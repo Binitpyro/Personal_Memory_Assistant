@@ -72,6 +72,8 @@ async def test_get_files_tree_groups_and_totals():
 
 @pytest.mark.asyncio
 async def test_get_files_tree_db_failure_returns_empty():
+    from app.main import _file_tree_cache
+    _file_tree_cache["data"] = None  # Clear cache from prior test
     db = FakeDB()
     db.raise_on_files = True
     result = await get_files_tree(db=db)

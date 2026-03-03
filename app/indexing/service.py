@@ -767,6 +767,7 @@ class IndexingService:
                 "type": path.suffix.lower(),
                 "folder_tag": folder_tag,
                 "summary": summary,
+                "sha256": self._calculate_sha256(path),
             }
 
             return {
@@ -827,8 +828,7 @@ class IndexingService:
         Returns (files_to_index, skipped_count, new_count, changed_count).
         """
         file_paths_list = [str(fp.absolute()) for fp, _ in all_files]
-        modified_map = await self.db.get_files_modified_map(file_paths_list)
-        sha256_map = await self.db.get_files_sha256_map(file_paths_list)
+        change_map = await self.db.get_files_change_map(file_paths_list)
 
         # ── Parallel stat() in thread-pool ────────────────────────────
         loop = asyncio.get_running_loop()
@@ -859,8 +859,9 @@ class IndexingService:
                 continue
 
             abs_path = str(file_path.absolute())
-            stored_mtime = modified_map.get(abs_path)
-            stored_sha = sha256_map.get(abs_path)
+            stored_entry = change_map.get(abs_path)
+            stored_mtime = stored_entry[0] if stored_entry else None
+            stored_sha = stored_entry[1] if stored_entry else None
 
             if stored_mtime is not None and stored_mtime == current_mtime:
                 skipped += 1

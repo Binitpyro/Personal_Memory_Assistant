@@ -117,34 +117,40 @@ Answer:
                     yield f"Error: Gemini API returned {response.status_code}"
                     return
 
-                # Gemini streamGenerateContent returns a JSON array that grows.
-                # Each chunk is a complete JSON object preceded by a comma (except the first).
+                # Gemini streamGenerateContent returns a JSON array of objects.
+                # Use an incremental JSON decoder for robust nested-object parsing.
+                decoder = json.JSONDecoder()
                 buffer = ""
                 async for chunk in response.aiter_text():
                     buffer += chunk
-                    # This is a bit naive but works for the SSE-like JSON stream
-                    # We look for objects {...}
-                    while "{" in buffer and "}" in buffer:
-                        start = buffer.find("{")
-                        # Find the matching closing brace for this specific object
-                        # (Simple version: just take everything until the next ']' or ',' or end)
-                        # More robust: use a JSON decoder
-                        try:
-                            # Try to find a balanced JSON object
-                            # For Gemini, each chunk is usually a candidates object
-                            end = buffer.find("}", start) + 1
-                            obj_str = buffer[start:end]
-                            data = json.loads(obj_str)
-                            if "candidates" in data and data["candidates"]:
-                                text = data["candidates"][0]["content"]["parts"][0]["text"]
-                                yield text
-                            buffer = buffer[end:]
-                        except json.JSONDecodeError:
-                            # Not a full object yet
+                    while True:
+                        # Strip leading whitespace, commas, and array brackets
+                        buffer = buffer.lstrip(", \r\n\t[]")
+                        if not buffer:
                             break
-        except Exception as e:
-            logger.error("Gemini streaming error: %s", e)
-            yield f"Streaming error: {str(e)}"
+                        try:
+                            data, end_idx = decoder.raw_decode(buffer)
+                        except json.JSONDecodeError:
+                            # Not enough data for a complete JSON value yet
+                            break
+
+                        if isinstance(data, dict) and "candidates" in data and data["candidates"]:
+                            try:
+                                text = (
+                                    data["candidates"][0]
+                                    .get("content", {})
+                                    .get("parts", [{}])[0]
+                                    .get("text")
+                                )
+                                if text:
+                                    yield text
+                            except (KeyError, IndexError, TypeError):
+                                pass
+
+                        buffer = buffer[end_idx:]
+        except Exception:
+            logger.exception("Gemini streaming error")
+            yield "Streaming error. Please retry."
 
     async def _call_ollama(self, prompt: str) -> str:
         """Fallback to local Ollama instance."""

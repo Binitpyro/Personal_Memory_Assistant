@@ -91,7 +91,9 @@ function toast(msg,type='info'){
     if(!c) return;
     const el=document.createElement('div');
     el.className='toast '+type;
-    el.innerHTML=`<span>${msg}</span>`;
+    const span=document.createElement('span');
+    span.textContent=msg;
+    el.appendChild(span);
     c.appendChild(el);
     setTimeout(()=>el.remove(),4000);
 }

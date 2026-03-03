@@ -69,6 +69,8 @@ async def rerank(
     """
     if not results:
         return results
+    if top_k <= 0:
+        return []
 
     import time
     t0 = time.perf_counter()

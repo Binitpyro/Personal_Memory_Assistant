@@ -1,3 +1,4 @@
+import math
 import time
 import logging
 import threading
@@ -30,7 +31,7 @@ class LatencyTracker:
                 stats[stage] = {
                     "avg": round(sum(sorted_vals) / len(sorted_vals), 2),
                     "p50": round(sorted_vals[len(sorted_vals) // 2], 2),
-                    "p95": round(sorted_vals[min(int(len(sorted_vals) * 0.95), len(sorted_vals) - 1)], 2) if len(sorted_vals) >= 20 else sorted_vals[-1],
+                    "p95": round(sorted_vals[max(0, math.ceil(len(sorted_vals) * 0.95) - 1)], 2),
                     "count": len(sorted_vals)
                 }
         return stats

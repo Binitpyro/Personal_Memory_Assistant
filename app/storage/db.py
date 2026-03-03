@@ -33,7 +33,6 @@ class DatabaseManager:
             await self.conn.execute("PRAGMA cache_size = -64000;")   # 64 MB page cache
             await self.conn.execute("PRAGMA mmap_size = 268435456;") # 256 MB memory-mapped I/O
             await self.conn.execute("PRAGMA temp_store = MEMORY;")   # temp tables in RAM
-            await self.conn.execute("PRAGMA page_size = 8192;")      # larger pages for bulk I/O
 
     def _get_conn(self) -> aiosqlite.Connection:
         """Return the active connection, raising if not connected."""
@@ -216,23 +215,32 @@ class DatabaseManager:
             return ids
 
         # For larger batches, use executemany + read back IDs
-        # Get the current max id to identify inserted rows
-        async with conn.execute("SELECT COALESCE(MAX(id), 0) FROM chunks") as cur:
-            row = await cur.fetchone()
-            start_id = (row[0] if row else 0) + 1
+        # Wrap in an explicit transaction to prevent race conditions
+        # with concurrent inserts between MAX(id) and the bulk insert.
+        await conn.execute("BEGIN IMMEDIATE")
+        try:
+            async with conn.execute("SELECT COALESCE(MAX(id), 0) FROM chunks") as cur:
+                row = await cur.fetchone()
+                start_id = (row[0] if row else 0) + 1
 
-        await conn.executemany(
-            "INSERT INTO chunks (file_id, start_offset, end_offset, text_preview) "
-            "VALUES (:file_id, :start_offset, :end_offset, :text_preview);",
-            chunks,
-        )
+            await conn.executemany(
+                "INSERT INTO chunks (file_id, start_offset, end_offset, text_preview) "
+                "VALUES (:file_id, :start_offset, :end_offset, :text_preview);",
+                chunks,
+            )
 
-        # Read back the generated IDs (they are sequential in SQLite)
-        async with conn.execute(
-            "SELECT id FROM chunks WHERE id >= ? ORDER BY id", (start_id,)
-        ) as cursor:
-            rows = await cursor.fetchall()
-            return [r[0] for r in rows]
+            # Read back the generated IDs (they are sequential in SQLite)
+            async with conn.execute(
+                "SELECT id FROM chunks WHERE id >= ? ORDER BY id", (start_id,)
+            ) as cursor:
+                rows = await cursor.fetchall()
+                ids = [r[0] for r in rows]
+
+            await conn.commit()
+            return ids
+        except Exception:
+            await conn.rollback()
+            raise
 
     async def commit(self) -> None:
         """Explicitly commits the current transaction."""

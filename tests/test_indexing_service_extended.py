@@ -37,8 +37,8 @@ class FakeDB:
         self.file_chunks = {}
         self.profile_rows = []
 
-    async def get_files_modified_map(self, paths):
-        return {p: "same" for p in paths if p.endswith("same.txt")}
+    async def get_files_change_map(self, paths):
+        return {p: ("same", "") for p in paths if p.endswith("same.txt")}
 
     async def get_file_by_path(self, path):
         if path in self.files:

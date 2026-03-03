@@ -42,12 +42,12 @@ class EmbeddingService:
             if device == "cuda":
                 self.model.half() # Use FP16 on GPU
                 
-            self._ready.set()
             logger.info("Model loaded successfully.")
         except Exception as e:
-            logger.error("Failed to load embedding model: %s", e)
-            self._loading = False  # Allow retry on transient failures
-            self._ready.set() # Set to unblock waiters even on failure
+            logger.exception("Failed to load embedding model: %s", e)
+        finally:
+            self._loading = False  # Reset so future retries are possible
+            self._ready.set()  # Unblock waiters on both success and failure
 
     def load_model_background(self) -> None:
         """Starts model loading in a background thread (non-blocking)."""

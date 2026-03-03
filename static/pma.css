@@ -83,10 +83,10 @@
        ══════════════════════════════════════════════════════════ */
     .main{flex:1;overflow-y:auto;display:flex;flex-direction:column}
     .page{display:none;flex:1;padding:2rem 2.5rem 3rem;max-width:1200px;width:100%;
-          margin:0 auto;animation:fadeUp .25s ease}
+          margin:0 auto;animation:fade-up .25s ease}
     .page.active{display:block}
-        .page.page-enter{animation:fadeUp var(--dur-med) var(--ease-out)}
-    @keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+        .page.page-enter{animation:fade-up var(--dur-med) var(--ease-out)}
+    @keyframes fade-up{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
     .page-header{margin-bottom:1.75rem}
     .page-header h1{display:flex;align-items:center;gap:.5rem;margin-bottom:.25rem}
     .page-header p{color:var(--text-3);font-size:.875rem}
@@ -174,7 +174,7 @@
         transition:background .2s;appearance:none;border:none;width:100%;
         font-family:inherit;font-size:inherit;color:inherit;text-align:left}
     .global-progress:hover{background:var(--bg-hover)}
-    .global-progress.visible{display:flex;align-items:center;gap:1rem;animation:fadeUp .25s ease}
+    .global-progress.visible{display:flex;align-items:center;gap:1rem;animation:fade-up .25s ease}
     .global-progress.gp-done{cursor:default}
     .gp-track{flex:1;height:6px;background:var(--bg-hover);border-radius:99px;overflow:hidden;
         min-width:80px;max-width:420px}
@@ -201,7 +201,7 @@
        PROGRESS (in-page detail section)
        ══════════════════════════════════════════════════════════ */
     .progress-section{margin-top:1rem;display:none}
-    .progress-section.visible{display:block;animation:fadeUp .3s ease}
+    .progress-section.visible{display:block;animation:fade-up .3s ease}
     .progress-track{height:8px;background:var(--bg-hover);border-radius:99px;overflow:hidden}
     .progress-fill{height:100%;background:linear-gradient(90deg,var(--primary),var(--primary-h));
                    border-radius:99px;transition:width .3s ease;position:relative}
@@ -359,7 +359,7 @@
     .toast{display:flex;align-items:center;gap:.6rem;padding:.7rem 1rem;min-width:280px;
            background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r-sm);
            box-shadow:var(--sh-lg);font-size:.8rem;pointer-events:auto;
-           animation:toastIn .3s cubic-bezier(.4,0,.2,1),toastOut .3s ease 3.7s forwards}
+           animation:toast-in .3s cubic-bezier(.4,0,.2,1),toast-out .3s ease 3.7s forwards}
     .toast.success{border-left:3px solid var(--success)}
     .toast.error{border-left:3px solid var(--danger)}
     .toast.info{border-left:3px solid var(--primary)}
@@ -368,22 +368,22 @@
     .toast.error svg{color:var(--danger)}
     .toast.info svg{color:var(--primary)}
     .toast span{flex:1}
-    @keyframes toastIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
-    @keyframes toastOut{to{opacity:0;transform:translateX(16px)}}
+    @keyframes toast-in{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
+    @keyframes toast-out{to{opacity:0;transform:translateX(16px)}}
 
     /* ══════════════════════════════════════════════════════════
        COMMAND PALETTE
        ══════════════════════════════════════════════════════════ */
     .cmd-overlay{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:100;
                  align-items:flex-start;justify-content:center;padding:18vh 0 0;
-                 backdrop-filter:blur(4px);animation:fadeIn .15s ease;border:none;max-width:100vw;max-height:100vh;width:100vw;height:100vh}
+                 backdrop-filter:blur(4px);animation:fade-in .15s ease;border:none;max-width:100vw;max-height:100vh;width:100vw;height:100vh}
     .cmd-overlay[open]{display:flex}
     .cmd-box{width:520px;background:var(--bg-card);border:1px solid var(--border);
              border-radius:var(--r-lg);box-shadow:var(--sh-lg);overflow:hidden}
     .cmd-box input{width:100%;padding:1rem 1.25rem;font-size:1rem;border:none;
                    background:transparent;color:var(--text);outline:none;font-family:inherit}
     .cmd-box input::placeholder{color:var(--text-3)}
-    @keyframes fadeIn{from{opacity:0}to{opacity:1}}
+    @keyframes fade-in{from{opacity:0}to{opacity:1}}
 
     /* ══════════════════════════════════════════════════════════
        STATUS BAR
@@ -439,10 +439,10 @@
         height: 100%;
         background: linear-gradient(90deg, var(--bg-hover) 25%, var(--bg-input) 50%, var(--bg-hover) 75%);
         background-size: 200% 100%;
-        animation: shimmer 1.5s infinite linear;
+        animation: shimmer-bg 1.5s infinite linear;
         border-radius: var(--r-sm);
     }
-    @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+    @keyframes shimmer-bg { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
 
     /* --- WinDirStat Inspired & Highlight UI --- */
     .highlight-row {

@@ -431,6 +431,12 @@ class DatabaseManager:
         async with conn.execute(sql, params) as cursor:
             return list(await cursor.fetchall())
 
+    async def execute_write(self, sql: str, params: tuple = ()) -> None:
+        """Execute a write SQL statement and commit."""
+        conn = self._get_conn()
+        await conn.execute(sql, params)
+        await conn.commit()
+
     async def save_query(
         self, question: str, answer: str, source_count: int, latency_ms: float
     ) -> int:

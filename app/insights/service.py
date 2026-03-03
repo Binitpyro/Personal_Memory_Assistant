@@ -66,4 +66,5 @@ class InsightsService:
             result["cold_files"] = [{"path": r[0], "size": r[1]} for r in rows]
         except Exception as e:
             logger.error("Error fetching filtered insights: %s", e)
+            result["error"] = "Failed to load filtered insights. Check server logs for details."
         return result

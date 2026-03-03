@@ -1,4 +1,5 @@
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Set
+from pathlib import Path
 from app.config import settings
 
 def _format_file_stats(stats: Dict[str, Any]) -> str:
@@ -20,6 +21,22 @@ def _format_file_stats(stats: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _deduplicate_by_file(results: List[Dict[str, Any]], max_per_file: int = 2) -> List[Dict[str, Any]]:
+    """Limit snippets per file to improve source diversity in the context window.
+
+    Keeps at most *max_per_file* chunks from the same file, preferring
+    higher-scored ones (the list is assumed to be pre-sorted by score).
+    """
+    file_counts: Dict[str, int] = {}
+    deduped: List[Dict[str, Any]] = []
+    for res in results:
+        fp = res.get("file_path", "")
+        file_counts[fp] = file_counts.get(fp, 0) + 1
+        if file_counts[fp] <= max_per_file:
+            deduped.append(res)
+    return deduped
+
+
 def build_context(
     retrieved_results: List[Dict[str, Any]],
     max_tokens: int = 0,
@@ -28,13 +45,11 @@ def build_context(
 ) -> str:
     """Formats retrieved snippets into a single context string for the LLM.
 
-    If *file_stats* is provided (aggregate counts by type/folder), it is
-    prepended so the LLM can answer inventory questions with hard numbers
-    instead of listing every individual file.
-
-    If *folder_profiles_text* is provided (project-level descriptions), it
-    is prepended so the LLM can answer questions about what projects exist,
-    their types, and their structure.
+    Optimisations over the original:
+    - Deduplicates by file path (max 2 snippets per file) for diversity.
+    - Truncates each snippet to a character budget so one long chunk
+      doesn't monopolise the context window.
+    - Prioritises high-scoring snippets first.
     """
     if not retrieved_results and not file_stats and not folder_profiles_text:
         return "No relevant context found."
@@ -45,6 +60,8 @@ def build_context(
     context_parts = []
     total_len = 0
     max_chars = max_tokens * 4  # ~4 chars per token heuristic
+    max_snippet_chars = max_chars // max(len(retrieved_results), 1)  # Fair share per snippet
+    max_snippet_chars = max(min(max_snippet_chars, max_chars), min(600, max_chars))  # At least 600 chars but never exceed budget
 
     # Prepend folder profiles when available (project-level understanding)
     if folder_profiles_text:
@@ -56,12 +73,19 @@ def build_context(
         stats_block = _format_file_stats(file_stats)
         context_parts.append(stats_block)
         total_len += len(stats_block)
+
+    # Deduplicate: max 2 snippets from the same file for diversity
+    deduplicated = _deduplicate_by_file(retrieved_results)
     
-    for i, res in enumerate(retrieved_results):
+    for i, res in enumerate(deduplicated):
         snippet_id = i + 1
         path = res.get("file_path", "Unknown File")
         text = res.get("text", "")
         
+        # Truncate individual snippets to their fair share of the budget
+        if len(text) > max_snippet_chars:
+            text = text[:max_snippet_chars] + "…"
+
         part = f"""Snippet {snippet_id} [{path}]:
 {text}
 ---

@@ -5,6 +5,7 @@ Handles API routing, dependency injection, and lifespan events.
 
 import asyncio
 import ctypes
+import importlib.metadata
 import json
 import logging
 import os
@@ -22,7 +23,7 @@ from typing import Any, List, Optional, Tuple
 from fastapi import BackgroundTasks, Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
@@ -36,6 +37,32 @@ _indexing_service_cls: Any = None
 _progress_obj: Any = None
 _full_rag_func: Any = None
 _insights_service_cls: Any = None
+_static_asset_version_cache: dict[str, tuple[int, str]] = {}
+_file_tree_cache: dict[str, Any] = {"data": None, "ts": 0.0}
+_insights_cache: dict[str, Any] = {"data": None, "ts": 0.0}
+_CACHE_TTL = 10  # seconds
+
+try:
+    APP_VERSION = importlib.metadata.version("personal-memory-assistant")
+except importlib.metadata.PackageNotFoundError:
+    APP_VERSION = "1.2.0"
+
+
+def _versioned_static_url(asset_name: str) -> str:
+    asset_rel = Path("static") / asset_name
+    try:
+        mtime_ns = asset_rel.stat().st_mtime_ns
+    except OSError:
+        return f"/static/{asset_name}"
+
+    cached = _static_asset_version_cache.get(asset_name)
+    if cached and cached[0] == mtime_ns:
+        return cached[1]
+
+    version = format(mtime_ns, "x")
+    url = f"/static/{asset_name}?v={version}"
+    _static_asset_version_cache[asset_name] = (mtime_ns, url)
+    return url
 
 def _ensure_indexing() -> Tuple[Any, Any]:
     global _indexing_service_cls, _progress_obj
@@ -108,6 +135,14 @@ async def lifespan(fastapi_app: FastAPI):
     logger.info("Initializing Chroma...")
     await loop.run_in_executor(None, chroma.connect)
 
+    # Preload reranker model to eliminate cold-start latency on first query
+    try:
+        from app.search.reranker import preload_reranker
+        preload_reranker()
+        logger.info("Reranker preload started in background.")
+    except Exception as e:
+        logger.debug("Reranker preload skipped: %s", e)
+
     logger.info("Server ready  (model loading in background)")
     yield
     logger.info("Shutting down...")
@@ -131,6 +166,11 @@ async def add_request_id(request: Request, call_next):
     response = await call_next(request)
     elapsed = (time.perf_counter() - t0) * 1000
     response.headers["X-Request-ID"] = request_id
+    if request.url.path.startswith("/static/"):
+        if request.query_params.get("v"):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            response.headers["Cache-Control"] = "public, max-age=3600"
     if request.url.path not in ("/health", "/index/progress-stream"):
         logger.info(
             "[%s] %s %s → %d (%.0fms)",
@@ -216,6 +256,7 @@ async def health(db: DatabaseManager = Depends(get_db)):
     emb = _get_embedding_service()
     _, progress = _ensure_indexing()
     return {
+        "version": APP_VERSION,
         "status": "ok" if db_ok else "degraded",
         "db": "connected" if db_ok else "error",
         "model_ready": emb.is_ready,
@@ -224,7 +265,15 @@ async def health(db: DatabaseManager = Depends(get_db)):
 
 @app.get("/", response_class=HTMLResponse)
 async def read_root(request: Request):
-    return templates.TemplateResponse(request, "index.html")
+    return templates.TemplateResponse(
+        request,
+        "index.html",
+        {
+            "app_version": APP_VERSION,
+            "pma_css_url": _versioned_static_url("pma.css"),
+            "pma_js_url": _versioned_static_url("pma.js"),
+        },
+    )
 
 @app.post("/index/start")
 async def index_start(
@@ -239,6 +288,8 @@ async def index_start(
         return JSONResponse(status_code=400, content={"error": "No valid folder paths provided."})
     indexing_service_cls, _ = _ensure_indexing()
     service = indexing_service_cls(db, emb, chroma)
+    _file_tree_cache["data"] = None
+    _insights_cache["data"] = None
     background_tasks.add_task(service.index_folders, folders)
     return JSONResponse(status_code=202, content={"message": "Indexing started"})
 
@@ -315,6 +366,35 @@ async def query(
     return results
 
 
+
+
+@app.post("/query/stream")
+async def query_stream(
+    request: QueryRequest,
+    db: DatabaseManager = Depends(get_db),
+    emb=Depends(get_emb),
+    chroma=Depends(get_chroma),
+    llm=Depends(get_llm)
+):
+    question = request.validated_question
+    if not question:
+        return JSONResponse(status_code=400, content={"error": "Question cannot be empty."})
+
+    from app.search.retrieval import full_rag_stream
+    
+    return StreamingResponse(
+        full_rag_stream(
+            query=question,
+            db=db,
+            embedding_service=emb,
+            chroma_client=chroma,
+            llm_client=llm,
+            file_type=request.file_type,
+            folder_tag=request.folder_tag,
+        ),
+        media_type="text/event-stream"
+    )
+
 @app.post("/unreal/import")
 async def import_unreal_metadata(
     request: UnrealImportRequest,
@@ -389,14 +469,34 @@ async def import_unreal_metadata(
 
 @app.get("/insights")
 async def get_insights(db: DatabaseManager = Depends(get_db)):
+    now = time.time()
+    if _insights_cache["data"] and (now - _insights_cache["ts"]) < _CACHE_TTL:
+        return _insights_cache["data"]
     insights_service_cls = _ensure_insights()
     insights_svc = insights_service_cls(db)
     stats = await insights_svc.get_stats()
+    _insights_cache["data"] = stats
+    _insights_cache["ts"] = now
     return stats
+
+@app.get("/insights/by-type")
+async def get_insights_by_type(
+    type_filter: str = "",
+    db: DatabaseManager = Depends(get_db),
+):
+    """Returns top and cold files filtered by file extension."""
+    if not type_filter:
+        return {"top_files": [], "cold_files": []}
+    insights_service_cls = _ensure_insights()
+    insights_svc = insights_service_cls(db)
+    return await insights_svc.get_filtered_files(type_filter)
 
 @app.get("/files/tree")
 async def get_files_tree(db: DatabaseManager = Depends(get_db)):
     """Returns indexed files grouped by folder tag for tree display."""
+    now = time.time()
+    if _file_tree_cache["data"] and (now - _file_tree_cache["ts"]) < _CACHE_TTL:
+        return _file_tree_cache["data"]
     try:
         files = await db.get_all_files()
     except Exception as e:
@@ -415,7 +515,10 @@ async def get_files_tree(db: DatabaseManager = Depends(get_db)):
             "usage_count": f["usage_count"],
         })
         total_size += f["size"]
-    return {"folders": folders, "total_files": len(files), "total_size": total_size}
+    result = {"folders": folders, "total_files": len(files), "total_size": total_size}
+    _file_tree_cache["data"] = result
+    _file_tree_cache["ts"] = now
+    return result
 
 @app.get("/pick/folder")
 async def pick_folder():
@@ -487,6 +590,12 @@ async def get_system_info():
                 except OSError as exc:
                     logger.debug("Could not read disk usage for %s: %s", drive, exc)
     return info
+
+@app.get("/system/metrics")
+async def get_metrics():
+    """Returns detailed stage-level latency metrics."""
+    from app.utils.metrics import metrics_tracker
+    return metrics_tracker.get_stats()
 
 @app.post("/demo/seed")
 async def seed_demo(
@@ -585,11 +694,15 @@ async def clear_database(
 ):
     """Permanently delete ALL indexed data (files, chunks, embeddings, history)."""
     try:
+        from app.search.retrieval import clear_retrieval_cache
         counts = await db.clear_all()
         await chroma.clear_all()
+        clear_retrieval_cache()
         _, progress = _ensure_indexing()
         progress.reset(0)
         progress.status = "idle"
+        _file_tree_cache["data"] = None
+        _insights_cache["data"] = None
         logger.info("Database fully cleared by user.")
         return counts
     except Exception as e:
@@ -601,6 +714,8 @@ async def cleanup_stale(db: DatabaseManager = Depends(get_db)):
     """Removes index entries for files that no longer exist on disk."""
     try:
         cleaned = await db.cleanup_stale_files()
+        _file_tree_cache["data"] = None
+        _insights_cache["data"] = None
         return {
             "message": f"Cleaned {len(cleaned)} stale file(s).",
             "cleaned_paths": cleaned,

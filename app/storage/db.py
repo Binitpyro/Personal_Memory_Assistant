@@ -4,6 +4,7 @@ Handles interactions with SQLite using aiosqlite for metadata storage.
 """
 
 import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -28,6 +29,11 @@ class DatabaseManager:
             await self.conn.execute("PRAGMA foreign_keys = ON;")
             await self.conn.execute("PRAGMA synchronous = NORMAL;")
             await self.conn.execute("PRAGMA busy_timeout = 5000;")
+            # ── Performance PRAGMAs ──────────────────────────────────
+            await self.conn.execute("PRAGMA cache_size = -64000;")   # 64 MB page cache
+            await self.conn.execute("PRAGMA mmap_size = 268435456;") # 256 MB memory-mapped I/O
+            await self.conn.execute("PRAGMA temp_store = MEMORY;")   # temp tables in RAM
+            await self.conn.execute("PRAGMA page_size = 8192;")      # larger pages for bulk I/O
 
     def _get_conn(self) -> aiosqlite.Connection:
         """Return the active connection, raising if not connected."""
@@ -59,6 +65,7 @@ class DatabaseManager:
         """Apply safe, idempotent schema migrations."""
         migrations = [
             ("summary", "ALTER TABLE files ADD COLUMN summary TEXT DEFAULT ''"),
+            ("sha256", "ALTER TABLE files ADD COLUMN sha256 TEXT DEFAULT ''"),
             ("files_created_at",
              "ALTER TABLE files ADD COLUMN created_at TEXT NOT NULL DEFAULT ''"),
             ("chunks_created_at",
@@ -134,19 +141,29 @@ class DatabaseManager:
         except Exception as exc:
             logger.debug("unreal_project_facts migration note: %s", exc)
 
-    async def insert_file(self, file_data: Dict[str, Any]) -> int:
-        """Inserts file metadata and returns the new file id."""
+    async def insert_file(
+        self,
+        file_data: Dict[str, Any],
+        *,
+        auto_commit: bool = True,
+    ) -> int:
+        """Inserts file metadata and returns the new file id.
+
+        Set ``auto_commit=False`` when batching many writes in a single transaction.
+        """
         conn = self._get_conn()
         file_data.setdefault("summary", "")
+        file_data.setdefault("sha256", "")
         query = """
-        INSERT INTO files (path, size, modified_at, type, folder_tag, summary)
-        VALUES (:path, :size, :modified_at, :type, :folder_tag, :summary)
+        INSERT INTO files (path, size, modified_at, type, folder_tag, summary, sha256)
+        VALUES (:path, :size, :modified_at, :type, :folder_tag, :summary, :sha256)
         ON CONFLICT(path) DO UPDATE SET
             size=excluded.size,
             modified_at=excluded.modified_at,
             type=excluded.type,
             folder_tag=excluded.folder_tag,
-            summary=excluded.summary
+            summary=excluded.summary,
+            sha256=excluded.sha256
         RETURNING id;
         """
         async with conn.execute(query, file_data) as cursor:
@@ -154,7 +171,8 @@ class DatabaseManager:
             if row is None:
                 raise RuntimeError(f"INSERT RETURNING id failed for {file_data.get('path')}")
             file_id: int = row[0]
-            await conn.commit()
+            if auto_commit:
+                await conn.commit()
             return file_id
 
     async def insert_chunk(self, chunk_data: Dict[str, Any]) -> int:
@@ -173,35 +191,63 @@ class DatabaseManager:
             return chunk_id
 
     async def insert_chunks_bulk(self, chunks: List[Dict[str, Any]]) -> List[int]:
-        """Insert multiple chunks in a single transaction using executemany.
+        """Insert multiple chunks efficiently in a single transaction.
 
-        Returns a list of inserted chunk IDs.
+        Uses a batch INSERT approach: inserts all rows first,
+        then reads back the generated IDs.  This is significantly
+        faster than individual INSERT RETURNING for large batches.
         """
         if not chunks:
             return []
         conn = self._get_conn()
-        ids: List[int] = []
-        for chunk in chunks:
-            async with conn.execute(
-                "INSERT INTO chunks (file_id, start_offset, end_offset, text_preview) "
-                "VALUES (:file_id, :start_offset, :end_offset, :text_preview) RETURNING id;",
-                chunk,
-            ) as cursor:
-                row = await cursor.fetchone()
-                if row:
-                    ids.append(row[0])
-        return ids
+
+        # For small batches, the per-row RETURNING approach is fine
+        if len(chunks) <= 20:
+            ids: List[int] = []
+            for chunk in chunks:
+                async with conn.execute(
+                    "INSERT INTO chunks (file_id, start_offset, end_offset, text_preview) "
+                    "VALUES (:file_id, :start_offset, :end_offset, :text_preview) RETURNING id;",
+                    chunk,
+                ) as cursor:
+                    row = await cursor.fetchone()
+                    if row:
+                        ids.append(row[0])
+            return ids
+
+        # For larger batches, use executemany + read back IDs
+        # Get the current max id to identify inserted rows
+        async with conn.execute("SELECT COALESCE(MAX(id), 0) FROM chunks") as cur:
+            row = await cur.fetchone()
+            start_id = (row[0] if row else 0) + 1
+
+        await conn.executemany(
+            "INSERT INTO chunks (file_id, start_offset, end_offset, text_preview) "
+            "VALUES (:file_id, :start_offset, :end_offset, :text_preview);",
+            chunks,
+        )
+
+        # Read back the generated IDs (they are sequential in SQLite)
+        async with conn.execute(
+            "SELECT id FROM chunks WHERE id >= ? ORDER BY id", (start_id,)
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [r[0] for r in rows]
 
     async def commit(self) -> None:
         """Explicitly commits the current transaction."""
         if self.conn:
             await self.conn.commit()
 
-    async def delete_file_chunks(self, file_id: int) -> None:
-        """Deletes all chunks associated with a file."""
+    async def delete_file_chunks(self, file_id: int, *, auto_commit: bool = True) -> None:
+        """Deletes all chunks associated with a file.
+
+        Set ``auto_commit=False`` when called from a larger batch transaction.
+        """
         conn = self._get_conn()
         await conn.execute("DELETE FROM chunks WHERE file_id = ?", (file_id,))
-        await conn.commit()
+        if auto_commit:
+            await conn.commit()
 
     async def get_file_chunks(self, file_id: int) -> List[aiosqlite.Row]:
         """Returns all chunks for a given file id."""
@@ -215,6 +261,23 @@ class DatabaseManager:
         async with conn.execute("SELECT * FROM files WHERE path = ?", (path,)) as cursor:
             return await cursor.fetchone()
 
+    async def get_existing_file_ids(self, paths: List[str]) -> Dict[str, int]:
+        """Return {path: file_id} for every path that already exists in the DB.
+
+        Used by the indexing pipeline to avoid per-file existence lookups.
+        """
+        result: Dict[str, int] = {}
+        conn = self._get_conn()
+        batch_size = 900
+        for i in range(0, len(paths), batch_size):
+            batch = paths[i : i + batch_size]
+            placeholders = ",".join("?" for _ in batch)
+            query = f"SELECT path, id FROM files WHERE path IN ({placeholders})"
+            async with conn.execute(query, batch) as cursor:
+                async for row in cursor:
+                    result[row[0]] = row[1]
+        return result
+
     async def get_files_modified_map(self, paths: List[str]) -> Dict[str, str]:
         """Return {path: modified_at} for every path that already exists in the DB."""
         result: Dict[str, str] = {}
@@ -227,6 +290,40 @@ class DatabaseManager:
             async with conn.execute(query, batch) as cursor:
                 async for row in cursor:
                     result[row[0]] = row[1]
+        return result
+
+    async def get_files_sha256_map(self, paths: List[str]) -> Dict[str, str]:
+        """Return {path: sha256} for every path that already exists in the DB."""
+        result: Dict[str, str] = {}
+        conn = self._get_conn()
+        batch_size = 900
+        for i in range(0, len(paths), batch_size):
+            batch = paths[i : i + batch_size]
+            placeholders = ",".join("?" for _ in batch)
+            query = f"SELECT path, sha256 FROM files WHERE path IN ({placeholders})"
+            async with conn.execute(query, batch) as cursor:
+                async for row in cursor:
+                    result[row[0]] = row[1]
+        return result
+
+    async def get_files_change_map(
+        self, paths: List[str]
+    ) -> Dict[str, Tuple[str, str]]:
+        """Return {path: (modified_at, sha256)} in a SINGLE query.
+
+        Replaces separate calls to get_files_modified_map + get_files_sha256_map
+        to halve the number of DB round-trips during change detection.
+        """
+        result: Dict[str, Tuple[str, str]] = {}
+        conn = self._get_conn()
+        batch_size = 900
+        for i in range(0, len(paths), batch_size):
+            batch = paths[i : i + batch_size]
+            placeholders = ",".join("?" for _ in batch)
+            query = f"SELECT path, modified_at, COALESCE(sha256, '') FROM files WHERE path IN ({placeholders})"
+            async with conn.execute(query, batch) as cursor:
+                async for row in cursor:
+                    result[row[0]] = (row[1], row[2])
         return result
 
     async def increment_usage_count(self, file_path: str) -> None:
@@ -243,11 +340,26 @@ class DatabaseManager:
         if not file_paths:
             return
         conn = self._get_conn()
+        counts: Dict[str, int] = {}
         for path in file_paths:
-            await conn.execute(
-                "UPDATE files SET usage_count = usage_count + 1 WHERE path = ?",
-                (path,),
-            )
+            counts[path] = counts.get(path, 0) + 1
+
+        when_clauses = []
+        case_params: List[Any] = []
+        for path, increment in counts.items():
+            when_clauses.append("WHEN ? THEN usage_count + ?")
+            case_params.extend([path, increment])
+
+        in_params = list(counts.keys())
+        placeholders = ",".join("?" for _ in in_params)
+        sql = (
+            "UPDATE files SET usage_count = CASE path "
+            + " ".join(when_clauses)
+            + " ELSE usage_count END WHERE path IN ("
+            + placeholders
+            + ")"
+        )
+        await conn.execute(sql, tuple(case_params + in_params))
         await conn.commit()
 
     async def get_all_files(self) -> List[aiosqlite.Row]:
@@ -303,17 +415,15 @@ class DatabaseManager:
     async def get_counts(self) -> Tuple[int, int]:
         """Return (file_count, chunk_count) in a single public call."""
         conn = self._get_conn()
-        file_count = 0
-        chunk_count = 0
-        async with conn.execute("SELECT COUNT(*) FROM files") as cursor:
+        async with conn.execute(
+            "SELECT "
+            "(SELECT COUNT(*) FROM files) AS file_count, "
+            "(SELECT COUNT(*) FROM chunks) AS chunk_count"
+        ) as cursor:
             row = await cursor.fetchone()
-            if row:
-                file_count = row[0]
-        async with conn.execute("SELECT COUNT(*) FROM chunks") as cursor:
-            row = await cursor.fetchone()
-            if row:
-                chunk_count = row[0]
-        return file_count, chunk_count
+            if not row:
+                return 0, 0
+            return row[0], row[1]
 
     async def execute_query(self, sql: str, params: tuple = ()) -> List[Any]:
         """Execute a read-only SQL query and return all rows."""
@@ -361,19 +471,23 @@ class DatabaseManager:
 
         Returns list of paths that were cleaned up.
         """
-        import os
-
         conn = self._get_conn()
         cleaned: List[str] = []
+        stale_ids: List[int] = []
         async with conn.execute("SELECT id, path FROM files") as cursor:
             rows = list(await cursor.fetchall())
         for row in rows:
             file_id, path = row[0], row[1]
             if not os.path.exists(path):
-                await conn.execute("DELETE FROM files WHERE id = ?", (file_id,))
+                stale_ids.append(file_id)
                 cleaned.append(path)
                 logger.info("Cleaned stale file: %s", path)
-        if cleaned:
+        if stale_ids:
+            placeholders = ",".join("?" for _ in stale_ids)
+            await conn.execute(
+                f"DELETE FROM files WHERE id IN ({placeholders})",
+                tuple(stale_ids),
+            )
             await conn.commit()
         return cleaned
 
@@ -481,8 +595,14 @@ class DatabaseManager:
 
     # ── Folder profiles ───────────────────────────────────────────────
 
-    async def upsert_folder_profile(self, profile: Dict[str, Any]) -> None:
-        """Insert or update a folder profile."""
+    async def upsert_folder_profile(
+        self, profile: Dict[str, Any], *, auto_commit: bool = True
+    ) -> None:
+        """Insert or update a folder profile.
+
+        Set ``auto_commit=False`` when batching multiple profiles in
+        a single transaction for better performance.
+        """
         conn = self._get_conn()
         await conn.execute(
             """
@@ -511,7 +631,8 @@ class DatabaseManager:
                 profile["key_files"],
             ),
         )
-        await conn.commit()
+        if auto_commit:
+            await conn.commit()
 
     async def get_all_folder_profiles(self) -> List[Dict[str, Any]]:
         """Return every stored folder profile."""

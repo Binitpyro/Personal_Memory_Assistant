@@ -47,3 +47,23 @@ class InsightsService:
             stats["error"] = "Failed to load insights. Check server logs for details."
 
         return stats
+
+    async def get_filtered_files(self, type_filter: str) -> Dict[str, Any]:
+        """Returns top and cold files filtered by extension type."""
+        result: Dict[str, Any] = {"top_files": [], "cold_files": []}
+        try:
+            rows = await self.db.execute_query(
+                "SELECT path, size FROM files WHERE type = ? ORDER BY size DESC LIMIT 15",
+                (type_filter,),
+            )
+            result["top_files"] = [{"path": r[0], "size": r[1]} for r in rows]
+
+            rows = await self.db.execute_query(
+                "SELECT path, size FROM files WHERE type = ? AND usage_count = 0 "
+                "ORDER BY size DESC LIMIT 15",
+                (type_filter,),
+            )
+            result["cold_files"] = [{"path": r[0], "size": r[1]} for r in rows]
+        except Exception as e:
+            logger.error("Error fetching filtered insights: %s", e)
+        return result

@@ -462,7 +462,7 @@ async function askQuestion(){
                     const data = JSON.parse(line);
                     if (data.type === 'content') answerEl.textContent += data.text;
                     if (data.type === 'metadata') renderSources(data.sources);
-                } catch(e){}
+                } catch(e){ console.debug('Stream parse skip:', line.slice(0, 50)); }
             }
         }
     } catch(e) { toast('Search failed','error'); }

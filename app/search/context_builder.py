@@ -61,7 +61,7 @@ def build_context(
     total_len = 0
     max_chars = max_tokens * 4  # ~4 chars per token heuristic
     max_snippet_chars = max_chars // max(len(retrieved_results), 1)  # Fair share per snippet
-    max_snippet_chars = max(max_snippet_chars, 600)  # But at least 600 chars
+    max_snippet_chars = max(min(max_snippet_chars, max_chars), min(600, max_chars))  # At least 600 chars but never exceed budget
 
     # Prepend folder profiles when available (project-level understanding)
     if folder_profiles_text:

@@ -46,6 +46,7 @@ class EmbeddingService:
             logger.info("Model loaded successfully.")
         except Exception as e:
             logger.error("Failed to load embedding model: %s", e)
+            self._loading = False  # Allow retry on transient failures
             self._ready.set() # Set to unblock waiters even on failure
 
     def load_model_background(self) -> None:

@@ -23,7 +23,7 @@ from typing import Any, List, Optional, Tuple
 from fastapi import BackgroundTasks, Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
@@ -366,9 +366,7 @@ async def query(
     return results
 
 
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
-...
 
 @app.post("/query/stream")
 async def query_stream(

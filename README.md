@@ -2,7 +2,7 @@
 
 # 🧠 Personal Memory Assistant (PMA)
 
-### Your files. Your knowledge. Instantly searchable.
+## Your files. Your knowledge. Instantly searchable.
 
 A **local-first AI-powered assistant** that indexes your personal and project files, then answers natural-language questions with full source attribution — all without sending your data to the cloud.
 
@@ -13,7 +13,7 @@ A **local-first AI-powered assistant** that indexes your personal and project fi
 
 ---
 
-**[Features](#-features) · [Quick Start](#-quick-start) · [Architecture](#-architecture) · [API Reference](#-api-reference) · [Configuration](#%EF%B8%8F-configuration) · [Contributing](#-contributing)**
+**[Features](#-features) · [Quick Start](#-quick-start) · [Architecture](#-architecture) · [API Reference](#-api-reference) · [Configuration](#-configuration) · [Contributing](#-contributing)**
 
 </div>
 
@@ -62,7 +62,7 @@ First-class import of UE4/UE5 metadata for rich game-project understanding (maps
 
 ## 🏗️ Architecture
 
-```
+```text
 ┌──────────────────────────────────────────────────────────────────┐
 │                        Client Layer                              │
 │            Browser  ·  pywebview Desktop Window                  │
@@ -89,7 +89,7 @@ First-class import of UE4/UE5 metadata for rich game-project understanding (maps
 
 ### Retrieval Pipeline
 
-```
+```text
 Query ──► Intent Classification
               │
          ┌────┴─────────────────────┐
@@ -174,7 +174,7 @@ Open **http://127.0.0.1:8000** in your browser (web mode).
 
 ### Typical Workflow
 
-```
+```text
 1. Launch PMA  ──►  2. Index Folders  ──►  3. Ask Questions  ──►  4. View Insights
                          via UI or API         natural language        analytics dashboard
 ```
@@ -347,7 +347,7 @@ All settings are loaded from a `.env` file using the `PMA_` prefix. See [app/con
 
 ## 🗂️ Project Structure
 
-```
+```text
 Sandisk-Hackathon/
 ├── __main__.py              # CLI entrypoint
 ├── desktop.py               # Native desktop launcher (pywebview)

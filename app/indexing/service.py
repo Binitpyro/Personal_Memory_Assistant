@@ -870,14 +870,11 @@ class IndexingService:
             current_sha = await loop.run_in_executor(None, self._calculate_sha256, file_path)
             if stored_sha and stored_sha == current_sha:
                 # Content identical, just update timestamp to avoid future re-hashing
-                await self.db.insert_file({
-                    "path": abs_path,
-                    "size": current_size,
-                    "modified_at": current_mtime,
-                    "type": file_path.suffix.lower(),
-                    "folder_tag": folder_tag,
-                    "sha256": current_sha
-                })
+                # Use a targeted UPDATE to preserve the existing summary
+                await self.db.execute_write(
+                    "UPDATE files SET size=?, modified_at=?, type=?, folder_tag=?, sha256=? WHERE path=?",
+                    (current_size, current_mtime, file_path.suffix.lower(), folder_tag, current_sha, abs_path),
+                )
                 skipped += 1
                 continue
 

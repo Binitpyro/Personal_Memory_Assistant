@@ -487,7 +487,7 @@ async def full_rag_stream(
         total_ms = round((time.perf_counter() - t_start) * 1000, 1)
         await db.save_query(query, full_answer, len(retrieved), total_ms)
     except Exception as e:
-        logger.warning("Failed to save streamed query history: %s", e)
+        logger.warning("Failed to save streamed query history: %s", e, exc_info=True)
 
 async def _load_query_metadata(db, inventory, project, unreal):
     p_coro = db.get_all_folder_profiles() if (project or inventory or unreal) else asyncio.sleep(0, [])

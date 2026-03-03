@@ -1,531 +1,463 @@
-# Personal Memory Assistant (PMA)
+<div align="center">
 
-![Build](https://img.shields.io/badge/build-not%20configured-lightgrey)
-![Coverage](https://img.shields.io/badge/coverage-see%20coverage.xml-blueviolet)
-![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)
-![Python](https://img.shields.io/badge/python-3.11%2B-blue)
+# 🧠 Personal Memory Assistant (PMA)
 
-Local-first RAG assistant for personal/project files. PMA indexes local folders, combines keyword + semantic retrieval, and answers questions with source context through a FastAPI web app (or native desktop window).
+## Your files. Your knowledge. Instantly searchable.
 
-## What the project does
+A **local-first AI-powered assistant** that indexes your personal and project files, then answers natural-language questions with full source attribution — all without sending your data to the cloud.
 
-- Indexes local files into:
-  - SQLite metadata + FTS5 text index
-  - Chroma vector collections (chunk embeddings + summary embeddings)
-- Supports common document/code formats, including `.txt`, `.md`, `.pdf`, `.docx`, source files, config files, and Unreal file extensions (`.uasset`, `.umap`, `.uproject`, `.uplugin`).
-- Uses hybrid retrieval (FTS + vector + RRF), optional reranking, and LLM answer generation.
-- Includes a deterministic fast-answer path in `/query` for inventory/project-style questions to reduce latency.
-- Provides storage insights (largest files, cold files, type breakdown).
-- Provides Unreal metadata import for richer project understanding (maps, characters, environment assets, etc.).
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
+[![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
+[![ChromaDB](https://img.shields.io/badge/ChromaDB-FF6F00?style=for-the-badge&logo=databricks&logoColor=white)](https://www.trychroma.com)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)](LICENSE)
 
-## Tech stack
+---
 
-- Backend: FastAPI + Uvicorn
-- DB: SQLite + FTS5
-- Vector store: ChromaDB
-- Embeddings: sentence-transformers (`all-MiniLM-L6-v2`)
-- LLM providers: Gemini (primary), Ollama fallback
-- UI: Jinja2 templates + static assets
-- Desktop mode: pywebview
+**[Features](#-features) · [Quick Start](#-quick-start) · [Architecture](#-architecture) · [API Reference](#-api-reference) · [Configuration](#-configuration) · [Contributing](#-contributing)**
 
-## Project layout
+</div>
+
+---
+
+## 🎯 Problem Statement
+
+We create and accumulate **hundreds of files** — code, notes, documents, game assets — across different projects and folders. Finding that one snippet, that one design decision, or understanding what's inside a massive project folder becomes a time sink. Traditional search tools match keywords but don't *understand* your content.
+
+**PMA bridges that gap.** It builds a semantic memory layer over your local files, letting you ask questions in plain English and get precise, source-backed answers in milliseconds.
+
+---
+
+## ✨ Features
+
+<table>
+<tr>
+<td width="50%">
+
+### 🔍 Hybrid Retrieval (RAG)
+Combines **FTS5 keyword search** + **vector semantic search** + **Reciprocal Rank Fusion** for best-of-both-worlds accuracy.
+
+### ⚡ Deterministic Fast Path
+Inventory and project-overview questions are answered instantly from metadata — no LLM round-trip needed.
+
+### 🖥️ Dual Interface
+Run as a **web app** in your browser or as a **native desktop app** via pywebview — same backend, your choice.
+
+</td>
+<td width="50%">
+
+### 📁 Smart Indexing Pipeline
+Incremental change detection, batched embedding, folder-profile synthesis, and automatic project-type inference.
+
+### 📊 Storage Insights
+Visual analytics on your indexed files: largest files, cold/unused files, type breakdown, and storage distribution.
+
+### 🎮 Unreal Engine Support
+First-class import of UE4/UE5 metadata for rich game-project understanding (maps, characters, materials, Niagara systems).
+
+</td>
+</tr>
+</table>
+
+---
+
+## 🏗️ Architecture
 
 ```text
-app/
-		main.py                 # FastAPI routes, middleware, app lifespan
-		config.py               # Settings (PMA_ env vars)
-		embeddings/             # Embedding service/model loading
-		indexing/service.py     # Scanning, chunking, embedding, upsert pipeline
-		scanner/                # scandir + optional NTFS MFT scanner
-		search/                 # retrieval, reranking, context builder, LLM client
-		storage/                # SQLite manager + schema
-		vector_store/           # Chroma client
-		insights/               # Storage analytics + Unreal metadata parser
-templates/
-		index.html              # Web UI
-static/
-		...                     # Frontend assets
-tests/
-		test_main.py
-		test_scanner.py
+┌──────────────────────────────────────────────────────────────────┐
+│                        Client Layer                              │
+│            Browser  ·  pywebview Desktop Window                  │
+└──────────────────────┬───────────────────────────────────────────┘
+                       │  REST + SSE
+┌──────────────────────▼───────────────────────────────────────────┐
+│                     FastAPI Application                           │
+│  ┌─────────┐  ┌──────────┐  ┌──────────┐  ┌────────────────┐   │
+│  │ Indexing │  │ Retrieval│  │ Insights │  │ Unreal Import  │   │
+│  │ Pipeline │  │  + RAG   │  │ Analytics│  │  (UE4/UE5)     │   │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └───────┬────────┘   │
+│       │              │             │                │            │
+│  ┌────▼──────────────▼─────────────▼────────────────▼────────┐  │
+│  │                   Service Layer                            │  │
+│  │  Scanner · Embeddings · LLM Client · Reranker · Context   │  │
+│  └────┬──────────────┬───────────────────────────────────────┘  │
+└───────┼──────────────┼──────────────────────────────────────────┘
+        │              │
+┌───────▼──────┐ ┌─────▼──────────┐ ┌─────────────────────────┐
+│   SQLite     │ │   ChromaDB     │ │   External LLM          │
+│ Metadata+FTS │ │ Vector Store   │ │ Gemini · Ollama         │
+└──────────────┘ └────────────────┘ └─────────────────────────┘
 ```
 
-## Requirements
+### Retrieval Pipeline
 
-- Python 3.11+
-- OS: Windows/Linux/macOS (Windows has additional NTFS admin-aware path)
-- GUI/file picker endpoints (`/pick/folder`, `/pick/file`) require Tkinter:
-  - On many Linux distributions, install OS package `python3-tk` in addition to `pip` dependencies.
-- Recommended RAM for embeddings/model loading: 8 GB+
-
-Install dependencies:
-
-```bash
-pip install -r requirements.txt
+```text
+Query ──► Intent Classification
+              │
+         ┌────┴─────────────────────┐
+         ▼                          ▼
+   Metadata Intent           Semantic Intent
+   (fast path)               (full RAG)
+         │                          │
+         │               ┌─────────┬┴──────────┐
+         │               ▼         ▼            ▼
+         │            FTS5     Semantic     Summary
+         │           Search    Search       Search
+         │               └─────────┴────────────┘
+         │                         │
+         │                    RRF Fusion
+         │                         │
+         │                  Optional Rerank
+         │                         │
+         │                  Context Assembly
+         │                         │
+         │                    LLM Answer
+         │                         │
+         └────────┬────────────────┘
+                  ▼
+          Response + Sources
 ```
 
-## Quick start (web)
+---
+
+## 🚀 Quick Start
+
+### Prerequisites
+
+- **Python 3.11+**
+- **8 GB+ RAM** recommended (for embedding model)
+- **Gemini API key** or local **Ollama** instance for LLM answers
+
+### Installation
 
 ```bash
+# Clone the repository
+git clone https://github.com/Binitpyro/Sandisk-Hackathon.git
+cd Sandisk-Hackathon
+
+# Create and activate virtual environment
 python -m venv .venv
+.venv\Scripts\activate        # Windows
+# source .venv/bin/activate   # Linux/macOS
 
-# Windows
-.venv\Scripts\activate
-
-# Linux/macOS
-source .venv/bin/activate
-
+# Install dependencies
 pip install -r requirements.txt
-python . --mode server --reload
 ```
 
-Open: `http://127.0.0.1:8000`
-
-Alternative run command:
+### Set up your environment
 
 ```bash
-uvicorn app.main:app --reload
+# Create .env file
+copy .env.example .env        # Windows
+# cp .env.example .env        # Linux/macOS
 ```
 
-## Desktop mode
-
-Run native-window app backed by the local FastAPI server:
-
-```bash
-python . --mode desktop
-```
-
-or:
-
-```bash
-python desktop.py
-```
-
-## Configuration
-
-Settings are loaded from `.env` using `PMA_` prefix (see `app/config.py`).
-
-Example `.env`:
-
-```env
-PMA_HOST=127.0.0.1
-PMA_PORT=8000
-PMA_DEV_MODE=true
-PMA_LOG_LEVEL=INFO
-
-PMA_DB_PATH=pma_metadata.db
-PMA_CHROMA_PERSIST_DIR=chroma_db
-
-PMA_EMBEDDING_MODEL=all-MiniLM-L6-v2
-PMA_EMBEDDING_BATCH_SIZE=128
-
-PMA_CHUNK_SIZE=512
-PMA_CHUNK_OVERLAP=50
-PMA_MAX_FILE_SIZE_MB=50
-PMA_INDEX_CONCURRENCY=8
-
-PMA_GEMINI_API_KEY=
-PMA_GEMINI_MODEL=gemini-flash-latest
-PMA_GEMINI_TIMEOUT=30
-
-PMA_OLLAMA_URL=http://localhost:11434/api/generate
-PMA_OLLAMA_MODEL=llama3
-PMA_OLLAMA_TIMEOUT=60
-
-PMA_RETRIEVAL_TOP_K=6
-PMA_CONTEXT_MAX_TOKENS=2200
-PMA_RRF_FTS_WEIGHT=0.4
-PMA_RRF_SEMANTIC_WEIGHT=0.6
-PMA_RRF_K=60
-PMA_SUMMARY_BOOST_FACTOR=1.25
-```
-
-### Getting API keys
-
-1. Open `https://makersuite.google.com/app/apikey`.
-2. Sign in with your Google account.
-3. Create an API key.
-4. Set it in `.env`:
+Add your Gemini API key (get one at [Google AI Studio](https://makersuite.google.com/app/apikey)):
 
 ```env
 PMA_GEMINI_API_KEY=your_key_here
 ```
 
-Optional Ollama fallback:
+### Run
 
-1. Install Ollama: `https://ollama.com/download`
-2. Pull a model: `ollama pull llama3`
-3. Ensure Ollama is running and reachable at `http://localhost:11434`
-4. Set/update:
+```bash
+# Web mode (default)
+python . --mode server --reload
 
-```env
-PMA_OLLAMA_URL=http://localhost:11434/api/generate
-PMA_OLLAMA_MODEL=llama3
+# Desktop mode (native window)
+python . --mode desktop
 ```
 
-## Usage examples
+Open **http://127.0.0.1:8000** in your browser (web mode).
 
-### Example 1: Basic code question
+---
 
-Query:
+## 📖 Usage
 
-```json
-{"question":"How does indexing work in this project?"}
+### Typical Workflow
+
+```text
+1. Launch PMA  ──►  2. Index Folders  ──►  3. Ask Questions  ──►  4. View Insights
+                         via UI or API         natural language        analytics dashboard
 ```
 
-Response (example):
+### Example Queries
 
-```json
-{
-	"answer": "The indexing pipeline scans files, chunks content, embeds chunks, then stores metadata in SQLite and vectors in Chroma. Key flow is in app/indexing/service.py.",
-	"sources": [
-		{"file_path": "app/indexing/service.py"},
-		{"file_path": "app/storage/db.py"},
-		{"file_path": "app/vector_store/chroma_client.py"}
-	],
-	"retrieved_count": 6,
-	"latency_ms": 420
-}
-```
+| Query | Type | Latency |
+|-------|------|---------|
+| *"How does the indexing pipeline work?"* | Semantic RAG | ~400 ms |
+| *"What are my largest indexed files?"* | Fast path (metadata) | ~40 ms |
+| *"How many maps are in my Unreal project?"* | Fast path (project facts) | ~110 ms |
+| *"Summarize the authentication module"* | Semantic RAG | ~500 ms |
 
-### Example 2: Storage insights question
-
-Query:
-
-```json
-{"question":"What are my largest indexed files?"}
-```
-
-Response (example):
+### Sample Response
 
 ```json
 {
-	"answer": "Top large files include ...",
-	"sources": [],
-	"retrieved_count": 0,
-	"latency_ms": 40
+  "answer": "The indexing pipeline scans files, chunks content, embeds chunks, then stores metadata in SQLite and vectors in Chroma.",
+  "sources": [
+    { "file_path": "app/indexing/service.py" },
+    { "file_path": "app/storage/db.py" }
+  ],
+  "retrieved_count": 6,
+  "latency_ms": 420
 }
 ```
 
-### Example 3: Unreal project question
+---
 
-Query:
+## 📡 API Reference
 
-```json
-{"question":"How many maps and character assets are in my Unreal project?","folder_tag":"MyProject"}
-```
+### Core Endpoints
 
-Response (example):
-
-```json
-{
-	"answer": "Project MyProject has 12 maps and 37 character-related assets.",
-	"sources": [{"file_path": "C:/GameProject"}],
-	"retrieved_count": 3,
-	"latency_ms": 110
-}
-```
-
-## Typical workflow
-
-1. Start server/app.
-2. Index one or more folders (`/index/start` or UI picker).
-3. Ask questions in the Ask tab (`/query`).
-4. Check analytics in Insights (`/insights`).
-5. Optionally import Unreal metadata (`/unreal/import`) for richer game-project answers.
-
-## API overview
-
-### Health & system
-
-- `GET /health` — service/database/model/indexing status
-- `GET /system/info` — OS, admin status, scan method, volume info
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/health` | Service, database, model, and indexing status |
+| `POST` | `/query` | Run a RAG query with optional filters |
+| `GET` | `/query/history` | Recent query history |
 
 ### Indexing
 
-- `POST /index/start` — start background indexing
-- `GET /index/status` — current index + progress snapshot
-- `GET /index/progress-stream` — SSE progress stream
-- `POST /index/reindex` — force reindex for provided folders
-- `POST /index/cleanup` — remove stale DB entries for deleted files
-- `POST /index/clear` — clear all indexed metadata + vectors + history
-- `GET /index/export` — export indexed file metadata JSON
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/index/start` | Start background indexing for given folders |
+| `GET` | `/index/status` | Current indexing state + progress snapshot |
+| `GET` | `/index/progress-stream` | SSE real-time progress stream |
+| `POST` | `/index/reindex` | Force reindex (bypass change detection) |
+| `POST` | `/index/cleanup` | Remove stale DB entries for deleted files |
+| `POST` | `/index/clear` | Clear all indexed data + vectors + history |
+| `GET` | `/index/export` | Export indexed file metadata as JSON |
 
-### Querying & history
+### Insights & Utilities
 
-- `POST /query` — run RAG query with optional `file_type` and `folder_tag`
-- `GET /query/history` — recent query history
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/files/tree` | Indexed files grouped by folder tag |
+| `GET` | `/insights` | Storage analytics dashboard data |
+| `GET` | `/pick/folder` | Native OS folder picker dialog |
+| `GET` | `/pick/file` | Native OS file picker (multi-select) |
+| `POST` | `/demo/seed` | Generate and index demo files |
+| `POST` | `/unreal/import` | Import Unreal Engine project metadata |
 
-### File metadata & insights
-
-- `GET /files/tree` — indexed files grouped by folder tag
-- `GET /insights` — total size, top files, cold files, type breakdown
-
-### Utilities
-
-- `GET /pick/folder` — native folder picker
-- `GET /pick/file` — native file picker (multi-select)
-- `POST /demo/seed` — generate and index demo files
-
-### Unreal metadata
-
-- `POST /unreal/import` — import Unreal project metadata JSON and upsert project facts/profile
-
-### Security considerations
-
-- PMA is intended for local usage (`127.0.0.1` by default).
-- No built-in authentication/authorization is enabled by default.
-- Avoid binding publicly (`0.0.0.0`) unless protected by a trusted network boundary/reverse proxy.
-- Keep `PMA_GEMINI_API_KEY` in `.env` (already ignored by `.gitignore`).
-- Sensitive local data is stored in SQLite (`PMA_DB_PATH`, default `pma_metadata.db`) and Chroma (`PMA_CHROMA_PERSIST_DIR`, default `chroma_db/`).
-
-### Endpoint schemas (key routes)
+<details>
+<summary><b>Expand: Request/Response Schemas</b></summary>
 
 #### `POST /query`
 
-Request body:
-
 ```json
-{
-	"question": "string (required, 1..2000)",
-	"file_type": "string (optional, e.g. .py)",
-	"folder_tag": "string (optional)"
-}
+// Request
+{ "question": "string (1..2000)", "file_type": ".py", "folder_tag": "MyProject" }
+
+// Response 200
+{ "answer": "string", "sources": [{"file_path": "string"}], "retrieved_count": 6, "latency_ms": 420 }
 ```
-
-Success `200` (example):
-
-```json
-{
-	"answer": "string",
-	"sources": [{"file_path": "string"}],
-	"retrieved_count": 0,
-	"latency_ms": 0
-}
-```
-
-Common errors: `400` (`{"error":"Question cannot be empty."}`), `500` (`{"error":"An error occurred while processing your query."}`), `422` (`{"error":"Validation error","details":["..."]}`)
 
 #### `POST /index/start`
 
-Request body:
-
 ```json
-{
-	"folders": ["C:/path/one", "C:/path/two"]
-}
+// Request
+{ "folders": ["C:/path/one", "C:/path/two"] }
+
+// Response 202
+{ "message": "Indexing started" }
 ```
-
-Success `202`: `{"message":"Indexing started"}`
-
-Common errors: `400` (`{"error":"No valid folder paths provided."}`), `422`
 
 #### `GET /index/status`
 
-Success `200` (example):
-
 ```json
+// Response 200
 {
-	"status": "idle|running|done|error",
-	"files_indexed": 0,
-	"chunks_indexed": 0,
-	"progress_percent": 0,
-	"scan_method": "scandir|ntfs_mft",
-	"scan_duration_ms": 0.0,
-	"skipped_files": 0,
-	"new_files": 0,
-	"changed_files": 0
+  "status": "idle|running|done|error",
+  "files_indexed": 0, "chunks_indexed": 0, "progress_percent": 0,
+  "scan_method": "scandir|ntfs_mft", "scan_duration_ms": 0.0,
+  "skipped_files": 0, "new_files": 0, "changed_files": 0
 }
 ```
-
-Common errors: `500`
-
-#### `GET /insights`
-
-Success `200`: statistics object from `InsightsService.get_stats()` including size/use/type distributions.
-
-Common errors: `500`
-
-#### `POST /index/reindex`
-
-Request body:
-
-```json
-{
-	"folders": ["C:/path/to/reindex"]
-}
-```
-
-Success `202`: `{"message":"Re-indexing started (change detection bypassed)"}`
-
-Common errors: `400`, `422`
-
-#### `POST /index/clear`
-
-Request body: none
-
-Success `200`: count summary object returned by database clear operation.
-
-Common errors: `500` (`{"error":"Failed to clear database. Please check server logs."}`)
 
 #### `POST /unreal/import`
 
-Request body:
-
 ```json
+// Request
+{ "json_path": "C:/path/to/metadata.json", "folder_tag": "MyProject" }
+
+// Response 200
 {
-	"json_path": "C:/path/to/unreal_metadata.json",
-	"folder_tag": "MyProject (optional)"
+  "message": "Unreal metadata imported successfully.",
+  "project": { "name": "string", "engine_version": "5.3.2", "folder_tag": "string" },
+  "stats": { "total_assets": 0, "map_count": 0, "character_blueprints": 0, "material_count": 0 }
 }
 ```
 
-Success `200` (example):
+</details>
 
-```json
-{
-	"message": "Unreal metadata imported successfully.",
-	"project": {
-		"name": "string",
-		"engine_version": "string",
-		"folder_tag": "string",
-		"folder_path": "string"
-	},
-	"stats": {
-		"total_assets": 0,
-		"map_count": 0,
-		"environment_assets": 0,
-		"character_blueprints": 0,
-		"pawn_blueprints": 0,
-		"skeletal_meshes": 0,
-		"material_count": 0,
-		"niagara_systems": 0
-	}
-}
+---
+
+## ⚙️ Configuration
+
+All settings are loaded from a `.env` file using the `PMA_` prefix. See [app/config.py](app/config.py) for full details.
+
+<details>
+<summary><b>Expand: Full Configuration Reference</b></summary>
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PMA_HOST` | `127.0.0.1` | Server bind address |
+| `PMA_PORT` | `8000` | Server port |
+| `PMA_DEV_MODE` | `true` | Enable development mode |
+| `PMA_LOG_LEVEL` | `INFO` | Logging level |
+| `PMA_DB_PATH` | `pma_metadata.db` | SQLite database path |
+| `PMA_CHROMA_PERSIST_DIR` | `chroma_db` | ChromaDB persistence directory |
+| `PMA_EMBEDDING_MODEL` | `all-MiniLM-L6-v2` | Sentence-transformer model name |
+| `PMA_EMBEDDING_BATCH_SIZE` | `128` | Embedding batch size |
+| `PMA_CHUNK_SIZE` | `512` | Text chunk size (tokens) |
+| `PMA_CHUNK_OVERLAP` | `50` | Overlap between chunks |
+| `PMA_MAX_FILE_SIZE_MB` | `50` | Max file size to index |
+| `PMA_INDEX_CONCURRENCY` | `8` | Concurrent indexing workers |
+| `PMA_GEMINI_API_KEY` | — | Google Gemini API key |
+| `PMA_GEMINI_MODEL` | `gemini-flash-latest` | Gemini model variant |
+| `PMA_OLLAMA_URL` | `http://localhost:11434/api/generate` | Ollama endpoint |
+| `PMA_OLLAMA_MODEL` | `llama3` | Ollama model name |
+| `PMA_RETRIEVAL_TOP_K` | `6` | Number of retrieval results |
+| `PMA_RRF_FTS_WEIGHT` | `0.4` | RRF weight for keyword search |
+| `PMA_RRF_SEMANTIC_WEIGHT` | `0.6` | RRF weight for semantic search |
+| `PMA_SUMMARY_BOOST_FACTOR` | `1.25` | Summary embedding boost |
+
+</details>
+
+### LLM Provider Setup
+
+<details>
+<summary><b>Gemini (Primary)</b></summary>
+
+1. Go to [Google AI Studio](https://makersuite.google.com/app/apikey)
+2. Sign in and create an API key
+3. Add to `.env`: `PMA_GEMINI_API_KEY=your_key_here`
+
+</details>
+
+<details>
+<summary><b>Ollama (Local Fallback)</b></summary>
+
+1. Install from [ollama.com](https://ollama.com/download)
+2. Pull a model: `ollama pull llama3`
+3. Ensure it's running at `http://localhost:11434`
+4. Update `.env` if using non-default settings
+
+</details>
+
+---
+
+## 🗂️ Project Structure
+
+```text
+Sandisk-Hackathon/
+├── __main__.py              # CLI entrypoint
+├── desktop.py               # Native desktop launcher (pywebview)
+├── launcher.py              # Packaged executable entrypoint
+├── pyproject.toml           # Project metadata & tool config
+├── requirements.txt         # Python dependencies
+│
+├── app/
+│   ├── main.py              # FastAPI app, routes, middleware, lifespan
+│   ├── config.py            # Settings via PMA_ env vars
+│   ├── embeddings/          # Sentence-transformer model loading
+│   ├── indexing/            # Scan → chunk → embed → store pipeline
+│   ├── scanner/             # OS scandir + NTFS MFT fast scanner
+│   ├── search/              # Retrieval, reranking, context, LLM client
+│   ├── storage/             # SQLite manager + FTS5 schema
+│   ├── vector_store/        # ChromaDB client wrapper
+│   ├── insights/            # Storage analytics + Unreal metadata
+│   └── utils/               # Shared utilities & metrics
+│
+├── templates/index.html     # Single-page web UI
+├── static/                  # Frontend CSS, JS, chart libraries
+├── tests/                   # pytest test suite
+└── chroma_db/               # Persistent vector store (gitignored)
 ```
 
-Common errors: `400` (`{"error":"Metadata JSON file does not exist."}`), `500` (`{"error":"Failed to import Unreal metadata."}`), `422`
+---
 
-## Unreal metadata import
+## 🛠️ Tech Stack
 
-Use this when you want deeper game-asset understanding than text extraction can provide.
+| Layer | Technology | Purpose |
+|-------|-----------|---------|
+| **Backend** | FastAPI + Uvicorn | Async API server |
+| **Database** | SQLite + FTS5 | Metadata, full-text search |
+| **Vector Store** | ChromaDB | Semantic embeddings storage |
+| **Embeddings** | sentence-transformers (`all-MiniLM-L6-v2`) | Local embedding generation |
+| **LLM** | Google Gemini / Ollama | Answer generation |
+| **Frontend** | Jinja2 + Vanilla JS + Chart.js | Web UI with analytics |
+| **Desktop** | pywebview | Native window wrapper |
+| **File Scanning** | `os.scandir` / NTFS MFT | High-speed file enumeration |
 
-Compatibility:
+---
 
-- Supports metadata exports from Unreal Engine `UE4.x` and `UE5.x` as long as fields map to the accepted keys below.
-- `engine_version` is stored as text and used for project facts/profile context (compatibility is best-effort by schema match, not hard-blocked by version).
-
-Path format note:
-
-- In JSON payloads, Windows backslashes must be escaped (`C:\\path\\to\\file.json`).
-- Using forward slashes (`C:/path/to/file.json`) is recommended for copy/paste simplicity.
-
-Request:
+## 🧪 Testing
 
 ```bash
-curl -X POST http://127.0.0.1:8000/unreal/import \
-	-H "Content-Type: application/json" \
-	-d '{"json_path":"C:/path/to/unreal_metadata.json","folder_tag":"MyProject"}'
-```
-
-Expected JSON schema (accepted aliases shown):
-
-```json
-{
-	"project_name": "MyProject",        
-	"engine_version": "5.3.2",          
-	"project_path": "C:/Projects/MyProject",
-	"assets": [
-		{
-			"asset_class": "Blueprint",
-			"object_path": "/Game/Characters/BP_Hero",
-			"tags": {"Category": "Character"}
-		}
-	]
-}
-```
-
-Also accepted key variants include:
-
-- `ProjectName`/`project_name`/`Name`/`name`
-- `EngineVersion`/`engine_version`/`EngineAssociation`
-- `ProjectPath`/`project_path`/`RootPath`
-- `Assets`/`assets`/`AssetData` (including `AssetRegistry.Assets`)
-
-Behavior:
-
-- Parses project + asset facts.
-- Stores structured facts in `unreal_project_facts`.
-- Updates folder profile (`folder_tag` override supported).
-- Tries to embed/store a summary for retrieval boosting.
-
-## Retrieval pipeline summary
-
-For semantic questions:
-
-1. Compute query embedding.
-2. Run keyword search (FTS5) + semantic search (Chroma) + summary search.
-3. Fuse rankings via RRF.
-4. Optional reranking for precision.
-5. Build context and generate final answer with LLM.
-
-For inventory/project-style questions, PMA may return deterministic fast answers without LLM call.
-
-## Testing
-
-Run tests:
-
-```bash
+# Run tests
 pytest -q
-```
 
-With coverage:
-
-```bash
+# Run with coverage report
 pytest --cov=app --cov-report=term-missing --cov-report=xml
 ```
 
-## Packaging notes
+---
 
-This repo includes helper launchers for desktop/executable workflows:
-
-- `desktop.py` — native window launcher (pywebview)
-- `launcher.py` — packaged launcher-friendly entrypoint
-- `PMA.spec` — PyInstaller spec
-
-### Building an executable
-
-1. Install PyInstaller:
+## 📦 Building Executable
 
 ```bash
 pip install pyinstaller
-```
-
-2. Build from the spec:
-
-```bash
 pyinstaller PMA.spec
 ```
 
-3. Output location:
+Output is produced under `dist/PMA/`. On Windows, a standalone `PMA.exe` is also generated.
 
-- One-folder output is created under `dist/PMA/`.
-- Depending on platform/build options, an executable like `dist/PMA.exe` may also be produced on Windows.
+---
 
-Notes:
+## 🔒 Security Notes
 
-- First launch can be slower because embedding/model components warm up.
-- Packaging with `PMA.spec`/`launcher.py` includes runtime assets needed for desktop launchers (including local model/chroma runtime data paths used by the app).
+- **Local-first by default** — binds to `127.0.0.1`, not exposed to network.
+- **No built-in auth** — designed for single-user local use.
+- **API keys stay local** — `.env` is gitignored; keys are never committed.
+- **LLM context** — outbound calls to Gemini/Ollama include query context; use Ollama for fully offline operation.
 
-## Troubleshooting
+---
 
-- **LLM answers unavailable**: set `PMA_GEMINI_API_KEY` or run local Ollama endpoint.
-- **Slow first query/index**: initial model load and embedding warm-up are expected.
-- **Windows scan method**: admin context may enable NTFS MFT scanning; otherwise scanner uses `scandir`.
+## 🐛 Troubleshooting
 
-## Contributing
+| Issue | Solution |
+|-------|----------|
+| LLM answers unavailable | Set `PMA_GEMINI_API_KEY` in `.env` or start a local Ollama instance |
+| Slow first query / index | Expected — initial model load and embedding warm-up takes a few seconds |
+| Windows scan method shows `scandir` | Run as administrator to enable faster NTFS MFT scanning |
+| Tkinter errors on Linux | Install `python3-tk` via your system package manager |
 
-- When opening a PR, ensure your branch contains at least one unique commit so the PR has a non-empty diff.
+---
 
-## License
+## 🤝 Contributing
 
-MIT. See `LICENSE`.
+Contributions are welcome! When opening a PR, ensure your branch contains at least one unique commit so the pull request has a non-empty diff.
+
+```bash
+# Development setup
+pip install -e ".[dev]"
+
+# Run linter
+ruff check app/ tests/
+
+# Run type checker
+mypy app/
+```
+
+---
+
+## 📄 License
+
+This project is licensed under the **MIT License** — see the [LICENSE](LICENSE) file for details.
+
+---
+
+<div align="center">
+
+**Built for the SanDisk Hackathon** · Made with ❤️ by [Binitpyro](https://github.com/Binitpyro)
+
+</div>

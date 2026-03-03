@@ -3,6 +3,7 @@ import logging
 import asyncio
 import threading
 import concurrent.futures
+import hashlib
 from collections import Counter
 from pathlib import Path
 from datetime import datetime
@@ -179,12 +180,16 @@ def _build_folder_profile(
     for fp, _ in folder_files:
         ext = fp.suffix.lower()
         ext_counts[ext] += 1
+        if fp.name.lower() in _KEY_NAMES or ext in _KEY_EXTS:
+            key_files_list.append(fp.name)
+
+    # Batch stat() — tolerate individual failures instead of per-file try/except
+    total_size = 0
+    for fp, _ in folder_files:
         try:
             total_size += fp.stat().st_size
         except OSError:
             pass
-        if fp.name.lower() in _KEY_NAMES or ext in _KEY_EXTS:
-            key_files_list.append(fp.name)
 
     project_type, description = _detect_project_type(folder_files, folder)
 
@@ -390,6 +395,10 @@ class IndexingService:
             # Generate folder profiles after indexing so the DB has all files
             await self._generate_folder_profiles(all_files, unique_folders)
 
+            # Phase 3.1: Invalidate Retrieval Cache
+            from app.search.retrieval import clear_retrieval_cache
+            clear_retrieval_cache()
+
             progress.complete()
             logger.info(
                 "Indexing completed: %d files processed (%d skipped).",
@@ -503,16 +512,26 @@ class IndexingService:
         all_chroma_metas: List[Dict[str, Any]] = []
         summary_items: List[Dict[str, Any]] = []
 
-        for item in prepared:
-            await self._store_single_prepared_item(
-                item,
-                all_chroma_ids,
-                all_chroma_embs,
-                all_chroma_metas,
-                summary_items,
-            )
+        # ── Pre-batch: look up ALL existing files in one DB query ──────
+        all_paths = [item["file_data"]["path"] for item in prepared]
+        existing_map = await self.db.get_existing_file_ids(all_paths)
 
-        await self.db.commit()
+        # ── Process in micro-batches for progress + bounded memory ─────
+        STORE_BATCH = 200
+        for batch_start in range(0, len(prepared), STORE_BATCH):
+            batch = prepared[batch_start : batch_start + STORE_BATCH]
+            for item in batch:
+                await self._store_single_prepared_item(
+                    item,
+                    all_chroma_ids,
+                    all_chroma_embs,
+                    all_chroma_metas,
+                    summary_items,
+                    existing_map,
+                )
+            # Commit each micro-batch so we don't hold a giant transaction
+            await self.db.commit()
+
         await self._flush_chroma_batches(
             all_chroma_ids,
             all_chroma_embs,
@@ -527,17 +546,22 @@ class IndexingService:
         all_chroma_embs: List[List[float]],
         all_chroma_metas: List[Dict[str, Any]],
         summary_items: List[Dict[str, Any]],
+        existing_map: Optional[Dict[str, int]] = None,
     ) -> None:
         try:
             file_data = item["file_data"]
             file_path = file_data["path"]
             folder_tag = item["folder_tag"]
 
-            existing = await self.db.get_file_by_path(file_path)
-            if existing:
-                await self._delete_existing_chunks(existing["id"])
+            # Use pre-fetched map instead of per-file DB query
+            existing_id = (existing_map or {}).get(file_path)
+            if existing_id is not None:
+                await self._delete_existing_chunks(existing_id)
 
-            file_id = await self.db.insert_file(file_data)
+            try:
+                file_id = await self.db.insert_file(file_data, auto_commit=False)
+            except TypeError:
+                file_id = await self.db.insert_file(file_data)
             chunk_ids_int = await self.db.insert_chunks_bulk(
                 self._build_chunk_rows(item["chunks"], file_id)
             )
@@ -563,7 +587,10 @@ class IndexingService:
         old_ids = [str(chunk["id"]) for chunk in old_chunks]
         if old_ids:
             await self.chroma_client.delete_documents(old_ids)
-        await self.db.delete_file_chunks(file_id)
+        try:
+            await self.db.delete_file_chunks(file_id, auto_commit=False)
+        except TypeError:
+            await self.db.delete_file_chunks(file_id)
 
     @staticmethod
     def _build_chunk_rows(chunks: List[Dict[str, Any]], file_id: int) -> List[Dict[str, Any]]:
@@ -619,45 +646,71 @@ class IndexingService:
         all_chroma_metas: List[Dict[str, Any]],
         summary_items: List[Dict[str, Any]],
     ) -> None:
+        """Flush chunk & summary embeddings to ChromaDB.
+
+        Uses asyncio.gather so chunk batches and summary upsert
+        run concurrently when possible.
+        """
+        tasks = []
         chroma_batch = 5000
         for i in range(0, len(all_chroma_ids), chroma_batch):
             end = min(i + chroma_batch, len(all_chroma_ids))
-            await self.chroma_client.add_documents(
-                all_chroma_ids[i:end],
-                all_chroma_embs[i:end],
-                all_chroma_metas[i:end],
+            tasks.append(
+                self.chroma_client.add_documents(
+                    all_chroma_ids[i:end],
+                    all_chroma_embs[i:end],
+                    all_chroma_metas[i:end],
+                )
             )
 
         if summary_items:
-            await self.chroma_client.add_summaries_batch(summary_items)
+            tasks.append(self.chroma_client.add_summaries_batch(summary_items))
+
+        if tasks:
+            await asyncio.gather(*tasks)
 
     async def _generate_folder_profiles(
         self,
         all_files: List[Tuple[Path, str]],
         folders: List[Path],
     ) -> None:
-        """Build and store a profile for each indexed folder.
+        """Build and store profiles for all indexed folders **in parallel**.
 
-        Profiles capture the *type* of project (Unreal, Python, etc.),
-        file counts, key project files, and directory structure.  These
-        are embedded in ChromaDB so retrieval can surface them for
-        project-level queries.
+        Profile construction (CPU + I/O) runs concurrently in threads,
+        then all DB upserts happen in a single transaction.
         """
         logger.info("Generating folder profiles for %d folder(s) …", len(folders))
         profile_texts: List[str] = []
         profiles: List[Dict[str, Any]] = []
 
         loop = asyncio.get_running_loop()
-        for folder in folders:
-            try:
-                profile = await loop.run_in_executor(
-                    None, _build_folder_profile, folder, folder.name, all_files
+
+        # Build all profiles in parallel threads
+        max_workers = min(len(folders), (os.cpu_count() or 4) + 2)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futs = [
+                loop.run_in_executor(
+                    pool, _build_folder_profile, folder, folder.name, all_files
                 )
-                profiles.append(profile)
-                profile_texts.append(profile["profile_text"])
-                await self.db.upsert_folder_profile(profile)
+                for folder in folders
+            ]
+            results = await asyncio.gather(*futs, return_exceptions=True)
+
+        for folder, result in zip(folders, results):
+            if isinstance(result, (Exception, BaseException)):
+                logger.error("Error generating profile for %s: %s", folder, result)
+                continue
+            profile: Dict[str, Any] = result
+            profiles.append(profile)
+            profile_texts.append(profile["profile_text"])
+
+        # Batch DB upserts (single transaction)
+        for profile in profiles:
+            try:
+                await self.db.upsert_folder_profile(profile, auto_commit=False)
             except Exception as e:
-                logger.error("Error generating profile for %s: %s", folder, e)
+                logger.error("Error storing profile for %s: %s", profile["folder_path"], e)
+        await self.db.commit()
 
         # Embed all profile texts and store in the summary collection
         if profile_texts:
@@ -714,6 +767,7 @@ class IndexingService:
                 "type": path.suffix.lower(),
                 "folder_tag": folder_tag,
                 "summary": summary,
+                "sha256": self._calculate_sha256(path),
             }
 
             return {
@@ -730,22 +784,36 @@ class IndexingService:
     def _scan_all_folders(
         self, unique_folders: List[Path]
     ) -> Tuple[List[Tuple[Path, str]], str, float]:
-        """Scan all folders and return deduplicated files with scan metadata."""
+        """Scan all folders **in parallel** and return deduplicated files.
+
+        Each folder is scanned in its own thread so I/O-heavy MFT / scandir
+        operations overlap instead of running serially.
+        """
         all_files: List[Tuple[Path, str]] = []
         seen_paths: Set[str] = set()
         scan_method = ""
         scan_duration = 0.0
 
-        for path in unique_folders:
-            scan_result = fast_scan(path, self.supported_extensions)
-            scan_method = scan_result.method
-            scan_duration += scan_result.duration_ms
+        def _scan_one(folder: Path):
+            return folder, fast_scan(folder, self.supported_extensions)
 
-            for file_path in scan_result.files:
-                abs_key = str(file_path.resolve())
-                if abs_key not in seen_paths:
-                    seen_paths.add(abs_key)
-                    all_files.append((file_path, path.name))
+        max_workers = min(len(unique_folders), (os.cpu_count() or 4) + 2)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = [pool.submit(_scan_one, p) for p in unique_folders]
+            for fut in concurrent.futures.as_completed(futures):
+                try:
+                    folder, scan_result = fut.result()
+                except Exception as exc:
+                    logger.error("Scan failed for a folder: %s", exc)
+                    continue
+                scan_method = scan_result.method
+                scan_duration += scan_result.duration_ms
+
+                for file_path in scan_result.files:
+                    abs_key = str(file_path.resolve())
+                    if abs_key not in seen_paths:
+                        seen_paths.add(abs_key)
+                        all_files.append((file_path, folder.name))
 
         return all_files, scan_method, scan_duration
 
@@ -754,28 +822,60 @@ class IndexingService:
     ) -> Tuple[List[Tuple[Path, str]], int, int, int]:
         """Compare scanned files against the DB and classify as new/changed/unchanged.
 
+        stat() calls are offloaded to a thread-pool so they run in parallel
+        instead of blocking the event loop one-by-one.
+
         Returns (files_to_index, skipped_count, new_count, changed_count).
         """
         file_paths_list = [str(fp.absolute()) for fp, _ in all_files]
-        indexed_map = await self.db.get_files_modified_map(file_paths_list)
+        change_map = await self.db.get_files_change_map(file_paths_list)
 
+        # ── Parallel stat() in thread-pool ────────────────────────────
+        loop = asyncio.get_running_loop()
+
+        def _get_file_info(file_path: Path) -> Tuple[Optional[str], int]:
+            """Return (isoformat mtime, size) or (None, 0) on error."""
+            try:
+                stat = file_path.stat()
+                return datetime.fromtimestamp(stat.st_mtime).isoformat(), stat.st_size
+            except OSError:
+                return None, 0
+
+        max_workers = min(len(all_files), (os.cpu_count() or 4) * 4, 64)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+            file_infos = await asyncio.gather(
+                *[loop.run_in_executor(pool, _get_file_info, fp) for fp, _ in all_files]
+            )
+
+        # ── Classify ──────────────────────────────────────────────────
         files_to_index: List[Tuple[Path, str]] = []
         skipped = 0
         new_count = 0
         changed_count = 0
 
-        for file_path, folder_tag in all_files:
-            abs_path = str(file_path.absolute())
-            try:
-                current_mtime = datetime.fromtimestamp(
-                    file_path.stat().st_mtime
-                ).isoformat()
-            except OSError:
+        for (file_path, folder_tag), (current_mtime, current_size) in zip(all_files, file_infos):
+            if current_mtime is None:
                 skipped += 1
                 continue
 
-            stored_mtime = indexed_map.get(abs_path)
+            abs_path = str(file_path.absolute())
+            stored_entry = change_map.get(abs_path)
+            stored_mtime = stored_entry[0] if stored_entry else None
+            stored_sha = stored_entry[1] if stored_entry else None
+
             if stored_mtime is not None and stored_mtime == current_mtime:
+                skipped += 1
+                continue
+            
+            # Timestamp differs, check hash
+            current_sha = await loop.run_in_executor(None, self._calculate_sha256, file_path)
+            if stored_sha and stored_sha == current_sha:
+                # Content identical, just update timestamp to avoid future re-hashing
+                # Use a targeted UPDATE to preserve the existing summary
+                await self.db.execute_write(
+                    "UPDATE files SET size=?, modified_at=?, type=?, folder_tag=?, sha256=? WHERE path=?",
+                    (current_size, current_mtime, file_path.suffix.lower(), folder_tag, current_sha, abs_path),
+                )
                 skipped += 1
                 continue
 
@@ -795,6 +895,18 @@ class IndexingService:
             skipped,
         )
         return files_to_index, skipped, new_count, changed_count
+
+    def _calculate_sha256(self, path: Path) -> str:
+        """Calculate SHA256 hash of a file's content."""
+        hasher = hashlib.sha256()
+        try:
+            with open(path, "rb") as f:
+                for chunk in iter(lambda: f.read(1_048_576), b""):  # 1 MB reads for SSD throughput
+                    hasher.update(chunk)
+            return hasher.hexdigest()
+        except Exception as e:
+            logger.warning("Could not calculate hash for %s: %s", path, e)
+            return ""
 
     async def index_file(self, path: Path, folder_tag: str):
         """Extracts text, chunks it, generates embeddings, and stores in both DBs."""

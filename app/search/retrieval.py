@@ -2,7 +2,9 @@ import asyncio
 import logging
 import re
 import time
-from typing import List, Dict, Any, Optional, Set
+import threading
+from collections import OrderedDict
+from typing import List, Dict, Any, Optional, Set, Tuple
 from app.storage.db import DatabaseManager
 from app.embeddings.service import EmbeddingService
 from app.vector_store.chroma_client import ChromaClient
@@ -13,16 +15,32 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+# Phase 3.1: Result Cache (LRU)
+# Keys are (query, file_type, folder_tag)
+# Values are List[Dict[str, Any]]
+_retrieval_cache: OrderedDict[Tuple[str, Optional[str], Optional[str]], List[Dict[str, Any]]] = OrderedDict()
+_CACHE_MAX_SIZE = 500  # 5x increase for better hit rate
+_cache_lock = threading.Lock()
+
+def clear_retrieval_cache():
+    """Invalidates the retrieval cache. Call this after indexing or clearing DB."""
+    with _cache_lock:
+        _retrieval_cache.clear()
+        logger.info("Retrieval cache cleared.")
+
 _INVENTORY_RE = re.compile(
     r'\b(?:what|which|list|show|how many|count|do i have|files? do i|'
-    r'files? i have|my files|all files|all my)\b',
+    r'files? i have|my files|all files|all my|total|size|'
+    r'breakdown|statistics|stats|types? of files?|extensions?|'
+    r'storage|disk|space|largest|smallest|recent|oldest)\b',
     re.IGNORECASE,
 )
 
 _PROJECT_RE = re.compile(
     r'\b(?:project|projects|describe|overview|about|summary|folder|'
     r'tell me about|what is|what are|unreal|unity|godot|react|node|'
-    r'python|rust|java|c\+\+|go|flutter|workspace)\b',
+    r'python|rust|java|c\+\+|go|flutter|workspace|'
+    r'codebase|repo|repository|tech stack|framework|language)\b',
     re.IGNORECASE,
 )
 
@@ -36,11 +54,9 @@ def _is_project_query(query: str) -> bool:
     """Heuristic: does the user want project-level information?"""
     return bool(_PROJECT_RE.search(query))
 
-
 def _is_unreal_query(query: str) -> bool:
     """Heuristic: does the user explicitly ask about Unreal Engine data?"""
     return bool(_UNREAL_RE.search(query))
-
 
 def _append_unreal_fact_lines(lines: List[str], unreal_facts: List[Dict[str, Any]]) -> None:
     lines.append("Unreal project summary:")
@@ -60,7 +76,6 @@ def _append_unreal_fact_lines(lines: List[str], unreal_facts: List[Dict[str, Any
         "character/environment detail."
     )
 
-
 def _append_unreal_profile_hint(lines: List[str], unreal_profiles: List[Dict[str, Any]]) -> None:
     detected = ", ".join(profile.get("folder_tag", "Unknown") for profile in unreal_profiles[:4])
     lines.append(
@@ -73,7 +88,6 @@ def _append_unreal_profile_hint(lines: List[str], unreal_profiles: List[Dict[str
         "(json_path + optional folder_tag)."
     )
 
-
 def _append_project_profile_lines(lines: List[str], folder_profiles: List[Dict[str, Any]]) -> None:
     lines.append("Indexed project/folder profiles:")
     for profile in folder_profiles[:8]:
@@ -82,7 +96,6 @@ def _append_project_profile_lines(lines: List[str], folder_profiles: List[Dict[s
             f"- {profile['folder_tag']} ({profile['project_type']}): "
             f"{profile['file_count']} files, {size_mb} MB, path: {profile['folder_path']}"
         )
-
 
 def _append_inventory_type_lines(lines: List[str], file_stats: Dict[str, Any]) -> None:
     top_types = file_stats.get("by_type", [])[:6]
@@ -93,17 +106,13 @@ def _append_inventory_type_lines(lines: List[str], file_stats: Dict[str, Any]) -
         + ", ".join(f"{item['ext']} ({item['count']})" for item in top_types)
     )
 
-
 def _build_fast_answer(
     query: str,
     file_stats: Optional[Dict[str, Any]],
     folder_profiles: List[Dict[str, Any]],
     unreal_facts: List[Dict[str, Any]],
 ) -> Optional[str]:
-    """Build a deterministic answer for inventory/project questions.
-
-    This bypasses slow LLM calls when structured metadata is sufficient.
-    """
+    """Build a deterministic answer for inventory/project questions."""
     inventory = _is_inventory_query(query)
     project = _is_project_query(query)
     unreal = _is_unreal_query(query)
@@ -142,11 +151,6 @@ def _build_fast_answer(
 _FTS5_OPERATOR_RE = re.compile(r'["*^]|\bAND\b|\bOR\b|\bNOT\b|\bNEAR\b', re.IGNORECASE)
 
 def _sanitize_fts_query(query: str) -> str:
-    """Sanitize user input for safe use in FTS5 MATCH.
-
-    Strips FTS5 operators (AND, OR, NOT, NEAR, *, ^, ") then wraps each
-    token in double-quotes so the query is treated as literal terms.
-    """
     cleaned = _FTS5_OPERATOR_RE.sub(' ', query)
     tokens = [t.strip() for t in cleaned.split() if t.strip()]
     if not tokens:
@@ -154,14 +158,13 @@ def _sanitize_fts_query(query: str) -> str:
     return ' '.join(f'"{t}"' for t in tokens)
 
 async def _fts_search(db: DatabaseManager, query: str, k: int) -> List[Dict[str, Any]]:
-    """Run FTS5 keyword search."""
     try:
         fts_match = _sanitize_fts_query(query)
         fts_sql = "SELECT rowid, chunks_text FROM chunk_fts WHERE chunk_fts MATCH ? ORDER BY rank LIMIT ?"
         rows = await db.execute_query(fts_sql, (fts_match, 2 * k))
         return [{"id": str(row[0]), "text": row[1]} for row in rows]
     except Exception as e:
-        logger.warning("FTS5 Search failed (non-fatal, falling back to semantic only): %s", e)
+        logger.warning("FTS5 Search failed: %s", e)
         return []
 
 async def _semantic_search_with_emb(
@@ -169,7 +172,6 @@ async def _semantic_search_with_emb(
     query_emb: List[float],
     k: int,
 ) -> List[Dict[str, Any]]:
-    """Run Chroma semantic search using a pre-computed embedding."""
     raw = await chroma_client.semantic_search(query_emb, k=2 * k)
     results: List[Dict[str, Any]] = []
     if raw.get("ids") and raw["ids"][0]:
@@ -187,10 +189,6 @@ def _compute_rrf_scores(
     semantic_results: List[Dict[str, Any]],
     k: int,
 ) -> List[tuple]:
-    """Compute Reciprocal Rank Fusion scores and return top-k (id, score) pairs.
-    
-    Weights and k_rrf are configurable via settings.
-    """
     scores: Dict[str, float] = {}
     k_rrf = settings.rrf_k
     fts_w = settings.rrf_fts_weight
@@ -207,11 +205,6 @@ async def _summary_search_with_emb(
     query_emb: List[float],
     k: int,
 ) -> Set[str]:
-    """Search the document-summary collection and return file paths of top-k docs.
-
-    These paths are used to *boost* chunks from relevant documents during
-    RRF scoring (two-stage retrieval: doc → chunk).
-    """
     try:
         raw = await chroma_client.search_summaries(query_emb, k=k)
         paths: Set[str] = set()
@@ -222,8 +215,41 @@ async def _summary_search_with_emb(
                     paths.add(fp)
         return paths
     except Exception as e:
-        logger.debug("Summary search unavailable (non-fatal): %s", e)
+        logger.debug("Summary search unavailable: %s", e)
         return set()
+
+def _build_candidate_results(
+    chunk_ids_ordered: List[int],
+    row_map: Dict[int, Any],
+    score_map: Dict[int, float],
+    relevant_doc_paths: Set[str],
+) -> List[Dict[str, Any]]:
+    """Deduplicate and build candidate result dicts from ordered chunk IDs."""
+    results: List[Dict[str, Any]] = []
+    seen_texts: Set[str] = set()
+    for cid in chunk_ids_ordered:
+        row = row_map.get(cid)
+        if not row:
+            continue
+        text = row[1]
+        if len(text) < 50:
+            continue
+        text_prefix = text[:100]
+        if text_prefix in seen_texts:
+            continue
+        seen_texts.add(text_prefix)
+        file_path = row[2]
+        rrf_score = score_map[cid] * settings.rrf_score_scale
+        if file_path in relevant_doc_paths:
+            rrf_score *= settings.summary_boost_factor
+        results.append({
+            "chunk_id": cid,
+            "text": text,
+            "file_path": file_path,
+            "folder_tag": row[3],
+            "score": round(rrf_score, 4),
+        })
+    return results
 
 async def hybrid_retrieve(
     query: str, 
@@ -232,25 +258,57 @@ async def hybrid_retrieve(
     chroma_client: ChromaClient,
     k: int = settings.retrieval_top_k,
     use_reranker: bool = True,
+    file_type: Optional[str] = None,
+    folder_tag: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Combines FTS5 keyword + Chroma semantic + document-summary search using RRF,
-    then reranks the candidates with a cross-encoder for maximum precision."""
+    then reranks the candidates with a cross-encoder for maximum precision.
 
-    query_emb = await embedding_service.embed_query(query)
+    Performance optimisations:
+    - LRU cache (500 entries) for repeat queries.
+    - Adaptive recall_k: short queries use smaller recall window.
+    - Confidence-based reranker bypass: if RRF top-1 score is well above
+      the pack, skip the expensive cross-encoder pass.
+    - All async I/O (FTS, embedding, semantic, summary) runs concurrently.
+    """
 
+    # Phase 3.1: Cache Lookup
+    cache_key = (query.strip().lower(), file_type, folder_tag)
+    with _cache_lock:
+        if cache_key in _retrieval_cache:
+            _retrieval_cache.move_to_end(cache_key)
+            logger.info("Retrieval cache hit for query: '%s'", query)
+            return _retrieval_cache[cache_key]
+
+    # Adaptive recall_k: short/simple queries need fewer candidates
+    query_words = len(query.split())
+    if query_words <= 3:
+        recall_k = max(20, k * 2)
+    elif query_words <= 8:
+        recall_k = max(35, k * 2)
+    else:
+        recall_k = max(50, k * 2)
+
+    # Launch FTS & embedding concurrently
+    fts_task = asyncio.create_task(_fts_search(db, query, recall_k))
+    emb_task = asyncio.create_task(embedding_service.embed_query(query))
+    query_emb = await emb_task
+    
+    # Launch semantic & summary search concurrently
+    semantic_task = asyncio.create_task(_semantic_search_with_emb(chroma_client, query_emb, recall_k))
+    summary_task = asyncio.create_task(_summary_search_with_emb(chroma_client, query_emb, k))
+    
     fts_results, semantic_results, relevant_doc_paths = await asyncio.gather(
-        _fts_search(db, query, k),
-        _semantic_search_with_emb(chroma_client, query_emb, k),
-        _summary_search_with_emb(chroma_client, query_emb, k),
+        fts_task, semantic_task, summary_task
     )
 
-    sorted_ids = _compute_rrf_scores(fts_results, semantic_results, k * 2)
-
+    sorted_ids = _compute_rrf_scores(fts_results, semantic_results, recall_k)
     if not sorted_ids:
         return []
 
     chunk_ids_ordered = [int(cid) for cid, _ in sorted_ids]
     score_map = {int(cid): sc for cid, sc in sorted_ids}
+
     placeholders = ",".join("?" for _ in chunk_ids_ordered)
     query_sql = (
         f"SELECT c.id, c.text_preview, f.path, f.folder_tag "
@@ -262,26 +320,34 @@ async def hybrid_retrieve(
     for row in rows:
         row_map[row[0]] = row
 
-    results = []
-    for cid in chunk_ids_ordered:
-        row = row_map.get(cid)
-        if row:
-            file_path = row[2]
-            rrf_score = score_map[cid] * settings.rrf_score_scale
-            if file_path in relevant_doc_paths:
-                rrf_score *= settings.summary_boost_factor
-            results.append({
-                "chunk_id": cid,
-                "text": row[1],
-                "file_path": file_path,
-                "folder_tag": row[3],
-                "score": round(rrf_score, 4),
-            })
+    results = _build_candidate_results(chunk_ids_ordered, row_map, score_map, relevant_doc_paths)
 
+    # Confidence-based reranker bypass:
+    # If the RRF top score is 2x+ the runner-up, ranking is already decisive
+    # and the expensive cross-encoder can be skipped.
     if results and use_reranker:
-        results = await rerank(query, results, top_k=k, text_key="text")
+        skip_reranker = False
+        if len(results) >= 2:
+            top_score = results[0]["score"]
+            second_score = results[1]["score"]
+            if second_score > 0 and (top_score / second_score) >= 2.0:
+                skip_reranker = True
+                logger.debug(
+                    "Reranker bypassed: top RRF score %.2f is %.1fx the second (%.2f)",
+                    top_score, top_score / second_score, second_score,
+                )
+        if not skip_reranker:
+            results = await rerank(query, results, top_k=k, text_key="text")
 
-    return results
+    final_results = results[:k]
+    
+    # Update Cache
+    with _cache_lock:
+        if len(_retrieval_cache) >= _CACHE_MAX_SIZE:
+            _retrieval_cache.popitem(last=False)
+        _retrieval_cache[cache_key] = final_results
+        
+    return final_results
 
 async def full_rag(
     query: str,
@@ -293,182 +359,162 @@ async def full_rag(
     file_type: Optional[str] = None,
     folder_tag: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Retrieves context and generates an LLM answer.
-    
-    Supports optional file_type and folder_tag filters.
-    Tracks latency for each RAG pipeline stage.
-    For inventory-type questions augments context with aggregate file stats.
-    For project-level questions augments context with folder profiles.
-    """
     t_start = time.perf_counter()
-
     inventory = _is_inventory_query(query)
     project = _is_project_query(query)
     unreal = _is_unreal_query(query)
 
     folder_profiles, file_stats, unreal_facts = await _load_query_metadata(
-        db,
-        inventory=inventory,
-        project=project,
-        unreal=unreal,
+        db, inventory=inventory, project=project, unreal=unreal,
     )
 
     fast_answer = _build_fast_answer(query, file_stats, folder_profiles, unreal_facts)
     if fast_answer:
-        source_rows = [
-            {
-                "file_path": p.get("folder_path", ""),
-                "folder_tag": p.get("folder_tag", ""),
-                "text": p.get("profile_text", ""),
-            }
-            for p in folder_profiles
-        ]
+        source_rows = [{"file_path": p.get("folder_path", ""), "folder_tag": p.get("folder_tag", ""), "text": p.get("profile_text", "")} for p in folder_profiles]
+        total_ms = round((time.perf_counter() - t_start) * 1000, 1)
         return {
             "answer": fast_answer,
             "sources": source_rows,
             "retrieved_count": len(source_rows),
-            "latency_ms": round((time.perf_counter() - t_start) * 1000, 1),
+            "latency_ms": total_ms,
+            "mode": "fast_path",
+            "timing": {"metadata_ms": total_ms, "retrieval_ms": 0, "llm_ms": 0},
         }
 
-    # Fallback to full RAG for semantic questions.
     include_profiles_text = project or inventory or unreal
-    retrieved, file_stats, folder_profiles_text = await _gather_full_rag_inputs(
-        query=query,
-        db=db,
-        embedding_service=embedding_service,
-        chroma_client=chroma_client,
-        k=k,
-        inventory=inventory,
-        project=project,
-        unreal=unreal,
-        cached_file_stats=file_stats,
-        include_profiles_text=include_profiles_text,
-    )
-
-    t_retrieval = time.perf_counter()
+    from app.utils.metrics import Timer
+    
+    t_ret = time.perf_counter()
+    with Timer("retrieval"):
+        retrieved, file_stats, folder_profiles_text = await _gather_full_rag_inputs(
+            query=query, db=db, embedding_service=embedding_service, chroma_client=chroma_client,
+            k=k, inventory=inventory, project=project, unreal=unreal, cached_file_stats=file_stats,
+            include_profiles_text=include_profiles_text,
+        )
+    retrieval_ms = round((time.perf_counter() - t_ret) * 1000, 1)
 
     if file_type or folder_tag:
         retrieved = _filter_retrieved_results(retrieved, file_type=file_type, folder_tag=folder_tag)
     
     if not retrieved and not file_stats and not folder_profiles_text:
-        return {
-            "answer": "I couldn't find any relevant documents to answer your question.",
-            "sources": [],
-            "retrieved_count": 0,
-            "latency_ms": round((time.perf_counter() - t_start) * 1000, 1),
-        }
+        return {"answer": "I couldn't find any relevant documents.", "sources": [], "retrieved_count": 0, "latency_ms": round((time.perf_counter() - t_start) * 1000, 1)}
         
-    context = build_context(
-        retrieved,
-        file_stats=file_stats,
-        folder_profiles_text=folder_profiles_text,
-    )
-    t_context = time.perf_counter()
+    context = build_context(retrieved, file_stats=file_stats, folder_profiles_text=folder_profiles_text)
     
-    answer = await llm_client.generate_answer(query, context)
     t_llm = time.perf_counter()
+    with Timer("llm_generation"):
+        answer = await llm_client.generate_answer(query, context)
+    llm_ms = round((time.perf_counter() - t_llm) * 1000, 1)
     
-    total_ms = round((t_llm - t_start) * 1000, 1)
-    logger.info(
-        "RAG pipeline: retrieval=%.0fms context=%.0fms llm=%.0fms total=%.0fms "
-        "(inventory=%s project=%s unreal=%s)",
-        (t_retrieval - t_start) * 1000,
-        (t_context - t_retrieval) * 1000,
-        (t_llm - t_context) * 1000,
-        total_ms,
-        inventory,
-        project,
-        unreal,
-    )
+    total_ms = round((time.perf_counter() - t_start) * 1000, 1)
     
     return {
         "answer": answer,
         "sources": retrieved,
         "retrieved_count": len(retrieved),
         "latency_ms": total_ms,
+        "mode": "full_rag",
+        "timing": {"retrieval_ms": retrieval_ms, "llm_ms": llm_ms, "total_ms": total_ms},
     }
 
-
-async def _load_query_metadata(
-    db: DatabaseManager,
-    inventory: bool,
-    project: bool,
-    unreal: bool,
-) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]], List[Dict[str, Any]]]:
-    should_load_profiles = project or inventory or unreal
-    should_load_unreal_facts = unreal or project
-
-    folder_profiles_coro = (
-        db.get_all_folder_profiles()
-        if should_load_profiles
-        else asyncio.sleep(0, result=[])
-    )
-    file_stats_coro = db.get_file_stats_summary() if inventory else asyncio.sleep(0, result=None)
-    unreal_facts_coro = (
-        db.get_all_unreal_project_facts()
-        if should_load_unreal_facts
-        else asyncio.sleep(0, result=[])
-    )
-
-    return await asyncio.gather(folder_profiles_coro, file_stats_coro, unreal_facts_coro)
-
-
-async def _gather_full_rag_inputs(
+async def full_rag_stream(
     query: str,
     db: DatabaseManager,
     embedding_service: EmbeddingService,
     chroma_client: ChromaClient,
-    k: int,
-    inventory: bool,
-    project: bool,
-    unreal: bool,
-    cached_file_stats: Optional[Dict[str, Any]],
-    include_profiles_text: bool,
-) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]], str]:
-    coros: List[Any] = [
-        hybrid_retrieve(
-            query=query,
-            db=db,
-            embedding_service=embedding_service,
-            chroma_client=chroma_client,
-            k=k,
-            use_reranker=not (project or inventory or unreal),
+    llm_client: LLMClient,
+    k: int = settings.retrieval_top_k,
+    file_type: Optional[str] = None,
+    folder_tag: Optional[str] = None,
+) -> AsyncGenerator[str, None]:
+    """Retrieves context and yields answer chunks + initial metadata."""
+    t_start = time.perf_counter()
+    inventory = _is_inventory_query(query)
+    project = _is_project_query(query)
+    unreal = _is_unreal_query(query)
+
+    folder_profiles, file_stats, unreal_facts = await _load_query_metadata(
+        db, inventory=inventory, project=project, unreal=unreal,
+    )
+
+    fast_answer = _build_fast_answer(query, file_stats, folder_profiles, unreal_facts)
+    if fast_answer:
+        # For fast path, just yield the whole thing as one chunk since it's instant
+        metadata = {
+            "type": "metadata",
+            "sources": [{"file_path": p.get("folder_path", ""), "folder_tag": p.get("folder_tag", ""), "text": p.get("profile_text", "")} for p in folder_profiles],
+            "latency_ms": round((time.perf_counter() - t_start) * 1000, 1)
+        }
+        yield json.dumps(metadata) + "\n"
+        yield json.dumps({"type": "content", "text": fast_answer}) + "\n"
+        return
+
+    include_profiles_text = project or inventory or unreal
+    from app.utils.metrics import Timer
+    
+    with Timer("retrieval"):
+        retrieved, file_stats, folder_profiles_text = await _gather_full_rag_inputs(
+            query=query, db=db, embedding_service=embedding_service, chroma_client=chroma_client,
+            k=k, inventory=inventory, project=project, unreal=unreal, cached_file_stats=file_stats,
+            include_profiles_text=include_profiles_text,
         )
-    ]
 
-    if inventory:
-        coros.append(asyncio.sleep(0, result=cached_file_stats))
-    if include_profiles_text:
-        coros.append(db.get_folder_profiles_text())
+    if file_type or folder_tag:
+        retrieved = _filter_retrieved_results(retrieved, file_type=file_type, folder_tag=folder_tag)
+    
+    if not retrieved and not file_stats and not folder_profiles_text:
+        yield json.dumps({"type": "content", "text": "I couldn't find any relevant documents."}) + "\n"
+        return
+        
+    context = build_context(retrieved, file_stats=file_stats, folder_profiles_text=folder_profiles_text)
+    
+    # Yield sources immediately before starting LLM
+    metadata = {
+        "type": "metadata",
+        "sources": retrieved,
+        "latency_retrieval_ms": round((time.perf_counter() - t_start) * 1000, 1)
+    }
+    yield json.dumps(metadata) + "\n"
 
+    full_answer = ""
+    with Timer("llm_generation"):
+        async for chunk in llm_client.stream_answer(query, context):
+            full_answer += chunk
+            yield json.dumps({"type": "content", "text": chunk}) + "\n"
+    
+    # Optional: save history at the end
+    try:
+        total_ms = round((time.perf_counter() - t_start) * 1000, 1)
+        await db.save_query(query, full_answer, len(retrieved), total_ms)
+    except Exception as e:
+        logger.warning("Failed to save streamed query history: %s", e)
+
+async def _load_query_metadata(db, inventory, project, unreal):
+    p_coro = db.get_all_folder_profiles() if (project or inventory or unreal) else asyncio.sleep(0, [])
+    s_coro = db.get_file_stats_summary() if inventory else asyncio.sleep(0, None)
+    u_coro = db.get_all_unreal_project_facts() if (unreal or project) else asyncio.sleep(0, [])
+    return await asyncio.gather(p_coro, s_coro, u_coro)
+
+async def _gather_full_rag_inputs(query, db, embedding_service, chroma_client, k, inventory, project, unreal, cached_file_stats, include_profiles_text):
+    coros = [hybrid_retrieve(query=query, db=db, embedding_service=embedding_service, chroma_client=chroma_client, k=k, use_reranker=not (project or inventory or unreal))]
+    if inventory: coros.append(asyncio.sleep(0, cached_file_stats))
+    if include_profiles_text: coros.append(db.get_folder_profiles_text())
     results = await asyncio.gather(*coros)
-
     retrieved = results[0]
-    file_stats = cached_file_stats if inventory else None
+    file_stats = results[1] if inventory else None
     folder_profiles_text = ""
-    next_idx = 1
-
-    if inventory:
-        file_stats = results[next_idx]
-        next_idx += 1
-    if include_profiles_text:
-        folder_profiles_text = results[next_idx]
-
+    if include_profiles_text and inventory:
+        folder_profiles_text = results[2]
+    elif include_profiles_text:
+        folder_profiles_text = results[1]
     return retrieved, file_stats, folder_profiles_text
 
-
-def _filter_retrieved_results(
-    retrieved: List[Dict[str, Any]],
-    file_type: Optional[str],
-    folder_tag: Optional[str],
-) -> List[Dict[str, Any]]:
-    filtered: List[Dict[str, Any]] = []
-    for result in retrieved:
-        file_path = result.get("file_path", "")
-        result_folder_tag = result.get("folder_tag", "")
-        if file_type and not file_path.lower().endswith(file_type):
-            continue
-        if folder_tag and result_folder_tag != folder_tag:
-            continue
-        filtered.append(result)
+def _filter_retrieved_results(retrieved, file_type, folder_tag):
+    filtered = []
+    for res in retrieved:
+        path = res.get("file_path", "").lower()
+        tag = res.get("folder_tag", "")
+        if file_type and not path.endswith(file_type.lower()): continue
+        if folder_tag and tag != folder_tag: continue
+        filtered.append(res)
     return filtered

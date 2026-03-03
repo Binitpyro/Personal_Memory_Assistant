@@ -1,6 +1,7 @@
 import logging
 import httpx
-from typing import Optional
+import json
+from typing import Optional, AsyncGenerator
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from app.config import settings
 
@@ -27,9 +28,8 @@ class LLMClient:
             self._ollama_client = httpx.AsyncClient(timeout=settings.ollama_timeout)
         return self._ollama_client
 
-    async def generate_answer(self, query: str, context: str) -> str:
-        """Generates an answer using the provided context and query."""
-        prompt = f"""
+    def _build_prompt(self, query: str, context: str) -> str:
+        return f"""
 You are a personal memory assistant. Answer the user's question using ONLY the provided context snippets.
 If the answer is not in the context, say "I don't have enough information in your indexed files to answer this."
 
@@ -53,10 +53,24 @@ Instructions:
 
 Answer:
 """
+
+    async def generate_answer(self, query: str, context: str) -> str:
+        """Generates an answer using the provided context and query."""
+        prompt = self._build_prompt(query, context)
         if self.api_key:
             return await self._call_gemini(prompt)
         else:
             return await self._call_ollama(prompt)
+
+    async def stream_answer(self, query: str, context: str) -> AsyncGenerator[str, None]:
+        """Generates a streaming answer using the provided context and query."""
+        prompt = self._build_prompt(query, context)
+        if self.api_key:
+            async for chunk in self._stream_gemini(prompt):
+                yield chunk
+        else:
+            async for chunk in self._stream_ollama(prompt):
+                yield chunk
 
     @retry(
         stop=stop_after_attempt(3),
@@ -89,6 +103,49 @@ Answer:
         logger.error("Unexpected Gemini response structure (keys: %s)", list(data.keys()))
         return "Error parsing Gemini response."
 
+    async def _stream_gemini(self, prompt: str) -> AsyncGenerator[str, None]:
+        """Streams response from Gemini API using server-sent events-like parsing."""
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:streamGenerateContent"
+        params = {"key": self.api_key}
+        headers = {"Content-Type": "application/json"}
+        payload = {"contents": [{"parts": [{"text": prompt}]}]}
+        
+        client = self._get_gemini_client()
+        try:
+            async with client.stream("POST", url, params=params, json=payload, headers=headers) as response:
+                if response.status_code != 200:
+                    yield f"Error: Gemini API returned {response.status_code}"
+                    return
+
+                # Gemini streamGenerateContent returns a JSON array that grows.
+                # Each chunk is a complete JSON object preceded by a comma (except the first).
+                buffer = ""
+                async for chunk in response.aiter_text():
+                    buffer += chunk
+                    # This is a bit naive but works for the SSE-like JSON stream
+                    # We look for objects {...}
+                    while "{" in buffer and "}" in buffer:
+                        start = buffer.find("{")
+                        # Find the matching closing brace for this specific object
+                        # (Simple version: just take everything until the next ']' or ',' or end)
+                        # More robust: use a JSON decoder
+                        try:
+                            # Try to find a balanced JSON object
+                            # For Gemini, each chunk is usually a candidates object
+                            end = buffer.find("}", start) + 1
+                            obj_str = buffer[start:end]
+                            data = json.loads(obj_str)
+                            if "candidates" in data and data["candidates"]:
+                                text = data["candidates"][0]["content"]["parts"][0]["text"]
+                                yield text
+                            buffer = buffer[end:]
+                        except json.JSONDecodeError:
+                            # Not a full object yet
+                            break
+        except Exception as e:
+            logger.error("Gemini streaming error: %s", e)
+            yield f"Streaming error: {str(e)}"
+
     async def _call_ollama(self, prompt: str) -> str:
         """Fallback to local Ollama instance."""
         payload = {
@@ -107,4 +164,39 @@ Answer:
                 return "Local LLM (Ollama) not responding. Please provide a GEMINI_API_KEY or start Ollama."
         except Exception as e:
             logger.warning("Ollama fallback failed: %s", e)
-            return "No LLM available. Here are the top retrieved snippets from your files:"
+            return "No LLM available."
+
+    @staticmethod
+    def _parse_ollama_line(line: str):
+        """Parse a single line from Ollama streaming response."""
+        if not line:
+            return None, False
+        try:
+            data = json.loads(line)
+            return data.get("response"), data.get("done", False)
+        except json.JSONDecodeError:
+            return None, False
+
+    async def _stream_ollama(self, prompt: str) -> AsyncGenerator[str, None]:
+        """Streams response from local Ollama instance."""
+        payload = {
+            "model": self.ollama_model,
+            "prompt": prompt,
+            "stream": True
+        }
+        
+        try:
+            client = self._get_ollama_client()
+            async with client.stream("POST", self.ollama_url, json=payload) as response:
+                if response.status_code != 200:
+                    yield "Local LLM (Ollama) error."
+                    return
+                async for line in response.aiter_lines():
+                    text, done = self._parse_ollama_line(line)
+                    if text:
+                        yield text
+                    if done:
+                        break
+        except Exception as e:
+            logger.warning("Ollama streaming failed: %s", e)
+            yield "Ollama error."

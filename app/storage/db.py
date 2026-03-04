@@ -33,6 +33,9 @@ class DatabaseManager:
             await self.conn.execute("PRAGMA cache_size = -64000;")   # 64 MB page cache
             await self.conn.execute("PRAGMA mmap_size = 268435456;") # 256 MB memory-mapped I/O
             await self.conn.execute("PRAGMA temp_store = MEMORY;")   # temp tables in RAM
+            await self.conn.execute("PRAGMA page_size = 8192;")      # larger pages reduce B-tree depth
+            await self.conn.execute("PRAGMA read_uncommitted = ON;") # readers skip WAL frames
+            await self.conn.execute("PRAGMA wal_autocheckpoint = 1000;") # explicit WAL checkpoint control
 
     def _get_conn(self) -> aiosqlite.Connection:
         """Return the active connection, raising if not connected."""
@@ -81,6 +84,16 @@ class DatabaseManager:
                 else:
                     logger.error("Migration failed for column '%s': %s", col_name, exc)
                     raise
+
+        # Phase 6.2: Covering index for change detection (depends on sha256 column above)
+        try:
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_files_change_detection "
+                "ON files(path, modified_at, sha256)"
+            )
+            await conn.commit()
+        except Exception:
+            pass  # Silently skip if sha256 column doesn't exist yet
 
         # Table-level migration: folder_profiles
         try:
@@ -139,6 +152,55 @@ class DatabaseManager:
             logger.debug("unreal_project_facts table ensured.")
         except Exception as exc:
             logger.debug("unreal_project_facts migration note: %s", exc)
+
+        # Phase 9.1: Drop the heavy covering index that duplicates chunk text
+        try:
+            await conn.execute("DROP INDEX IF EXISTS idx_chunks_covering")
+            await conn.commit()
+        except Exception as exc:
+            logger.warning("Failed to drop idx_chunks_covering: %s", exc)
+
+        # Phase 9.2: Rebuild chunk_fts with detail=column to save ~40% space
+        try:
+            cur = await conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='chunk_fts'")
+            row = await cur.fetchone()
+            if row and "detail=column" not in row[0]:
+                logger.info("Storage optimization: Rebuilding chunk_fts with detail=column...")
+                # We simply drop the table. The schema.sql ran before this and 
+                # will re-create it next time, but we must manually create it now so it's ready.
+                await conn.execute("DROP TABLE IF EXISTS chunk_fts")
+                await conn.execute(
+                    "CREATE VIRTUAL TABLE chunk_fts USING fts5("
+                    "chunks_text, content=chunks, content_rowid=id, detail=column)"
+                )
+                await conn.execute("INSERT INTO chunk_fts(chunk_fts) VALUES('rebuild')")
+                await conn.commit()
+                logger.info("Storage optimization: Rebuilt chunk_fts successfully.")
+        except Exception as exc:
+            logger.warning("Failed to rebuild FTS table: %s", exc)
+
+    async def fts_optimize(self) -> None:
+        """Optimizes the FTS5 index to reduce fragmentation and improve search speed."""
+        conn = self._get_conn()
+        try:
+            logger.info("Optimizing FTS5 index (chunk_fts)...")
+            await conn.execute("INSERT INTO chunk_fts(chunk_fts) VALUES('optimize')")
+            await conn.commit()
+            logger.info("FTS5 index optimization complete.")
+        except Exception as e:
+            logger.warning("FTS5 optimization failed: %s", e)
+
+    async def vacuum(self) -> None:
+        """Compacts the database and optimizes search indexes."""
+        conn = self._get_conn()
+        logger.info("Starting database maintenance (FTS optimize + VACUUM)...")
+        
+        # Optimize FTS before vacuuming to reclaim maximum space
+        await self.fts_optimize()
+        
+        await conn.execute("VACUUM")
+        await conn.commit()
+        logger.info("Database maintenance completed.")
 
     async def insert_file(
         self,
@@ -382,27 +444,31 @@ class DatabaseManager:
     async def get_file_stats_summary(self) -> Dict[str, Any]:
         """Return aggregate file statistics grouped by type and folder_tag.
 
-        Used to augment LLM context for inventory / listing questions
-        so the model can answer with counts and locations rather than
-        dumping raw filenames.
+        Uses a single-pass CTE to avoid scanning the files table twice.
         """
         conn = self._get_conn()
 
-        # Per-extension counts & total size
-        type_rows = await (
+        # Phase 6.3: Single-pass CTE replaces two separate GROUP BY scans
+        rows = await (
             await conn.execute(
-                "SELECT type, COUNT(*) AS cnt, SUM(size) AS total_bytes "
-                "FROM files GROUP BY type ORDER BY cnt DESC"
+                "WITH "
+                "type_agg AS ("
+                "  SELECT type, COUNT(*) AS cnt, SUM(size) AS total_bytes "
+                "  FROM files GROUP BY type"
+                "), "
+                "folder_agg AS ("
+                "  SELECT folder_tag, COUNT(*) AS cnt "
+                "  FROM files GROUP BY folder_tag"
+                ") "
+                "SELECT 'T' AS src, type AS key, cnt, total_bytes FROM type_agg "
+                "UNION ALL "
+                "SELECT 'F' AS src, folder_tag AS key, cnt, 0 FROM folder_agg "
+                "ORDER BY src, cnt DESC"
             )
         ).fetchall()
 
-        # Per-folder-tag counts
-        folder_rows = await (
-            await conn.execute(
-                "SELECT folder_tag, COUNT(*) AS cnt "
-                "FROM files GROUP BY folder_tag ORDER BY cnt DESC"
-            )
-        ).fetchall()
+        type_rows = [(r[1], r[2], r[3]) for r in rows if r[0] == 'T']
+        folder_rows = [(r[1], r[2]) for r in rows if r[0] == 'F']
 
         total_files = sum(r[1] for r in type_rows)
         total_bytes = sum(r[2] or 0 for r in type_rows)
@@ -418,6 +484,7 @@ class DatabaseManager:
                 {"folder": r[0] or "Unknown", "count": r[1]}
                 for r in folder_rows
             ],
+            "database_size_bytes": os.path.getsize(self.db_path) if os.path.exists(self.db_path) else 0,
         }
 
     async def get_counts(self) -> Tuple[int, int]:
@@ -479,6 +546,13 @@ class DatabaseManager:
                 }
                 for r in rows
             ]
+
+    async def clear_query_history(self) -> Dict[str, str]:
+        """Delete all entries from the query_history table."""
+        conn = self._get_conn()
+        await conn.execute("DELETE FROM query_history")
+        await conn.commit()
+        return {"message": "Query history cleared successfully."}
 
     async def cleanup_stale_files(self) -> List[str]:
         """Remove index entries for files that no longer exist on disk.

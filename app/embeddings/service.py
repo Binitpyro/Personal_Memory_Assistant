@@ -24,7 +24,11 @@ class EmbeddingService:
         self._max_cache_size = 2000  # Increased from 1000
 
     def load_model(self) -> None:
-        """Loads the embedding model (blocking)."""
+        """Loads the embedding model (blocking).
+
+        Prefers ONNX Runtime backend when ``onnxruntime`` is installed
+        (gives ~2-3x speedup on CPU).  Falls back to PyTorch.
+        """
         if self.model:
             self._ready.set()
             return
@@ -34,15 +38,29 @@ class EmbeddingService:
             import torch
             
             device = "cuda" if torch.cuda.is_available() else "cpu"
-            logger.info("Loading embedding model: %s on device: %s", self.model_name, device)
+
+            # Phase 2.1: Prefer ONNX backend on CPU for ~2-3x faster inference
+            backend = "torch"  # default
+            if device == "cpu":
+                try:
+                    import onnxruntime  # noqa: F401
+                    import optimum # noqa: F401
+                    backend = "onnx"
+                    logger.info("ONNX Runtime and Optimum detected — using ONNX backend for faster CPU inference.")
+                except ImportError:
+                    logger.info("onnxruntime or optimum not installed — using default PyTorch backend.")
+
+            logger.info("Loading embedding model: %s on device: %s (backend: %s)", self.model_name, device, backend)
             
-            # Optimization: Load with half-precision if on GPU for faster inference
-            self.model = SentenceTransformer(self.model_name, device=device)
+            if backend == "onnx":
+                self.model = SentenceTransformer(self.model_name, device=device, backend=backend)
+            else:
+                self.model = SentenceTransformer(self.model_name, device=device)
             
             if device == "cuda":
                 self.model.half() # Use FP16 on GPU
                 
-            logger.info("Model loaded successfully.")
+            logger.info("Model loaded successfully (backend=%s).", backend)
         except Exception as e:
             logger.exception("Failed to load embedding model: %s", e)
         finally:
@@ -86,7 +104,7 @@ class EmbeddingService:
         # ── Deduplicate texts ──────────────────────────────────────────
         unique_texts: List[str] = []
         text_to_idx: Dict[str, int] = {}
-        original_map: List[int] = []  # original_map[i] = index in unique_texts
+        original_map: List[int] = []  # maps original index to deduplicated text index
 
         for text in texts:
             if text not in text_to_idx:

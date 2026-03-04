@@ -23,8 +23,9 @@ class Settings(BaseSettings):
     index_concurrency: int = 16  # Increased from 12 for better I/O overlap
 
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-flash-latest"
-    gemini_timeout: float = 30.0
+    gemini_model: str = "gemini-2.5-flash-lite"
+    gemini_timeout: float = 90.0
+
     ollama_url: str = "http://localhost:11434/api/generate"
     ollama_model: str = "llama3"
     ollama_timeout: float = 60.0
@@ -35,7 +36,7 @@ class Settings(BaseSettings):
     rrf_score_scale: int = 1000
     summary_boost_factor: float = 1.25
     retrieval_top_k: int = 6
-    context_max_tokens: int = 3000  # Increased from 2200 for richer context
+    context_max_tokens: int = 2500  # Balanced for reliability and depth
 
     dev_mode: bool = True  # Default on for hackathon; set to False for prod
     log_level: str = "INFO"

@@ -1,4 +1,4 @@
-import { useMemo, useCallback, useRef, useState } from 'react'
+import { useMemo, useCallback, useRef, useState, useEffect } from 'react'
 import { ChevronLeft, Home, File, Folder, Layers, Trash2 } from 'lucide-react'
 import ReactEChartsCore from 'echarts-for-react/lib/core'
 import * as echarts from 'echarts/core'
@@ -334,68 +334,65 @@ export function FileTypeTreemap({ allFiles, activeFilter, onFilterChange, onFile
         {
           colorAlpha: [1, 1],
           colorSaturation: [1, 1],
-          itemStyle: { color: '#1e1a3a', borderColor: '#3d15cb', borderWidth: 3, gapWidth: 3 },
+          itemStyle: { 
+            color: '#1e1a3a', 
+            borderColor: '#3d15cb', 
+            borderWidth: 3, 
+            gapWidth: 3 
+          },
           upperLabel: { show: true, height: 26, backgroundColor: 'rgba(61,21,203,0.18)', color: '#f1f5e0', fontWeight: 'bold', fontSize: 12 }
         },
-        // ── Level 1 (Primary folders) ── Ultrasonic Blue
+        // ── Level 1 (Category / Main folders)
         {
           colorAlpha: [1, 1],
           colorSaturation: [1, 1],
-          itemStyle: { color: '#1e1a3a', borderColor: '#3d15cb', borderWidth: 3, gapWidth: 3 },
+          itemStyle: { 
+            color: '#1e1a3a', 
+            borderColor: '#3d15cb', 
+            borderWidth: 3, 
+            gapWidth: 3 
+          },
           upperLabel: { show: true, height: 24, backgroundColor: 'rgba(61,21,203,0.15)', color: '#f1f5e0', fontWeight: 'bold', fontSize: 11 }
         },
-        // ── Level 2 (Sub-folders) ── Soft Periwinkle
+        // ── Level 2 (Extension / Sub-folders)
         {
           colorAlpha: [1, 1],
           colorSaturation: [1, 1],
-          itemStyle: { color: '#1e1a3a', borderColor: '#9984d4', borderWidth: 2, gapWidth: 2 },
-          upperLabel: { show: true, height: 22, backgroundColor: 'rgba(153,132,212,0.12)', color: '#f1f5e0', fontWeight: 'bold', fontSize: 10 }
+          itemStyle: { 
+            color: '#1e1a3a', 
+            borderColor: '#9984d4', 
+            borderWidth: 2, 
+            gapWidth: 2 
+          },
+          upperLabel: { 
+            show: true, 
+            height: 22, 
+            backgroundColor: 'rgba(153,132,212,0.12)', 
+            color: '#f1f5e0', 
+            fontWeight: 'bold', 
+            fontSize: 10,
+            formatter: (params: any) => {
+              const name = params.name;
+              const isActive = activeFilter && name.toLowerCase() === activeFilter.toLowerCase();
+              return isActive ? `\u{2728} ${name} (FILTERED)` : ` ${name}`;
+            }
+          }
         },
-        // ── Level 3 ── Soft Periwinkle
+        // ── Level 3
         {
           colorAlpha: [1, 1],
           colorSaturation: [1, 1],
           itemStyle: { color: '#1e1a3a', borderColor: '#9984d4', borderWidth: 1.5, gapWidth: 1.5 },
           upperLabel: { show: true, height: 20, backgroundColor: 'rgba(153,132,212,0.10)', color: '#f1f5e0', fontSize: 10 }
         },
-        // ── Level 4 ── Soft Periwinkle
+        // ... rest same, but ensure we highlight the items matching filter
         {
-          colorAlpha: [1, 1],
-          colorSaturation: [1, 1],
-          itemStyle: { color: '#1e1a3a', borderColor: '#9984d4', borderWidth: 1.5, gapWidth: 1 },
-          upperLabel: { show: true, height: 18, backgroundColor: 'rgba(153,132,212,0.08)', color: '#f1f5e0', fontSize: 9 }
-        },
-        // ── Level 5 ── Periwinkle thin
-        {
-          colorAlpha: [1, 1],
-          colorSaturation: [1, 1],
-          itemStyle: { color: '#1e1a3a', borderColor: '#9984d4', borderWidth: 1, gapWidth: 1 },
-          upperLabel: { show: true, height: 16, backgroundColor: 'rgba(153,132,212,0.06)', color: '#f1f5e0', fontSize: 9 }
-        },
-        // ── Level 6 ── Periwinkle minimal
-        {
-          colorAlpha: [1, 1],
-          colorSaturation: [1, 1],
-          itemStyle: { color: '#1e1a3a', borderColor: '#9984d4', borderWidth: 1, gapWidth: 0 },
-          upperLabel: { show: true, height: 14, backgroundColor: 'rgba(153,132,212,0.05)', color: '#f1f5e0', fontSize: 8 }
-        },
-        // ── Level 7 ── Deep folders catch-all
-        {
-          colorAlpha: [1, 1],
-          colorSaturation: [1, 1],
-          itemStyle: { color: '#1e1a3a', borderColor: '#9984d4', borderWidth: 1, gapWidth: 0 },
-          upperLabel: { show: true, height: 14, backgroundColor: 'rgba(153,132,212,0.05)', color: '#f1f5e0', fontSize: 8 }
-        },
-        // ── Level 8 (Leaf files) ── Per-item category color, minimal borders
-        {
-          colorAlpha: [1, 1],
-          colorSaturation: [1, 1],
           itemStyle: { borderColor: 'rgba(14,11,26,0.5)', borderWidth: 1, gapWidth: 0 },
           label: { show: true, position: 'inside', fontSize: 9, color: '#f1f5e0', formatter: (p: any) => p.value > 800 ? p.name : '' }
         }
       ]
     }]
-  }), [treeData, totalSize])
+  }), [treeData, totalSize, activeFilter])
 
   const onEvents = useMemo(() => ({
     click: (params: any) => {
@@ -432,17 +429,33 @@ export function FileTypeTreemap({ allFiles, activeFilter, onFilterChange, onFile
 
       if (params.data?.fileData && onFileSelect) onFileSelect(params.data.fileData)
       
-      // Extension filter logic
-      if (groupMode === 'type' && params.treePathInfo?.length === 3 && onFilterChange) {
-        onFilterChange(params.name === activeFilter ? null : params.name)
+      // Improved extension filter logic: works in any mode, searches path for an extension
+      if (onFilterChange) {
+        const pathInfo = params.treePathInfo || [];
+        const extNode = pathInfo.find((p: any) => p.name && p.name.startsWith('.'));
+        if (extNode) {
+          onFilterChange(extNode.name === activeFilter ? null : extNode.name);
+        }
       }
     },
     contextmenu: (params: any) => { params.event.stop(); handleBack() }
   }), [handleBack, onFilterChange, onFileSelect, activeFilter, groupMode])
 
+  // Automatically highlight the active filter node
+  useEffect(() => {
+    const instance = chartRef.current?.getEchartsInstance();
+    if (instance && activeFilter) {
+      instance.dispatchAction({
+        type: 'highlight',
+        seriesIndex: 0,
+        name: activeFilter
+      });
+    }
+  }, [activeFilter, treeData]);
+
   return (
-    <div className="space-y-4">
-      <div className="flex flex-col gap-3 bg-surface-lighter/50 p-3 rounded-2xl border border-white/5 shadow-inner">
+    <div className="flex-1 flex flex-col min-h-0">
+      <div className="flex flex-col gap-3 bg-surface-lighter/50 p-3 rounded-2xl border border-white/5 shadow-inner mb-4 shrink-0">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <button onClick={handleBack} disabled={navPath.length <= 1} className="flex items-center gap-1 px-3 py-1.5 bg-surface-dark/50 hover:bg-primary/20 border border-white/10 rounded-xl text-xs font-bold transition-all disabled:opacity-20 text-text-primary"><ChevronLeft className="w-4 h-4" /> BACK</button>
@@ -470,9 +483,15 @@ export function FileTypeTreemap({ allFiles, activeFilter, onFilterChange, onFile
           ))}
         </div>
       </div>
-      <div className="flex-1 min-h-[500px] relative rounded-2xl overflow-hidden border border-white/5 shadow-2xl bg-surface-dark group">
+      <div className="flex-1 relative rounded-2xl overflow-hidden border border-white/5 shadow-2xl bg-surface-dark group">
         <div className="absolute top-12 right-4 z-10 pointer-events-none opacity-0 group-hover:opacity-40 transition-opacity text-[10px] font-bold text-white uppercase bg-black/60 px-3 py-1.5 rounded-full">Right-click: Back • Scroll: Zoom • Drag: Pan</div>
-        <ReactEChartsCore ref={chartRef} echarts={echarts} option={option} style={{ height: '100%', width: '100%' }} onEvents={onEvents} />
+        <ReactEChartsCore 
+          ref={chartRef} 
+          echarts={echarts} 
+          option={option} 
+          style={{ height: '100%', width: '100%' }} 
+          onEvents={onEvents} 
+        />
       </div>
     </div>
   )

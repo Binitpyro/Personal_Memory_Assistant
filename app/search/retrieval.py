@@ -45,20 +45,18 @@ def clear_retrieval_cache():
     logger.info("Retrieval + RAG response caches cleared (generation=%d).", _index_generation)
 
 _INVENTORY_RE = re.compile(
-    r'\b(?:what|which|list|show|how many|count|do i have|files? do i|'
-    r'files? i have|my files|all files|all my|total|size|'
+    r'\b(?:how many|count|do i have|files? do i|'
+    r'files? i have|my files|all files|all my|total size|'
     r'breakdown|statistics|stats|types? of files?|extensions?|'
-    r'storage|disk|space|largest|smallest|recent|oldest|'
-    r'how big|how large|how much space|file count|indexed)\b',
+    r'storage|disk space|largest files?|smallest files?|recent files?|oldest files?|'
+    r'how big|how large|how much space|file count|indexed files?)\b',
     re.IGNORECASE,
 )
 
 _PROJECT_RE = re.compile(
-    r'\b(?:project|projects|describe|overview|about|summary|folder|'
-    r'tell me about|what is|what are|unreal|unity|godot|react|node|'
-    r'python|rust|java|c\+\+|go|flutter|workspace|'
-    r'codebase|repo|repository|tech stack|framework|language|'
-    r'where is|where can i find|what tech|what tools|built with)\b',
+    r'\b(?:describe project|overview of|project summary|folder structure|'
+    r'tell me about the project|tech stack|frameworks used|languages? used|'
+    r'where is the project|what tech is this built with)\b',
     re.IGNORECASE,
 )
 
@@ -429,11 +427,14 @@ async def full_rag(
     k: int = settings.retrieval_top_k,
     file_type: Optional[str] = None,
     folder_tag: Optional[str] = None,
+    history: Optional[List[Dict[str, str]]] = None,
 ) -> Dict[str, Any]:
     t_start = time.perf_counter()
 
     # Phase 1.1: Full-RAG response cache — return cached LLM answer instantly
-    rag_cache_key = (query.strip().lower(), file_type, folder_tag, _index_generation)
+    # Include history in cache key if present
+    hist_key = tuple((h["role"], h["content"]) for h in history) if history else None
+    rag_cache_key = (query.strip().lower(), file_type, folder_tag, hist_key, _index_generation)
     with _rag_cache_lock:
         if rag_cache_key in _rag_response_cache:
             _rag_response_cache.move_to_end(rag_cache_key)
@@ -453,7 +454,7 @@ async def full_rag(
     )
 
     fast_answer = _build_fast_answer(query, file_stats, folder_profiles, unreal_facts)
-    if fast_answer:
+    if fast_answer and not history: # Skip fast-path if there's history to allow follow-ups
         source_rows = [{"file_path": p.get("folder_path", ""), "folder_tag": p.get("folder_tag", ""), "text": p.get("profile_text", "")} for p in folder_profiles]
         total_ms = round((time.perf_counter() - t_start) * 1000, 1)
         return {
@@ -487,7 +488,11 @@ async def full_rag(
     
     t_llm = time.perf_counter()
     with Timer("llm_generation"):
-        answer = await llm_client.generate_answer(query, context)
+        try:
+            answer = await llm_client.generate_answer(query, context, history=history)
+        except Exception as e:
+            logger.error("LLM Generation failed: %s", e)
+            answer = "I'm sorry, but I encountered an error while generating the answer. This could be due to a timeout or connection issue with the AI service. Please try again."
     llm_ms = round((time.perf_counter() - t_llm) * 1000, 1)
     
     total_ms = round((time.perf_counter() - t_start) * 1000, 1)
@@ -501,11 +506,12 @@ async def full_rag(
         "timing": {"retrieval_ms": retrieval_ms, "llm_ms": llm_ms, "total_ms": total_ms},
     }
 
-    # Phase 1.1: Cache the full RAG response for repeat queries
-    with _rag_cache_lock:
-        if len(_rag_response_cache) >= _RAG_CACHE_MAX_SIZE:
-            _rag_response_cache.popitem(last=False)
-        _rag_response_cache[rag_cache_key] = result
+    # Phase 1.1: Cache the full RAG response for repeat queries (only if successful)
+    if "error" not in result["answer"].lower() and "i'm sorry" not in result["answer"].lower():
+        with _rag_cache_lock:
+            if len(_rag_response_cache) >= _RAG_CACHE_MAX_SIZE:
+                _rag_response_cache.popitem(last=False)
+            _rag_response_cache[rag_cache_key] = result
 
     return result
 
@@ -518,6 +524,7 @@ async def full_rag_stream(
     k: int = settings.retrieval_top_k,
     file_type: Optional[str] = None,
     folder_tag: Optional[str] = None,
+    history: Optional[List[Dict[str, str]]] = None,
 ) -> AsyncGenerator[str, None]:
     """Retrieves context and yields answer chunks + initial metadata."""
     t_start = time.perf_counter()
@@ -530,7 +537,7 @@ async def full_rag_stream(
     )
 
     fast_answer = _build_fast_answer(query, file_stats, folder_profiles, unreal_facts)
-    if fast_answer:
+    if fast_answer and not history:
         # For fast path, just yield the whole thing as one chunk since it's instant
         metadata = {
             "type": "metadata",
@@ -570,7 +577,7 @@ async def full_rag_stream(
 
     full_answer = ""
     with Timer("llm_generation"):
-        async for chunk in llm_client.stream_answer(query, context):
+        async for chunk in llm_client.stream_answer(query, context, history=history):
             full_answer += chunk
             yield json.dumps({"type": "content", "text": chunk}) + "\n"
     

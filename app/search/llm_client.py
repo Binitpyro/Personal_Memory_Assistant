@@ -1,7 +1,7 @@
 import logging
 import httpx
 import json
-from typing import Optional, AsyncGenerator
+from typing import Optional, AsyncGenerator, List, Dict
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from app.config import settings
 
@@ -17,13 +17,11 @@ class LLMClient:
         self._ollama_client: Optional[httpx.AsyncClient] = None
 
     def _get_gemini_client(self) -> httpx.AsyncClient:
-        """Lazy-create a reusable async HTTP client for Gemini."""
         if self._gemini_client is None or self._gemini_client.is_closed:
             self._gemini_client = httpx.AsyncClient(timeout=settings.gemini_timeout)
         return self._gemini_client
 
     def _get_ollama_client(self) -> httpx.AsyncClient:
-        """Lazy-create a reusable async HTTP client for Ollama."""
         if self._ollama_client is None or self._ollama_client.is_closed:
             self._ollama_client = httpx.AsyncClient(timeout=settings.ollama_timeout)
         return self._ollama_client
@@ -41,58 +39,40 @@ Question:
 
 Instructions:
 1. Provide a concise, direct, and *useful* answer.
-2. When asked about what files a user has (inventory/listing questions):
-   - Lead with a high-level summary: total counts, file types, and project locations.
-   - Group files by project, folder, or purpose — NOT by cryptic subfolder names.
-   - Do NOT exhaustively list files that have auto-generated or hash-like names (e.g. Unreal .uasset files). Instead, state the count and location.
-   - Focus on what the files *are* (e.g. "Unreal Engine external actor assets") rather than each individual filename.
-3. When the context contains a "File Statistics" section, use those aggregate numbers as the primary data source for inventory questions.
-4. When the context contains an "Indexed Project/Folder Profiles" section, use it to describe projects at a high level — mention the project type, what it contains, its key files and folder structure. This is your primary source for project-level questions.
-5. Cite source files by their paths using [source_index] notation when relevant.
-6. Be professional, helpful, and conversational — not robotic.
+2. Group files by project, folder, or purpose.
+3. Cite source files by their paths using [source_index] notation.
+4. Be professional and conversational.
 
 Answer:
 """
 
     async def _check_ollama_health(self) -> bool:
-        """Pings Ollama to see if it's running locally."""
-        if hasattr(self, "_ollama_healthy") and self._ollama_healthy is not None:
-            return self._ollama_healthy
-            
-        client = self._get_ollama_client()
         try:
-            # Short timeout for local health check
-            resp = await client.get(f"{settings.ollama_base_url}/api/tags", timeout=1.5)
-            self._ollama_healthy = resp.status_code == 200
+            client = self._get_ollama_client()
+            resp = await client.get(self.ollama_url.replace("/api/generate", "/api/tags"), timeout=1.0)
+            return resp.status_code == 200
         except Exception:
-            self._ollama_healthy = False
-        return self._ollama_healthy
+            return False
 
-    async def generate_answer(self, query: str, context: str) -> str:
-        """Generates an answer using the provided context and query."""
+    async def generate_answer(self, query: str, context: str, history: Optional[List[Dict[str, str]]] = None) -> str:
         prompt = self._build_prompt(query, context)
         if self.api_key:
-            return await self._call_gemini(prompt)
-        
+            return await self._call_gemini(prompt, history=history)
         if await self._check_ollama_health():
             return await self._call_ollama(prompt)
-            
-        return "LLM unavailable. Please provide a GEMINI_API_KEY or ensure Ollama is running locally."
+        return "LLM unavailable. Please provide a GEMINI_API_KEY or ensure Ollama is running."
 
-    async def stream_answer(self, query: str, context: str) -> AsyncGenerator[str, None]:
-        """Generates a streaming answer using the provided context and query."""
+    async def stream_answer(self, query: str, context: str, history: Optional[List[Dict[str, str]]] = None) -> AsyncGenerator[str, None]:
         prompt = self._build_prompt(query, context)
         if self.api_key:
-            async for chunk in self._stream_gemini(prompt):
+            async for chunk in self._stream_gemini(prompt, history=history):
                 yield chunk
             return
-            
         if await self._check_ollama_health():
             async for chunk in self._stream_ollama(prompt):
                 yield chunk
             return
-            
-        yield "LLM unavailable (Gemini key missing and Ollama unreachable)."
+        yield "LLM unavailable."
 
     @retry(
         stop=stop_after_attempt(3),
@@ -100,45 +80,28 @@ Answer:
         retry=retry_if_exception_type(httpx.HTTPError),
         reraise=True,
     )
-    async def _call_gemini(self, prompt: str) -> str:
-        """Calls the Google Gemini API with retry logic for transient failures."""
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
-        headers = {"x-goog-api-key": self.api_key, "Content-Type": "application/json"}
-        payload = {
-            "contents": [{
-                "parts": [{"text": prompt}]
-            }],
-            "generationConfig": {
-                "temperature": 0.3,
-                "topP": 0.8,
-                "maxOutputTokens": 1024,
-            },
-        }
+    async def _call_gemini(self, prompt: str, history: Optional[List[Dict[str, str]]] = None) -> str:
+        # Production v1 endpoint
+        url = f"https://generativelanguage.googleapis.com/v1/models/{self.model}:generateContent"
         
-        client = self._get_gemini_client()
-        response = await client.post(url, json=payload, headers=headers)
-        if response.status_code != 200:
-            logger.error("Gemini API error (%d): <redacted>", response.status_code)
-            return f"Gemini API returned error {response.status_code}. Please check your API key or connection."
+        # Diagnostics
+        key_preview = self.api_key[:6] + "..." if len(self.api_key) > 6 else "****"
+        logger.info("Gemini Request: %s (model: %s, key: %s)", url, self.model, key_preview)
         
-        data = response.json()
-        try:
-            if 'candidates' in data and data['candidates']:
-                return data['candidates'][0]['content']['parts'][0]['text']
-        except (KeyError, IndexError, TypeError):
-            pass
-        logger.error("Unexpected Gemini response structure (keys: %s)", list(data.keys()))
-        return "Error parsing Gemini response."
+        # Build contents array with history
+        contents = []
+        if history:
+            for msg in history:
+                role = "user" if msg["role"] == "user" else "model"
+                contents.append({"role": role, "parts": [{"text": msg["content"]}]})
+        
+        # Add current prompt as latest user message
+        contents.append({"role": "user", "parts": [{"text": prompt}]})
 
-    async def _stream_gemini(self, prompt: str) -> AsyncGenerator[str, None]:
-        """Streams response from Gemini API using server-sent events-like parsing."""
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:streamGenerateContent"
-        params = {"key": self.api_key}
-        headers = {"Content-Type": "application/json"}
         payload = {
-            "contents": [{"parts": [{"text": prompt}]}],
+            "contents": contents,
             "generationConfig": {
-                "temperature": 0.3,
+                "temperature": 0.2,
                 "topP": 0.8,
                 "maxOutputTokens": 1024,
             },
@@ -146,13 +109,49 @@ Answer:
         
         client = self._get_gemini_client()
         try:
-            async with client.stream("POST", url, params=params, json=payload, headers=headers) as response:
+            # Try with ?key= parameter first, as it's the most common for AI Studio keys
+            response = await client.post(url, params={"key": self.api_key}, json=payload)
+            
+            if response.status_code != 200:
+                logger.error("Gemini error %d: %s", response.status_code, response.text)
+                # Fallback: try with x-goog-api-key header if param failed with 404/401
+                if response.status_code in (404, 401):
+                    logger.info("Retrying Gemini with header-based auth...")
+                    response = await client.post(url, headers={"x-goog-api-key": self.api_key}, json=payload)
+            
+            if response.status_code != 200:
+                return f"Gemini API error {response.status_code}: {response.text[:100]}"
+            
+            data = response.json()
+            return data['candidates'][0]['content']['parts'][0]['text']
+        except Exception as e:
+            logger.error("Gemini request failed: %s", str(e))
+            raise
+
+    async def _stream_gemini(self, prompt: str, history: Optional[List[Dict[str, str]]] = None) -> AsyncGenerator[str, None]:
+        url = f"https://generativelanguage.googleapis.com/v1/models/{self.model}:streamGenerateContent"
+        
+        contents = []
+        if history:
+            for msg in history:
+                role = "user" if msg["role"] == "user" else "model"
+                contents.append({"role": role, "parts": [{"text": msg["content"]}]})
+        contents.append({"role": "user", "parts": [{"text": prompt}]})
+
+        payload = {
+            "contents": contents,
+            "generationConfig": {
+                "temperature": 0.2,
+                "topP": 0.8,
+                "maxOutputTokens": 1024,
+            },
+        }
+        client = self._get_gemini_client()
+        try:
+            async with client.stream("POST", url, params={"key": self.api_key}, json=payload) as response:
                 if response.status_code != 200:
-                    yield f"Error: Gemini API returned {response.status_code}"
+                    yield f"Error: {response.status_code}"
                     return
-
-                # Gemini streamGenerateContent returns a JSON array of objects.
-                # Use an incremental JSON decoder for robust nested-object parsing.
                 decoder = json.JSONDecoder()
                 buffer = ""
                 async for chunk in response.aiter_text():
@@ -160,89 +159,37 @@ Answer:
                     buffer, new_texts = self._parse_stream_buffer(decoder, buffer)
                     for text in new_texts:
                         yield text
-        except Exception:
-            logger.exception("Gemini streaming error")
-            yield "Streaming error. Please retry."
+        except Exception as e:
+            logger.error("Gemini stream failed: %s", e)
+            yield "Streaming error."
 
     def _parse_stream_buffer(self, decoder: json.JSONDecoder, buffer: str) -> tuple[str, list[str]]:
         new_texts = []
         while True:
-            # Strip leading whitespace, commas, and array brackets
             buffer = buffer.lstrip(", \r\n\t[]")
-            if not buffer:
-                break
+            if not buffer: break
             try:
                 data, end_idx = decoder.raw_decode(buffer)
-            except json.JSONDecodeError:
-                # Not enough data for a complete JSON value yet
-                break
-
-            if isinstance(data, dict) and "candidates" in data and data["candidates"]:
-                try:
-                    text = (
-                        data["candidates"][0]
-                        .get("content", {})
-                        .get("parts", [{}])[0]
-                        .get("text")
-                    )
-                    if text:
-                        new_texts.append(text)
-                except (KeyError, IndexError, TypeError):
-                    pass
-            buffer = buffer[end_idx:]
+                if isinstance(data, dict) and "candidates" in data:
+                    text = data["candidates"][0].get("content", {}).get("parts", [{}])[0].get("text")
+                    if text: new_texts.append(text)
+                buffer = buffer[end_idx:]
+            except json.JSONDecodeError: break
         return buffer, new_texts
 
     async def _call_ollama(self, prompt: str) -> str:
-        """Fallback to local Ollama instance."""
-        payload = {
-            "model": self.ollama_model,
-            "prompt": prompt,
-            "stream": False
-        }
-        
         try:
             client = self._get_ollama_client()
-            response = await client.post(self.ollama_url, json=payload)
-            if response.status_code == 200:
-                data = response.json()
-                return data.get("response", "No response from Ollama.")
-            else:
-                return "Local LLM (Ollama) not responding. Please provide a GEMINI_API_KEY or start Ollama."
-        except Exception as e:
-            logger.warning("Ollama fallback failed: %s", e)
-            return "No LLM available."
-
-    @staticmethod
-    def _parse_ollama_line(line: str):
-        """Parse a single line from Ollama streaming response."""
-        if not line:
-            return None, False
-        try:
-            data = json.loads(line)
-            return data.get("response"), data.get("done", False)
-        except json.JSONDecodeError:
-            return None, False
+            resp = await client.post(self.ollama_url, json={"model": self.ollama_model, "prompt": prompt, "stream": False})
+            return resp.json().get("response", "No response.") if resp.status_code == 200 else "Ollama error."
+        except Exception: return "Ollama failed."
 
     async def _stream_ollama(self, prompt: str) -> AsyncGenerator[str, None]:
-        """Streams response from local Ollama instance."""
-        payload = {
-            "model": self.ollama_model,
-            "prompt": prompt,
-            "stream": True
-        }
-        
         try:
             client = self._get_ollama_client()
-            async with client.stream("POST", self.ollama_url, json=payload) as response:
-                if response.status_code != 200:
-                    yield "Local LLM (Ollama) error."
-                    return
-                async for line in response.aiter_lines():
-                    text, done = self._parse_ollama_line(line)
-                    if text:
-                        yield text
-                    if done:
-                        break
-        except Exception as e:
-            logger.warning("Ollama streaming failed: %s", e)
-            yield "Ollama error."
+            async with client.stream("POST", self.ollama_url, json={"model": self.ollama_model, "prompt": prompt, "stream": True}) as resp:
+                async for line in resp.aiter_lines():
+                    if not line: continue
+                    chunk = json.loads(line).get("response")
+                    if chunk: yield chunk
+        except Exception: yield "Ollama stream failed."

@@ -117,11 +117,16 @@ export interface QueryResponse {
   timing?: Record<string, number>;
 }
 
-export const postQuery = (question: string, file_type?: string, folder_tag?: string) =>
+export const postQuery = (question: string, options: { file_type?: string, folder_tag?: string, history?: {role: string, content: string}[] } = {}) =>
   json<QueryResponse>('/query', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ question, file_type: file_type || null, folder_tag: folder_tag || null }),
+    body: JSON.stringify({ 
+      question, 
+      file_type: options.file_type || null, 
+      folder_tag: options.folder_tag || null,
+      history: options.history || null
+    }),
   });
 
 export interface HistoryItem {
@@ -134,6 +139,9 @@ export interface HistoryItem {
 
 export const getQueryHistory = (limit = 20) =>
   json<{ history: HistoryItem[] }>(`/query/history?limit=${limit}`);
+
+export const clearQueryHistory = () =>
+  json<{ message: string }>('/query/history/clear', { method: 'POST' });
 
 // ── File tree ─────────────────────────────────────────────────────────
 
@@ -217,7 +225,7 @@ export interface QueryStreamChunk {
 export function subscribeQuery(
   question: string,
   onChunk: (chunk: QueryStreamChunk) => void,
-  options: { file_type?: string; folder_tag?: string } = {}
+  options: { file_type?: string; folder_tag?: string, history?: {role: string, content: string}[] } = {}
 ): () => void {
   const controller = new AbortController();
   
@@ -228,6 +236,7 @@ export function subscribeQuery(
       question,
       file_type: options.file_type || null,
       folder_tag: options.folder_tag || null,
+      history: options.history || null,
     }),
     signal: controller.signal,
   }).then(async (response) => {

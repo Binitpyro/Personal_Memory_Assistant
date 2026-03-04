@@ -36,6 +36,31 @@ def _deduplicate_by_file(results: List[Dict[str, Any]], max_per_file: int = 2) -
             deduped.append(res)
     return deduped
 
+def _format_snippets(deduplicated: List[Dict[str, Any]], max_chars: int, total_len: int) -> List[str]:
+    context_parts = []
+    for i, res in enumerate(deduplicated):
+        snippet_id = i + 1
+        path = res.get("file_path", "Unknown File")
+        text = res.get("text", "")
+        
+        # Phase 4.1: Top-2 snippets get 40% of budget, rest share remainder
+        if i < 2:
+            budget = int(max_chars * 0.2)  # 20% each for top 2 = 40% total
+        else:
+            remaining_count = max(len(deduplicated) - 2, 1)
+            budget = int((max_chars * 0.6) / remaining_count)
+        budget = max(budget, min(600, max_chars))  # At least 600 chars
+
+        if len(text) > budget:
+            text = text[:budget] + "…"
+
+        part = f"Snippet {snippet_id} [{path}]:\n{text}\n---\n"
+        if total_len + len(part) > max_chars:
+            break
+            
+        context_parts.append(part)
+        total_len += len(part)
+    return context_parts
 
 def build_context(
     retrieved_results: List[Dict[str, Any]],
@@ -61,7 +86,7 @@ def build_context(
     total_len = 0
     max_chars = max_tokens * 4  # ~4 chars per token heuristic
     max_snippet_chars = max_chars // max(len(retrieved_results), 1)  # Fair share per snippet
-    max_snippet_chars = max(min(max_snippet_chars, max_chars), min(600, max_chars))  # At least 600 chars but never exceed budget
+    max_snippet_chars = max(max_snippet_chars, min(600, max_chars))  # At least 600 chars but never exceed budget
 
     # Prepend folder profiles when available (project-level understanding)
     if folder_profiles_text:
@@ -76,24 +101,15 @@ def build_context(
 
     # Deduplicate: max 2 snippets from the same file for diversity
     deduplicated = _deduplicate_by_file(retrieved_results)
-    
-    for i, res in enumerate(deduplicated):
-        snippet_id = i + 1
-        path = res.get("file_path", "Unknown File")
-        text = res.get("text", "")
-        
-        # Truncate individual snippets to their fair share of the budget
-        if len(text) > max_snippet_chars:
-            text = text[:max_snippet_chars] + "…"
 
-        part = f"""Snippet {snippet_id} [{path}]:
-{text}
----
-"""
-        if total_len + len(part) > max_chars:
-            break
-            
-        context_parts.append(part)
-        total_len += len(part)
+    # Phase 4.1: Drop snippets scoring < 20% of the top score (noise reduction)
+    if deduplicated:
+        top_score = deduplicated[0].get("score", 1.0)
+        if top_score > 0:
+            score_threshold = top_score * 0.2
+            deduplicated = [r for r in deduplicated if r.get("score", 1.0) >= score_threshold]
+    
+    snippet_parts = _format_snippets(deduplicated, max_chars, total_len)
+    context_parts.extend(snippet_parts)
             
     return "\n".join(context_parts)

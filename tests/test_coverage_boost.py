@@ -191,7 +191,7 @@ class FakeInsightsDB:
         if self.calls == 2:
             return [("a.py", 100)]
         if self.calls == 3:
-            return [("b.py", 40)]
+            return [("b.py", 40, 0)] # Added usage_count
         return [(".py", 2, 140), (".md", 1, 10)]
 
 

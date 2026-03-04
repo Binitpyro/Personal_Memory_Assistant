@@ -32,6 +32,8 @@ class LatencyTracker:
                     "avg": round(sum(sorted_vals) / len(sorted_vals), 2),
                     "p50": round(sorted_vals[len(sorted_vals) // 2], 2),
                     "p95": round(sorted_vals[max(0, math.ceil(len(sorted_vals) * 0.95) - 1)], 2),
+                    "p99": round(sorted_vals[max(0, math.ceil(len(sorted_vals) * 0.99) - 1)], 2),
+                    "max": round(sorted_vals[-1], 2),
                     "count": len(sorted_vals)
                 }
         return stats

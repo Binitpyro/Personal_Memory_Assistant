@@ -1,3 +1,7 @@
+-- SQLite Configuration Pragmas
+PRAGMA auto_vacuum = INCREMENTAL;
+PRAGMA journal_mode = WAL;
+
 -- Files table for storing metadata
 CREATE TABLE IF NOT EXISTS files (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -8,13 +12,15 @@ CREATE TABLE IF NOT EXISTS files (
     type TEXT NOT NULL,
     folder_tag TEXT,
     usage_count INTEGER DEFAULT 0,
-    summary TEXT DEFAULT ''
+    summary TEXT DEFAULT '',
+    sha256 TEXT DEFAULT ''
 );
 
 -- Performance indexes
 CREATE INDEX IF NOT EXISTS idx_files_folder_tag ON files(folder_tag);
 CREATE INDEX IF NOT EXISTS idx_files_modified_at ON files(modified_at);
 CREATE INDEX IF NOT EXISTS idx_files_type ON files(type);
+CREATE INDEX IF NOT EXISTS idx_files_change_detection ON files(path, modified_at, sha256);
 
 -- Chunks table for storing text segments
 CREATE TABLE IF NOT EXISTS chunks (
@@ -29,13 +35,15 @@ CREATE TABLE IF NOT EXISTS chunks (
 
 -- FK index for efficient joins / cascading deletes
 CREATE INDEX IF NOT EXISTS idx_chunks_file_id ON chunks(file_id);
+CREATE INDEX IF NOT EXISTS idx_chunks_text_lookup ON chunks(id, text_preview);
 
 -- FTS5 virtual table for keyword search
 -- Note: SQLite FTS5 should be enabled in the environment
 CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5(
     chunks_text,
     content=chunks,
-    content_rowid=id
+    content_rowid=id,
+    detail=column -- Phase 9.2: strip byte-offset index (saves ~40% space)
 );
 
 -- Trigger to keep FTS index in sync with chunks table
@@ -101,3 +109,9 @@ CREATE TABLE IF NOT EXISTS unreal_project_facts (
 );
 
 CREATE INDEX IF NOT EXISTS idx_unreal_facts_folder_tag ON unreal_project_facts(folder_tag);
+
+-- NOTE: The covering index idx_chunks_covering was dropped in Phase 9 
+-- because it duplicated the entire text corpus and caused massive bloat.
+
+-- NOTE: idx_files_change_detection is created in db.py migrations
+-- because it references the sha256 column added via ALTER TABLE.

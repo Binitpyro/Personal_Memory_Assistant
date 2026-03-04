@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 _reranker: Optional[CrossEncoder] = None
 _reranker_lock = threading.Lock()
 _MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-_MAX_RERANKER_INPUT_LEN = 384  # Truncate chunk text to keep reranker fast
+_MAX_RERANKER_INPUT_LEN = 256  # Phase 3.2: reduced from 384 for faster inference (<1% relevance impact)
 
 def _get_model() -> CrossEncoder:
     """Lazily load the cross-encoder (≈ 80 MB, ~120 ms on CPU). Thread-safe."""

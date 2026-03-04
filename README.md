@@ -21,7 +21,7 @@ A **local-first AI-powered assistant** that indexes your personal and project fi
 
 ## 🎯 Problem Statement
 
-We create and accumulate **hundreds of files** — code, notes, documents, game assets — across different projects and folders. Finding that one snippet, that one design decision, or understanding what's inside a massive project folder becomes a time sink. Traditional search tools match keywords but don't *understand* your content.
+We create and accumulate **hundreds of files** — code, notes, documents, game assets — across different projects and folders. Finding that one snippet, that one design decision, or understanding what's inside a massive project folder becomes a time sink. Traditional search tools match keywords but don't _understand_ your content.
 
 **PMA bridges that gap.** It builds a semantic memory layer over your local files, letting you ask questions in plain English and get precise, source-backed answers in milliseconds.
 
@@ -34,24 +34,34 @@ We create and accumulate **hundreds of files** — code, notes, documents, game 
 <td width="50%">
 
 ### 🔍 Hybrid Retrieval (RAG)
+
 Combines **FTS5 keyword search** + **vector semantic search** + **Reciprocal Rank Fusion** for best-of-both-worlds accuracy.
 
 ### ⚡ Deterministic Fast Path
+
 Inventory and project-overview questions are answered instantly from metadata — no LLM round-trip needed.
 
 ### 🖥️ Dual Interface
+
 Run as a **web app** in your browser or as a **native desktop app** via pywebview — same backend, your choice.
+
+### 🌊 Streaming Answers
+
+Real-time token streaming for a smoother, faster-feeling Q&A experience (via SSE).
 
 </td>
 <td width="50%">
 
 ### 📁 Smart Indexing Pipeline
+
 Incremental change detection, batched embedding, folder-profile synthesis, and automatic project-type inference.
 
 ### 📊 Storage Insights
+
 Visual analytics on your indexed files: largest files, cold/unused files, type breakdown, and storage distribution.
 
 ### 🎮 Unreal Engine Support
+
 First-class import of UE4/UE5 metadata for rich game-project understanding (maps, characters, materials, Niagara systems).
 
 </td>
@@ -181,12 +191,12 @@ Open **http://127.0.0.1:8000** in your browser (web mode).
 
 ### Example Queries
 
-| Query | Type | Latency |
-|-------|------|---------|
-| *"How does the indexing pipeline work?"* | Semantic RAG | ~400 ms |
-| *"What are my largest indexed files?"* | Fast path (metadata) | ~40 ms |
-| *"How many maps are in my Unreal project?"* | Fast path (project facts) | ~110 ms |
-| *"Summarize the authentication module"* | Semantic RAG | ~500 ms |
+| Query                                       | Type                      | Latency |
+| ------------------------------------------- | ------------------------- | ------- |
+| _"How does the indexing pipeline work?"_    | Semantic RAG              | ~400 ms |
+| _"What are my largest indexed files?"_      | Fast path (metadata)      | ~40 ms  |
+| _"How many maps are in my Unreal project?"_ | Fast path (project facts) | ~110 ms |
+| _"Summarize the authentication module"_     | Semantic RAG              | ~500 ms |
 
 ### Sample Response
 
@@ -208,34 +218,38 @@ Open **http://127.0.0.1:8000** in your browser (web mode).
 
 ### Core Endpoints
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/health` | Service, database, model, and indexing status |
-| `POST` | `/query` | Run a RAG query with optional filters |
-| `GET` | `/query/history` | Recent query history |
+| Method | Endpoint         | Description                                   |
+| ------ | ---------------- | --------------------------------------------- |
+| `GET`  | `/health`        | Service, database, model, and indexing status |
+| `POST` | `/query`         | Run a RAG query with optional filters         |
+| `POST` | `/query/stream`  | Run a streaming RAG query (SSE)               |
+| `GET`  | `/query/history` | Recent query history                          |
 
 ### Indexing
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/index/start` | Start background indexing for given folders |
-| `GET` | `/index/status` | Current indexing state + progress snapshot |
-| `GET` | `/index/progress-stream` | SSE real-time progress stream |
-| `POST` | `/index/reindex` | Force reindex (bypass change detection) |
-| `POST` | `/index/cleanup` | Remove stale DB entries for deleted files |
-| `POST` | `/index/clear` | Clear all indexed data + vectors + history |
-| `GET` | `/index/export` | Export indexed file metadata as JSON |
+| Method | Endpoint                 | Description                                 |
+| ------ | ------------------------ | ------------------------------------------- |
+| `POST` | `/index/start`           | Start background indexing for given folders |
+| `GET`  | `/index/status`          | Current indexing state + progress snapshot  |
+| `GET`  | `/index/progress-stream` | SSE real-time progress stream               |
+| `POST` | `/index/reindex`         | Force reindex (bypass change detection)     |
+| `POST` | `/index/cleanup`         | Remove stale DB entries for deleted files   |
+| `POST` | `/index/clear`           | Clear all indexed data + vectors + history  |
+| `GET`  | `/index/export`          | Export indexed file metadata as JSON        |
 
 ### Insights & Utilities
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/files/tree` | Indexed files grouped by folder tag |
-| `GET` | `/insights` | Storage analytics dashboard data |
-| `GET` | `/pick/folder` | Native OS folder picker dialog |
-| `GET` | `/pick/file` | Native OS file picker (multi-select) |
-| `POST` | `/demo/seed` | Generate and index demo files |
-| `POST` | `/unreal/import` | Import Unreal Engine project metadata |
+| Method | Endpoint             | Description                                    |
+| ------ | -------------------- | ---------------------------------------------- |
+| `GET`  | `/files/tree`        | Indexed files grouped by folder tag            |
+| `GET`  | `/insights`          | Storage analytics dashboard data               |
+| `GET`  | `/pick/folder`       | Native OS folder picker dialog                 |
+| `GET`  | `/pick/file`         | Native OS file picker (multi-select)           |
+| `POST` | `/demo/seed`         | Generate and index demo files                  |
+| `POST` | `/unreal/import`     | Import Unreal Engine project metadata          |
+| `GET`  | `/system/info`       | OS, admin, and drive volume information        |
+| `GET`  | `/system/metrics`    | Detailed stage-level latency metrics (p50/p95) |
+| `POST` | `/system/compact-db` | Trigger background SQLite VACUUM               |
 
 <details>
 <summary><b>Expand: Request/Response Schemas</b></summary>
@@ -266,9 +280,14 @@ Open **http://127.0.0.1:8000** in your browser (web mode).
 // Response 200
 {
   "status": "idle|running|done|error",
-  "files_indexed": 0, "chunks_indexed": 0, "progress_percent": 0,
-  "scan_method": "scandir|ntfs_mft", "scan_duration_ms": 0.0,
-  "skipped_files": 0, "new_files": 0, "changed_files": 0
+  "files_indexed": 0,
+  "chunks_indexed": 0,
+  "progress_percent": 0,
+  "scan_method": "scandir|ntfs_mft",
+  "scan_duration_ms": 0.0,
+  "skipped_files": 0,
+  "new_files": 0,
+  "changed_files": 0
 }
 ```
 
@@ -297,28 +316,30 @@ All settings are loaded from a `.env` file using the `PMA_` prefix. See [app/con
 <details>
 <summary><b>Expand: Full Configuration Reference</b></summary>
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PMA_HOST` | `127.0.0.1` | Server bind address |
-| `PMA_PORT` | `8000` | Server port |
-| `PMA_DEV_MODE` | `true` | Enable development mode |
-| `PMA_LOG_LEVEL` | `INFO` | Logging level |
-| `PMA_DB_PATH` | `pma_metadata.db` | SQLite database path |
-| `PMA_CHROMA_PERSIST_DIR` | `chroma_db` | ChromaDB persistence directory |
-| `PMA_EMBEDDING_MODEL` | `all-MiniLM-L6-v2` | Sentence-transformer model name |
-| `PMA_EMBEDDING_BATCH_SIZE` | `128` | Embedding batch size |
-| `PMA_CHUNK_SIZE` | `512` | Text chunk size (tokens) |
-| `PMA_CHUNK_OVERLAP` | `50` | Overlap between chunks |
-| `PMA_MAX_FILE_SIZE_MB` | `50` | Max file size to index |
-| `PMA_INDEX_CONCURRENCY` | `8` | Concurrent indexing workers |
-| `PMA_GEMINI_API_KEY` | — | Google Gemini API key |
-| `PMA_GEMINI_MODEL` | `gemini-flash-latest` | Gemini model variant |
-| `PMA_OLLAMA_URL` | `http://localhost:11434/api/generate` | Ollama endpoint |
-| `PMA_OLLAMA_MODEL` | `llama3` | Ollama model name |
-| `PMA_RETRIEVAL_TOP_K` | `6` | Number of retrieval results |
-| `PMA_RRF_FTS_WEIGHT` | `0.4` | RRF weight for keyword search |
-| `PMA_RRF_SEMANTIC_WEIGHT` | `0.6` | RRF weight for semantic search |
-| `PMA_SUMMARY_BOOST_FACTOR` | `1.25` | Summary embedding boost |
+| Variable                   | Default                               | Description                          |
+| -------------------------- | ------------------------------------- | ------------------------------------ |
+| `PMA_HOST`                 | `127.0.0.1`                           | Server bind address                  |
+| `PMA_PORT`                 | `8000`                                | Server port                          |
+| `PMA_DEV_MODE`             | `true`                                | Enable development mode              |
+| `PMA_LOG_LEVEL`            | `INFO`                                | Logging level                        |
+| `PMA_DB_PATH`              | `pma_metadata.db`                     | SQLite database path                 |
+| `PMA_CHROMA_PERSIST_DIR`   | `chroma_db`                           | ChromaDB persistence directory       |
+| `PMA_EMBEDDING_MODEL`      | `all-MiniLM-L6-v2`                    | Sentence-transformer model name      |
+| `PMA_EMBEDDING_BATCH_SIZE` | `128`                                 | Embedding batch size                 |
+| `PMA_CHUNK_SIZE`           | `512`                                 | Text chunk size (tokens)             |
+| `PMA_CHUNK_OVERLAP`        | `50`                                  | Overlap between chunks               |
+| `PMA_MAX_FILE_SIZE_MB`     | `50`                                  | Max file size to index               |
+| `PMA_INDEX_CONCURRENCY`    | `8`                                   | Concurrent indexing workers          |
+| `PMA_GEMINI_API_KEY`       | —                                     | Google Gemini API key                |
+| `PMA_GEMINI_MODEL`         | `gemini-flash-latest`                 | Gemini model variant                 |
+| `PMA_OLLAMA_URL`           | `http://localhost:11434/api/generate` | Ollama endpoint                      |
+| `PMA_OLLAMA_MODEL`         | `llama3`                              | Ollama model name                    |
+| `PMA_RETRIEVAL_TOP_K`      | `6`                                   | Number of retrieval results          |
+| `PMA_RRF_FTS_WEIGHT`       | `0.4`                                 | RRF weight for keyword search        |
+| `PMA_RRF_SEMANTIC_WEIGHT`  | `0.6`                                 | RRF weight for semantic search       |
+| `PMA_SUMMARY_BOOST_FACTOR` | `1.25`                                | Summary embedding boost              |
+| `PMA_RETRIEVAL_CACHE_SIZE` | `500`                                 | LRU cache size for retrieval results |
+| `PMA_RAG_CACHE_SIZE`       | `200`                                 | LRU cache size for full LLM answers  |
 
 </details>
 
@@ -377,16 +398,16 @@ Sandisk-Hackathon/
 
 ## 🛠️ Tech Stack
 
-| Layer | Technology | Purpose |
-|-------|-----------|---------|
-| **Backend** | FastAPI + Uvicorn | Async API server |
-| **Database** | SQLite + FTS5 | Metadata, full-text search |
-| **Vector Store** | ChromaDB | Semantic embeddings storage |
-| **Embeddings** | sentence-transformers (`all-MiniLM-L6-v2`) | Local embedding generation |
-| **LLM** | Google Gemini / Ollama | Answer generation |
-| **Frontend** | Jinja2 + Vanilla JS + Chart.js | Web UI with analytics |
-| **Desktop** | pywebview | Native window wrapper |
-| **File Scanning** | `os.scandir` / NTFS MFT | High-speed file enumeration |
+| Layer             | Technology                                 | Purpose                           |
+| ----------------- | ------------------------------------------ | --------------------------------- |
+| **Backend**       | FastAPI + Uvicorn + GZip                   | Async API server with compression |
+| **Database**      | SQLite + FTS5                              | Metadata, full-text search        |
+| **Vector Store**  | ChromaDB                                   | Semantic embeddings storage       |
+| **Embeddings**    | sentence-transformers (`all-MiniLM-L6-v2`) | Local embedding generation        |
+| **LLM**           | Google Gemini / Ollama                     | Answer generation                 |
+| **Frontend**      | React / Jinja2 + Vanilla JS                | Modern SPA or lightweight shell   |
+| **Desktop**       | pywebview                                  | Native window wrapper             |
+| **File Scanning** | `os.scandir` / NTFS MFT                    | High-speed file enumeration       |
 
 ---
 
@@ -424,12 +445,12 @@ Output is produced under `dist/PMA/`. On Windows, a standalone `PMA.exe` is also
 
 ## 🐛 Troubleshooting
 
-| Issue | Solution |
-|-------|----------|
-| LLM answers unavailable | Set `PMA_GEMINI_API_KEY` in `.env` or start a local Ollama instance |
-| Slow first query / index | Expected — initial model load and embedding warm-up takes a few seconds |
-| Windows scan method shows `scandir` | Run as administrator to enable faster NTFS MFT scanning |
-| Tkinter errors on Linux | Install `python3-tk` via your system package manager |
+| Issue                               | Solution                                                                |
+| ----------------------------------- | ----------------------------------------------------------------------- |
+| LLM answers unavailable             | Set `PMA_GEMINI_API_KEY` in `.env` or start a local Ollama instance     |
+| Slow first query / index            | Expected — initial model load and embedding warm-up takes a few seconds |
+| Windows scan method shows `scandir` | Run as administrator to enable faster NTFS MFT scanning                 |
+| Tkinter errors on Linux             | Install `python3-tk` via your system package manager                    |
 
 ---
 

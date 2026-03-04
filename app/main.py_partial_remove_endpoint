@@ -1,0 +1,65 @@
+@api_router.post("/index/folder/remove")
+async def remove_folder_index(
+    request: IndexRequest,
+    db: DatabaseManager = Depends(get_db),
+    chroma=Depends(get_chroma),
+):
+    """Removes all indexed data for specific folder prefixes."""
+    folders = request.validated_folders
+    if not folders:
+        return JSONResponse(status_code=400, content={"error": "No valid folder paths provided."})
+
+    removed_total = 0
+    for folder in folders:
+        try:
+            # 1. Normalize for DB (handle mixed separators)
+            f_norm = folder.replace("\\", "/")
+            if not f_norm.endswith("/"):
+                f_norm += "/"
+            
+            # Match both slash styles in DB
+            p1 = f_norm + "%"
+            p2 = f_norm.replace("/", "\\") + "%"
+            p3 = f_norm[:-1]
+            p4 = p3.replace("/", "\\")
+
+            # 2. Find file IDs for deletion
+            rows = await db.execute_query(
+                "SELECT id, path FROM files WHERE path LIKE ? OR path LIKE ? OR path = ? OR path = ?",
+                (p1, p2, p3, p4)
+            )
+            if not rows: continue
+
+            file_ids = [r[0] for r in rows]
+            file_paths = [r[1] for r in rows]
+
+            # 3. Delete from Chroma
+            # We must delete chunks (ID: chunk_id) and summaries (ID: file_{id})
+            chunk_rows = await db.execute_query(
+                f"SELECT id FROM chunks WHERE file_id IN ({','.join('?' for _ in file_ids)})",
+                tuple(file_ids)
+            )
+            chunk_ids = [str(r[0]) for r in chunk_rows]
+            
+            if chunk_ids:
+                await chroma.delete_documents(chunk_ids)
+            
+            for f_id in file_ids:
+                await chroma.delete_summary(f"file_{f_id}")
+
+            # 4. Delete from SQLite (Cascade handles chunks/FTS)
+            await db.execute_write(
+                f"DELETE FROM files WHERE id IN ({','.join('?' for _ in file_ids)})",
+                tuple(file_ids)
+            )
+            removed_total += len(file_ids)
+            
+        except Exception as e:
+            logger.error("Failed to remove folder index for %s: %s", folder, e)
+
+    _file_tree_cache["data"] = None
+    _insights_cache["data"] = None
+    from app.search.retrieval import clear_retrieval_cache
+    clear_retrieval_cache()
+
+    return {"message": f"Successfully removed {removed_total} files."}

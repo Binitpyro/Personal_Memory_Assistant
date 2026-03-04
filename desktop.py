@@ -53,7 +53,7 @@ def _start_server() -> None:
     server.run()
 
 
-def _wait_for_server(timeout: int = 30) -> bool:
+def _wait_for_server(timeout: int = 120) -> bool:
     """Poll /health until the server responds or *timeout* elapses."""
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -83,7 +83,7 @@ def main() -> None:
 
     logger.info("Waiting for server...")
     if not _wait_for_server():
-        print("ERROR: Server did not start within 30 seconds.")
+        print("ERROR: Server did not start within 120 seconds.")
         sys.exit(1)
     logger.info("Server ready at %s", SERVER_URL)
 

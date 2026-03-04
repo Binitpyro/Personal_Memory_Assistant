@@ -1,0 +1,79 @@
+@import "tailwindcss";
+@plugin "daisyui";
+
+/* ── Ultrasonic Blue glassmorphism theme ──────────────────── */
+@theme {
+  --color-primary: #3d15cb;
+  --color-primary-light: #8e48ea;
+  --color-primary-dark: #2e0fa0;
+  --color-surface: #0e0b1a;
+  --color-surface-light: #1a1530;
+  --color-surface-lighter: #262040;
+  --color-text-primary: #f1f5e0;
+  --color-text-secondary: #959f93;
+  --color-accent: #9984d4;
+  --color-success: #4ADE80;
+  --color-warning: #FACC15;
+  --color-error: #F87171;
+}
+
+/* ── Base styles ─────────────────────────────────────────── */
+body {
+  @apply bg-surface text-text-primary font-sans antialiased;
+  margin: 0;
+  min-height: 100vh;
+}
+
+#root {
+  min-height: 100vh;
+  display: flex;
+}
+
+/* ── Glassmorphism utility ───────────────────────────────── */
+.glass {
+  background: rgba(14, 11, 26, 0.6);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(61, 21, 203, 0.15);
+}
+
+.glass-card {
+  @apply glass rounded-2xl p-6;
+}
+
+/* ── Scrollbar ───────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(61, 21, 203, 0.3);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(61, 21, 203, 0.5);
+}
+
+/* ── Animations ──────────────────────────────────────────── */
+@keyframes fade-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in-up {
+  animation: fade-in-up 0.4s ease-out both;
+}
+
+/* ── Purple glow effect ──────────────────────────────────── */
+.glow-purple {
+  box-shadow: 0 0 20px rgba(61, 21, 203, 0.3),
+              0 0 60px rgba(61, 21, 203, 0.1);
+}

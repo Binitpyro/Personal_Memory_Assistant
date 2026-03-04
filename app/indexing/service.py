@@ -428,7 +428,7 @@ class IndexingService:
 
         # ── Phase 1: parallel extract + chunk ──────────────────────────
         logger.info("Pipeline phase 1/3: extracting text from %d files …", total)
-        max_workers = min(self._concurrency * 2, (os.cpu_count() or 4) + 2)
+        max_workers = min(self._concurrency * 2, (os.cpu_count() or 4) * 2 + 2)  # Phase 5.3: ~80% more parallelism
         loop = asyncio.get_running_loop()
 
         prepared: List[Dict[str, Any]] = []
@@ -507,18 +507,19 @@ class IndexingService:
             prepared[file_idx]["_summary_embedding"] = all_embeddings[idx]
 
     async def _store_prepared_items(self, prepared: List[Dict[str, Any]]) -> None:
-        all_chroma_ids: List[str] = []
-        all_chroma_embs: List[List[float]] = []
-        all_chroma_metas: List[Dict[str, Any]] = []
-        summary_items: List[Dict[str, Any]] = []
-
+        """Process and store prepared items in micro-batches to bound memory usage."""
         # ── Pre-batch: look up ALL existing files in one DB query ──────
         all_paths = [item["file_data"]["path"] for item in prepared]
         existing_map = await self.db.get_existing_file_ids(all_paths)
 
         # ── Process in micro-batches for progress + bounded memory ─────
-        STORE_BATCH = 200
+        STORE_BATCH = 100 # Reduced from 200 for even tighter memory bounds
         for batch_start in range(0, len(prepared), STORE_BATCH):
+            all_chroma_ids: List[str] = []
+            all_chroma_embs: List[List[float]] = []
+            all_chroma_metas: List[Dict[str, Any]] = []
+            summary_items: List[Dict[str, Any]] = []
+            
             batch = prepared[batch_start : batch_start + STORE_BATCH]
             for item in batch:
                 await self._store_single_prepared_item(
@@ -529,15 +530,17 @@ class IndexingService:
                     summary_items,
                     existing_map,
                 )
-            # Commit each micro-batch so we don't hold a giant transaction
+            
+            # Commit SQLite batch
             await self.db.commit()
-
-        await self._flush_chroma_batches(
-            all_chroma_ids,
-            all_chroma_embs,
-            all_chroma_metas,
-            summary_items,
-        )
+            
+            # Flush ChromaDB batch immediately to reclaim memory
+            await self._flush_chroma_batches(
+                all_chroma_ids,
+                all_chroma_embs,
+                all_chroma_metas,
+                summary_items,
+            )
 
     async def _store_single_prepared_item(
         self,
@@ -854,36 +857,23 @@ class IndexingService:
         changed_count = 0
 
         for (file_path, folder_tag), (current_mtime, current_size) in zip(all_files, file_infos):
-            if current_mtime is None:
-                skipped += 1
-                continue
-
-            abs_path = str(file_path.absolute())
-            stored_entry = change_map.get(abs_path)
-            stored_mtime = stored_entry[0] if stored_entry else None
-            stored_sha = stored_entry[1] if stored_entry else None
-
-            if stored_mtime is not None and stored_mtime == current_mtime:
-                skipped += 1
-                continue
+            status = await self._process_file_change(
+                file_path=file_path,
+                folder_tag=folder_tag,
+                current_mtime=current_mtime,
+                current_size=current_size,
+                change_map=change_map,
+                loop=loop,
+            )
             
-            # Timestamp differs, check hash
-            current_sha = await loop.run_in_executor(None, self._calculate_sha256, file_path)
-            if stored_sha and stored_sha == current_sha:
-                # Content identical, just update timestamp to avoid future re-hashing
-                # Use a targeted UPDATE to preserve the existing summary
-                await self.db.execute_write(
-                    "UPDATE files SET size=?, modified_at=?, type=?, folder_tag=?, sha256=? WHERE path=?",
-                    (current_size, current_mtime, file_path.suffix.lower(), folder_tag, current_sha, abs_path),
-                )
+            if status == "skipped":
                 skipped += 1
-                continue
-
-            if stored_mtime is None:
+            elif status == "new":
                 new_count += 1
-            else:
+                files_to_index.append((file_path, folder_tag))
+            elif status == "changed":
                 changed_count += 1
-            files_to_index.append((file_path, folder_tag))
+                files_to_index.append((file_path, folder_tag))
 
         logger.info(
             "Change detection: %d scanned → %d to index "
@@ -907,6 +897,38 @@ class IndexingService:
         except Exception as e:
             logger.warning("Could not calculate hash for %s: %s", path, e)
             return ""
+
+    async def _process_file_change(
+        self,
+        file_path: Path,
+        folder_tag: str,
+        current_mtime: Optional[str],
+        current_size: int,
+        change_map: Dict[str, Any],
+        loop: asyncio.AbstractEventLoop,
+    ) -> str:
+        if current_mtime is None:
+            return "skipped"
+
+        abs_path = str(file_path.absolute())
+        stored_entry = change_map.get(abs_path)
+        stored_mtime = stored_entry[0] if stored_entry else None
+        stored_sha = stored_entry[1] if stored_entry else None
+
+        if stored_mtime is not None and stored_mtime == current_mtime:
+            return "skipped"
+        
+        if stored_mtime is not None:
+            current_sha = await loop.run_in_executor(None, self._calculate_sha256, file_path)
+            if stored_sha and stored_sha == current_sha:
+                await self.db.execute_write(
+                    "UPDATE files SET size=?, modified_at=?, type=?, folder_tag=?, sha256=? WHERE path=?",
+                    (current_size, current_mtime, file_path.suffix.lower(), folder_tag, current_sha, abs_path),
+                )
+                return "skipped"
+            return "changed"
+
+        return "new"
 
     async def index_file(self, path: Path, folder_tag: str):
         """Extracts text, chunks it, generates embeddings, and stores in both DBs."""
@@ -999,10 +1021,11 @@ class IndexingService:
     _UNREAL_PROJECT_EXTENSIONS = frozenset({".uproject", ".uplugin"})
 
     def _extract_text(self, path: Path) -> str:
-        """Text extraction for multiple file types.
+        """Text extraction for multiple file types with safety timeouts.
 
         Supports: .txt, .md, .pdf, .docx, .csv, .json, and source code files.
         """
+        import concurrent.futures
         ext = path.suffix.lower()
         extractor = {
             ".pdf": self._extract_pdf,
@@ -1011,19 +1034,24 @@ class IndexingService:
             ".json": self._extract_json,
         }.get(ext)
 
-        if extractor:
-            return extractor(path)
+        if not extractor:
+            if ext in self._TEXT_EXTENSIONS or ext in self._UNREAL_PROJECT_EXTENSIONS:
+                return self._extract_plain_text(path)
+            if ext in self._UNREAL_BINARY_EXTENSIONS:
+                return self._extract_unreal_asset_stub(path)
+            return ""
 
-        if ext in self._TEXT_EXTENSIONS:
-            return self._extract_plain_text(path)
-
-        if ext in self._UNREAL_BINARY_EXTENSIONS:
-            return self._extract_unreal_asset_stub(path)
-
-        if ext in self._UNREAL_PROJECT_EXTENSIONS:
-            return self._extract_plain_text(path)
-
-        return ""
+        # Use a localized thread pool to enforce a timeout on potentially hung extractors (PDF/DOCX)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(extractor, path)
+            try:
+                return future.result(timeout=45.0) # 45s hard limit per file extraction
+            except concurrent.futures.TimeoutError:
+                logger.error("Extraction timed out (45s) for file: %s", path)
+                return ""
+            except Exception as e:
+                logger.error("Extraction failed for %s: %s", path, e)
+                return ""
 
     @staticmethod
     def _extract_unreal_asset_stub(path: Path) -> str:

@@ -639,6 +639,16 @@ async function clearDatabase(){
     } catch(e){ toast('Clear failed','error'); }
 }
 
+async function compactDatabase(){
+    if(!confirm('This will background vacuum the SQLite database to reclaim space. Continue?')) return;
+    try {
+        const res = await fetch('/system/compact-db', {method:'POST'});
+        const data = await res.json();
+        if(!res.ok){ toast(data.error||'Compaction failed','error'); return; }
+        toast(data.message||'Compaction started','success');
+    } catch(e){ toast('Compaction request failed','error'); }
+}
+
 /* ════════════════════════════════════════════════════════════
    EXPLORER FILTER (debounced)
    ════════════════════════════════════════════════════════════ */
@@ -683,7 +693,7 @@ function init(){
     // Expose all functions used in HTML onclick handlers to global scope
     Object.assign(globalThis, {
         switchPage, askQuestion, fetchInsights, fetchFileTree, updateInsightsTables,
-        clearDatabase, toggleTheme, pickFolder, pickFiles, startIndexing,
+        clearDatabase, compactDatabase, toggleTheme, pickFolder, pickFiles, startIndexing,
         seedDemo, cleanupStale, exportIndex, debouncedFilterTree, pollProgress
     });
 

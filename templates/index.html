@@ -65,7 +65,7 @@
                 <path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/>
             </svg>
         </button>
-        <span class="sidebar-hint">v{{ app_version | default('1.2.0') }}</span>
+        <span class="sidebar-hint">v{{ app_version | default('0.0.34') }}</span>
     </div>
 </aside>
 
@@ -204,6 +204,10 @@
         <button class="btn btn-danger" onclick="clearDatabase()" title="Permanently erase all indexed data">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
             Clear Database
+        </button>
+        <button class="btn btn-secondary" onclick="compactDatabase()" title="Reclaim disk space by compacting the database">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M4 14.899A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.242M12 12v9"/><polyline points="8 17 12 21 16 17"/></svg>
+            Compact DB
         </button>
         </div>
     </div>

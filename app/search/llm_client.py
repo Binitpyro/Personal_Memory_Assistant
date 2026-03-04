@@ -54,13 +54,30 @@ Instructions:
 Answer:
 """
 
+    async def _check_ollama_health(self) -> bool:
+        """Pings Ollama to see if it's running locally."""
+        if hasattr(self, "_ollama_healthy") and self._ollama_healthy is not None:
+            return self._ollama_healthy
+            
+        client = self._get_ollama_client()
+        try:
+            # Short timeout for local health check
+            resp = await client.get(f"{settings.ollama_base_url}/api/tags", timeout=1.5)
+            self._ollama_healthy = resp.status_code == 200
+        except Exception:
+            self._ollama_healthy = False
+        return self._ollama_healthy
+
     async def generate_answer(self, query: str, context: str) -> str:
         """Generates an answer using the provided context and query."""
         prompt = self._build_prompt(query, context)
         if self.api_key:
             return await self._call_gemini(prompt)
-        else:
+        
+        if await self._check_ollama_health():
             return await self._call_ollama(prompt)
+            
+        return "LLM unavailable. Please provide a GEMINI_API_KEY or ensure Ollama is running locally."
 
     async def stream_answer(self, query: str, context: str) -> AsyncGenerator[str, None]:
         """Generates a streaming answer using the provided context and query."""
@@ -68,9 +85,14 @@ Answer:
         if self.api_key:
             async for chunk in self._stream_gemini(prompt):
                 yield chunk
-        else:
+            return
+            
+        if await self._check_ollama_health():
             async for chunk in self._stream_ollama(prompt):
                 yield chunk
+            return
+            
+        yield "LLM unavailable (Gemini key missing and Ollama unreachable)."
 
     @retry(
         stop=stop_after_attempt(3),
@@ -85,7 +107,12 @@ Answer:
         payload = {
             "contents": [{
                 "parts": [{"text": prompt}]
-            }]
+            }],
+            "generationConfig": {
+                "temperature": 0.3,
+                "topP": 0.8,
+                "maxOutputTokens": 1024,
+            },
         }
         
         client = self._get_gemini_client()
@@ -108,7 +135,14 @@ Answer:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:streamGenerateContent"
         params = {"key": self.api_key}
         headers = {"Content-Type": "application/json"}
-        payload = {"contents": [{"parts": [{"text": prompt}]}]}
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": 0.3,
+                "topP": 0.8,
+                "maxOutputTokens": 1024,
+            },
+        }
         
         client = self._get_gemini_client()
         try:
@@ -123,34 +157,40 @@ Answer:
                 buffer = ""
                 async for chunk in response.aiter_text():
                     buffer += chunk
-                    while True:
-                        # Strip leading whitespace, commas, and array brackets
-                        buffer = buffer.lstrip(", \r\n\t[]")
-                        if not buffer:
-                            break
-                        try:
-                            data, end_idx = decoder.raw_decode(buffer)
-                        except json.JSONDecodeError:
-                            # Not enough data for a complete JSON value yet
-                            break
-
-                        if isinstance(data, dict) and "candidates" in data and data["candidates"]:
-                            try:
-                                text = (
-                                    data["candidates"][0]
-                                    .get("content", {})
-                                    .get("parts", [{}])[0]
-                                    .get("text")
-                                )
-                                if text:
-                                    yield text
-                            except (KeyError, IndexError, TypeError):
-                                pass
-
-                        buffer = buffer[end_idx:]
+                    buffer, new_texts = self._parse_stream_buffer(decoder, buffer)
+                    for text in new_texts:
+                        yield text
         except Exception:
             logger.exception("Gemini streaming error")
             yield "Streaming error. Please retry."
+
+    def _parse_stream_buffer(self, decoder: json.JSONDecoder, buffer: str) -> tuple[str, list[str]]:
+        new_texts = []
+        while True:
+            # Strip leading whitespace, commas, and array brackets
+            buffer = buffer.lstrip(", \r\n\t[]")
+            if not buffer:
+                break
+            try:
+                data, end_idx = decoder.raw_decode(buffer)
+            except json.JSONDecodeError:
+                # Not enough data for a complete JSON value yet
+                break
+
+            if isinstance(data, dict) and "candidates" in data and data["candidates"]:
+                try:
+                    text = (
+                        data["candidates"][0]
+                        .get("content", {})
+                        .get("parts", [{}])[0]
+                        .get("text")
+                    )
+                    if text:
+                        new_texts.append(text)
+                except (KeyError, IndexError, TypeError):
+                    pass
+            buffer = buffer[end_idx:]
+        return buffer, new_texts
 
     async def _call_ollama(self, prompt: str) -> str:
         """Fallback to local Ollama instance."""

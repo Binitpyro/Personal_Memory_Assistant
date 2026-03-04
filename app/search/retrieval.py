@@ -17,23 +17,39 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 # Phase 3.1: Result Cache (LRU)
-# Keys are (query, file_type, folder_tag)
+# Keys are (query, file_type, folder_tag, index_gen)
 # Values are List[Dict[str, Any]]
-_retrieval_cache: OrderedDict[Tuple[str, Optional[str], Optional[str]], List[Dict[str, Any]]] = OrderedDict()
+_retrieval_cache: OrderedDict[Tuple[str, Optional[str], Optional[str], int], List[Dict[str, Any]]] = OrderedDict()
 _CACHE_MAX_SIZE = 500  # 5x increase for better hit rate
 _cache_lock = threading.Lock()
 
+# Full-RAG response cache (caches LLM answers for repeat queries)
+# Keys are (query, file_type, folder_tag, index_gen)
+# Values are Dict[str, Any] (full response)
+_rag_response_cache: OrderedDict[Tuple[str, Optional[str], Optional[str], int], Dict[str, Any]] = OrderedDict()
+_RAG_CACHE_MAX_SIZE = 200
+_rag_cache_lock = threading.Lock()
+
+# Index generation counter — incremented on each cache clear (after re-indexing)
+# Included in cache keys so stale entries are never hit.
+_index_generation: int = 0
+
 def clear_retrieval_cache():
     """Invalidates the retrieval cache. Call this after indexing or clearing DB."""
+    global _index_generation
     with _cache_lock:
         _retrieval_cache.clear()
-        logger.info("Retrieval cache cleared.")
+    with _rag_cache_lock:
+        _rag_response_cache.clear()
+    _index_generation += 1
+    logger.info("Retrieval + RAG response caches cleared (generation=%d).", _index_generation)
 
 _INVENTORY_RE = re.compile(
     r'\b(?:what|which|list|show|how many|count|do i have|files? do i|'
     r'files? i have|my files|all files|all my|total|size|'
     r'breakdown|statistics|stats|types? of files?|extensions?|'
-    r'storage|disk|space|largest|smallest|recent|oldest)\b',
+    r'storage|disk|space|largest|smallest|recent|oldest|'
+    r'how big|how large|how much space|file count|indexed)\b',
     re.IGNORECASE,
 )
 
@@ -41,7 +57,8 @@ _PROJECT_RE = re.compile(
     r'\b(?:project|projects|describe|overview|about|summary|folder|'
     r'tell me about|what is|what are|unreal|unity|godot|react|node|'
     r'python|rust|java|c\+\+|go|flutter|workspace|'
-    r'codebase|repo|repository|tech stack|framework|language)\b',
+    r'codebase|repo|repository|tech stack|framework|language|'
+    r'where is|where can i find|what tech|what tools|built with)\b',
     re.IGNORECASE,
 )
 
@@ -158,11 +175,33 @@ def _sanitize_fts_query(query: str) -> str:
         return '"' + query.replace('"', '') + '"'
     return ' '.join(f'"{t}"' for t in tokens)
 
-async def _fts_search(db: DatabaseManager, query: str, k: int) -> List[Dict[str, Any]]:
+async def _fts_search(
+    db: DatabaseManager, query: str, k: int,
+    folder_tag: Optional[str] = None,
+    file_type: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """FTS5 keyword search with optional metadata push-down filters."""
     try:
         fts_match = _sanitize_fts_query(query)
-        fts_sql = "SELECT rowid, chunks_text FROM chunk_fts WHERE chunk_fts MATCH ? ORDER BY rank LIMIT ?"
-        rows = await db.execute_query(fts_sql, (fts_match, 2 * k))
+        params = [fts_match]
+        where_clauses = ["cf.chunks_text MATCH ?"]
+        
+        if folder_tag:
+            where_clauses.append("f.folder_tag = ?")
+            params.append(folder_tag)
+        if file_type:
+            where_clauses.append("f.type = ?")
+            params.append(file_type.lower())
+            
+        params.append(2 * k)
+        fts_sql = (
+            "SELECT cf.rowid, cf.chunks_text FROM chunk_fts cf "
+            "JOIN chunks c ON c.id = cf.rowid "
+            "JOIN files f ON f.id = c.file_id "
+            f"WHERE {' AND '.join(where_clauses)} "
+            "ORDER BY rank LIMIT ?"
+        )
+        rows = await db.execute_query(fts_sql, tuple(params))
         return [{"id": str(row[0]), "text": row[1]} for row in rows]
     except Exception as e:
         logger.warning("FTS5 Search failed: %s", e)
@@ -172,15 +211,19 @@ async def _semantic_search_with_emb(
     chroma_client: ChromaClient,
     query_emb: List[float],
     k: int,
+    where_filter: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
-    raw = await chroma_client.semantic_search(query_emb, k=2 * k)
+    raw = await chroma_client.semantic_search(query_emb, k=2 * k, where_filter=where_filter)
     results: List[Dict[str, Any]] = []
-    if raw.get("ids") and raw["ids"][0]:
-        ids = raw["ids"][0]
-        dists = raw.get("distances", [[]])[0]
+    # Support both 'metadatas' and 'metas' for resilience across Chroma versions
+    ids_list = raw.get("ids", [[]])
+    if ids_list and ids_list[0]:
+        ids = ids_list[0]
+        distances_list = raw.get("distances", [[]])
+        dists = distances_list[0] if distances_list else []
         for i, doc_id in enumerate(ids):
             results.append({
-                "id": doc_id,
+                "id": str(doc_id),
                 "score": dists[i] if i < len(dists) else 0.0,
             })
     return results
@@ -209,11 +252,13 @@ async def _summary_search_with_emb(
     try:
         raw = await chroma_client.search_summaries(query_emb, k=k)
         paths: Set[str] = set()
-        if raw.get("metadatas") and raw["metadatas"][0]:
-            for meta in raw["metadatas"][0]:
-                fp = meta.get("file_path")
-                if fp:
-                    paths.add(fp)
+        metas_list = raw.get("metadatas", raw.get("metas", [[]]))
+        if metas_list and metas_list[0]:
+            for meta in metas_list[0]:
+                if meta:
+                    fp = meta.get("file_path")
+                    if fp:
+                        paths.add(fp)
         return paths
     except Exception as e:
         logger.debug("Summary search unavailable: %s", e)
@@ -235,7 +280,8 @@ def _build_candidate_results(
         text = row[1]
         if len(text) < 50:
             continue
-        text_prefix = text[:100]
+        # Use a rolling hash or snippet for more robust deduplication
+        text_prefix = text[:100].strip()
         if text_prefix in seen_texts:
             continue
         seen_texts.add(text_prefix)
@@ -274,11 +320,11 @@ async def hybrid_retrieve(
     """
 
     # Phase 3.1: Cache Lookup
-    cache_key = (query.strip().lower(), file_type, folder_tag)
+    cache_key = (query.strip().lower(), file_type, folder_tag, _index_generation)
     with _cache_lock:
         if cache_key in _retrieval_cache:
             _retrieval_cache.move_to_end(cache_key)
-            logger.info("Retrieval cache hit for query: '%s'", query)
+            logger.info("Retrieval cache hit for query: '%s' (filters: %s, %s)", query, file_type, folder_tag)
             return _retrieval_cache[cache_key]
 
     # Adaptive recall_k: short/simple queries need fewer candidates
@@ -290,13 +336,22 @@ async def hybrid_retrieve(
     else:
         recall_k = max(50, k * 2)
 
+    # Phase 3.1: Build Chroma where-filter for pushed-down metadata filtering
+    chroma_where: Dict[str, Any] = {}
+    if folder_tag:
+        chroma_where["folder_tag"] = folder_tag
+    if file_type:
+        chroma_where["file_type"] = file_type.lower()
+
     # Launch FTS & embedding concurrently
-    fts_task = asyncio.create_task(_fts_search(db, query, recall_k))
+    fts_task = asyncio.create_task(_fts_search(db, query, recall_k, folder_tag=folder_tag, file_type=file_type))
     emb_task = asyncio.create_task(embedding_service.embed_query(query))
     query_emb = await emb_task
     
     # Launch semantic & summary search concurrently
-    semantic_task = asyncio.create_task(_semantic_search_with_emb(chroma_client, query_emb, recall_k))
+    semantic_task = asyncio.create_task(
+        _semantic_search_with_emb(chroma_client, query_emb, recall_k, where_filter=chroma_where or None)
+    )
     summary_task = asyncio.create_task(_summary_search_with_emb(chroma_client, query_emb, k))
     
     fts_results, semantic_results, relevant_doc_paths = await asyncio.gather(
@@ -322,23 +377,7 @@ async def hybrid_retrieve(
         row_map[row[0]] = row
 
     results = _build_candidate_results(chunk_ids_ordered, row_map, score_map, relevant_doc_paths)
-
-    # Confidence-based reranker bypass:
-    # If the RRF top score is 2x+ the runner-up, ranking is already decisive
-    # and the expensive cross-encoder can be skipped.
-    if results and use_reranker:
-        skip_reranker = False
-        if len(results) >= 2:
-            top_score = results[0]["score"]
-            second_score = results[1]["score"]
-            if second_score > 0 and (top_score / second_score) >= 2.0:
-                skip_reranker = True
-                logger.debug(
-                    "Reranker bypassed: top RRF score %.2f is %.1fx the second (%.2f)",
-                    top_score, top_score / second_score, second_score,
-                )
-        if not skip_reranker:
-            results = await rerank(query, results, top_k=k, text_key="text")
+    results = await _apply_reranker_if_needed(results, query, use_reranker, k)
 
     final_results = results[:k]
     
@@ -349,6 +388,37 @@ async def hybrid_retrieve(
         _retrieval_cache[cache_key] = final_results
         
     return final_results
+
+async def _apply_reranker_if_needed(
+    results: List[Dict[str, Any]], 
+    query: str, 
+    use_reranker: bool, 
+    k: int
+) -> List[Dict[str, Any]]:
+    if not results or not use_reranker:
+        return results
+
+    skip_reranker = False
+    if len(results) >= 2:
+        top_score = results[0]["score"]
+        second_score = results[1]["score"]
+        if second_score > 0 and (top_score / second_score) >= 2.0:
+            skip_reranker = True
+            logger.debug(
+                "Reranker bypassed: top RRF score %.2f is %.1fx the second (%.2f)",
+                top_score, top_score / second_score, second_score,
+            )
+            
+    if not skip_reranker:
+        try:
+            results = await asyncio.wait_for(
+                rerank(query, results, top_k=k, text_key="text"),
+                timeout=0.8,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Reranker timed out (>800ms) — falling back to RRF order.")
+            
+    return results
 
 async def full_rag(
     query: str,
@@ -361,6 +431,19 @@ async def full_rag(
     folder_tag: Optional[str] = None,
 ) -> Dict[str, Any]:
     t_start = time.perf_counter()
+
+    # Phase 1.1: Full-RAG response cache — return cached LLM answer instantly
+    rag_cache_key = (query.strip().lower(), file_type, folder_tag, _index_generation)
+    with _rag_cache_lock:
+        if rag_cache_key in _rag_response_cache:
+            _rag_response_cache.move_to_end(rag_cache_key)
+            cached = _rag_response_cache[rag_cache_key]
+            logger.info("RAG response cache hit for query: '%s'", query)
+            cached_copy = dict(cached)
+            cached_copy["latency_ms"] = round((time.perf_counter() - t_start) * 1000, 1)
+            cached_copy["cache_hit"] = True
+            return cached_copy
+
     inventory = _is_inventory_query(query)
     project = _is_project_query(query)
     unreal = _is_unreal_query(query)
@@ -409,7 +492,7 @@ async def full_rag(
     
     total_ms = round((time.perf_counter() - t_start) * 1000, 1)
     
-    return {
+    result = {
         "answer": answer,
         "sources": retrieved,
         "retrieved_count": len(retrieved),
@@ -417,6 +500,14 @@ async def full_rag(
         "mode": "full_rag",
         "timing": {"retrieval_ms": retrieval_ms, "llm_ms": llm_ms, "total_ms": total_ms},
     }
+
+    # Phase 1.1: Cache the full RAG response for repeat queries
+    with _rag_cache_lock:
+        if len(_rag_response_cache) >= _RAG_CACHE_MAX_SIZE:
+            _rag_response_cache.popitem(last=False)
+        _rag_response_cache[rag_cache_key] = result
+
+    return result
 
 async def full_rag_stream(
     query: str,

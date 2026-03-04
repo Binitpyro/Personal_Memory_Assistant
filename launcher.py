@@ -73,7 +73,7 @@ def is_admin() -> bool:
         return False
 
 
-def wait_for_server(timeout: int = 45) -> bool:
+def wait_for_server(timeout: int = 120) -> bool:
     """Wait until the server responds."""
     import urllib.request
     import urllib.error
@@ -181,7 +181,7 @@ def main():
     # Wait for server to be ready
     if not wait_for_server():
         _show_error(
-            "Server failed to start within 45 seconds.\n\n"
+            "Server failed to start within 120 seconds.\n\n"
             "Check that dependencies are installed:\n  pip install -r requirements.txt"
         )
         server_proc.terminate()

@@ -547,6 +547,13 @@ class DatabaseManager:
                 for r in rows
             ]
 
+    async def clear_query_history(self) -> Dict[str, str]:
+        """Delete all entries from the query_history table."""
+        conn = self._get_conn()
+        await conn.execute("DELETE FROM query_history")
+        await conn.commit()
+        return {"message": "Query history cleared successfully."}
+
     async def cleanup_stale_files(self) -> List[str]:
         """Remove index entries for files that no longer exist on disk.
 

@@ -22,7 +22,8 @@ class InsightsService:
         }
 
         try:
-            stats["database_size_bytes"] = os.path.getsize(self.db.db_path) if os.path.exists(self.db.db_path) else 0
+            db_path = getattr(self.db, "db_path", None)
+            stats["database_size_bytes"] = os.path.getsize(db_path) if db_path and os.path.exists(db_path) else 0
             rows = await self.db.execute_query("SELECT SUM(size), COUNT(*) FROM files")
             if rows:
                 stats["total_size_bytes"] = rows[0][0] or 0
@@ -42,7 +43,7 @@ class InsightsService:
                 "SELECT type, COUNT(*), SUM(size) FROM files GROUP BY type"
             )
             stats["type_breakdown"] = {
-                r[0]: {"count": r[1], "size": r[2]} for r in rows
+                r[0]: {"count": r[1], "size": r[2] or 0} for r in rows
             }
 
         except Exception as e:
@@ -55,8 +56,9 @@ class InsightsService:
         """Returns top and cold files filtered by extension type."""
         result: Dict[str, Any] = {"top_files": [], "cold_files": []}
         try:
-            # Ensure type_filter matches stored format (usually lowercase, no dot)
+            # Robustly handle extension format: ensure it has exactly one leading dot
             clean_type = type_filter.lower().lstrip('.')
+            clean_type = f".{clean_type}"
             
             rows = await self.db.execute_query(
                 "SELECT path, size FROM files WHERE LOWER(type) = ? ORDER BY size DESC LIMIT 15",

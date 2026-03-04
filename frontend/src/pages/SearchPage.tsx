@@ -1,200 +1,254 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
-import { Search, Send, Sparkles, Loader2, FileText, Clock, ChevronDown, ChevronUp } from 'lucide-react'
-import { useApi } from '../useApi'
-import { postQuery, getQueryHistory, type QueryResponse, type QuerySource } from '../api'
+import { Search, Send, Sparkles, Loader2, FileText, Clock, Trash2, User, Bot, RotateCcw } from 'lucide-react'
+import { useApi, invalidateCache } from '../useApi'
+import { getQueryHistory, clearQueryHistory, subscribeQuery, type QuerySource, type QueryStreamChunk } from '../api'
+
+interface Message {
+  role: 'user' | 'assistant'
+  content: string
+  sources?: QuerySource[]
+  latency_ms?: number
+  isStreaming?: boolean
+}
 
 export function SearchPage() {
   const [question, setQuestion] = useState('')
+  const [messages, setMessages] = useState<Message[]>([])
   const [searching, setSearching] = useState(false)
-  const [result, setResult] = useState<QueryResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [showSources, setShowSources] = useState(false)
+  
+  const { data: historyData, refetch: refetchHistory } = useApi(getQueryHistory, { cacheKey: 'query-history' })
+  
   const inputRef = useRef<HTMLInputElement>(null)
-  const { data: historyData, refetch: refetchHistory } = useApi(
-    () => getQueryHistory(10),
-    { cacheKey: 'query-history' },
-  )
+  const messagesEndRef = useRef<HTMLDivElement>(null)
 
-  // Debounce timer ref for potential future auto-search
-  const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined)
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
+  }
 
   useEffect(() => {
-    inputRef.current?.focus()
-  }, [])
+    scrollToBottom()
+  }, [messages])
 
   const handleSearch = useCallback(async () => {
-    const q = question.trim()
-    if (!q || searching) return
-    clearTimeout(debounceRef.current)
-    setSearching(true)
+    if (!question.trim() || searching) return
+
+    const userMsg = question.trim()
+    setQuestion('')
     setError(null)
-    setResult(null)
-    try {
-      const res = await postQuery(q)
-      setResult(res)
-      setShowSources(false)
-      refetchHistory()
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Search failed')
-    } finally {
-      setSearching(false)
-    }
-  }, [question, searching, refetchHistory])
+    setSearching(true)
 
-  const handleKeyDown = useCallback(
-    (e: React.KeyboardEvent) => {
-      if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault()
-        handleSearch()
+    // Add user message
+    const newMessages: Message[] = [...messages, { role: 'user', content: userMsg }]
+    
+    // Add empty assistant message for streaming
+    setMessages([...newMessages, { role: 'assistant', content: '', isStreaming: true }])
+
+    const historyForApi = messages.map(m => ({ role: m.role, content: m.content }))
+
+    let fullText = ''
+    let sources: QuerySource[] = []
+    let latency = 0
+
+    const unsubscribe = subscribeQuery(userMsg, (chunk: QueryStreamChunk) => {
+      if (chunk.type === 'error') {
+        setError(chunk.text || 'Search failed')
+        setSearching(false)
+        // Remove the empty assistant message on error
+        setMessages(newMessages)
+        return
       }
-    },
-    [handleSearch],
-  )
 
-  const handleHistoryClick = useCallback((q: string) => {
-    setQuestion(q)
-    inputRef.current?.focus()
-  }, [])
+      if (chunk.type === 'sources') {
+        sources = chunk.sources || []
+        latency = chunk.latency_ms || chunk.retrieval_ms || 0
+      }
+
+      if (chunk.type === 'content' && chunk.text) {
+        fullText += chunk.text
+        setMessages(prev => {
+          const last = prev[prev.length - 1]
+          if (last && last.role === 'assistant') {
+            return [
+              ...prev.slice(0, -1),
+              { ...last, content: fullText, sources, latency_ms: latency }
+            ]
+          }
+          return prev
+        })
+      }
+      
+      // If the backend indicates it's finished (using a custom end chunk or just stopping)
+      // Since SSE reader loop handles 'done', we just wait for the search to stop
+    }, { history: historyForApi })
+
+    // We don't have a reliable "done" event in the current subscribeQuery simple implementation
+    // So we'll wrap it or just set searching to false after a delay or based on common markers
+    // For now, let's assume it finishes when fullText stops updating or add a timeout
+    setTimeout(() => {
+      setSearching(false)
+      setMessages(prev => {
+        const last = prev[prev.length - 1]
+        if (last) return [...prev.slice(0, -1), { ...last, isStreaming: false }]
+        return prev
+      })
+      invalidateCache('query-history')
+      refetchHistory()
+    }, 15000) // 15s max for now, proper implementation would yield a 'done' chunk
+
+    return unsubscribe
+  }, [question, searching, messages, refetchHistory])
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      handleSearch()
+    }
+  }
+
+  const handleClearHistory = useCallback(async () => {
+    if (!confirm('Are you sure you want to clear all chat history?')) return
+    try {
+      await clearQueryHistory()
+      invalidateCache('query-history')
+      refetchHistory()
+      setMessages([])
+    } catch (e) {
+      alert(`Failed to clear history: ${e instanceof Error ? e.message : 'Unknown error'}`)
+    }
+  }, [refetchHistory])
+
+  const resetChat = () => {
+    setMessages([])
+    setQuestion('')
+    setError(null)
+  }
 
   return (
-    <div className="flex-1 overflow-y-auto p-6 space-y-6 animate-fade-in-up custom-scrollbar">
+    <div className="flex-1 flex flex-col h-full overflow-hidden animate-fade-in-up">
       {/* Header */}
-      <div>
-        <h1 className="text-2xl font-bold flex items-center gap-3">
-          <Search className="w-7 h-7 text-primary" />
-          Search
-        </h1>
-        <p className="text-text-secondary mt-1">
-          Ask questions about your personal files using AI
-        </p>
+      <div className="p-6 border-b border-white/5 flex justify-between items-center shrink-0">
+        <div>
+          <h1 className="text-2xl font-bold flex items-center gap-3 text-white">
+            <Search className="w-7 h-7 text-primary" />
+            AI Chat
+          </h1>
+          <p className="text-text-secondary text-sm">Conversational memory assistant</p>
+        </div>
+        <button 
+          onClick={resetChat}
+          className="flex items-center gap-2 px-4 py-2 bg-white/5 hover:bg-white/10 rounded-xl text-xs font-bold transition-all text-text-secondary"
+        >
+          <RotateCcw className="w-3.5 h-3.5" /> NEW CHAT
+        </button>
       </div>
 
-      {/* Search Input */}
-      <div className="glass-card">
-        <div className="flex gap-3">
-          <div className="relative flex-1">
-            <Sparkles className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-primary" />
-            <input
-              ref={inputRef}
-              type="text"
-              value={question}
-              onChange={(e) => setQuestion(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder="Ask anything about your files..."
-              className="w-full bg-surface-lighter border border-primary/20 rounded-xl pl-12 pr-4 py-4 text-text-primary placeholder:text-text-secondary focus:outline-none focus:ring-2 focus:ring-primary/40 text-lg"
-              disabled={searching}
-            />
-          </div>
-          <button
-            onClick={handleSearch}
-            disabled={!question.trim() || searching}
-            className="btn bg-primary hover:bg-primary-dark text-white rounded-xl px-6 disabled:opacity-40"
-          >
-            {searching ? <Loader2 className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
-          </button>
-        </div>
-      </div>
-
-      {/* Error */}
-      {error && (
-        <div className="glass-card bg-error/10 border-error/30 text-error text-sm">{error}</div>
-      )}
-
-      {/* Results */}
-      {result && (
-        <div className="glass-card space-y-4">
-          {/* Answer */}
-          <div className="prose prose-invert max-w-none text-text-primary whitespace-pre-wrap leading-relaxed">
-            {result.answer}
-          </div>
-
-          {/* Timing badge */}
-          <div className="flex items-center gap-4 text-xs text-text-secondary">
-            <span>{result.latency_ms}ms</span>
-            <span>{result.retrieved_count} source(s)</span>
-            {result.mode && <span className="bg-primary/20 text-primary-light px-2 py-0.5 rounded">{result.mode}</span>}
-          </div>
-
-          {/* Sources toggle */}
-          {result.sources.length > 0 && (
-            <div>
-              <button
-                onClick={() => setShowSources(!showSources)}
-                className="flex items-center gap-1 text-sm text-primary-light hover:underline"
-              >
-                {showSources ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                {showSources ? 'Hide' : 'Show'} Sources
-              </button>
-              {showSources && (
-                <div className="mt-3 space-y-2">
-                  {result.sources.map((src: QuerySource, i: number) => (
-                    <div key={i} className="bg-surface-lighter rounded-xl px-4 py-3 text-sm">
-                      <div className="flex items-center gap-2 text-primary-light font-medium mb-1">
-                        <FileText className="w-4 h-4" />
-                        {src.file_path.split(/[\\/]/).pop()}
-                      </div>
-                      {src.text && (
-                        <p className="text-text-secondary text-xs line-clamp-3">{src.text}</p>
-                      )}
-                      {src.score !== undefined && (
-                        <span className="text-xs text-text-secondary mt-1 block">Score: {src.score.toFixed(2)}</span>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Empty state */}
-      {!result && !searching && !error && (
-        <div className="glass-card text-center py-16">
-          <Search className="w-12 h-12 text-primary/30 mx-auto mb-4" />
-          <h3 className="text-lg text-text-secondary">
-            Your search results will appear here
-          </h3>
-          <p className="text-text-secondary/60 text-sm mt-2">
-            Try asking: &quot;What did I write about machine learning?&quot;
-          </p>
-        </div>
-      )}
-
-      {/* Loading state */}
-      {searching && (
-        <div className="glass-card text-center py-16">
-          <Loader2 className="w-12 h-12 text-primary mx-auto mb-4 animate-spin" />
-          <h3 className="text-lg text-text-secondary">Searching your memory…</h3>
-        </div>
-      )}
-
-      {/* Query History */}
-      <div className="glass-card">
-        <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
-          <Clock className="w-5 h-5 text-primary" />
-          Recent Queries
-        </h2>
-        {historyData?.history && historyData.history.length > 0 ? (
-          <div className="space-y-2">
-            {historyData.history.map((item, i) => (
-              <button
-                key={i}
-                onClick={() => handleHistoryClick(item.question)}
-                className="w-full text-left bg-surface-lighter rounded-xl px-4 py-3 hover:bg-surface-light transition-colors text-sm"
-              >
-                <span className="text-text-primary">{item.question}</span>
-                {item.latency_ms !== undefined && (
-                  <span className="text-text-secondary ml-2 text-xs">({item.latency_ms}ms)</span>
-                )}
-              </button>
-            ))}
+      {/* Chat Area */}
+      <div className="flex-1 overflow-y-auto p-6 space-y-6 custom-scrollbar">
+        {messages.length === 0 ? (
+          <div className="h-full flex flex-col items-center justify-center text-center opacity-40">
+            <Bot className="w-16 h-16 text-primary mb-4" />
+            <h2 className="text-xl font-bold text-white mb-2">How can I help you?</h2>
+            <p className="max-w-sm text-sm">Ask about your documents, codebases, or project statistics. I remember our conversation context.</p>
           </div>
         ) : (
-          <div className="text-text-secondary text-sm">
-            No recent queries yet. Start searching to build your history.
+          <div className="max-w-4xl mx-auto space-y-8">
+            {messages.map((msg, idx) => (
+              <div key={idx} className={`flex gap-4 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                {msg.role === 'assistant' && (
+                  <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center shrink-0 border border-primary/30 shadow-lg">
+                    <Bot className="w-4 h-4 text-primary-light" />
+                  </div>
+                )}
+                <div className={`flex flex-col gap-2 max-w-[85%] ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
+                  <div className={`px-5 py-3 rounded-2xl text-sm leading-relaxed shadow-sm border ${
+                    msg.role === 'user' 
+                      ? 'bg-primary text-white border-primary-light/20 rounded-tr-none' 
+                      : 'bg-surface-lighter text-text-primary border-white/5 rounded-tl-none'
+                  }`}>
+                    {msg.isStreaming && !msg.content ? (
+                      <div className="flex gap-1 py-1">
+                        <span className="w-1.5 h-1.5 bg-primary-light rounded-full animate-bounce"></span>
+                        <span className="w-1.5 h-1.5 bg-primary-light rounded-full animate-bounce [animation-delay:0.2s]"></span>
+                        <span className="w-1.5 h-1.5 bg-primary-light rounded-full animate-bounce [animation-delay:0.4s]"></span>
+                      </div>
+                    ) : (
+                      <div className="whitespace-pre-wrap">{msg.content}</div>
+                    )}
+                  </div>
+                  
+                  {msg.role === 'assistant' && msg.sources && msg.sources.length > 0 && (
+                    <div className="flex flex-wrap gap-2 mt-1">
+                      {msg.sources.slice(0, 3).map((src, sidx) => (
+                        <div key={sidx} className="flex items-center gap-1.5 px-2 py-1 bg-white/5 rounded-lg text-[10px] text-text-secondary border border-white/5">
+                          <FileText className="w-3 h-3 text-primary-light" />
+                          <span className="max-w-[150px] truncate">{src.file_path.split(/[\\/]/).pop()}</span>
+                        </div>
+                      ))}
+                      {msg.sources.length > 3 && (
+                        <span className="text-[10px] text-text-secondary self-center">+{msg.sources.length - 3} more</span>
+                      )}
+                    </div>
+                  )}
+                </div>
+                {msg.role === 'user' && (
+                  <div className="w-8 h-8 rounded-full bg-surface-lighter flex items-center justify-center shrink-0 border border-white/10 shadow-lg">
+                    <User className="w-4 h-4 text-text-secondary" />
+                  </div>
+                )}
+              </div>
+            ))}
+            <div ref={messagesEndRef} />
           </div>
         )}
+      </div>
+
+      {/* Input Area */}
+      <div className="p-6 shrink-0 bg-surface-dark/50 backdrop-blur-md border-t border-white/5">
+        <div className="max-w-4xl mx-auto flex flex-col gap-3">
+          {error && (
+            <div className="bg-error/10 border border-error/20 text-error text-xs p-3 rounded-xl flex items-center justify-between">
+              <span>{error}</span>
+              <button onClick={() => setError(null)} className="font-bold opacity-60 hover:opacity-100">✕</button>
+            </div>
+          )}
+          <div className="relative group">
+            <div className="absolute -inset-0.5 bg-gradient-to-r from-primary to-accent rounded-2xl blur opacity-20 group-focus-within:opacity-40 transition duration-1000"></div>
+            <div className="relative flex items-center bg-surface-lighter border border-white/10 rounded-2xl overflow-hidden shadow-2xl">
+              <input
+                ref={inputRef}
+                type="text"
+                value={question}
+                onChange={(e) => setQuestion(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder={searching ? "AI is thinking..." : "Ask a follow-up or a new question..."}
+                className="flex-1 bg-transparent px-6 py-4 text-text-primary placeholder:text-text-secondary/50 focus:outline-none text-base"
+                disabled={searching}
+              />
+              <button
+                onClick={handleSearch}
+                disabled={!question.trim() || searching}
+                className="p-3 mr-2 bg-primary hover:bg-primary-dark disabled:bg-white/5 text-white rounded-xl transition-all shadow-lg"
+              >
+                {searching ? <Loader2 className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
+              </button>
+            </div>
+          </div>
+          <div className="flex items-center justify-between px-2">
+            <div className="flex gap-4 text-[10px] text-text-secondary font-bold uppercase tracking-widest">
+              <span className="flex items-center gap-1"><Sparkles className="w-3 h-3 text-primary" /> Gemini 2.5 Flash Lite</span>
+              <span className="flex items-center gap-1"><Clock className="w-3 h-3" /> Context Enabled</span>
+            </div>
+            {historyData?.history && historyData.history.length > 0 && (
+              <button
+                onClick={handleClearHistory}
+                className="text-[10px] font-black text-error/60 hover:text-error transition-colors flex items-center gap-1"
+              >
+                <Trash2 className="w-3 h-3" /> CLEAR HISTORY
+              </button>
+            )}
+          </div>
+        </div>
       </div>
     </div>
   )

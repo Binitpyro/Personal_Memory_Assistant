@@ -203,7 +203,7 @@ export function ExplorerPage() {
   }, [tree, activeExtension])
 
   return (
-    <div className="flex flex-col h-screen p-6 animate-fade-in-up overflow-hidden">
+    <div className="flex flex-col h-full p-6 animate-fade-in-up overflow-hidden">
       {/* Header */}
       <div className="flex justify-between items-center mb-6 shrink-0">
         <div>

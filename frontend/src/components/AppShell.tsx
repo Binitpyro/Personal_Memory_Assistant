@@ -46,7 +46,7 @@ export function AppShell() {
         {/* Footer */}
         <div className="px-5 py-4 border-t border-primary/10">
           <span className="text-xs text-text-secondary opacity-0 group-hover:opacity-100 transition-opacity duration-300 whitespace-nowrap">
-            v0.0.34
+            v0.0.36
           </span>
         </div>
       </aside>

@@ -1,6 +1,6 @@
 // FileTypeTreemap.tsx
 // ─────────────────────────────────────────────────────────────────
-//  BY FOLDERS  →  3D Isometric Dreamscape: Crystal Folders + Bubble Files
+//  BY FOLDERS  →  3D Isometric Dreamscape: Encompassing Crystals + Bubbles
 //  BY FILE TYPE → ECharts Treemap (unchanged)
 // ─────────────────────────────────────────────────────────────────
 
@@ -86,8 +86,15 @@ function findCommonPrefix(paths: string[]): string {
 }
 
 /* ═══════════════════════════════════════════════════════════════
-   FOLDER TREE MODEL & TREEMAP LAYOUT
+   FOLDER TREE MODEL & LOCAL TREEMAP LAYOUT
 ═══════════════════════════════════════════════════════════════ */
+
+export interface NestedFileEntry extends FileEntry {
+  localX: number
+  localY: number
+  localW: number
+  localH: number
+}
 
 interface FolderNode {
   name:     string
@@ -95,12 +102,56 @@ interface FolderNode {
   realSize: number
   depth:    number
   children: FolderNode[]
-  files:    FileEntry[]
-  // Layout bounds (0-100 normalized)
-  x: number
-  y: number
-  w: number
-  h: number
+  files:    NestedFileEntry[]
+  // Layout bounds (0-100 normalized relative to parent)
+  localX: number
+  localY: number
+  localW: number
+  localH: number
+}
+
+function computeLocalLayout(node: FolderNode) {
+  // Limit nodes to avoid extreme DOM overload when rendering
+  const MAX_CHILDREN = 40;
+  const MAX_FILES = 80;
+
+  const displayFolders = node.children.slice(0, MAX_CHILDREN);
+  const displayFiles = node.files.slice(0, MAX_FILES);
+
+  const items = [
+    ...displayFolders.map(c => ({ type: 'folder' as const, size: c.realSize, ref: c })),
+    ...displayFiles.map(f => ({ type: 'file' as const, size: f.size, ref: f }))
+  ].sort((a, b) => b.size - a.size)
+
+  let curX = 0, curY = 0, curW = 100, curH = 100
+
+  items.forEach((item, idx) => {
+    const isLast = idx === items.length - 1
+    const remainingSize = items.slice(idx).reduce((acc, i) => acc + i.size, 0)
+    const ratio = remainingSize === 0 ? 0 : item.size / remainingSize
+    
+    const splitHorizontally = curW > curH
+
+    let itemX = curX, itemY = curY, itemW = curW, itemH = curH
+
+    if (splitHorizontally) {
+      itemW = isLast ? curW : curW * ratio
+      curX += itemW
+      curW -= itemW
+    } else {
+      itemH = isLast ? curH : curH * ratio
+      curY += itemH
+      curH -= itemH
+    }
+
+    if (item.type === 'folder') {
+      const f = item.ref as FolderNode
+      f.localX = itemX; f.localY = itemY; f.localW = itemW; f.localH = itemH;
+    } else {
+      const f = item.ref as NestedFileEntry
+      f.localX = itemX; f.localY = itemY; f.localW = itemW; f.localH = itemH;
+    }
+  })
 }
 
 function buildFolderTree(allFiles: Record<string, FileEntry[]>): FolderNode | null {
@@ -117,7 +168,7 @@ function buildFolderTree(allFiles: Record<string, FileEntry[]>): FolderNode | nu
     name: startFolderName,
     fullPath: commonPrefix || null,
     children: new Map<string, any>(),
-    files: [] as FileEntry[],
+    files: [] as NestedFileEntry[],
     realSize: 0,
     depth: 0,
   }
@@ -136,14 +187,14 @@ function buildFolderTree(allFiles: Record<string, FileEntry[]>): FolderNode | nu
       const part   = parts[i]
       const isFile = i === parts.length - 1
       if (isFile) {
-        current.files.push(f)
+        current.files.push(f as NestedFileEntry)
       } else {
         if (!current.children.has(part)) {
           current.children.set(part, {
             name:     part,
             fullPath: (current.fullPath ? current.fullPath + '/' : '') + part,
             children: new Map<string, any>(),
-            files:    [] as FileEntry[],
+            files:    [] as NestedFileEntry[],
             realSize: 0,
             depth:    current.depth + 1,
           })
@@ -159,64 +210,22 @@ function buildFolderTree(allFiles: Record<string, FileEntry[]>): FolderNode | nu
     )
     const ownSize      = node.files.reduce((s: number, f: FileEntry) => s + f.size, 0)
     const childrenSize = childrenArray.reduce((s, c) => s + c.realSize, 0)
-    return {
+    
+    const finalizedNode: FolderNode = {
       name:     node.name,
       fullPath: node.fullPath,
       children: childrenArray.sort((a, b) => b.realSize - a.realSize),
-      files:    node.files.sort((a: FileEntry, b: FileEntry) => b.size - a.size),
+      files:    node.files.sort((a: FileEntry, b: FileEntry) => b.size - a.size).map(f => ({...f, localX:0, localY:0, localW:0, localH:0})),
       realSize: ownSize + childrenSize,
       depth,
-      x: 0, y: 0, w: 0, h: 0
+      localX: 0, localY: 0, localW: 0, localH: 0
     }
+
+    computeLocalLayout(finalizedNode)
+    return finalizedNode
   }
 
-  const tree = finalize(root, 0)
-  // Initial layout: fill the 100x100 space
-  layoutTreemap(tree, 0, 0, 100, 100)
-  return tree
-}
-
-/**
- * Simple recursive slice-and-dice treemap layout
- */
-function layoutTreemap(node: FolderNode, x: number, y: number, w: number, h: number) {
-  node.x = x; node.y = y; node.w = w; node.h = h
-
-  const total = node.realSize
-  if (total === 0 || (node.children.length === 0 && node.files.length === 0)) return
-
-  // Combine children and files for layout partitioning
-  // We treat direct files as if they were items to be placed
-  const items = [
-    ...node.children.map(c => ({ type: 'folder' as const, size: c.realSize, ref: c })),
-    ...node.files.map(f => ({ type: 'file' as const, size: f.size, ref: f }))
-  ].sort((a, b) => b.size - a.size)
-
-  let curX = x, curY = y, curW = w, curH = h
-
-  items.forEach((item, idx) => {
-    const isLast = idx === items.length - 1
-    const ratio = item.size / (items.slice(idx).reduce((acc, i) => acc + i.size, 0))
-    
-    // Alternating split direction based on aspect ratio
-    const splitHorizontally = curW > curH
-
-    if (splitHorizontally) {
-      const itemW = isLast ? curW : curW * ratio
-      if (item.type === 'folder') {
-        layoutTreemap(item.ref as FolderNode, curX, curY, itemW, curH)
-      }
-      curX += itemW
-      curW -= itemW
-    } else {
-      const itemH = isLast ? curH : curH * ratio
-      if (item.type === 'folder') {
-        layoutTreemap(item.ref as FolderNode, curX, curY, curW, itemH)
-      }
-      curY += itemH
-      curH -= itemH
-    }
-  })
+  return finalize(root, 0)
 }
 
 function findNode(tree: FolderNode, path: string | null): FolderNode {
@@ -229,138 +238,155 @@ function findNode(tree: FolderNode, path: string | null): FolderNode {
 }
 
 /* ═══════════════════════════════════════════════════════════════
-   CRYSTAL COMPONENT (FOLDER)
+   NESTED BUBBLE COMPONENT (FILE)
 ═══════════════════════════════════════════════════════════════ */
 
-interface CrystalProps {
-  node: FolderNode
-  hue: number
-  onClick: () => void
-  onHover: (e: React.MouseEvent, node: FolderNode) => void
+interface NestedBubbleProps {
+  file: NestedFileEntry
+  parentHeight: number
+  onFileSelect?: (file: FileEntry) => void
+  onFileHover: (e: React.MouseEvent, file: FileEntry) => void
   onLeave: () => void
 }
 
-function Crystal({ node, hue, onClick, onHover, onLeave }: CrystalProps) {
-  // Height represents depth or importance
-  const height = Math.max(20, 160 - node.depth * 30)
-  const alpha = 0.3 + (1 / (node.depth + 1)) * 0.4
-  
-  const style3d: React.CSSProperties = {
-    position: 'absolute',
-    left: `${node.x}%`,
-    top: `${node.y}%`,
-    width: `${node.w}%`,
-    height: `${node.h}%`,
-    transformStyle: 'preserve-3d',
-    cursor: 'pointer',
-    pointerEvents: 'auto',
-    transition: 'all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275)',
-  }
-
-  return (
-    <div
-      style={style3d}
-      onClick={e => { e.stopPropagation(); onClick() }}
-      onMouseEnter={e => onHover(e, node)}
-      onMouseLeave={onLeave}
-      className="group/crystal"
-    >
-      {/* Top Face */}
-      <div style={{
-        position: 'absolute',
-        inset: 2,
-        transform: `translateZ(${height}px)`,
-        background: `linear-gradient(135deg, hsla(${hue}, 80%, 80%, ${alpha + 0.2}), hsla(${hue}, 70%, 40%, ${alpha}))`,
-        backdropFilter: 'blur(8px)',
-        border: '1px solid rgba(255,255,255,0.4)',
-        boxShadow: `0 0 20px hsla(${hue}, 70%, 50%, 0.3)`,
-        borderRadius: '2px',
-      }} />
-
-      {/* Side Faces (simplified for performance/CSS limits) */}
-      {/* Front */}
-      <div style={{
-        position: 'absolute',
-        bottom: -height,
-        left: 2,
-        right: 2,
-        height: height,
-        transform: 'rotateX(-90deg)',
-        transformOrigin: 'top',
-        background: `linear-gradient(to bottom, hsla(${hue}, 70%, 40%, ${alpha}), hsla(${hue}, 70%, 20%, ${alpha}))`,
-        border: '1px solid rgba(255,255,255,0.1)',
-      }} />
-      
-      {/* Right */}
-      <div style={{
-        position: 'absolute',
-        top: 2,
-        bottom: 2,
-        right: -height,
-        width: height,
-        transform: 'rotateY(90deg)',
-        transformOrigin: 'left',
-        background: `linear-gradient(to right, hsla(${hue}, 70%, 40%, ${alpha}), hsla(${hue}, 70%, 20%, ${alpha}))`,
-        border: '1px solid rgba(255,255,255,0.1)',
-      }} />
-
-      {/* Internal Glow */}
-      <div className="absolute inset-0 opacity-0 group-hover/crystal:opacity-100 transition-opacity duration-500"
-           style={{
-             background: `radial-gradient(circle at center, hsla(${hue}, 100%, 70%, 0.4) 0%, transparent 70%)`,
-             transform: `translateZ(${height/2}px)`
-           }} />
-    </div>
-  )
-}
-
-/* ═══════════════════════════════════════════════════════════════
-   BUBBLE COMPONENT (FILE)
-═══════════════════════════════════════════════════════════════ */
-
-interface BubbleProps {
-  file: FileEntry
-  x: number; y: number; w: number; h: number
-  onClick: () => void
-  onHover: (e: React.MouseEvent, file: FileEntry) => void
-  onLeave: () => void
-}
-
-function Bubble({ file, x, y, w, h, onClick, onHover, onLeave }: BubbleProps) {
+function NestedBubble({ file, parentHeight, onFileSelect, onFileHover, onLeave }: NestedBubbleProps) {
   const ext = ('.' + file.path.split('.').pop()?.toLowerCase()) || '.other'
   const category = CATEGORY_MAP[ext] || 'Other'
   const color = COLORS[category] || COLORS.Other
   
-  // Random-ish altitude and animation delay
-  const altitude = useMemo(() => 40 + Math.random() * 120, [])
+  const size = 16; 
+  const x = file.localX + file.localW / 2;
+  const y = file.localY + file.localH / 2;
+
+  const altitude = useMemo(() => 5 + Math.random() * Math.max(0, parentHeight - size - 10), [parentHeight, size])
   const delay = useMemo(() => -Math.random() * 5, [])
 
   return (
     <div
       style={{
         position: 'absolute',
-        left: `${x + w/2}%`,
-        top: `${y + h/2}%`,
-        width: 12, height: 12,
+        left: `${x}%`, top: `${y}%`,
         transformStyle: 'preserve-3d',
         transform: `translate3d(-50%, -50%, ${altitude}px)`,
         pointerEvents: 'auto',
         cursor: 'pointer',
       }}
-      onClick={e => { e.stopPropagation(); onClick() }}
-      onMouseEnter={e => onHover(e, file)}
-      onMouseLeave={onLeave}
+      onClick={(e) => { e.stopPropagation(); onFileSelect?.(file); }}
+      onMouseEnter={(e) => { e.stopPropagation(); onFileHover(e, file); }}
+      onMouseLeave={(e) => { e.stopPropagation(); onLeave(); }}
     >
       <div 
-        className="w-full h-full rounded-full animate-float"
+        className="rounded-full animate-float-slow"
         style={{
-          background: `radial-gradient(circle at 30% 30%, white 0%, ${color}aa 40%, ${color}44 80%, transparent 100%)`,
-          boxShadow: `0 0 15px ${color}66, inset 0 0 5px white`,
-          backdropFilter: 'blur(2px)',
-          border: '0.5px solid rgba(255,255,255,0.3)',
+          width: size, height: size,
+          background: `radial-gradient(circle at 30% 30%, white 0%, ${color}cc 40%, ${color}66 80%, transparent 100%)`,
+          boxShadow: `0 0 10px ${color}88, inset 0 0 4px white`,
+          border: '1px solid rgba(255,255,255,0.5)',
           animationDelay: `${delay}s`,
         }}
       />
+    </div>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   RECURSIVE ENCOMPASSING CRYSTAL COMPONENT (FOLDER)
+═══════════════════════════════════════════════════════════════ */
+
+interface RecursiveCrystalProps {
+  node: FolderNode
+  depth: number
+  maxDepth: number
+  onFolderClick: (node: FolderNode) => void
+  onFileHover: (e: React.MouseEvent, file: FileEntry) => void
+  onFolderHover: (e: React.MouseEvent, folder: FolderNode) => void
+  onLeave: () => void
+  onFileSelect?: (file: FileEntry) => void
+}
+
+function RecursiveCrystal({ node, depth, maxDepth, onFolderClick, onFileHover, onFolderHover, onLeave, onFileSelect }: RecursiveCrystalProps) {
+  const isViewRoot = depth === 0;
+  
+  const x = isViewRoot ? 0 : node.localX;
+  const y = isViewRoot ? 0 : node.localY;
+  const w = isViewRoot ? 100 : node.localW;
+  const h = isViewRoot ? 100 : node.localH;
+
+  const baseHeight = 160;
+  const height = Math.max(30, baseHeight - depth * 50);
+  const zOffset = isViewRoot ? 0 : 4; // Lift nested crystals slightly off parent's floor
+  
+  const hue = DEPTH_HUES[(node.depth) % DEPTH_HUES.length];
+  const alpha = 0.10 + (depth * 0.05); // Deeper = slightly more opaque
+
+  const glassStyle = {
+    position: 'absolute' as const,
+    border: '1px solid rgba(255,255,255,0.25)',
+    background: `linear-gradient(135deg, hsla(${hue}, 80%, 70%, ${alpha}), hsla(${hue}, 80%, 30%, ${alpha + 0.1}))`,
+    boxShadow: `inset 0 0 15px hsla(${hue}, 80%, 60%, 0.15)`,
+    backdropFilter: depth <= 1 ? 'blur(2px)' : 'none',
+  }
+
+  const wallStyle = { ...glassStyle, pointerEvents: 'none' as const };
+
+  const renderContents = depth < maxDepth;
+  const displayFolders = node.children.slice(0, 40);
+  const displayFiles = node.files.slice(0, 80);
+
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        left: `${x}%`, top: `${y}%`, width: `${w}%`, height: `${h}%`,
+        transformStyle: 'preserve-3d',
+        transform: isViewRoot ? 'none' : `translateZ(${zOffset}px)`,
+        transition: 'all 0.5s ease',
+      }}
+    >
+      <div 
+        className="crystal-volume group absolute"
+        onClick={(e) => { e.stopPropagation(); onFolderClick(node); }}
+        onMouseEnter={(e) => { e.stopPropagation(); onFolderHover(e, node); }}
+        onMouseLeave={(e) => { e.stopPropagation(); onLeave(); }}
+        style={{
+          inset: isViewRoot ? '0%' : '1.5%', // 1.5% padding inside layout cell
+          transformStyle: 'preserve-3d',
+          cursor: 'pointer',
+        }}
+      >
+        {/* Floor (Catches interactions for the entire crystal volume if empty) */}
+        <div style={{ ...glassStyle, inset: 0, transform: 'translateZ(0)', pointerEvents: 'auto' }} />
+        
+        {/* Ceiling (Faint to allow viewing inside) */}
+        <div 
+          style={{ ...wallStyle, inset: 0, transform: `translateZ(${height}px)`, opacity: 0.05 }} 
+          className="group-hover:opacity-30 transition-opacity duration-300"
+        />
+
+        {/* Walls (Pointer events none so they don't block hovering interior elements) */}
+        <div style={{ ...wallStyle, bottom: 0, left: 0, right: 0, height, transformOrigin: 'bottom', transform: 'rotateX(90deg)' }} />
+        <div style={{ ...wallStyle, top: 0, left: 0, right: 0, height, transformOrigin: 'top', transform: 'rotateX(-90deg)' }} />
+        <div style={{ ...wallStyle, top: 0, bottom: 0, left: 0, width: height, transformOrigin: 'left', transform: 'rotateY(90deg)' }} />
+        <div style={{ ...wallStyle, top: 0, bottom: 0, right: 0, width: height, transformOrigin: 'right', transform: 'rotateY(-90deg)' }} />
+
+        {/* Contents Encompassed Within */}
+        {renderContents && (
+          <div style={{ position: 'absolute', inset: 0, transformStyle: 'preserve-3d' }}>
+            {displayFolders.map((c: any) => (
+              <RecursiveCrystal 
+                key={c.name} node={c} depth={depth + 1} maxDepth={maxDepth}
+                onFolderClick={onFolderClick} onFileHover={onFileHover} onFolderHover={onFolderHover} onLeave={onLeave} onFileSelect={onFileSelect}
+              />
+            ))}
+            {displayFiles.map((f: any) => (
+              <NestedBubble 
+                key={f.path} file={f} parentHeight={height}
+                onFileHover={onFileHover} onLeave={onLeave} onFileSelect={onFileSelect}
+              />
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   )
 }
@@ -395,106 +421,50 @@ function IsoMap3DWorld({ rootNode, currentPath, onFolderClick, onFileSelect }: I
 
   const hideTooltip = useCallback(() => setTooltip((t: any) => ({ ...t, visible: false })), [])
 
-  // Flatten the tree for rendering: We want to show the hierarchy
-  // but only crystals that are relevant to the current zoom or context.
-  // For a "Dreamscape" vibe, we'll render the current node's descendants.
   const currentNode = findNode(rootNode, currentPath)
-
-  // Re-layout immediate children for the view
-  const viewLayout = useMemo(() => {
-    const dummy = { 
-        ...currentNode, 
-        x: 0, y: 0, w: 100, h: 100, 
-        children: [...currentNode.children], 
-        files: [...currentNode.files] 
-    }
-    layoutTreemap(dummy as FolderNode, 0, 0, 100, 100)
-    return dummy
-  }, [currentNode])
 
   return (
     <div ref={containerRef} className="relative w-full h-full overflow-hidden bg-[#050510] flex items-center justify-center">
       <style>{`
-        @keyframes float {
-          0%, 100% { transform: translateY(0) scale(1); }
-          50% { transform: translateY(-10px) scale(1.05); }
+        @keyframes float-slow {
+          0%, 100% { transform: translateY(0); }
+          50% { transform: translateY(-8px); }
         }
-        .animate-float {
-          animation: float 4s ease-in-out infinite;
+        .animate-float-slow {
+          animation: float-slow 3s ease-in-out infinite;
         }
       `}</style>
 
       {/* 3D Scene Container */}
       <div style={{
-        width: '70%',
-        height: '70%',
-        perspective: '1200px',
+        width: '100%',
+        height: '100%',
+        perspective: '1500px',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center'
       }}>
+        {/* Isometric Rotator */}
         <div style={{
-          width: '600px',
-          height: '600px',
+          width: '550px',
+          height: '550px',
           position: 'relative',
-          transform: 'rotateX(55deg) rotateZ(-45deg)',
+          transform: 'rotateX(60deg) rotateZ(-45deg)',
           transformStyle: 'preserve-3d',
           transition: 'transform 0.8s cubic-bezier(0.4, 0, 0.2, 1)',
         }}>
-          {/* Floor */}
-          <div className="absolute inset-0 bg-primary/5 border border-primary/20 rounded-lg" style={{ transform: 'translateZ(-1px)' }}>
-             <div className="absolute inset-0" style={{ backgroundImage: 'radial-gradient(circle, rgba(61,21,203,0.1) 1px, transparent 1px)', backgroundSize: '30px 30px' }} />
-          </div>
-
-          {/* Crystals (Folders) */}
-          {viewLayout.children.map((child, i) => (
-            <Crystal
-              key={child.fullPath || child.name}
-              node={child}
-              hue={DEPTH_HUES[i % DEPTH_HUES.length]}
-              onClick={() => onFolderClick(child)}
-              onHover={(e, n) => showTooltip(e, n, true)}
-              onLeave={hideTooltip}
-            />
-          ))}
-
-          {/* Bubbles (Files) */}
-          {(() => {
-              // Redo layout locally to get file positions
-              const items = [
-                ...viewLayout.children.map(c => ({ type: 'folder' as const, size: c.realSize, ref: c })),
-                ...viewLayout.files.map(f => ({ type: 'file' as const, size: f.size, ref: f }))
-              ].sort((a, b) => b.size - a.size)
-
-              let curX = 0, curY = 0, curW = 100, curH = 100
-              return items.map((item, idx) => {
-                const isLast = idx === items.length - 1
-                const ratio = item.size / (items.slice(idx).reduce((acc, i) => acc + i.size, 0))
-                const splitHorizontally = curW > curH
-                
-                const itemX = curX, itemY = curY
-                const itemW = splitHorizontally ? (isLast ? curW : curW * ratio) : curW
-                const itemH = splitHorizontally ? curH : (isLast ? curH : curH * ratio)
-
-                if (splitHorizontally) curX += itemW; else curY += itemH
-                if (splitHorizontally) curW -= itemW; else curH -= itemH
-
-                if (item.type === 'file') {
-                  const f = item.ref as FileEntry
-                  return (
-                    <Bubble
-                      key={f.path}
-                      file={f}
-                      x={itemX} y={itemY} w={itemW} h={itemH}
-                      onClick={() => onFileSelect?.(f)}
-                      onHover={(e, fl) => showTooltip(e, fl, false)}
-                      onLeave={hideTooltip}
-                    />
-                  )
-                }
-                return null
-              })
-          })()}
+          {currentNode && (
+             <RecursiveCrystal 
+               node={currentNode} 
+               depth={0} 
+               maxDepth={2} 
+               onFolderClick={onFolderClick}
+               onFileHover={(e: React.MouseEvent, f: FileEntry) => showTooltip(e, f, false)}
+               onFolderHover={(e: React.MouseEvent, f: FolderNode) => showTooltip(e, f, true)}
+               onLeave={hideTooltip}
+               onFileSelect={onFileSelect}
+             />
+          )}
         </div>
       </div>
 
@@ -643,7 +613,7 @@ export function FileTypeTreemap({
   return (
     <div className="flex-1 flex flex-col min-h-0 gap-4">
       {/* Controls */}
-      <div className="flex items-center justify-between bg-surface-lighter/30 p-3 rounded-2xl border border-white/5 backdrop-blur-sm">
+      <div className="flex items-center justify-between bg-surface-lighter/30 p-3 rounded-2xl border border-white/5 backdrop-blur-sm z-10">
         <div className="flex items-center gap-2">
           <button onClick={handleBack} disabled={navPath.length <= 1} 
                   className="p-2 hover:bg-primary/20 rounded-xl disabled:opacity-20 transition-colors">

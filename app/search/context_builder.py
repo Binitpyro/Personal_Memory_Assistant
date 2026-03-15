@@ -1,6 +1,15 @@
+import re
 from typing import List, Dict, Any, Optional, Set
 from pathlib import Path
 from app.config import settings
+
+def _compress_text(text: str) -> str:
+    """Normalize whitespace and remove excessive newlines to save tokens."""
+    # Replace 3+ newlines with 2
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    # Replace multiple spaces with single space
+    text = re.sub(r' +', ' ', text)
+    return text.strip()
 
 def _format_file_stats(stats: Dict[str, Any]) -> str:
     """Format aggregate file statistics into a readable preamble for the LLM."""
@@ -67,6 +76,7 @@ def build_context(
     max_tokens: int = 0,
     file_stats: Optional[Dict[str, Any]] = None,
     folder_profiles_text: str = "",
+    metadata_insights: Optional[str] = None,
 ) -> str:
     """Formats retrieved snippets into a single context string for the LLM.
 
@@ -76,7 +86,7 @@ def build_context(
       doesn't monopolise the context window.
     - Prioritises high-scoring snippets first.
     """
-    if not retrieved_results and not file_stats and not folder_profiles_text:
+    if not retrieved_results and not file_stats and not folder_profiles_text and not metadata_insights:
         return "No relevant context found."
 
     if max_tokens <= 0:
@@ -85,24 +95,28 @@ def build_context(
     context_parts = []
     total_len = 0
     max_chars = max_tokens * 4  # ~4 chars per token heuristic
-    max_snippet_chars = max_chars // max(len(retrieved_results), 1)  # Fair share per snippet
-    max_snippet_chars = max(max_snippet_chars, min(600, max_chars))  # At least 600 chars but never exceed budget
 
-    # Prepend folder profiles when available (project-level understanding)
+    # ── 1. Metadata Insights (Highest Priority Factual Data) ─────
+    if metadata_insights:
+        context_parts.append(metadata_insights)
+        total_len += len(metadata_insights)
+
+    # ── 2. Folder Profiles (Project-level context) ──────────────
     if folder_profiles_text:
         context_parts.append(folder_profiles_text)
         total_len += len(folder_profiles_text)
 
-    # Prepend file statistics when available
+    # ── 3. File Statistics (Aggregate Data) ────────────────────
     if file_stats:
         stats_block = _format_file_stats(file_stats)
         context_parts.append(stats_block)
         total_len += len(stats_block)
 
+    # ── 4. Semantic Snippets (Chunk-level data) ────────────────
     # Deduplicate: max 2 snippets from the same file for diversity
     deduplicated = _deduplicate_by_file(retrieved_results)
 
-    # Phase 4.1: Drop snippets scoring < 20% of the top score (noise reduction)
+    # Drop snippets scoring < 20% of the top score (noise reduction)
     if deduplicated:
         top_score = deduplicated[0].get("score", 1.0)
         if top_score > 0:
@@ -112,4 +126,5 @@ def build_context(
     snippet_parts = _format_snippets(deduplicated, max_chars, total_len)
     context_parts.extend(snippet_parts)
             
-    return "\n".join(context_parts)
+    final_context = "\n".join(context_parts)
+    return _compress_text(final_context)

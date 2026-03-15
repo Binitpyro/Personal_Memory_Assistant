@@ -1,23 +1,15 @@
-// FileTypeTreemap.tsx
-// ─────────────────────────────────────────────────────────────────
-//  BY FOLDERS  →  3D Isometric Dreamscape: Encompassing Crystals + Bubbles
-//  BY FILE TYPE → ECharts Treemap (unchanged)
-// ─────────────────────────────────────────────────────────────────
-
-import { useMemo, useRef, useState, useEffect, useCallback } from 'react'
-import { ChevronLeft, Home, Layers, Sparkles } from 'lucide-react'
+import { useMemo, useCallback, useRef, useState, useEffect } from 'react'
+import { ChevronLeft, Home, File, Folder, Layers, Trash2 } from 'lucide-react'
 import ReactEChartsCore from 'echarts-for-react/lib/core'
 import * as echarts from 'echarts/core'
 import { TreemapChart as EChartsTreemap } from 'echarts/charts'
 import { TooltipComponent, VisualMapComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
-import type { FileEntry } from '../api'
+import { type FileEntry } from '../api'
 
 echarts.use([EChartsTreemap, TooltipComponent, VisualMapComponent, CanvasRenderer])
 
-/* ═══════════════════════════════════════════════════════════════
-   CONSTANTS & PURE HELPERS
-═══════════════════════════════════════════════════════════════ */
+/* ── Constants & Helpers ─────────────────────────────────── */
 
 const CATEGORY_MAP: Record<string, string> = {
   '.py': 'Code', '.js': 'Code', '.ts': 'Code', '.tsx': 'Code', '.jsx': 'Code',
@@ -38,634 +30,478 @@ const CATEGORY_MAP: Record<string, string> = {
 }
 
 const COLORS: Record<string, string> = {
-  Code:          '#3572A5',
-  Web:           '#e34c26',
-  Documents:     '#e11d48',
-  Data:          '#a4c639',
-  Unreal:        '#007fff',
-  Images:        '#a36ad5',
-  Media:         '#1db954',
-  Presentations: '#d24726',
-  Archives:      '#f59e0b',
-  Executables:   '#9333ea',
-  Other:         '#6b7280',
+  Code: '#3572A5', Web: '#e34c26', Documents: '#e11d48', Data: '#a4c639',
+  Unreal: '#007fff', Images: '#a36ad5', Media: '#1db954', Presentations: '#d24726',
+  Archives: '#f59e0b', Executables: '#9333ea', Other: '#6b7280',
 }
 
-const DEPTH_HUES = [260, 200, 310, 170, 40, 280, 150, 340]
-
 function formatBytes(bytes: number): string {
-  if (bytes < 1024)                  return `${bytes} B`
-  if (bytes < 1024 * 1024)           return `${(bytes / 1024).toFixed(1)} KB`
-  if (bytes < 1024 * 1024 * 1024)    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
 }
 
 function lightenColor(hex: string, amount: number): string {
   const c = hex.replace('#', '')
   if (c.length !== 6) return hex
-  const r = parseInt(c.substring(0, 2), 16)
-  const g = parseInt(c.substring(2, 4), 16)
-  const b = parseInt(c.substring(4, 6), 16)
-  return `#${[r, g, b]
-    .map(v => Math.min(255, Math.round(v + (255 - v) * amount)).toString(16).padStart(2, '0'))
-    .join('')}`
+  const r = Number.parseInt(c.substring(0, 2), 16)
+  const g = Number.parseInt(c.substring(2, 4), 16)
+  const b = Number.parseInt(c.substring(4, 6), 16)
+  const lr = Math.min(255, Math.round(r + (255 - r) * amount))
+  const lg = Math.min(255, Math.round(g + (255 - g) * amount))
+  const lb = Math.min(255, Math.round(b + (255 - b) * amount))
+  return `#${lr.toString(16).padStart(2, '0')}${lg.toString(16).padStart(2, '0')}${lb.toString(16).padStart(2, '0')}`
 }
 
 function normalizePath(p: string): string {
-  return p.replace(/\\/g, '/').replace(/\/+$/, '')
+  let norm = p.replaceAll('\\', '/');
+  while (norm.endsWith('/')) { norm = norm.slice(0, -1); }
+  return norm;
 }
 
 function findCommonPrefix(paths: string[]): string {
-  if (paths.length === 0) return ''
-  const sorted = [...paths].sort()
-  const first = sorted[0].split('/')
-  const last  = sorted[sorted.length - 1].split('/')
-  let i = 0
-  while (i < first.length && i < last.length && first[i] === last[i]) i++
-  return first.slice(0, i).join('/')
+  if (paths.length === 0) return '';
+  const sorted = [...paths].sort((a, b) => a.localeCompare(b));
+  const first = sorted[0].split('/');
+  const last = (sorted.at(-1) || '').split('/');
+  let i = 0;
+  while (i < first.length && i < last.length && first[i] === last[i]) {
+    i++;
+  }
+  return first.slice(0, i).join('/');
 }
 
-/* ═══════════════════════════════════════════════════════════════
-   FOLDER TREE MODEL & LOCAL TREEMAP LAYOUT
-═══════════════════════════════════════════════════════════════ */
-
-export interface NestedFileEntry extends FileEntry {
-  localX: number
-  localY: number
-  localW: number
-  localH: number
+export interface FileTypeTreemapProps {
+  readonly allFiles: Record<string, FileEntry[]>
+  readonly activeFilter?: string | null
+  readonly onFilterChange?: (ext: string | null) => void
+  readonly onFileSelect?: (file: FileEntry) => void
+  readonly onDeleteFolder?: (path: string) => void
+  readonly initialMode?: 'folder' | 'type'
 }
 
-interface FolderNode {
-  name:     string
+interface NavSegment {
+  name: string
   fullPath: string | null
-  realSize: number
-  depth:    number
-  children: FolderNode[]
-  files:    NestedFileEntry[]
-  // Layout bounds (0-100 normalized relative to parent)
-  localX: number
-  localY: number
-  localW: number
-  localH: number
 }
 
-function computeLocalLayout(node: FolderNode) {
-  // Limit nodes to avoid extreme DOM overload when rendering
-  const MAX_CHILDREN = 40;
-  const MAX_FILES = 80;
-
-  const displayFolders = node.children.slice(0, MAX_CHILDREN);
-  const displayFiles = node.files.slice(0, MAX_FILES);
-
-  const items = [
-    ...displayFolders.map(c => ({ type: 'folder' as const, size: c.realSize, ref: c })),
-    ...displayFiles.map(f => ({ type: 'file' as const, size: f.size, ref: f }))
-  ].sort((a, b) => b.size - a.size)
-
-  let curX = 0, curY = 0, curW = 100, curH = 100
-
-  items.forEach((item, idx) => {
-    const isLast = idx === items.length - 1
-    const remainingSize = items.slice(idx).reduce((acc, i) => acc + i.size, 0)
-    const ratio = remainingSize === 0 ? 0 : item.size / remainingSize
-    
-    const splitHorizontally = curW > curH
-
-    let itemX = curX, itemY = curY, itemW = curW, itemH = curH
-
-    if (splitHorizontally) {
-      itemW = isLast ? curW : curW * ratio
-      curX += itemW
-      curW -= itemW
-    } else {
-      itemH = isLast ? curH : curH * ratio
-      curY += itemH
-      curH -= itemH
-    }
-
-    if (item.type === 'folder') {
-      const f = item.ref as FolderNode
-      f.localX = itemX; f.localY = itemY; f.localW = itemW; f.localH = itemH;
-    } else {
-      const f = item.ref as NestedFileEntry
-      f.localX = itemX; f.localY = itemY; f.localW = itemW; f.localH = itemH;
-    }
-  })
-}
-
-function buildFolderTree(allFiles: Record<string, FileEntry[]>): FolderNode | null {
-  const flatFiles = Object.values(allFiles).flat()
-  if (flatFiles.length === 0) return null
-
-  const normalizedPaths = flatFiles.map(f => normalizePath(f.path))
-  const commonPrefix    = findCommonPrefix(normalizedPaths)
-  const prefixParts     = commonPrefix.split('/').filter(Boolean)
-  const startFolderName = prefixParts[prefixParts.length - 1] || 'Root'
-  const stripPath       = prefixParts.slice(0, -1).join('/')
-
-  const root: any = {
-    name: startFolderName,
-    fullPath: commonPrefix || null,
-    children: new Map<string, any>(),
-    files: [] as NestedFileEntry[],
-    realSize: 0,
-    depth: 0,
+function buildTypeTree(flatFiles: FileEntry[], getVal: (s: number) => number) {
+  const structure = new Map<string, Map<string, FileEntry[]>>()
+  for (const f of flatFiles) {
+    const ext = ('.' + f.path.split('.').pop()?.toLowerCase()) || '.other'
+    const category = CATEGORY_MAP[ext] || 'Other'
+    if (!structure.has(category)) structure.set(category, new Map())
+    const catMap = structure.get(category)!
+    if (!catMap.has(ext)) catMap.set(ext, [])
+    catMap.get(ext)!.push(f)
   }
 
-  for (const f of flatFiles) {
-    const fullPath = normalizePath(f.path)
-    let relative = fullPath
-    if (stripPath && fullPath.startsWith(stripPath)) {
-      relative = fullPath.slice(stripPath.length).replace(/^\/+/, '')
+  return Array.from(structure.entries()).map(([category, extMap]) => {
+    const baseColor = COLORS[category] || COLORS.Other
+    const children = Array.from(extMap.entries()).map(([ext, files], i) => {
+      const shade = i === 0 ? baseColor : lightenColor(baseColor, Math.min(0.4, 0.05 * i))
+      const fileNodes = [...files].sort((a: FileEntry, b: FileEntry) => b.size - a.size).map((f: FileEntry) => ({
+        name: f.path.split(/[\\/]/).pop() || f.path,
+        value: getVal(f.size),
+        realSize: f.size,
+        fileData: f,
+        itemStyle: { color: shade }
+      }))
+      return {
+        name: ext,
+        value: fileNodes.reduce((s: number, c: any) => s + c.value, 0),
+        realSize: files.reduce((s: number, f: FileEntry) => s + f.size, 0),
+        children: fileNodes,
+        itemStyle: { color: shade }
+      }
+    })
+    return {
+      name: category,
+      value: children.reduce((s: number, c: any) => s + c.value, 0),
+      realSize: children.reduce((s: number, c: any) => s + c.realSize, 0),
+      children,
+      itemStyle: { color: baseColor }
     }
-    const parts    = relative.split('/').filter(Boolean)
-    let current    = root
-    const startIdx = parts[0] === startFolderName ? 1 : 0
+  }).sort((a: any, b: any) => b.realSize - a.realSize)
+}
+
+function finalizeTree(node: any): any {
+  if (node.fileData) return node;
+  const childArray = Array.from(node.children.values()).map(finalizeTree);
+  return {
+    ...node,
+    children: childArray,
+    value: childArray.reduce((s: number, c: any) => s + c.value, 0),
+    realSize: childArray.reduce((s: number, c: any) => s + (c.realSize || 0), 0)
+  };
+}
+
+function collapseFolderChains(node: any): any {
+  if (!node.children || !Array.isArray(node.children) || node.children.length === 0) return node;
+  node.children = node.children.map(collapseFolderChains);
+  while (
+    node.children.length === 1 &&
+    node.children[0].children &&
+    Array.isArray(node.children[0].children) &&
+    node.children[0].children.length > 0
+  ) {
+    const only = node.children[0];
+    node.name = `${node.name} / ${only.name}`;
+    node.fullPath = only.fullPath || node.fullPath;
+    node.children = only.children;
+    node.realSize = only.realSize;
+    node.value = only.value;
+  }
+  return node;
+}
+
+function buildFolderTree(flatFiles: FileEntry[], getVal: (s: number) => number) {
+  const normalizedPaths = flatFiles.map(f => normalizePath(f.path));
+  const commonPrefix = findCommonPrefix(normalizedPaths);
+  const prefixParts = commonPrefix.split('/').filter(Boolean);
+  const startFolderName = prefixParts.at(-1) || 'Root';
+  const stripPath = prefixParts.slice(0, -1).join('/');
+
+  const rootNode: any = {
+    name: startFolderName,
+    fullPath: commonPrefix,
+    children: new Map(),
+    realSize: 0,
+    value: 0,
+    itemStyle: { color: '#1e1a3a' }
+  };
+
+  for (const f of flatFiles) {
+    const fullPath = normalizePath(f.path);
+    let relative = fullPath;
+    if (stripPath && fullPath.startsWith(stripPath)) {
+      relative = fullPath.slice(stripPath.length).replace(/^\/+/, '');
+    }
+
+    const parts = relative.split('/').filter(Boolean);
+    let current = rootNode;
+    const startIdx = parts[0] === startFolderName ? 1 : 0;
 
     for (let i = startIdx; i < parts.length; i++) {
-      const part   = parts[i]
-      const isFile = i === parts.length - 1
+      const part = parts[i];
+      const isFile = (i === parts.length - 1);
       if (isFile) {
-        current.files.push(f as NestedFileEntry)
+        const ext = ('.' + part.split('.').pop()?.toLowerCase()) || '.other';
+        const category = CATEGORY_MAP[ext] || 'Other';
+        current.children.set(part, {
+          name: part,
+          value: getVal(f.size),
+          realSize: f.size,
+          fileData: f,
+          itemStyle: { color: COLORS[category] || COLORS.Other }
+        });
       } else {
         if (!current.children.has(part)) {
           current.children.set(part, {
-            name:     part,
-            fullPath: (current.fullPath ? current.fullPath + '/' : '') + part,
-            children: new Map<string, any>(),
-            files:    [] as NestedFileEntry[],
+            name: part,
+            children: new Map(),
+            fullPath: current.fullPath + '/' + part,
             realSize: 0,
-            depth:    current.depth + 1,
-          })
+            value: 0,
+            itemStyle: { color: '#1e1a3a' }
+          });
         }
-        current = current.children.get(part)
+        current = current.children.get(part);
       }
     }
   }
 
-  const finalize = (node: any, depth: number): FolderNode => {
-    const childrenArray: FolderNode[] = Array.from(node.children.values()).map((c: any) =>
-      finalize(c, depth + 1)
-    )
-    const ownSize      = node.files.reduce((s: number, f: FileEntry) => s + f.size, 0)
-    const childrenSize = childrenArray.reduce((s, c) => s + c.realSize, 0)
-    
-    const finalizedNode: FolderNode = {
-      name:     node.name,
-      fullPath: node.fullPath,
-      children: childrenArray.sort((a, b) => b.realSize - a.realSize),
-      files:    node.files.sort((a: FileEntry, b: FileEntry) => b.size - a.size).map(f => ({...f, localX:0, localY:0, localW:0, localH:0})),
-      realSize: ownSize + childrenSize,
-      depth,
-      localX: 0, localY: 0, localW: 0, localH: 0
-    }
-
-    computeLocalLayout(finalizedNode)
-    return finalizedNode
-  }
-
-  return finalize(root, 0)
+  const finalizedTree = finalizeTree(rootNode);
+  return collapseFolderChains(finalizedTree);
 }
 
-function findNode(tree: FolderNode, path: string | null): FolderNode {
-  if (!path || tree.fullPath === path) return tree
-  for (const child of tree.children) {
-    const found = findNode(child, path)
-    if (found.fullPath === path) return found
-  }
-  return tree
-}
-
-/* ═══════════════════════════════════════════════════════════════
-   NESTED BUBBLE COMPONENT (FILE)
-═══════════════════════════════════════════════════════════════ */
-
-interface NestedBubbleProps {
-  file: NestedFileEntry
-  parentHeight: number
-  onFileSelect?: (file: FileEntry) => void
-  onFileHover: (e: React.MouseEvent, file: FileEntry) => void
-  onLeave: () => void
-}
-
-function NestedBubble({ file, parentHeight, onFileSelect, onFileHover, onLeave }: NestedBubbleProps) {
-  const ext = ('.' + file.path.split('.').pop()?.toLowerCase()) || '.other'
-  const category = CATEGORY_MAP[ext] || 'Other'
-  const color = COLORS[category] || COLORS.Other
-  
-  const size = 16; 
-  const x = file.localX + file.localW / 2;
-  const y = file.localY + file.localH / 2;
-
-  const altitude = useMemo(() => 5 + Math.random() * Math.max(0, parentHeight - size - 10), [parentHeight, size])
-  const delay = useMemo(() => -Math.random() * 5, [])
-
-  return (
-    <div
-      style={{
-        position: 'absolute',
-        left: `${x}%`, top: `${y}%`,
-        transformStyle: 'preserve-3d',
-        transform: `translate3d(-50%, -50%, ${altitude}px)`,
-        pointerEvents: 'auto',
-        cursor: 'pointer',
-      }}
-      onClick={(e) => { e.stopPropagation(); onFileSelect?.(file); }}
-      onMouseEnter={(e) => { e.stopPropagation(); onFileHover(e, file); }}
-      onMouseLeave={(e) => { e.stopPropagation(); onLeave(); }}
-    >
-      <div 
-        className="rounded-full animate-float-slow"
-        style={{
-          width: size, height: size,
-          background: `radial-gradient(circle at 30% 30%, white 0%, ${color}cc 40%, ${color}66 80%, transparent 100%)`,
-          boxShadow: `0 0 10px ${color}88, inset 0 0 4px white`,
-          border: '1px solid rgba(255,255,255,0.5)',
-          animationDelay: `${delay}s`,
-        }}
-      />
-    </div>
-  )
-}
-
-/* ═══════════════════════════════════════════════════════════════
-   RECURSIVE ENCOMPASSING CRYSTAL COMPONENT (FOLDER)
-═══════════════════════════════════════════════════════════════ */
-
-interface RecursiveCrystalProps {
-  node: FolderNode
-  depth: number
-  maxDepth: number
-  onFolderClick: (node: FolderNode) => void
-  onFileHover: (e: React.MouseEvent, file: FileEntry) => void
-  onFolderHover: (e: React.MouseEvent, folder: FolderNode) => void
-  onLeave: () => void
-  onFileSelect?: (file: FileEntry) => void
-}
-
-function RecursiveCrystal({ node, depth, maxDepth, onFolderClick, onFileHover, onFolderHover, onLeave, onFileSelect }: RecursiveCrystalProps) {
-  const isViewRoot = depth === 0;
-  
-  const x = isViewRoot ? 0 : node.localX;
-  const y = isViewRoot ? 0 : node.localY;
-  const w = isViewRoot ? 100 : node.localW;
-  const h = isViewRoot ? 100 : node.localH;
-
-  const baseHeight = 160;
-  const height = Math.max(30, baseHeight - depth * 50);
-  const zOffset = isViewRoot ? 0 : 4; // Lift nested crystals slightly off parent's floor
-  
-  const hue = DEPTH_HUES[(node.depth) % DEPTH_HUES.length];
-  const alpha = 0.10 + (depth * 0.05); // Deeper = slightly more opaque
-
-  const glassStyle = {
-    position: 'absolute' as const,
-    border: '1px solid rgba(255,255,255,0.25)',
-    background: `linear-gradient(135deg, hsla(${hue}, 80%, 70%, ${alpha}), hsla(${hue}, 80%, 30%, ${alpha + 0.1}))`,
-    boxShadow: `inset 0 0 15px hsla(${hue}, 80%, 60%, 0.15)`,
-    backdropFilter: depth <= 1 ? 'blur(2px)' : 'none',
-  }
-
-  const wallStyle = { ...glassStyle, pointerEvents: 'none' as const };
-
-  const renderContents = depth < maxDepth;
-  const displayFolders = node.children.slice(0, 40);
-  const displayFiles = node.files.slice(0, 80);
-
-  return (
-    <div
-      style={{
-        position: 'absolute',
-        left: `${x}%`, top: `${y}%`, width: `${w}%`, height: `${h}%`,
-        transformStyle: 'preserve-3d',
-        transform: isViewRoot ? 'none' : `translateZ(${zOffset}px)`,
-        transition: 'all 0.5s ease',
-      }}
-    >
-      <div 
-        className="crystal-volume group absolute"
-        onClick={(e) => { e.stopPropagation(); onFolderClick(node); }}
-        onMouseEnter={(e) => { e.stopPropagation(); onFolderHover(e, node); }}
-        onMouseLeave={(e) => { e.stopPropagation(); onLeave(); }}
-        style={{
-          inset: isViewRoot ? '0%' : '1.5%', // 1.5% padding inside layout cell
-          transformStyle: 'preserve-3d',
-          cursor: 'pointer',
-        }}
-      >
-        {/* Floor (Catches interactions for the entire crystal volume if empty) */}
-        <div style={{ ...glassStyle, inset: 0, transform: 'translateZ(0)', pointerEvents: 'auto' }} />
-        
-        {/* Ceiling (Faint to allow viewing inside) */}
-        <div 
-          style={{ ...wallStyle, inset: 0, transform: `translateZ(${height}px)`, opacity: 0.05 }} 
-          className="group-hover:opacity-30 transition-opacity duration-300"
-        />
-
-        {/* Walls (Pointer events none so they don't block hovering interior elements) */}
-        <div style={{ ...wallStyle, bottom: 0, left: 0, right: 0, height, transformOrigin: 'bottom', transform: 'rotateX(90deg)' }} />
-        <div style={{ ...wallStyle, top: 0, left: 0, right: 0, height, transformOrigin: 'top', transform: 'rotateX(-90deg)' }} />
-        <div style={{ ...wallStyle, top: 0, bottom: 0, left: 0, width: height, transformOrigin: 'left', transform: 'rotateY(90deg)' }} />
-        <div style={{ ...wallStyle, top: 0, bottom: 0, right: 0, width: height, transformOrigin: 'right', transform: 'rotateY(-90deg)' }} />
-
-        {/* Contents Encompassed Within */}
-        {renderContents && (
-          <div style={{ position: 'absolute', inset: 0, transformStyle: 'preserve-3d' }}>
-            {displayFolders.map((c: any) => (
-              <RecursiveCrystal 
-                key={c.name} node={c} depth={depth + 1} maxDepth={maxDepth}
-                onFolderClick={onFolderClick} onFileHover={onFileHover} onFolderHover={onFolderHover} onLeave={onLeave} onFileSelect={onFileSelect}
-              />
-            ))}
-            {displayFiles.map((f: any) => (
-              <NestedBubble 
-                key={f.path} file={f} parentHeight={height}
-                onFileHover={onFileHover} onLeave={onLeave} onFileSelect={onFileSelect}
-              />
-            ))}
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}
-
-/* ═══════════════════════════════════════════════════════════════
-   ISO MAP 3D WORLD
-═══════════════════════════════════════════════════════════════ */
-
-interface IsoMap3DWorldProps {
-  rootNode: FolderNode
-  currentPath: string | null
-  onFolderClick: (node: FolderNode) => void
-  onFileSelect?: (file: FileEntry) => void
-}
-
-function IsoMap3DWorld({ rootNode, currentPath, onFolderClick, onFileSelect }: IsoMap3DWorldProps) {
-  const [tooltip, setTooltip] = useState<any>({ visible: false, x: 0, y: 0, name: '', size: 0, isFolder: false })
-  const containerRef = useRef<HTMLDivElement>(null)
-
-  const showTooltip = useCallback((e: React.MouseEvent, item: any, isFolder: boolean) => {
-    const rect = containerRef.current?.getBoundingClientRect()
-    if (!rect) return
-    setTooltip({
-      visible: true,
-      x: e.clientX - rect.left + 15,
-      y: e.clientY - rect.top - 15,
-      name: isFolder ? item.name : item.path.split(/[/\\]/).pop(),
-      size: isFolder ? item.realSize : item.size,
-      isFolder
-    })
-  }, [])
-
-  const hideTooltip = useCallback(() => setTooltip((t: any) => ({ ...t, visible: false })), [])
-
-  const currentNode = findNode(rootNode, currentPath)
-
-  return (
-    <div ref={containerRef} className="relative w-full h-full overflow-hidden bg-[#050510] flex items-center justify-center">
-      <style>{`
-        @keyframes float-slow {
-          0%, 100% { transform: translateY(0); }
-          50% { transform: translateY(-8px); }
-        }
-        .animate-float-slow {
-          animation: float-slow 3s ease-in-out infinite;
-        }
-      `}</style>
-
-      {/* 3D Scene Container */}
-      <div style={{
-        width: '100%',
-        height: '100%',
-        perspective: '1500px',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center'
-      }}>
-        {/* Isometric Rotator */}
-        <div style={{
-          width: '550px',
-          height: '550px',
-          position: 'relative',
-          transform: 'rotateX(60deg) rotateZ(-45deg)',
-          transformStyle: 'preserve-3d',
-          transition: 'transform 0.8s cubic-bezier(0.4, 0, 0.2, 1)',
-        }}>
-          {currentNode && (
-             <RecursiveCrystal 
-               node={currentNode} 
-               depth={0} 
-               maxDepth={2} 
-               onFolderClick={onFolderClick}
-               onFileHover={(e: React.MouseEvent, f: FileEntry) => showTooltip(e, f, false)}
-               onFolderHover={(e: React.MouseEvent, f: FolderNode) => showTooltip(e, f, true)}
-               onLeave={hideTooltip}
-               onFileSelect={onFileSelect}
-             />
-          )}
-        </div>
-      </div>
-
-      {/* Tooltip */}
-      {tooltip.visible && (
-        <div className="absolute z-[100] pointer-events-none bg-surface-dark/95 border border-primary/30 p-2 rounded-lg shadow-2xl backdrop-blur-md"
-             style={{ left: tooltip.x, top: tooltip.y }}>
-          <div className="text-xs font-bold text-primary-light">{tooltip.isFolder ? 'FOLDER' : 'FILE'}</div>
-          <div className="text-sm text-text-primary truncate max-w-[200px]">{tooltip.name}</div>
-          <div className="text-xs text-text-secondary">{formatBytes(tooltip.size)}</div>
-        </div>
-      )}
-
-      {/* Path Indicator */}
-      <div className="absolute top-4 left-4 text-[10px] font-mono text-primary/40 uppercase tracking-widest">
-        DREAMSCAPE // {currentPath || 'ROOT'}
-      </div>
-    </div>
-  )
-}
-
-/* ═══════════════════════════════════════════════════════════════
-   MAIN EXPORTED COMPONENT
-═══════════════════════════════════════════════════════════════ */
-
-export interface FileTypeTreemapProps {
-  allFiles:        Record<string, FileEntry[]>
-  activeFilter?:   string | null
-  onFilterChange?: (ext: string | null) => void
-  onFileSelect?:   (file: FileEntry) => void
-  onDeleteFolder?: (path: string) => void
-  initialMode?:    'folder' | 'type'
-}
-
-export function FileTypeTreemap({
-  allFiles,
-  activeFilter,
-  onFilterChange,
-  onFileSelect,
-  initialMode = 'folder',
-}: FileTypeTreemapProps) {
+export function FileTypeTreemap({ allFiles, activeFilter, onFilterChange, onFileSelect, onDeleteFolder, initialMode = 'folder' }: FileTypeTreemapProps) {
   const chartRef = useRef<ReactEChartsCore>(null)
   const [groupMode, setGroupMode] = useState<'folder' | 'type'>(initialMode)
 
-  const folderTree = useMemo(() => buildFolderTree(allFiles), [allFiles])
-  const rootLabel = folderTree?.name || 'Root'
+  // Dynamic Root Label
+  const rootLabel = useMemo(() => {
+    if (groupMode === 'type') return 'File Types'
+    const paths = Object.values(allFiles).flat().map(f => normalizePath(f.path))
+    if (paths.length === 0) return 'Root'
+    const prefix = findCommonPrefix(paths)
+    return prefix.split('/').pop() || 'Root'
+  }, [allFiles, groupMode])
 
-  const [navPath, setNavPath] = useState<{name: string, fullPath: string | null}[]>([
-    { name: rootLabel, fullPath: folderTree?.fullPath ?? null }
-  ])
+  const [navPath, setNavPath] = useState<NavSegment[]>([{ name: rootLabel, fullPath: null }])
 
-  useEffect(() => {
-    if (folderTree) {
-      setNavPath([{ name: folderTree.name, fullPath: folderTree.fullPath }])
-    }
-  }, [folderTree])
-
-  const currentFolderPath = navPath[navPath.length - 1]?.fullPath ?? null
-
-  // ── ECharts type-mode data ───────────────────────────────────
-  const { typeTreeData } = useMemo(() => {
+  /* ── Build Data Logic ──────────────────────────────────── */
+  const { treeData, totalSize } = useMemo(() => {
     const flatFiles = Object.values(allFiles).flat()
-    const getVal    = (s: number) => Math.sqrt(s + 1) * 10
+    const total = flatFiles.reduce((s, f) => s + f.size, 0)
 
-    const structure = new Map<string, Map<string, FileEntry[]>>()
-    for (const f of flatFiles) {
-      const ext      = ('.' + f.path.split('.').pop()?.toLowerCase()) || '.other'
-      const category = CATEGORY_MAP[ext] || 'Other'
-      if (!structure.has(category)) structure.set(category, new Map())
-      const catMap = structure.get(category)!
-      if (!catMap.has(ext)) catMap.set(ext, [])
-      catMap.get(ext)!.push(f)
+    // Square root scale: better than pow(0.2) for relative impact, 
+    // better than linear for seeing small files.
+    const getVal = (s: number) => Math.sqrt(s + 1) * 10
+
+    if (groupMode === 'type') {
+      return { treeData: buildTypeTree(flatFiles, getVal), totalSize: total }
+    } else {
+      return { treeData: [buildFolderTree(flatFiles, getVal)], totalSize: total }
     }
+  }, [allFiles, groupMode])
 
-    const nodes: any[] = Array.from(structure.entries())
-      .map(([category, extMap]) => {
-        const baseColor = COLORS[category] || COLORS.Other
-        const children  = Array.from(extMap.entries()).map(([ext, files], i) => {
-          const shade     = i === 0 ? baseColor : lightenColor(baseColor, Math.min(0.4, 0.05 * i))
-          const fileNodes = files.sort((a, b) => b.size - a.size).map(f => ({
-            name:      f.path.split(/[/\\]/).pop() || f.path,
-            value:     getVal(f.size),
-            realSize:  f.size,
-            fileData:  f,
-            itemStyle: { color: shade },
-          }))
-          return {
-            name:      ext,
-            value:     fileNodes.reduce((s, c) => s + c.value, 0),
-            realSize:  files.reduce((s, f) => s + f.size, 0),
-            children:  fileNodes,
-            itemStyle: { color: shade },
-          }
-        })
-        return {
-          name:      category,
-          value:     children.reduce((s, c) => s + c.value, 0),
-          realSize:  children.reduce((s, c) => s + c.realSize, 0),
-          children,
-          itemStyle: { color: baseColor },
-        }
-      })
-      .sort((a, b) => b.realSize - a.realSize)
+  /* ── Navigation ────────────────────────────────────────── */
+  const handleHome = useCallback(() => {
+    const instance = chartRef.current?.getEchartsInstance()
+    if (instance) {
+      instance.dispatchAction({ type: 'treemapRootToNode', targetNode: null })
+      setNavPath([{ name: rootLabel, fullPath: null }])
+    }
+  }, [rootLabel])
 
-    return { typeTreeData: nodes }
-  }, [allFiles])
+  const handleBack = useCallback(() => {
+    const instance = chartRef.current?.getEchartsInstance()
+    if (!instance) return
+    try {
+      const series = (instance as any).getModel().getSeriesByIndex(0)
+      const currentRoot = series.getViewRoot()
+      if (currentRoot?.parent) {
+        instance.dispatchAction({ type: 'treemapRootToNode', targetNode: currentRoot.parent })
+        setNavPath(prev => prev.length > 1 ? prev.slice(0, -1) : [{ name: rootLabel, fullPath: null }])
+      } else handleHome()
+    } catch { handleHome() }
+  }, [handleHome, rootLabel])
 
-  // ── Handlers ────────────────────────────────────────────────
+  const handleBreadcrumbClick = useCallback((index: number) => {
+    const instance = chartRef.current?.getEchartsInstance()
+    if (!instance) return
+    if (index === 0) { handleHome(); return }
+    const targetName = navPath[index].name
+    instance.dispatchAction({ type: 'treemapRootToNode', targetNode: targetName })
+    setNavPath(prev => prev.slice(0, index + 1))
+  }, [navPath, handleHome])
 
-  const handleBack = () => setNavPath(p => p.length > 1 ? p.slice(0, -1) : p)
-  const handleHome = () => setNavPath([navPath[0]])
-  const handleFolderClick = (node: FolderNode) => setNavPath([...navPath, { name: node.name, fullPath: node.fullPath }])
+  const handleDeleteCurrent = useCallback(() => {
+    if (!onDeleteFolder || navPath.length <= 1) return
+    const current = navPath.at(-1)!
+    if (current.fullPath && confirm(`Remove index for all files in "${current.name}"?\n\nPath: ${current.fullPath}`)) {
+      onDeleteFolder(current.fullPath)
+    }
+  }, [onDeleteFolder, navPath])
 
   const option = useMemo(() => ({
-    backgroundColor: 'transparent',
+    backgroundColor: 'transparent', 
     tooltip: {
+      backgroundColor: 'rgba(255, 255, 255, 0.95)', 
+      borderColor: 'rgba(149, 159, 147, 0.2)', 
+      textStyle: { color: '#1e293b' },
+      extraCssText: 'box-shadow: 0 10px 30px rgba(0,0,0,0.1); border-radius: 12px; backdrop-filter: blur(8px);',
       formatter: (info: any) => {
         const size = info.data?.realSize ?? info.value
-        return `${info.name}<br/>Size: <b>${formatBytes(size)}</b>`
+        const pct = totalSize > 0 ? ((size / totalSize) * 100).toFixed(1) : '0.0'
+        return `<div style="font-weight:700;margin-bottom:4px;color:#3d15cb">${info.name}</div>Size: <b>${formatBytes(size)}</b> (${pct}%)`
       }
     },
+    animation: true,
+    animationDurationUpdate: 450,
+    animationEasing: 'cubicInOut' as const,
     series: [{
       type: 'treemap',
-      data: typeTreeData,
+      data: treeData,
+      width: '100%',
+      height: '100%',
+      roam: true,
+      nodeClick: 'zoomToNode',
       breadcrumb: { show: false },
-      label: { show: true, fontSize: 10 },
-      itemStyle: { borderColor: '#050510', borderWidth: 1, gapWidth: 1 },
+      leafDepth: undefined,
+      visibleMinSize: 10,
+      label: {
+        show: true,
+        formatter: '{b}',
+        color: '#1e293b',
+        fontSize: 10
+      },
+      upperLabel: {
+        show: true,
+        height: 22,
+        color: '#3d15cb',
+        fontSize: 11,
+        fontWeight: 'bold',
+        backgroundColor: 'rgba(255,255,255,0.7)',
+        formatter: (params: any) => {
+          const size = params.data?.realSize
+          return size == null ? ` ${params.name}` : `\u{1F4C1} ${params.name} (${formatBytes(size)})`
+        }
+      },
+      itemStyle: {
+        borderColor: '#f1f5e0',
+        borderWidth: 1,
+        gapWidth: 1
+      },
       levels: [
-        { itemStyle: { borderWidth: 4, borderColor: '#050510', gapWidth: 4 } },
-        { itemStyle: { borderWidth: 2, borderColor: '#050510', gapWidth: 2 } }
+        {
+          colorAlpha: [1, 1],
+          colorSaturation: [1, 1],
+          itemStyle: {
+            color: '#f8fbf0',
+            borderColor: '#3d15cb',
+            borderWidth: 3,
+            gapWidth: 3
+          },
+          upperLabel: { show: true, height: 26, backgroundColor: 'rgba(255,255,255,0.8)', color: '#3d15cb', fontWeight: 'bold', fontSize: 12 }
+        },
+        {
+          colorAlpha: [1, 1],
+          colorSaturation: [1, 1],
+          itemStyle: {
+            color: '#fdfdfd',
+            borderColor: '#3d15cb',
+            borderWidth: 3,
+            gapWidth: 3
+          },
+          upperLabel: { show: true, height: 24, backgroundColor: 'rgba(255,255,255,0.7)', color: '#3d15cb', fontWeight: 'bold', fontSize: 11 }
+        },
+        {
+          colorAlpha: [1, 1],
+          colorSaturation: [1, 1],
+          itemStyle: {
+            color: '#ffffff',
+            borderColor: '#9984d4',
+            borderWidth: 2,
+            gapWidth: 2
+          },
+          upperLabel: {
+            show: true,
+            height: 22,
+            backgroundColor: 'rgba(255,255,255,0.6)',
+            color: '#3d15cb',
+            fontWeight: 'bold',
+            fontSize: 10,
+            formatter: (params: any) => {
+              const name = params.name;
+              const isActive = activeFilter && name.toLowerCase() === activeFilter.toLowerCase();
+              return isActive ? `\u{2728} ${name} (FILTERED)` : ` ${name}`;
+            }
+          }
+        },
+        {
+          colorAlpha: [1, 1],
+          colorSaturation: [1, 1],
+          itemStyle: { color: '#ffffff', borderColor: '#9984d4', borderWidth: 1.5, gapWidth: 1.5 },
+          upperLabel: { show: true, height: 20, backgroundColor: 'rgba(255,255,255,0.5)', color: '#3d15cb', fontSize: 10 }
+        },
+        {
+          itemStyle: { borderColor: 'rgba(149,159,147,0.2)', borderWidth: 1, gapWidth: 0 },
+          label: { show: true, position: 'inside', fontSize: 9, color: '#1e293b', formatter: (p: any) => p.value > 800 ? p.name : '' }
+        }
       ]
     }]
-  }), [typeTreeData])
+  }), [treeData, totalSize, activeFilter])
 
   const onEvents = useMemo(() => ({
     click: (params: any) => {
-      if (params.data?.fileData && onFileSelect) onFileSelect(params.data.fileData)
-      if (onFilterChange) {
-        const pathInfo = params.treePathInfo || []
-        const extNode = pathInfo.find((p: any) => p.name?.startsWith('.'))
-        if (extNode) onFilterChange(extNode.name === activeFilter ? null : extNode.name)
+      // 1. Outline effect for folders
+      if (params.data?.children && chartRef.current) {
+        const instance = chartRef.current.getEchartsInstance();
+        instance.dispatchAction({
+          type: 'highlight',
+          seriesIndex: 0,
+          dataIndex: params.dataIndex
+        });
+        setTimeout(() => {
+          instance.dispatchAction({
+            type: 'downplay',
+            seriesIndex: 0,
+            dataIndex: params.dataIndex
+          });
+        }, 1000);
       }
+
+      // 2. Navigation & Selection logic
+      if (params.data?.children) {
+        // Construct hierarchical path from root to current node using treePathInfo
+        const pathInfo = params.treePathInfo || [];
+        const newNav = pathInfo
+          .map((p: any) => ({
+            name: p.name,
+            fullPath: p.data?.fullPath || null
+          }))
+          .filter((p: any) => p.name !== '');
+
+        setNavPath(newNav);
+      }
+
+      if (params.data?.fileData && onFileSelect) onFileSelect(params.data.fileData)
+
+      // Improved extension filter logic: works in any mode, searches path for an extension
+      if (onFilterChange) {
+        const pathInfo = params.treePathInfo || [];
+        const extNode = pathInfo.find((p: any) => p.name?.startsWith('.'));
+        if (extNode) {
+          onFilterChange(extNode.name === activeFilter ? null : extNode.name);
+        }
+      }
+    },
+    contextmenu: (params: any) => { params.event.stop(); handleBack() }
+  }), [handleBack, onFilterChange, onFileSelect, activeFilter, groupMode])
+
+  // Automatically highlight the active filter node
+  useEffect(() => {
+    const instance = chartRef.current?.getEchartsInstance();
+    if (instance && activeFilter) {
+      instance.dispatchAction({
+        type: 'highlight',
+        seriesIndex: 0,
+        name: activeFilter
+      });
     }
-  }), [onFileSelect, onFilterChange, activeFilter])
+  }, [activeFilter, treeData]);
 
   return (
-    <div className="flex-1 flex flex-col min-h-0 gap-4">
-      {/* Controls */}
-      <div className="flex items-center justify-between bg-surface-lighter/30 p-3 rounded-2xl border border-white/5 backdrop-blur-sm z-10">
-        <div className="flex items-center gap-2">
-          <button onClick={handleBack} disabled={navPath.length <= 1} 
-                  className="p-2 hover:bg-primary/20 rounded-xl disabled:opacity-20 transition-colors">
-            <ChevronLeft className="w-5 h-5" />
-          </button>
-          <button onClick={handleHome} className="p-2 hover:bg-primary/20 rounded-xl transition-colors">
-            <Home className="w-5 h-5" />
-          </button>
-          <div className="h-4 w-px bg-white/10 mx-2" />
-          <div className="flex items-center gap-1 overflow-x-auto no-scrollbar max-w-[400px]">
-            {navPath.map((seg, i) => (
-              <div key={i} className="flex items-center shrink-0">
-                <button onClick={() => setNavPath(navPath.slice(0, i + 1))}
-                        className={`text-xs font-medium px-2 py-1 rounded-lg transition-colors ${
-                          i === navPath.length - 1 ? 'text-primary-light bg-primary/10' : 'text-text-secondary hover:text-text-primary'
-                        }`}>
-                  {seg.name}
-                </button>
-                {i < navPath.length - 1 && <span className="text-white/20 text-[10px]">/</span>}
-              </div>
-            ))}
+    <div className="flex-1 flex flex-col min-h-0">
+      <div className="flex flex-col gap-3 glass p-3 rounded-2xl border border-white/30 shadow-inner mb-4 shrink-0">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <button onClick={handleBack} disabled={navPath.length <= 1} className="flex items-center gap-1 px-3 py-1.5 bg-black/5 hover:bg-primary/10 border border-white/20 rounded-xl text-xs font-bold transition-all disabled:opacity-20 text-text-primary"><ChevronLeft className="w-4 h-4" /> BACK</button>
+            <button onClick={handleHome} className="flex items-center gap-1 px-3 py-1.5 bg-black/5 hover:bg-primary/10 border border-white/20 rounded-xl text-xs font-bold transition-all text-text-primary"><Home className="w-4 h-4" /> HOME</button>
+          </div>
+          <div className="flex items-center gap-3">
+            {onDeleteFolder && navPath.length > 1 && navPath[navPath.length - 1].fullPath && (
+              <button onClick={handleDeleteCurrent} className="flex items-center gap-1 px-3 py-1.5 bg-error/10 hover:bg-error/20 border border-error/20 text-error rounded-xl text-[10px] font-bold transition-all"><Trash2 className="w-3.5 h-3.5" /> DELETE FOLDER INDEX</button>
+            )}
+            <div className="flex items-center bg-black/5 p-1 rounded-xl border border-white/20">
+              <button onClick={() => { setGroupMode('folder'); handleHome() }} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-bold transition-all ${groupMode === 'folder' ? 'bg-primary text-white shadow-lg' : 'text-text-secondary hover:text-text-primary'}`}><Folder className="w-3.5 h-3.5" /> BY FOLDERS</button>
+              <button onClick={() => { setGroupMode('type'); handleHome() }} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-bold transition-all ${groupMode === 'type' ? 'bg-primary text-white shadow-lg' : 'text-text-secondary hover:text-text-primary'}`}><Layers className="w-3.5 h-3.5" /> BY FILE TYPE</button>
+            </div>
           </div>
         </div>
-
-        <div className="flex items-center gap-2 bg-surface-dark/50 p-1 rounded-xl border border-white/5">
-          <button onClick={() => setGroupMode('folder')}
-                  className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold transition-all ${
-                    groupMode === 'folder' ? 'bg-primary text-white shadow-lg shadow-primary/20' : 'text-text-secondary hover:text-text-primary'
-                  }`}>
-            <Sparkles className="w-4 h-4" /> 3D DREAMSCAPE
-          </button>
-          <button onClick={() => setGroupMode('type')}
-                  className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold transition-all ${
-                    groupMode === 'type' ? 'bg-primary text-white shadow-lg shadow-primary/20' : 'text-text-secondary hover:text-text-primary'
-                  }`}>
-            <Layers className="w-4 h-4" /> BY FILE TYPE
-          </button>
+        <div className="flex items-center gap-1 bg-black/5 px-3 py-2 rounded-xl border border-white/10 overflow-x-auto no-scrollbar scroll-smooth">
+          {navPath.map((seg, i) => {
+            const isLast = i === navPath.length - 1;
+            const isFile = isLast && !seg.fullPath;
+            let Icon;
+            if (i === 0) Icon = Home;
+            else if (isFile) Icon = File;
+            else Icon = Folder;
+            const itemKey = seg.fullPath ? `${seg.fullPath}-${i}` : `${seg.name}-${i}`;
+            return (
+              <div key={itemKey} className="flex items-center shrink-0">
+                <button onClick={() => handleBreadcrumbClick(i)} className={`flex items-center gap-1.5 px-2 py-1 rounded-lg text-[11px] font-medium transition-all hover:bg-black/5 ${isLast ? 'text-primary bg-primary/10' : 'text-text-secondary hover:text-text-primary'}`}>
+                  <Icon className="w-3 h-3" />
+                  <span className="max-w-[120px] truncate">{seg.name}</span>
+                </button>
+                {!isLast && <span className="text-text-secondary/20 mx-0.5">/</span>}
+              </div>
+            )
+          })}
         </div>
       </div>
-
-      {/* Visualizer */}
-      <div className="flex-1 relative rounded-3xl overflow-hidden border border-white/5 shadow-2xl bg-[#050510]">
-        {groupMode === 'folder' && folderTree ? (
-          <IsoMap3DWorld 
-            rootNode={folderTree} 
-            currentPath={currentFolderPath}
-            onFolderClick={handleFolderClick}
-            onFileSelect={onFileSelect}
-          />
-        ) : (
-          <ReactEChartsCore ref={chartRef} echarts={echarts} option={option} onEvents={onEvents} style={{ height: '100%', width: '100%' }} />
-        )}
+      <div className="flex-1 relative rounded-2xl overflow-hidden border border-white/40 shadow-xl bg-white/30 group">
+        <div className="absolute top-12 right-4 z-10 pointer-events-none opacity-0 group-hover:opacity-60 transition-opacity text-[10px] font-bold text-text-primary uppercase bg-white/80 border border-white/40 px-3 py-1.5 rounded-full shadow-sm">Right-click: Back • Scroll: Zoom • Drag: Pan</div>
+        <ReactEChartsCore
+          ref={chartRef}
+          echarts={echarts}
+          option={option}
+          style={{ height: '100%', width: '100%' }}
+          onEvents={onEvents}
+        />
       </div>
     </div>
   )

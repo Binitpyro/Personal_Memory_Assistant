@@ -117,13 +117,13 @@ export interface QueryResponse {
   timing?: Record<string, number>;
 }
 
-export const postQuery = (question: string, options: { file_type?: string, folder_tag?: string, history?: {role: string, content: string}[] } = {}) =>
+export const postQuery = (question: string, options: { file_type?: string, folder_tag?: string, history?: { role: string, content: string }[] } = {}) =>
   json<QueryResponse>('/query', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ 
-      question, 
-      file_type: options.file_type || null, 
+    body: JSON.stringify({
+      question,
+      file_type: options.file_type || null,
       folder_tag: options.folder_tag || null,
       history: options.history || null
     }),
@@ -164,8 +164,8 @@ export const getFileTree = () => json<FileTree>('/files/tree');
 
 export interface InsightsResponse {
   total_size_bytes: number;
-  file_count: number;
   database_size_bytes: number;
+  file_count: number;
   top_files: { path: string; size: number }[];
   cold_files: { path: string; usage_count: number }[];
   type_breakdown: Record<string, { count: number; size: number }>;
@@ -173,6 +173,14 @@ export interface InsightsResponse {
 }
 
 export const getInsights = () => json<InsightsResponse>('/insights');
+
+export const getVisualizerStream = async (): Promise<ArrayBuffer> => {
+  const res = await fetch(`${BASE}/visualizer/stream`);
+  if (!res.ok) {
+    throw new Error(`Failed to fetch visualizer stream: HTTP ${res.status}`);
+  }
+  return await res.arrayBuffer();
+};
 
 // ── Clear Caches ──────────────────────────────────────────────────────
 
@@ -198,16 +206,32 @@ export const seedDemo = () =>
 // ── SSE Progress Stream ───────────────────────────────────────────────
 
 export function subscribeProgress(onData: (data: IndexStatus & { current_file: string }) => void): () => void {
-  const es = new EventSource(`${BASE}/index/progress-stream`);
-  es.addEventListener('progress', (e) => {
-    try {
-      onData(JSON.parse(e.data));
-    } catch { /* ignore malformed */ }
-  });
-  es.onerror = () => {
-    es.close();
-  };
-  return () => es.close();
+  let es: EventSource | null = null;
+  let closed = false;
+  let retries = 0;
+  const MAX_RETRIES = 10;
+
+  function connect() {
+    if (closed) return;
+    es = new EventSource(`${BASE}/index/progress-stream`);
+    es.addEventListener('progress', (e) => {
+      retries = 0; // reset on success
+      try {
+        onData(JSON.parse(e.data));
+      } catch { /* ignore malformed */ }
+    });
+    es.onerror = () => {
+      es?.close();
+      if (!closed && retries < MAX_RETRIES) {
+        retries++;
+        setTimeout(connect, 1000);
+      }
+    };
+  }
+
+  // Small delay to allow backend SSE to be ready
+  setTimeout(connect, 300);
+  return () => { closed = true; es?.close(); };
 }
 
 // ── SSE Query Stream ──────────────────────────────────────────────────
@@ -225,10 +249,10 @@ export interface QueryStreamChunk {
 export function subscribeQuery(
   question: string,
   onChunk: (chunk: QueryStreamChunk) => void,
-  options: { file_type?: string; folder_tag?: string, history?: {role: string, content: string}[] } = {}
+  options: { file_type?: string; folder_tag?: string, history?: { role: string, content: string }[] } = {}
 ): () => void {
   const controller = new AbortController();
-  
+
   fetch(`${BASE}/query/stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -243,7 +267,7 @@ export function subscribeQuery(
     if (!response.ok) throw new Error('Stream request failed');
     const reader = response.body?.getReader();
     if (!reader) return;
-    
+
     const decoder = new TextDecoder();
     while (true) {
       const { done, value } = await reader.read();

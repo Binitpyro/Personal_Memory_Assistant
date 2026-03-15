@@ -43,17 +43,24 @@ class EmbeddingService:
             backend = "torch"  # default
             if device == "cpu":
                 try:
-                    import onnxruntime  # noqa: F401
-                    import optimum # noqa: F401
+                    import onnxruntime
+                    import optimum.onnxruntime
                     backend = "onnx"
-                    logger.info("ONNX Runtime and Optimum detected — using ONNX backend for faster CPU inference.")
-                except ImportError:
-                    logger.info("onnxruntime or optimum not installed — using default PyTorch backend.")
+                    logger.info("ONNX Runtime and Optimum verified — using ONNX backend for faster CPU inference.")
+                except ImportError as e:
+                    logger.info("ONNX backend unavailable (missing %s) — falling back to PyTorch.", str(e))
+                except Exception as e:
+                    logger.info("ONNX initialization failed: %s — falling back to PyTorch.", str(e))
 
             logger.info("Loading embedding model: %s on device: %s (backend: %s)", self.model_name, device, backend)
             
             if backend == "onnx":
-                self.model = SentenceTransformer(self.model_name, device=device, backend=backend)
+                self.model = SentenceTransformer(
+                    self.model_name, 
+                    device=device, 
+                    backend=backend,
+                    model_kwargs={"file_name": "onnx/model_O4.onnx"}
+                )
             else:
                 self.model = SentenceTransformer(self.model_name, device=device)
             
@@ -120,16 +127,27 @@ class EmbeddingService:
         loop = asyncio.get_running_loop()
         model = self.model  # capture for closure
         
-        unique_embeddings = await loop.run_in_executor(
-            None,
-            lambda: model.encode(
-                unique_texts,
-                batch_size=effective_batch_size,
-                show_progress_bar=False,
-                convert_to_numpy=True,
-                normalize_embeddings=True, # Ensure unit length for cosine similarity
-            ).tolist(),
-        )
+        # Internal progress reporting
+        from app.indexing.service import progress
+        
+        def encode_with_progress():
+            num_batches = (len(unique_texts) + effective_batch_size - 1) // effective_batch_size
+            results = []
+            for i in range(0, len(unique_texts), effective_batch_size):
+                batch_num = i // effective_batch_size + 1
+                progress.set_current_file(f"Phase 2/3: Embedding batch {batch_num}/{num_batches}…")
+                batch = unique_texts[i : i + effective_batch_size]
+                batch_embeddings = model.encode(
+                    batch,
+                    show_progress_bar=False,
+                    convert_to_numpy=True,
+                    normalize_embeddings=True,
+                )
+                results.append(batch_embeddings)
+            import numpy as np
+            return np.vstack(results).tolist()
+
+        unique_embeddings = await loop.run_in_executor(None, encode_with_progress)
 
         # Map back to original order
         embeddings = [unique_embeddings[original_map[i]] for i in range(len(texts))]

@@ -18,8 +18,36 @@ def _get_model() -> CrossEncoder:
     if _reranker is None:
         with _reranker_lock:
             if _reranker is None:  # double-checked locking
-                logger.info("Loading reranker model: %s", _MODEL_NAME)
-                _reranker = CrossEncoder(_MODEL_NAME, max_length=512)
+                import torch
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                
+                backend = "torch"
+                model_kwargs = None
+                if device == "cpu":
+                    try:
+                        import onnxruntime
+                        import optimum.onnxruntime
+                        backend = "onnx"
+                        # Reranker typically uses onnx/model.onnx if O4 is missing, 
+                        # but we check if we can specify a file.
+                        model_kwargs = {"file_name": "onnx/model.onnx"} 
+                        logger.info("ONNX verified for Reranker — accelerating CPU inference.")
+                    except ImportError:
+                        pass
+
+                logger.info("Loading reranker model: %s (backend: %s)", _MODEL_NAME, backend)
+                
+                if backend == "onnx":
+                    _reranker = CrossEncoder(
+                        _MODEL_NAME, 
+                        max_length=512, 
+                        device=device, 
+                        backend=backend,
+                        model_kwargs=model_kwargs
+                    )
+                else:
+                    _reranker = CrossEncoder(_MODEL_NAME, max_length=512, device=device)
+                
                 logger.info("Reranker model loaded.")
     return _reranker
 

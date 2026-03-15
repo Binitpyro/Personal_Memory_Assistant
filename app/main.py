@@ -35,25 +35,28 @@ from app.utils.metrics import metrics_tracker
 
 _BASE_DIR = Path(__file__).parent.parent
 _REACT_DIR = _BASE_DIR / "static" / "react"
-_REACT_INDEX = _REACT_DIR / "index.html"
+INDEX_HTML = "index.html"
+_REACT_INDEX = _REACT_DIR / INDEX_HTML
 templates = Jinja2Templates(directory="templates")
 
 _indexing_service_cls: Any = None
 _progress_obj: Any = None
 _full_rag_func: Any = None
 _insights_service_cls: Any = None
+
 _static_asset_version_cache: dict[str, tuple[int, str]] = {}
 _file_tree_cache: dict[str, Any] = {"data": None, "ts": 0.0}
 _insights_cache: dict[str, Any] = {"data": None, "ts": 0.0}
 _CACHE_TTL = 10  # seconds
 _bg_tasks: set[asyncio.Task] = set()
 
-APP_VERSION = "0.0.36"
+APP_VERSION = "0.0.41"
 
 def _versioned_static_url(asset_name: str) -> str:
-    asset_rel = Path("static") / asset_name
+    # Look in the base static directory for legacy assets
+    asset_path = _BASE_DIR / "static" / asset_name
     try:
-        mtime_ns = asset_rel.stat().st_mtime_ns
+        mtime_ns = asset_path.stat().st_mtime_ns
     except OSError:
         return f"/static/{asset_name}"
 
@@ -137,6 +140,22 @@ async def lifespan(fastapi_app: FastAPI):
     logger.info("Initializing database...")
     await db_manager.connect()
     await db_manager.init_db(schema_path=settings.schema_path)
+    # ── Admin privilege check for NTFS fast scanning ──
+    if plat.system() == "Windows":
+        try:
+            is_admin = bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:
+            is_admin = False
+        if is_admin:
+            logger.info("Running with Administrator privileges — NTFS MFT fast scanning enabled.")
+        else:
+            logger.warning(
+                "╔══════════════════════════════════════════════════════════════╗\n"
+                "║  NOT running as Administrator.                              ║\n"
+                "║  NTFS MFT fast scanning is DISABLED (using slower scandir). ║\n"
+                "║  Restart with 'Run as Administrator' for best performance.  ║\n"
+                "╚══════════════════════════════════════════════════════════════╝"
+            )
     emb = _get_embedding_service()
     logger.info("Starting background model load...")
     emb.load_model_background()
@@ -158,6 +177,7 @@ async def lifespan(fastapi_app: FastAPI):
 
 app = FastAPI(title="Personal Memory Assistant", lifespan=lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=500)
+app.mount("/static", StaticFiles(directory="static"), name="static")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -229,7 +249,14 @@ async def index_start(request: IndexRequest, background_tasks: BackgroundTasks, 
     service = indexing_service_cls(db, emb, chroma)
     _file_tree_cache["data"] = None
     _insights_cache["data"] = None
-    background_tasks.add_task(service.index_folders, folders)
+    async def _index_then_compact():
+        await service.index_folders(folders)
+        try:
+            await db.vacuum()
+            logger.info("Auto-compact completed after indexing.")
+        except Exception as e:
+            logger.warning("Auto-compact after indexing failed: %s", e)
+    background_tasks.add_task(_index_then_compact)
     return {"message": "Indexing started"}
 
 @api_router.get("/index/status")
@@ -244,7 +271,7 @@ async def progress_stream():
     _, progress = _ensure_indexing()
     async def event_generator():
         while True:
-            file_count, chunk_count = await db_manager.get_counts()
+            _, chunk_count = await db_manager.get_counts()
             pct = int((progress.processed_files / progress.total_files) * 100) if progress.total_files > 0 else 0
             data = {
                 "status": progress.status,
@@ -277,7 +304,7 @@ async def cleanup_stale(db: DatabaseManager = Depends(get_db)):
 @api_router.post("/index/clear")
 async def clear_index(db: DatabaseManager = Depends(get_db), chroma=Depends(get_chroma)):
     res = await db.clear_all()
-    await chroma.reset_collections()
+    await chroma.clear_all()
     _file_tree_cache["data"] = _insights_cache["data"] = None
     return res
 
@@ -377,6 +404,66 @@ async def get_files_tree(db: DatabaseManager = Depends(get_db)):
     except Exception:
         return {"folders": {}, "total_files": 0, "total_size": 0}
 
+@api_router.get("/visualizer/stream")
+async def stream_visualizer_binary(db: DatabaseManager = Depends(get_db)):
+    """
+    Streams all files and folders as a raw Float32Array / Uint32Array binary format for WebGPU.
+    Format per node: [x(f32), y(f32), z(f32), size(f32), typeHash(u32)]
+    """
+    import struct
+    import math
+
+    async def binary_generator():
+        # First, we need the total count to send as a header.
+        # This prevents WebGPU from allocating incorrectly.
+        file_count, _ = await db.get_counts()
+        folder_count = len(await db.get_all_folder_profiles())
+        total_nodes = file_count + folder_count
+
+        yield struct.pack("<I", total_nodes)
+
+        buffer = bytearray()
+        i = 0
+
+        async for node in db.stream_all_nodes():
+            path = node["path"]
+            size = float(node["size"])
+            is_folder = node["is_folder"]
+
+            # Deterministic layout logic mimicking frontend
+            angle = i * 0.1
+            radius = 10.0 + math.sqrt(i) * 2.0
+            x = math.cos(angle) * radius
+            y = math.sin(angle) * radius
+            z = (i % 100.0) - 50.0
+
+            if is_folder:
+                # Folders are drawn larger and distinguished by a negative size value
+                norm_size = -max(2.0, math.log10(size + 1.0) * 1.5)
+            else:
+                norm_size = max(0.5, math.log10(size + 1.0) * 0.8)
+
+            # Simple string hash matching the frontend logic
+            hash_val = 0
+            name = path.split("\\")[-1].split("/")[-1]
+            for char in name:
+                hash_val = ((hash_val << 5) - hash_val) + ord(char)
+                hash_val &= 0xFFFFFFFF
+
+            # Pack: 4 floats + 1 unsigned int = 20 bytes
+            buffer.extend(struct.pack("<ffffI", x, y, z, norm_size, hash_val))
+            i += 1
+
+            # Yield every 50,000 nodes (1MB) to keep memory footprint low
+            if len(buffer) >= 1000000:
+                yield bytes(buffer)
+                buffer.clear()
+
+        # Yield remainder
+        if buffer:
+            yield bytes(buffer)
+
+    return StreamingResponse(binary_generator(), media_type="application/octet-stream")
 @api_router.post("/index/folder/remove")
 async def remove_folder_index(request: IndexRequest, db: DatabaseManager = Depends(get_db), chroma=Depends(get_chroma)):
     folders = request.validated_folders
@@ -406,8 +493,29 @@ async def unreal_import(request: UnrealImportRequest, db: DatabaseManager = Depe
     try:
         path = request.validated_json_path
         if not os.path.exists(path): return JSONResponse(status_code=400, content={"error": "Metadata file not found."})
-        result = await parse_unreal_metadata(path, request.folder_tag, db, emb, chroma)
-        return result
+        
+        # Run sync parser in executor
+        loop = asyncio.get_running_loop()
+        facts = await loop.run_in_executor(None, parse_unreal_metadata, path, request.folder_tag)
+        
+        # Persist facts to DB
+        await db.upsert_unreal_project_facts(facts)
+        
+        # Embed profile text and store in summary collection
+        if facts.get("profile_text"):
+            embeddings = await emb.embed_texts([facts["profile_text"]])
+            await chroma.add_summaries_batch([{
+                "doc_id": f"unreal_import_{facts['folder_tag']}",
+                "embedding": embeddings[0],
+                "metadata": {
+                    "file_path": facts["folder_path"],
+                    "folder_tag": facts["folder_tag"],
+                    "project_type": "Unreal Engine",
+                    "is_unreal_import": "true"
+                }
+            }])
+            
+        return facts
     except Exception as e:
         logger.error("Unreal import failed: %s", e)
         return JSONResponse(status_code=500, content={"error": str(e)})
@@ -436,7 +544,9 @@ async def compact_db(db: DatabaseManager = Depends(get_db)):
     async def _do_vacuum():
         try: await db.vacuum()
         except Exception as e: logger.error("Vacuum failed: %s", e)
-    asyncio.create_task(_do_vacuum())
+    t = asyncio.create_task(_do_vacuum())
+    _bg_tasks.add(t)
+    t.add_done_callback(_bg_tasks.discard)
     return {"message": "Compaction started in background."}
 
 @api_router.get("/system/compact-db/status")
@@ -451,7 +561,21 @@ async def clear_cache():
 
 @api_router.post("/demo/seed")
 async def demo_seed(background_tasks: BackgroundTasks, db: DatabaseManager = Depends(get_db), emb=Depends(get_emb), chroma=Depends(get_chroma)):
-    return {"message": "Demo seeding not fully implemented in this mock.", "folder": "demo_data"}
+    demo_folder = str(_BASE_DIR / "demo_data")
+    if not os.path.isdir(demo_folder):
+        return JSONResponse(status_code=400, content={"error": "demo_data folder not found."})
+    indexing_service_cls, _ = _ensure_indexing()
+    service = indexing_service_cls(db, emb, chroma)
+    _file_tree_cache["data"] = _insights_cache["data"] = None
+    async def _demo_index_then_compact():
+        await service.index_folders([demo_folder])
+        try:
+            await db.vacuum()
+            logger.info("Auto-compact completed after demo indexing.")
+        except Exception as e:
+            logger.warning("Auto-compact after demo indexing failed: %s", e)
+    background_tasks.add_task(_demo_index_then_compact)
+    return {"message": "Demo indexing started for demo_data folder.", "folder": demo_folder}
 
 @api_router.get("/pick/folder")
 async def pick_folder():
@@ -473,14 +597,26 @@ async def health_root(db: DatabaseManager = Depends(get_db)):
 
 @app.get("/")
 async def root(request: Request):
-    if _REACT_INDEX.exists(): return FileResponse(_REACT_INDEX)
-    return templates.TemplateResponse(request, "index.html", {"app_version": APP_VERSION, "pma_css_url": _versioned_static_url("pma.css"), "pma_js_url": _versioned_static_url("pma.js")})
+    if _REACT_INDEX.exists():
+        return FileResponse(_REACT_INDEX)
+    return templates.TemplateResponse(
+        request, 
+        INDEX_HTML, 
+        {"app_version": APP_VERSION, "pma_css_url": _versioned_static_url("pma.css"), "pma_js_url": _versioned_static_url("pma.js")}
+    )
 
 @app.get("/{full_path:path}")
 async def spa_catch_all(request: Request, full_path: str):
     candidate = _REACT_DIR / full_path
-    if candidate.exists() and candidate.is_file(): return FileResponse(candidate)
+    if candidate.exists() and candidate.is_file():
+        return FileResponse(candidate)
+    
     if "text/html" in request.headers.get("accept", ""):
-        if _REACT_INDEX.exists(): return FileResponse(_REACT_INDEX)
-        return templates.TemplateResponse(request, "index.html", {"app_version": APP_VERSION, "pma_css_url": _versioned_static_url("pma.css"), "pma_js_url": _versioned_static_url("pma.js")})
+        if _REACT_INDEX.exists():
+            return FileResponse(_REACT_INDEX)
+        return templates.TemplateResponse(
+            request, 
+            INDEX_HTML, 
+            {"app_version": APP_VERSION, "pma_css_url": _versioned_static_url("pma.css"), "pma_js_url": _versioned_static_url("pma.js")}
+        )
     return JSONResponse(status_code=404, content={"error": "Not found"})

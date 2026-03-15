@@ -21,15 +21,15 @@ interface TreeNode {
 /* ── Recursive Node Component ───────────────────────────── */
 
 interface FolderNodeProps {
-  node: TreeNode
-  depth: number
-  onSelect: (file: FileEntry) => void
-  selectedPath: string | null
-  onDeleteFolder: (path: string) => void
+  readonly node: TreeNode
+  readonly depth: number
+  readonly onSelect: (file: FileEntry) => void
+  readonly selectedPath: string | null
+  readonly onDeleteFolder: (path: string) => void
 }
 
 function FolderNode({ node, depth, onSelect, selectedPath, onDeleteFolder }: FolderNodeProps) {
-  const [open, setOpen] = useState(depth === 0) 
+  const [open, setOpen] = useState(depth === 0)
 
   const handleDelete = (e: React.MouseEvent) => {
     e.stopPropagation()
@@ -40,19 +40,22 @@ function FolderNode({ node, depth, onSelect, selectedPath, onDeleteFolder }: Fol
 
   return (
     <div className="select-none">
-      <div 
-        className={`group flex items-center gap-2 w-full px-2 py-1 rounded-lg transition-colors cursor-pointer ${open ? 'bg-white/5' : 'hover:bg-white/5'}`}
+      <div
+        role="button"
+        tabIndex={0}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setOpen(!open); }}
+        className={`group flex items-center gap-2 w-full px-2 py-1 rounded-lg transition-colors cursor-pointer text-left ${open ? 'bg-black/5' : 'hover:bg-black/5'}`}
         onClick={() => setOpen(!open)}
       >
         <div className="w-4 h-4 flex items-center justify-center text-text-secondary">
-          {node.children.size > 0 || node.files.length > 0 ? (
+          {(node.children.size > 0 || node.files.length > 0) && (
             open ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />
-          ) : null}
+          )}
         </div>
         <Folder className="w-4 h-4 text-primary shrink-0" />
         <span className="text-sm font-medium truncate flex-1">{node.name}</span>
-        
-        <button 
+
+        <button
           onClick={handleDelete}
           className="opacity-0 group-hover:opacity-100 p-1 hover:bg-error/20 hover:text-error rounded transition-all mr-2"
           title="Delete this folder index"
@@ -61,45 +64,49 @@ function FolderNode({ node, depth, onSelect, selectedPath, onDeleteFolder }: Fol
         </button>
       </div>
 
-      {open && (
-        <div className="ml-4 border-l border-white/5 pl-1">
-          {Array.from(node.children.values())
-            .sort((a, b) => a.name.localeCompare(b.name))
-            .map((child) => (
-              <FolderNode 
-                key={child.fullPath} 
-                node={child} 
-                depth={depth + 1} 
-                onSelect={onSelect} 
-                selectedPath={selectedPath}
-                onDeleteFolder={onDeleteFolder}
-              />
-            ))
-          }
-          
-          {node.files
-            .sort((a, b) => b.size - a.size)
-            .map((f) => {
-              const fileName = f.path.split(/[\\/]/).pop() ?? f.path
-              const isSelected = f.path === selectedPath
-              return (
-                <div
-                  key={f.path}
-                  onClick={() => onSelect(f)}
-                  className={`flex items-center gap-2 w-full px-6 py-1 rounded-lg text-left text-sm transition-colors cursor-pointer ${
-                    isSelected ? 'bg-primary/20 text-primary-light' : 'hover:bg-white/5 text-text-secondary'
-                  }`}
-                >
-                  <File className="w-3.5 h-3.5 shrink-0 opacity-60" />
-                  <span className="truncate flex-1">{fileName}</span>
-                  <span className="text-[10px] opacity-40 tabular-nums">{formatSize(f.size)}</span>
-                </div>
-              )
-            })
-          }
-        </div>
-      )}
-    </div>
+      {
+        open && (
+          <div className="ml-4 border-l border-white/5 pl-1">
+            {Array.from(node.children.values())
+              .sort((a, b) => a.name.localeCompare(b.name))
+              .map((child) => (
+                <FolderNode
+                  key={child.fullPath}
+                  node={child}
+                  depth={depth + 1}
+                  onSelect={onSelect}
+                  selectedPath={selectedPath}
+                  onDeleteFolder={onDeleteFolder}
+                />
+              ))
+            }
+
+            {[...node.files]
+              .sort((a, b) => b.size - a.size)
+              .map((f) => {
+                const fileName = f.path.split(/[\\/]/).pop() ?? f.path
+                const isSelected = f.path === selectedPath
+                return (
+                  <div
+                    key={f.path}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') onSelect(f); }}
+                    onClick={() => onSelect(f)}
+                    className={`flex items-center gap-2 w-full px-6 py-1 rounded-lg text-left text-sm transition-colors cursor-pointer ${isSelected ? 'bg-primary/20 text-primary-light' : 'hover:bg-white/5 text-text-secondary'
+                      }`}
+                  >
+                    <File className="w-3.5 h-3.5 shrink-0 opacity-60" />
+                    <span className="truncate flex-1">{fileName}</span>
+                    <span className="text-[10px] opacity-40 tabular-nums">{formatSize(f.size)}</span>
+                  </div>
+                )
+              })
+            }
+          </div>
+        )
+      }
+    </div >
   )
 }
 
@@ -126,38 +133,40 @@ export function ExplorerPage() {
 
   const hierarchicalTree = useMemo(() => {
     if (!tree?.folders) return null
-    
+
     const rootNodes: TreeNode[] = []
-    
+
     Object.entries(tree.folders).forEach(([tag, files]) => {
       // Step 1: Normalize root tag
-      const normTag = tag.replace(/\\/g, '/').toLowerCase().replace(/\/+$/, '')
-      const tagName = tag.split(/[\\/]/).filter(Boolean).pop() || tag;
+      let normTag = tag.replaceAll('\\', '/').toLowerCase();
+      while (normTag.endsWith('/')) { normTag = normTag.slice(0, -1); }
+      const partsTag = tag.split(/[\\/]/).filter(Boolean);
+      const tagName = partsTag.at(-1) || tag;
 
-      const filteredFiles = activeExtension 
+      const filteredFiles = activeExtension
         ? files.filter(f => ('.' + f.path.split('.').pop()?.toLowerCase()) === activeExtension.toLowerCase())
         : files;
 
       if (filteredFiles.length === 0 && activeExtension) return;
 
       const root: TreeNode = { name: tagName, fullPath: tag, children: new Map(), files: [] }
-      
+
       filteredFiles.forEach(f => {
-        const normPath = f.path.replace(/\\/g, '/')
+        const normPath = f.path.replaceAll('\\', '/')
         const normPathLower = normPath.toLowerCase()
-        
+
         let relative = normPath
         if (normPathLower.startsWith(normTag)) {
           // Robustly remove the tag prefix
-          relative = normPath.slice(normTag.length).replace(/^\/+/, '')
+          while (relative.startsWith('/')) { relative = relative.slice(1); }
         }
-        
+
         const parts = relative.split('/').filter(Boolean)
         let current = root
-        
+
         // Skip parts that match root name to avoid "Root > Root > Sub" nesting
         let startIdx = 0;
-        while(startIdx < parts.length && parts[startIdx].toLowerCase() === tagName.toLowerCase()) {
+        while (startIdx < parts.length && parts[startIdx].toLowerCase() === tagName.toLowerCase()) {
           startIdx++;
         }
 
@@ -167,11 +176,11 @@ export function ExplorerPage() {
             current.files.push(f)
           } else {
             if (!current.children.has(part)) {
-              current.children.set(part, { 
-                name: part, 
-                fullPath: current.fullPath + '/' + part, 
-                children: new Map(), 
-                files: [] 
+              current.children.set(part, {
+                name: part,
+                fullPath: current.fullPath + '/' + part,
+                children: new Map(),
+                files: []
               })
             }
             current = current.children.get(part)!
@@ -180,61 +189,59 @@ export function ExplorerPage() {
       })
       rootNodes.push(root)
     })
-    
+
     return rootNodes.sort((a, b) => a.name.localeCompare(b.name))
   }, [tree, activeExtension])
 
   const largestFiles = useMemo(() => {
     if (!tree?.folders) return []
     const flat = Object.values(tree.folders).flat()
-    const filtered = activeExtension 
+    const filtered = activeExtension
       ? flat.filter(f => ('.' + f.path.split('.').pop()?.toLowerCase()) === activeExtension.toLowerCase())
       : flat
-    return filtered.sort((a, b) => b.size - a.size).slice(0, 15)
+    return [...filtered].sort((a, b) => b.size - a.size).slice(0, 15)
   }, [tree, activeExtension])
 
   const coldFiles = useMemo(() => {
     if (!tree?.folders) return []
     const flat = Object.values(tree.folders).flat()
-    const filtered = activeExtension 
+    const filtered = activeExtension
       ? flat.filter(f => ('.' + f.path.split('.').pop()?.toLowerCase()) === activeExtension.toLowerCase())
       : flat
-    return filtered.sort((a, b) => (a.usage_count || 0) - (b.usage_count || 0)).slice(0, 15)
+    return [...filtered].sort((a, b) => (a.usage_count || 0) - (b.usage_count || 0)).slice(0, 15)
   }, [tree, activeExtension])
 
   return (
     <div className="flex flex-col h-full p-6 animate-fade-in-up overflow-hidden">
       {/* Header */}
-      <div className="flex justify-between items-center mb-6 shrink-0">
+      <div className="flex items-center justify-between mb-6 shrink-0">
         <div>
-          <h1 className="text-2xl font-bold flex items-center gap-3 text-white">
+          <h1 className="text-2xl font-bold flex items-center gap-3 text-text-primary">
             <FolderTree className="w-7 h-7 text-primary" />
             Explorer
           </h1>
-          <p className="text-text-secondary mt-1">
+          <p className="text-text-secondary mt-1 text-sm flex items-center gap-2">
             Browse indexed data
             {tree && (
-              <span className="ml-2 text-xs text-primary-light font-mono bg-primary/10 px-2 py-0.5 rounded-full">
+              <span className="text-xs text-primary font-bold bg-primary/10 px-2 py-0.5 rounded-full">
                 {tree.total_files} files • {formatSize(tree.total_size)}
               </span>
             )}
           </p>
         </div>
 
-        <div className="flex bg-surface-lighter p-1 rounded-xl border border-white/5 shadow-inner">
+        <div className="flex bg-black/5 p-1 rounded-xl border border-black/5 shadow-inner">
           <button
             onClick={() => setViewMode('tree')}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${
-              viewMode === 'tree' ? 'bg-primary text-white shadow-lg' : 'text-text-secondary hover:text-text-primary'
-            }`}
+            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${viewMode === 'tree' ? 'bg-primary text-white shadow-lg' : 'text-text-secondary hover:text-text-primary'
+              }`}
           >
             <List className="w-4 h-4" /> TREE
           </button>
           <button
             onClick={() => setViewMode('treemap')}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${
-              viewMode === 'treemap' ? 'bg-primary text-white shadow-lg' : 'text-text-secondary hover:text-text-primary'
-            }`}
+            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${viewMode === 'treemap' ? 'bg-primary text-white shadow-lg' : 'text-text-secondary hover:text-text-primary'
+              }`}
           >
             <LayoutGrid className="w-4 h-4" /> TREEMAP
           </button>
@@ -243,7 +250,7 @@ export function ExplorerPage() {
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 flex-1 min-h-0">
         {/* Main View Area */}
-        <div className="glass-card lg:col-span-8 flex flex-col overflow-hidden p-0 border-white/5 shadow-2xl">
+        <div className="glass-card lg:col-span-8 flex flex-col overflow-hidden p-0">
           {loading ? (
             <div className="flex-1 flex items-center justify-center">
               <Loader2 className="w-12 h-12 text-primary animate-spin" />
@@ -254,31 +261,36 @@ export function ExplorerPage() {
             </div>
           ) : (
             <div className="flex-1 flex flex-col overflow-hidden">
-              {viewMode === 'tree' ? (
-                <div className="p-4 space-y-1 overflow-y-auto flex-1 custom-scrollbar">
-                  {hierarchicalTree.map((root) => (
-                    <FolderNode
-                      key={root.fullPath}
-                      node={root}
-                      depth={0}
-                      onSelect={setSelectedFile}
-                      selectedPath={selectedFile?.path ?? null}
+              {(() => {
+                if (viewMode === 'tree') {
+                  return (
+                    <div className="p-4 space-y-1 overflow-y-auto flex-1 custom-scrollbar">
+                      {hierarchicalTree.map((root) => (
+                        <FolderNode
+                          key={root.fullPath}
+                          node={root}
+                          depth={0}
+                          onSelect={setSelectedFile}
+                          selectedPath={selectedFile?.path ?? null}
+                          onDeleteFolder={handleDeleteFolder}
+                        />
+                      ))}
+                    </div>
+                  )
+                }
+                return (
+                  <div className="flex-1 p-2 flex flex-col min-h-0">
+                    <FileTypeTreemap
+                      allFiles={tree!.folders}
+                      onFileSelect={setSelectedFile}
                       onDeleteFolder={handleDeleteFolder}
+                      activeFilter={activeExtension}
+                      onFilterChange={setActiveExtension}
+                      initialMode="folder"
                     />
-                  ))}
-                </div>
-              ) : (
-                <div className="flex-1 p-2 flex flex-col min-h-0">
-                  <FileTypeTreemap 
-                    allFiles={tree!.folders} 
-                    onFileSelect={setSelectedFile} 
-                    onDeleteFolder={handleDeleteFolder}
-                    activeFilter={activeExtension}
-                    onFilterChange={setActiveExtension}
-                    initialMode="folder"
-                  />
-                </div>
-              )}
+                  </div>
+                )
+              })()}
             </div>
           )}
         </div>
@@ -287,50 +299,50 @@ export function ExplorerPage() {
         <div className="lg:col-span-4 flex flex-col gap-4 overflow-hidden h-full">
           {/* Active Filter Tile */}
           {activeExtension && (
-            <div className="bg-primary/20 border border-primary/30 rounded-2xl flex items-center justify-between p-4 shrink-0 shadow-lg glow-purple">
+            <div className="glass rounded-2xl flex items-center justify-between p-4 shrink-0">
               <div className="flex items-center gap-4">
                 <div className="bg-primary p-2 rounded-xl shadow-lg">
                   <LayoutGrid className="w-5 h-5 text-white" />
                 </div>
                 <div className="flex flex-col">
-                  <span className="text-[10px] uppercase font-bold text-primary-light tracking-widest leading-tight">Active Filter</span>
-                  <span className="text-xl font-black text-white uppercase leading-none">{activeExtension}</span>
+                  <span className="text-[10px] uppercase font-bold text-primary tracking-widest leading-tight">Active Filter</span>
+                  <span className="text-xl font-black text-text-primary uppercase leading-none">{activeExtension}</span>
                 </div>
               </div>
-              <button 
+              <button
                 onClick={() => setActiveExtension(null)}
-                className="text-[10px] font-black bg-white/10 hover:bg-white/20 px-3 py-2 rounded-lg transition-all border border-white/10"
+                className="text-[10px] font-black bg-white/20 text-primary hover:bg-white/40 px-3 py-2 rounded-lg transition-all border border-primary/10"
               >
                 CLEAR
               </button>
             </div>
           )}
 
-          {/* Selection Detail Tile (Smaller now) */}
-          <div className="glass-card shrink-0 border-white/5 p-4">
+          {/* Selection Detail Tile */}
+          <div className="glass-card shrink-0 p-4">
             {selectedFile ? (
               <div className="space-y-3">
-                <div className="flex items-center gap-3 border-b border-white/5 pb-2">
+                <div className="flex items-center gap-3 border-b border-black/5 pb-2">
                   <div className="bg-primary/10 p-2 rounded-xl border border-primary/20 shrink-0">
-                    <File className="w-5 h-5 text-primary-light" />
+                    <File className="w-5 h-5 text-primary" />
                   </div>
                   <div className="min-w-0 flex-1">
                     <h3 className="font-bold text-sm text-text-primary truncate">{selectedFile.path.split(/[\\/]/).pop()}</h3>
-                    <p className="text-[9px] text-primary-light/60 uppercase font-black tracking-widest">{selectedFile.type.replace('.','')}</p>
+                    <p className="text-[9px] text-primary uppercase font-black tracking-widest">{selectedFile.type.replace('.', '')}</p>
                   </div>
                 </div>
                 <dl className="grid grid-cols-2 gap-3">
                   <div className="col-span-2">
                     <dt className="text-[9px] font-black text-text-secondary uppercase tracking-widest mb-1">Path</dt>
-                    <dd className="text-[10px] text-text-primary bg-black/30 p-2 rounded-lg break-all font-mono border border-white/5 leading-tight">{selectedFile.path}</dd>
+                    <dd className="text-[10px] text-text-primary bg-black/5 p-2 rounded-lg break-all font-mono border border-black/5 leading-tight">{selectedFile.path}</dd>
                   </div>
                   <div>
                     <dt className="text-[9px] font-black text-text-secondary uppercase tracking-widest">Size</dt>
-                    <dd className="text-sm font-black text-primary-light">{formatSize(selectedFile.size)}</dd>
+                    <dd className="text-sm font-black text-primary">{formatSize(selectedFile.size)}</dd>
                   </div>
                   <div>
                     <dt className="text-[9px] font-black text-text-secondary uppercase tracking-widest">Usage</dt>
-                    <dd className="text-sm font-black text-white">{selectedFile.usage_count ?? 0}</dd>
+                    <dd className="text-sm font-black text-text-primary">{selectedFile.usage_count ?? 0}</dd>
                   </div>
                 </dl>
               </div>
@@ -342,43 +354,57 @@ export function ExplorerPage() {
             )}
           </div>
 
-          {/* Sidebar Tile: Largest Data (Expanded view) */}
-          <div className="glass-card flex-1 min-h-0 flex flex-col p-4 border-white/5">
+          {/* Sidebar Tile: Largest Data */}
+          <div className="glass-card flex-1 min-h-0 flex flex-col p-4">
             <h3 className="text-[10px] font-black uppercase tracking-[0.25em] text-text-secondary mb-3 flex items-center gap-2 shrink-0">
               <div className="w-1 h-3 bg-primary rounded-full"></div> Largest Data
             </h3>
             <div className="space-y-1.5 overflow-y-auto custom-scrollbar pr-2 flex-1">
               {largestFiles.map(f => (
-                <div key={f.path} onClick={() => setSelectedFile(f)} className="group flex items-center gap-3 p-2 rounded-xl bg-white/[0.02] hover:bg-primary/10 cursor-pointer transition-all border border-white/5 hover:border-primary/20">
-                  <div className="bg-surface-lighter px-1.5 py-1 rounded-lg border border-white/5 shrink-0 text-center min-w-[32px]">
-                    <span className="text-[9px] font-black text-primary-light uppercase">{f.type.replace('.', '').slice(0,3) || '??'}</span>
+                <div
+                  key={f.path}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setSelectedFile(f); }}
+                  onClick={() => setSelectedFile(f)}
+                  className="w-full text-left group flex items-center gap-3 p-2 rounded-xl bg-black/[0.02] hover:bg-primary/10 cursor-pointer transition-all border border-black/5 hover:border-primary/20"
+                >
+                  <div className="bg-white/40 px-1.5 py-1 rounded-lg border border-white/60 shrink-0 text-center min-w-[32px]">
+                    <span className="text-[9px] font-black text-primary uppercase">{f.type.replace('.', '').slice(0, 3) || '??'}</span>
                   </div>
                   <div className="flex-1 min-w-0">
                     <div className="text-[11px] font-bold text-text-primary truncate">{f.path.split(/[\\/]/).pop()}</div>
                     <div className="text-[9px] text-text-secondary font-bold uppercase tracking-tight">{formatSize(f.size)}</div>
                   </div>
-                  <ChevronRight className="w-3.5 h-3.5 text-white/5 group-hover:text-primary transition-all" />
+                  <ChevronRight className="w-3.5 h-3.5 text-text-secondary/20 group-hover:text-primary transition-all" />
                 </div>
               ))}
             </div>
           </div>
 
-          {/* Sidebar Tile: Cold Files (Expanded view) */}
-          <div className="glass-card flex-1 min-h-0 flex flex-col p-4 border-white/5">
+          {/* Sidebar Tile: Cold Files */}
+          <div className="glass-card flex-1 min-h-0 flex flex-col p-4">
             <h3 className="text-[10px] font-black uppercase tracking-[0.25em] text-text-secondary mb-3 flex items-center gap-2 shrink-0">
               <div className="w-1 h-3 bg-accent rounded-full"></div> Cold Files
             </h3>
             <div className="space-y-1.5 overflow-y-auto custom-scrollbar pr-2 flex-1">
               {coldFiles.map(f => (
-                <div key={f.path} onClick={() => setSelectedFile(f)} className="group flex items-center gap-3 p-2 rounded-xl bg-white/[0.02] hover:bg-accent/10 cursor-pointer transition-all border border-white/5 hover:border-accent/20">
-                  <div className="bg-surface-lighter px-1.5 py-1 rounded-lg border border-white/5 shrink-0 text-center min-w-[32px]">
-                    <span className="text-[9px] font-black text-accent uppercase">{f.type.replace('.', '').slice(0,3) || '??'}</span>
+                <div
+                  key={f.path}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setSelectedFile(f); }}
+                  onClick={() => setSelectedFile(f)}
+                  className="w-full text-left group flex items-center gap-3 p-2 rounded-xl bg-black/[0.02] hover:bg-accent/10 cursor-pointer transition-all border border-black/5 hover:border-accent/20"
+                >
+                  <div className="bg-white/40 px-1.5 py-1 rounded-lg border border-white/60 shrink-0 text-center min-w-[32px]">
+                    <span className="text-[9px] font-black text-accent uppercase">{f.type.replace('.', '').slice(0, 3) || '??'}</span>
                   </div>
                   <div className="flex-1 min-w-0">
                     <div className="text-[11px] font-bold text-text-primary truncate">{f.path.split(/[\\/]/).pop()}</div>
                     <div className="text-[9px] text-text-secondary font-bold">{f.usage_count || 0} hits</div>
                   </div>
-                  <ChevronRight className="w-3.5 h-3.5 text-white/5 group-hover:text-accent transition-all" />
+                  <ChevronRight className="w-3.5 h-3.5 text-text-secondary/20 group-hover:text-accent transition-all" />
                 </div>
               ))}
             </div>

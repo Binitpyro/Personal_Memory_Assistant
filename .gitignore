@@ -191,12 +191,8 @@ venv/
 .DS_Store
 
 # App Data / Persistence
-pma_metadata.db
-pma_metadata.db-journal
-pma_metadata.db-wal
-pma_metadata.db-shm
-chroma_db/
-demo_data/
+data/
+logs/
 .env
 
 # Chroma / vector store data (adjust if you use a different path)
@@ -209,8 +205,8 @@ vector_store/chroma_db/
 .ipynb_checkpoints/
 
 # Hackathon local/private files
-SanHack Obsidian/
-personal help/
+PMA Obsidian/
+scripts/
 GEMINI.md
 
 # Built executables

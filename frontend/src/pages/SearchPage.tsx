@@ -16,9 +16,9 @@ export function SearchPage() {
   const [messages, setMessages] = useState<Message[]>([])
   const [searching, setSearching] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  
+
   const { data: historyData, refetch: refetchHistory } = useApi(getQueryHistory, { cacheKey: 'query-history' })
-  
+
   const inputRef = useRef<HTMLInputElement>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
@@ -40,7 +40,7 @@ export function SearchPage() {
 
     // Add user message
     const newMessages: Message[] = [...messages, { role: 'user', content: userMsg }]
-    
+
     // Add empty assistant message for streaming
     setMessages([...newMessages, { role: 'assistant', content: '', isStreaming: true }])
 
@@ -67,8 +67,8 @@ export function SearchPage() {
       if (chunk.type === 'content' && chunk.text) {
         fullText += chunk.text
         setMessages(prev => {
-          const last = prev[prev.length - 1]
-          if (last && last.role === 'assistant') {
+          const last = prev.at(-1)
+          if (last?.role === 'assistant') {
             return [
               ...prev.slice(0, -1),
               { ...last, content: fullText, sources, latency_ms: latency }
@@ -77,7 +77,7 @@ export function SearchPage() {
           return prev
         })
       }
-      
+
       // If the backend indicates it's finished (using a custom end chunk or just stopping)
       // Since SSE reader loop handles 'done', we just wait for the search to stop
     }, { history: historyForApi })
@@ -88,7 +88,7 @@ export function SearchPage() {
     setTimeout(() => {
       setSearching(false)
       setMessages(prev => {
-        const last = prev[prev.length - 1]
+        const last = prev.at(-1)
         if (last) return [...prev.slice(0, -1), { ...last, isStreaming: false }]
         return prev
       })
@@ -127,17 +127,19 @@ export function SearchPage() {
   return (
     <div className="flex-1 flex flex-col h-full overflow-hidden animate-fade-in-up">
       {/* Header */}
-      <div className="p-6 border-b border-white/5 flex justify-between items-center shrink-0">
+      <div className="flex items-center justify-between p-6 shrink-0">
         <div>
-          <h1 className="text-2xl font-bold flex items-center gap-3 text-white">
+          <h1 className="text-2xl font-bold flex items-center gap-3 text-text-primary">
             <Search className="w-7 h-7 text-primary" />
             AI Chat
           </h1>
-          <p className="text-text-secondary text-sm">Conversational memory assistant</p>
+          <p className="text-text-secondary mt-1 text-sm">
+            Conversational memory assistant
+          </p>
         </div>
-        <button 
+        <button
           onClick={resetChat}
-          className="flex items-center gap-2 px-4 py-2 bg-white/5 hover:bg-white/10 rounded-xl text-xs font-bold transition-all text-text-secondary"
+          className="flex items-center gap-2 px-4 py-2 bg-white/5 hover:bg-white/10 rounded-xl text-xs font-bold transition-all text-text-secondary border border-white/5 shadow-sm"
         >
           <RotateCcw className="w-3.5 h-3.5" /> NEW CHAT
         </button>
@@ -154,18 +156,17 @@ export function SearchPage() {
         ) : (
           <div className="max-w-4xl mx-auto space-y-8">
             {messages.map((msg, idx) => (
-              <div key={idx} className={`flex gap-4 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+              <div key={`msg-${idx}-${msg.content.substring(0, 10)}`} className={`flex gap-4 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                 {msg.role === 'assistant' && (
                   <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center shrink-0 border border-primary/30 shadow-lg">
                     <Bot className="w-4 h-4 text-primary-light" />
                   </div>
                 )}
                 <div className={`flex flex-col gap-2 max-w-[85%] ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
-                  <div className={`px-5 py-3 rounded-2xl text-sm leading-relaxed shadow-sm border ${
-                    msg.role === 'user' 
-                      ? 'bg-primary text-white border-primary-light/20 rounded-tr-none' 
-                      : 'bg-surface-lighter text-text-primary border-white/5 rounded-tl-none'
-                  }`}>
+                  <div className={`px-5 py-3 rounded-2xl text-sm leading-relaxed shadow-sm border ${msg.role === 'user'
+                      ? 'bg-primary text-white border-primary-light/20 rounded-tr-none'
+                      : 'glass-card !p-3 text-text-primary border-white/80 rounded-tl-none'
+                    }`}>
                     {msg.isStreaming && !msg.content ? (
                       <div className="flex gap-1 py-1">
                         <span className="w-1.5 h-1.5 bg-primary-light rounded-full animate-bounce"></span>
@@ -176,11 +177,11 @@ export function SearchPage() {
                       <div className="whitespace-pre-wrap">{msg.content}</div>
                     )}
                   </div>
-                  
+
                   {msg.role === 'assistant' && msg.sources && msg.sources.length > 0 && (
                     <div className="flex flex-wrap gap-2 mt-1">
                       {msg.sources.slice(0, 3).map((src, sidx) => (
-                        <div key={sidx} className="flex items-center gap-1.5 px-2 py-1 bg-white/5 rounded-lg text-[10px] text-text-secondary border border-white/5">
+                        <div key={`src-${sidx}-${src.file_path}`} className="flex items-center gap-1.5 px-2 py-1 bg-white/5 rounded-lg text-[10px] text-text-secondary border border-white/5">
                           <FileText className="w-3 h-3 text-primary-light" />
                           <span className="max-w-[150px] truncate">{src.file_path.split(/[\\/]/).pop()}</span>
                         </div>
@@ -214,7 +215,7 @@ export function SearchPage() {
           )}
           <div className="relative group">
             <div className="absolute -inset-0.5 bg-gradient-to-r from-primary to-accent rounded-2xl blur opacity-20 group-focus-within:opacity-40 transition duration-1000"></div>
-            <div className="relative flex items-center bg-surface-lighter border border-white/10 rounded-2xl overflow-hidden shadow-2xl">
+            <div className="relative flex items-center glass rounded-2xl overflow-hidden shadow-2xl">
               <input
                 ref={inputRef}
                 type="text"

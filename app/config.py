@@ -8,10 +8,10 @@ class Settings(BaseSettings):
     host: str = "127.0.0.1"
     port: int = 8000
 
-    db_path: str = "pma_metadata.db"
+    db_path: str = "data/pma_metadata.db"
     schema_path: str = "app/storage/schema.sql"
 
-    chroma_persist_dir: str = "chroma_db"
+    chroma_persist_dir: str = "data/chroma_db"
 
     embedding_model: str = "all-MiniLM-L6-v2"
     embedding_batch_size: int = 512  # Doubled: modern GPUs/CPUs handle this well
@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     chunk_size: int = 512
     chunk_overlap: int = 50
     max_file_size_mb: int = 50
-    supported_extensions: str = ".txt,.md,.pdf,.docx,.csv,.json,.py,.js,.ts,.java,.c,.cpp,.rs,.go,.rb,.html,.css,.xml,.yaml,.yml,.toml,.ini,.cfg,.sh,.bat,.uasset,.umap,.uproject,.uplugin"
+    supported_extensions: str = ".txt,.md,.pdf,.docx,.csv,.json,.py,.js,.ts,.java,.c,.cpp,.rs,.go,.rb,.html,.css,.xml,.yaml,.yml,.toml,.ini,.cfg,.sh,.bat,.uasset,.umap,.uproject,.uplugin,"
     index_concurrency: int = 16  # Increased from 12 for better I/O overlap
 
     gemini_api_key: str = ""
@@ -35,8 +35,8 @@ class Settings(BaseSettings):
     rrf_k: int = 60
     rrf_score_scale: int = 1000
     summary_boost_factor: float = 1.25
-    retrieval_top_k: int = 6
-    context_max_tokens: int = 2500  # Balanced for reliability and depth
+    retrieval_top_k: int = 15
+    context_max_tokens: int = 8000  # Balanced for reliability and depth
 
     dev_mode: bool = True  # Default on for hackathon; set to False for prod
     log_level: str = "INFO"
@@ -47,7 +47,8 @@ class Settings(BaseSettings):
 
     @property
     def extensions_set(self) -> Set[str]:
-        return {e.strip() for e in self.supported_extensions.split(",") if e.strip()}
+        # Split by comma, strip whitespace, and include empty string if there's a double comma or trailing comma
+        return {e.strip() for e in self.supported_extensions.split(",")}
 
     model_config = {
         "env_prefix": "PMA_",

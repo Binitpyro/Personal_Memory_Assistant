@@ -51,7 +51,7 @@ class FakeDB:
     async def delete_file_chunks(self, file_id):
         self.file_chunks[file_id] = []
 
-    async def insert_file(self, file_data):
+    async def insert_file(self, file_data, *, auto_commit=True):
         path = file_data["path"]
         if path in self.files:
             return self.files[path]
@@ -183,15 +183,17 @@ async def test_scan_index_file_and_profiles(monkeypatch, tmp_path: Path):
     file1 = folder / "one.txt"
     file1.write_text("A short document. More text.", encoding="utf-8")
 
+    # Mock both Python and Rust scanners
     fake_scan_result = SimpleNamespace(method="scandir", duration_ms=1.5, files=[file1, file1])
     monkeypatch.setattr(idx, "fast_scan", lambda _path, _exts: fake_scan_result)
+    monkeypatch.setattr(idx, "RUST_CORE_AVAILABLE", False)
 
     all_files, method, duration = svc._scan_all_folders([folder])
     assert len(all_files) == 1
     assert method == "scandir"
     assert duration == 1.5
 
-    await svc.index_file(file1, "proj")
+    await svc._batch_index_pipeline([(file1, "proj")])
     assert svc.chroma_client.docs_batches
 
     await svc._generate_folder_profiles(all_files, [folder])
@@ -215,7 +217,7 @@ def test_extract_json_csv_stub_and_chunking(tmp_path: Path):
     jsonl = tmp_path / "c.json"
     jsonl.write_text('{"a":1}\n{"b":2}', encoding="utf-8")
     out = svc._extract_json(jsonl)
-    assert '"a": 1' in out and '"b": 2' in out
+    assert '"a":1' in out and '"b":2' in out
 
     csvp = tmp_path / "d.csv"
     csvp.write_text("h1,h2\n1,2", encoding="utf-8")

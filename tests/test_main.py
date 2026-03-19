@@ -1,15 +1,6 @@
 import pytest
-from httpx import AsyncClient, ASGITransport
+from httpx import AsyncClient
 import asyncio
-from app.main import app
-from typing import AsyncGenerator
-
-@pytest.fixture
-async def client() -> AsyncGenerator[AsyncClient, None]:
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as ac:
-        yield ac
 
 @pytest.mark.asyncio
 async def test_read_root(client: AsyncClient):

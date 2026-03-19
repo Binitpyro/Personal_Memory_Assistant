@@ -7,7 +7,7 @@ A **local-first AI-powered assistant** that indexes your personal and project fi
 ## ✨ Latest Features (v0.0.36)
 
 - **🚀 Full-Height Explorer:** Optimized layout that utilizes 100% of your browser tab height.
-- **🗺️ TreeSize Treemap:** Advanced visualization with "Ultrasonic Blue" theme, tiered borders, and 1-second highlight animation on navigation.
+- **🗺️ TreeSize Treemap:** 3D Isometric Dreamscape: Crystal Folders + Bubble Files visualization for interactive directory exploration.
 - **📁 Robust Path Handling:** Fixed folder nesting issues; clean hierarchical views for Windows and Linux paths.
 - **⚡ Performance Insights:** New filtering by file extension in both Explorer and Insights tabs.
 - **🛠️ Backend API:** Standardized `/api` prefix for all endpoints with robust Pydantic validation.

@@ -3,7 +3,6 @@ import { FileTypeTreemap } from './FileTypeTreemap';
 import { WebGPURenderer } from '../renderer/WebGPURenderer';
 import { getVisualizerStream, type FileEntry } from '../api';
 
-// A WebGPU canvas component that actually renders
 const WebGPUCanvas = () => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const rendererRef = useRef<WebGPURenderer | null>(null);
@@ -20,16 +19,40 @@ const WebGPUCanvas = () => {
         rendererRef.current = renderer;
 
         let isCancelled = false;
+        let resizeObserver: ResizeObserver | null = null;
 
         const initRenderer = async () => {
             try {
                 await renderer.init();
                 if (isCancelled) return;
 
+                resizeObserver = new ResizeObserver(entries => {
+                    for (let entry of entries) {
+                        const { width, height } = entry.contentRect;
+                        if (width > 0 && height > 0 && rendererRef.current) {
+                            rendererRef.current.resize(width, height);
+                        }
+                    }
+                });
+                resizeObserver.observe(canvas);
+
+                // 1. Fetch the data exactly ONCE
                 const buffer = await getVisualizerStream();
                 if (isCancelled) return;
 
+                // 2. Check the data payload
                 if (buffer.byteLength > 4) {
+                    const headerView = new Uint8Array(buffer, 0, 4);
+                    
+                    console.log("FIRST 4 BYTES FROM BACKEND:", headerView);
+                    
+                    // 60, 33 is "<!" from "<!DOCTYPE html>"
+                    if (headerView[0] === 60 && headerView[1] === 33) {
+                        console.error("VITE TRAP: The backend sent HTML instead of Binary 3D Data!");
+                        setLoadError("Backend disconnected. Vite sent HTML.");
+                        return;
+                    }
+                    
                     await renderer.loadData(buffer);
                 } else {
                     if (!isCancelled) {
@@ -38,13 +61,15 @@ const WebGPUCanvas = () => {
                     return; 
                 }
 
+                // 3. Start the animation loop
                 const animate = () => {
                     renderer.render();
                     requestRef.current = requestAnimationFrame(animate);
                 };
                 requestRef.current = requestAnimationFrame(animate);
+                
             } catch (err) {
-                console.error("Failed to initialize or fetch WebGPU data:", err);
+                console.error("Failed to initialize WebGPU:", err);
                 if (!isCancelled) {
                     setLoadError(err instanceof Error ? err.message : "Unknown error loading 3D data");
                 }
@@ -56,6 +81,7 @@ const WebGPUCanvas = () => {
         return () => {
             isCancelled = true;
             if (requestRef.current) cancelAnimationFrame(requestRef.current);
+            if (resizeObserver) resizeObserver.disconnect();
             if (rendererRef.current) {
                 rendererRef.current.destroy();
             }
@@ -93,7 +119,6 @@ const WebGPUCanvas = () => {
     }
 
     return (
-        // FIX: Added explicit min-h-[500px] to this wrapper div
         <div className="w-full h-full min-h-[500px] relative bg-[#f1f5e0] rounded-3xl overflow-hidden border border-white/40 shadow-inner">
             <div className="absolute top-6 left-8 z-10 pointer-events-none">
                 <h2 className="text-2xl font-bold text-primary flex items-center gap-3">
@@ -107,7 +132,6 @@ const WebGPUCanvas = () => {
             <canvas 
                 ref={canvasRef} 
                 className="w-full h-full cursor-grab active:cursor-grabbing block" 
-                // FIX: Use 100% height but enforce a strict minimum of 500px
                 style={{ minHeight: '500px', height: '100%', width: '100%' }}
                 onMouseDown={handleMouseDown}
                 onMouseMove={handleMouseMove}

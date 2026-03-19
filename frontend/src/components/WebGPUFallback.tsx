@@ -31,6 +31,11 @@ const WebGPUCanvas = () => {
 
                 if (buffer.byteLength > 4) {
                     await renderer.loadData(buffer);
+                } else {
+                    if (!isCancelled) {
+                        setLoadError("No 3D data available. Please index some files first.");
+                    }
+                    return; 
                 }
 
                 const animate = () => {
@@ -51,6 +56,9 @@ const WebGPUCanvas = () => {
         return () => {
             isCancelled = true;
             if (requestRef.current) cancelAnimationFrame(requestRef.current);
+            if (rendererRef.current) {
+                rendererRef.current.destroy();
+            }
         };
     }, []);
 
@@ -85,7 +93,8 @@ const WebGPUCanvas = () => {
     }
 
     return (
-        <div className="w-full h-full relative bg-[#f1f5e0] rounded-3xl overflow-hidden border border-white/40 shadow-inner">
+        // FIX: Added explicit min-h-[500px] to this wrapper div
+        <div className="w-full h-full min-h-[500px] relative bg-[#f1f5e0] rounded-3xl overflow-hidden border border-white/40 shadow-inner">
             <div className="absolute top-6 left-8 z-10 pointer-events-none">
                 <h2 className="text-2xl font-bold text-primary flex items-center gap-3">
                     <span className="w-3 h-3 bg-accent rounded-full animate-pulse shadow-[0_0_12px_rgba(142,72,234,0.6)]" />
@@ -97,8 +106,9 @@ const WebGPUCanvas = () => {
             </div>
             <canvas 
                 ref={canvasRef} 
-                className="w-full h-full cursor-grab active:cursor-grabbing" 
-                style={{ minHeight: '400px', display: 'block' }}
+                className="w-full h-full cursor-grab active:cursor-grabbing block" 
+                // FIX: Use 100% height but enforce a strict minimum of 500px
+                style={{ minHeight: '500px', height: '100%', width: '100%' }}
                 onMouseDown={handleMouseDown}
                 onMouseMove={handleMouseMove}
                 onMouseUp={handleMouseUp}

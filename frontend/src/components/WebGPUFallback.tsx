@@ -49,6 +49,9 @@ const WebGPUCanvas = () => {
                     // 60, 33 is "<!" from "<!DOCTYPE html>"
                     if (headerView[0] === 60 && headerView[1] === 33) {
                         console.error("VITE TRAP: The backend sent HTML instead of Binary 3D Data!");
+                        if (rendererRef.current) rendererRef.current.destroy();
+                        if (requestRef.current) cancelAnimationFrame(requestRef.current);
+                        if (resizeObserver) resizeObserver.disconnect();
                         setLoadError("Backend disconnected. Vite sent HTML.");
                         return;
                     }
@@ -56,6 +59,9 @@ const WebGPUCanvas = () => {
                     await renderer.loadData(buffer);
                 } else {
                     if (!isCancelled) {
+                        if (rendererRef.current) rendererRef.current.destroy();
+                        if (requestRef.current) cancelAnimationFrame(requestRef.current);
+                        if (resizeObserver) resizeObserver.disconnect();
                         setLoadError("No 3D data available. Please index some files first.");
                     }
                     return; 
@@ -71,6 +77,9 @@ const WebGPUCanvas = () => {
             } catch (err) {
                 console.error("Failed to initialize WebGPU:", err);
                 if (!isCancelled) {
+                    if (rendererRef.current) rendererRef.current.destroy();
+                    if (requestRef.current) cancelAnimationFrame(requestRef.current);
+                    if (resizeObserver) resizeObserver.disconnect();
                     setLoadError(err instanceof Error ? err.message : "Unknown error loading 3D data");
                 }
             }

@@ -1,11 +1,11 @@
 import asyncio
 import json
 import logging
-import re
 import time
 import threading
 from collections import OrderedDict
 from typing import AsyncGenerator, List, Dict, Any, Optional, Set, Tuple
+from pathlib import Path
 from app.storage.db import DatabaseManager
 from app.embeddings.service import EmbeddingService
 from app.vector_store.chroma_client import ChromaClient
@@ -14,24 +14,26 @@ from app.search.llm_client import LLMClient
 from app.search.reranker import rerank
 from app.config import settings
 
+from app.project_constants import (
+    RETRIEVAL_CACHE_MAX_SIZE, RAG_CACHE_MAX_SIZE, 
+    FTS5_OPERATOR_RE, determine_query_intent, is_metadata_intent
+)
+
 logger = logging.getLogger(__name__)
 
 # Phase 3.1: Result Cache (LRU)
 # Keys are (query, file_type, folder_tag, index_gen)
 # Values are List[Dict[str, Any]]
 _retrieval_cache: OrderedDict[Tuple[str, Optional[str], Optional[str], int], List[Dict[str, Any]]] = OrderedDict()
-_CACHE_MAX_SIZE = 500  # 5x increase for better hit rate
 _cache_lock = threading.Lock()
 
 # Full-RAG response cache (caches LLM answers for repeat queries)
 # Keys are (query, file_type, folder_tag, index_gen)
 # Values are Dict[str, Any] (full response)
 _rag_response_cache: OrderedDict[Tuple[str, Optional[str], Optional[str], int], Dict[str, Any]] = OrderedDict()
-_RAG_CACHE_MAX_SIZE = 200
 _rag_cache_lock = threading.Lock()
 
 # Index generation counter — incremented on each cache clear (after re-indexing)
-# Included in cache keys so stale entries are never hit.
 _index_generation: int = 0
 
 def clear_retrieval_cache():
@@ -44,18 +46,6 @@ def clear_retrieval_cache():
     _index_generation += 1
     logger.info("Retrieval + RAG response caches cleared (generation=%d).", _index_generation)
 
-_INVENTORY_RE = re.compile(
-    r'\b(?:how many|count|do i have|files? do i|'
-    r'files? i have|my files|all files|all my|total size|'
-    r'breakdown|statistics|stats|types? of files?|extensions?|'
-    r'storage|disk space|largest folders?|smallest folders?|'
-    r'how big|how large|how much space|file count|indexed files?)\b',
-    re.IGNORECASE,
-)
-
-_LATEST_RE = re.compile(r'\b(?:latest|recent|newest|added lately|last updated|last modified)\b', re.IGNORECASE)
-_LARGEST_RE = re.compile(r'\b(?:largest|biggest|huge|oversized|most space|taking up space)\b', re.IGNORECASE)
-
 async def _get_metadata_insights(
     query: str,
     db: DatabaseManager,
@@ -64,18 +54,15 @@ async def _get_metadata_insights(
     unreal_facts: List[Dict[str, Any]],
 ) -> Optional[str]:
     """Gather factual metadata insights based on the user query."""
-    inventory = bool(_LATEST_RE.search(query) or _LARGEST_RE.search(query) or "how many files" in query.lower())
-    project = "project" in query.lower() or "overview" in query.lower() or "summary" in query.lower()
-    unreal = "unreal" in query.lower() or "ue5" in query.lower() or "uproject" in query.lower()
-    latest = bool(_LATEST_RE.search(query))
-    largest = bool(_LARGEST_RE.search(query))
+    intent = determine_query_intent(query)
 
-    if not (inventory or project or unreal or latest or largest):
+    if not (intent["inventory"] or intent["project"] or intent["unreal"] or intent["latest"] or intent["largest"]):
         return None
 
     lines: List[str] = ["=== Metadata Insights (Factual Source of Truth) ==="]
     
-    if latest:
+    if intent["latest"]:
+
         rows = await db.execute_query("SELECT path, modified_at FROM files ORDER BY modified_at DESC LIMIT 5")
         if rows:
             lines.append("Recently modified files:")
@@ -97,18 +84,18 @@ async def _get_metadata_insights(
         if "unreal" in str(profile.get("project_type", "")).lower()
     ]
 
-    if inventory and file_stats:
+    if intent["inventory"] and file_stats:
         lines.append(
             f"Total indexed files: {file_stats['total_files']}. Total size: ~{file_stats['total_size_mb']} MB."
         )
         _append_inventory_type_lines(lines, file_stats)
 
-    if unreal and unreal_facts:
+    if intent["unreal"] and unreal_facts:
         _append_unreal_fact_lines(lines, unreal_facts)
-    elif unreal and unreal_profiles:
+    elif intent["unreal"] and unreal_profiles:
         _append_unreal_profile_hint(lines, unreal_profiles)
 
-    if project and folder_profiles:
+    if intent["project"] and folder_profiles:
         _append_project_profile_lines(lines, folder_profiles)
 
     lines.append("=" * 50)
@@ -136,6 +123,9 @@ def _append_project_profile_lines(lines: List[str], folder_profiles: List[Dict[s
             f"  - {fp['folder_tag']} ({fp['project_type']}): {fp['file_count']} files, {size_mb} MB"
         )
 
+def is_metadata_intent(query: str) -> bool:
+    return bool(re.search(r'\b(project summary|summary of project|unreal project overview|unreal summary|show project summary|project overview)\b', query.lower()))
+
 def _build_fast_answer(
     query: str,
     file_stats: Optional[Dict[str, Any]],
@@ -144,28 +134,27 @@ def _build_fast_answer(
 ) -> Optional[str]:
     """Provide immediate answers for pure metadata/inventory queries without hitting the LLM."""
     query_lower = query.lower()
+    intent = determine_query_intent(query)
     
     # Very specific fast paths
     if "how many files" in query_lower or "total size" in query_lower or "disk space" in query_lower:
         if file_stats:
             return f"You currently have {file_stats['total_files']} indexed files taking up a total of {file_stats['total_size_mb']} MB."
 
-    if "unreal" in query_lower and ("overview" in query_lower or "summary" in query_lower) and unreal_facts:
+    if intent["metadata_intent"] and unreal_facts and intent["unreal"]:
         lines = ["Here is your Unreal project summary:"]
         _append_unreal_fact_lines(lines, unreal_facts)
         return "\n".join(lines)
 
-    if "project" in query_lower and ("overview" in query_lower or "summary" in query_lower) and folder_profiles:
+    if intent["metadata_intent"] and folder_profiles and intent["project"]:
         lines = ["Here is a summary of your indexed projects:"]
         _append_project_profile_lines(lines, folder_profiles)
         return "\n".join(lines)
 
     return None
 
-_FTS5_OPERATOR_RE = re.compile(r'["*^]|\bAND\b|\bOR\b|\bNOT\b|\bNEAR\b', re.IGNORECASE)
-
 def _sanitize_fts_query(query: str) -> str:
-    cleaned = _FTS5_OPERATOR_RE.sub(' ', query)
+    cleaned = FTS5_OPERATOR_RE.sub(' ', query)
     tokens = [t.strip() for t in cleaned.split() if t.strip()]
     if not tokens:
         return '"' + query.replace('"', '') + '"'
@@ -379,7 +368,7 @@ async def hybrid_retrieve(
     
     # Update Cache
     with _cache_lock:
-        if len(_retrieval_cache) >= _CACHE_MAX_SIZE:
+        if len(_retrieval_cache) >= RETRIEVAL_CACHE_MAX_SIZE:
             _retrieval_cache.popitem(last=False)
         _retrieval_cache[cache_key] = final_results
         
@@ -443,9 +432,10 @@ async def full_rag(
             cached_copy["cache_hit"] = True
             return cached_copy
 
-    inventory = bool(_LATEST_RE.search(query) or _LARGEST_RE.search(query) or "how many files" in query.lower())
-    project = "project" in query.lower() or "overview" in query.lower() or "summary" in query.lower()
-    unreal = "unreal" in query.lower() or "ue5" in query.lower() or "uproject" in query.lower()
+    intent = determine_query_intent(query)
+    inventory = intent["inventory"]
+    project = intent["project"]
+    unreal = intent["unreal"]
 
     folder_profiles, file_stats, unreal_facts = await _load_query_metadata(
         db, inventory=inventory, project=project, unreal=unreal,
@@ -507,7 +497,7 @@ async def full_rag(
     # Phase 1.1: Cache the full RAG response for repeat queries (only if successful)
     if "error" not in result["answer"].lower() and "i'm sorry" not in result["answer"].lower():
         with _rag_cache_lock:
-            if len(_rag_response_cache) >= _RAG_CACHE_MAX_SIZE:
+            if len(_rag_response_cache) >= RAG_CACHE_MAX_SIZE:
                 _rag_response_cache.popitem(last=False)
             _rag_response_cache[rag_cache_key] = result
 
@@ -526,9 +516,10 @@ async def full_rag_stream(
 ) -> AsyncGenerator[str, None]:
     """Retrieves context and yields answer chunks + initial metadata."""
     t_start = time.perf_counter()
-    inventory = bool(_LATEST_RE.search(query) or _LARGEST_RE.search(query) or "how many files" in query.lower())
-    project = "project" in query.lower() or "overview" in query.lower() or "summary" in query.lower()
-    unreal = "unreal" in query.lower() or "ue5" in query.lower() or "uproject" in query.lower()
+    intent = determine_query_intent(query)
+    inventory = intent["inventory"]
+    project = intent["project"]
+    unreal = intent["unreal"]
 
     folder_profiles, file_stats, unreal_facts = await _load_query_metadata(
         db, inventory=inventory, project=project, unreal=unreal,

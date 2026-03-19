@@ -13,7 +13,7 @@ function formatBytes(bytes: number): string {
 }
 
 export function InsightsPage() {
-  const { data: insights, loading: insightsLoading, error } = useApi(getInsights, { cacheKey: 'insights', refetchInterval: 30_000 })
+  const { data: insights, loading: insightsLoading, error } = useApi(getInsights, { cacheKey: 'insights' })
   const { data: tree, loading: treeLoading } = useApi(getFileTree, { cacheKey: 'file-tree' })
   const [typeFilter, setTypeFilter] = useState<string | null>(null)
   const [filteredTopFiles, setFilteredTopFiles] = useState<{ path: string; size: number }[]>([])

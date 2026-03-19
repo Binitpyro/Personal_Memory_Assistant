@@ -22,7 +22,7 @@ struct VertexOutput {
     @location(0) view_depth: f32,
     @location(1) world_position: vec3<f32>,
     @location(2) normal: vec3<f32>,
-    @location(3) type_hash: u32,
+    @location(3) @interpolate(flat) type_hash: u32,
     @location(4) is_folder: f32,
 };
 

@@ -75,8 +75,6 @@ export class LinearBVH {
             layout: 'auto',
             compute: { module: mortonShader, entryPoint: "main" }
         });
-
-
     }
 
     public async uploadData(binaryBuffer: ArrayBuffer) {
@@ -90,7 +88,7 @@ export class LinearBVH {
         // Element buffer
         this.elementBuffer = this.device.createBuffer({
             size: payloadLength,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.VERTEX,
             mappedAtCreation: true
         });
         new Uint8Array(this.elementBuffer.getMappedRange()).set(new Uint8Array(binaryBuffer, payloadOffset));
@@ -105,7 +103,7 @@ export class LinearBVH {
         // BVH Node Buffer (approx 2N-1 nodes) 
         // 32 bytes per node: AABB Min (vec3) + Left (u32), AABB Max (vec3) + Right (u32)
         this.bvhNodeBuffer = this.device.createBuffer({
-            size: (this.numElements * 2 - 1) * 32,
+            size: Math.max(1, (this.numElements * 2 - 1)) * 32, // Prevent 0-size allocation
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
         });
     }
@@ -148,5 +146,18 @@ export class LinearBVH {
 
     public getElementCount(): number {
         return this.numElements;
+    }
+
+    public destroy() {
+        if (this.elementBuffer) {
+            this.elementBuffer.destroy();
+        }
+        if (this.mortonCodeBuffer) {
+            this.mortonCodeBuffer.destroy();
+        }
+        if (this.bvhNodeBuffer) {
+            this.bvhNodeBuffer.destroy();
+        }
+        this.numElements = 0;
     }
 }

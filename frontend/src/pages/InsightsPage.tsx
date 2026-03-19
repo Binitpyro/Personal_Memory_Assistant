@@ -109,7 +109,8 @@ export function InsightsPage() {
           {/* Charts area */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 flex-1">
             {/* File Type Distribution — 3D Crystal / Treemap fallback (spans 2 cols) */}
-            <div className="glass-card lg:col-span-2 flex flex-col min-h-[500px] overflow-hidden">
+            {/* FIX: Increased min-h and added h-full so the WebGPU canvas doesn't collapse */}
+            <div className="glass-card lg:col-span-2 flex flex-col min-h-[600px] h-full overflow-hidden">
               <div className="flex items-center justify-between mb-4 shrink-0">
                 <h2 className="text-lg font-bold text-primary flex items-center gap-2">
                   <PieChart className="w-5 h-5" />
@@ -131,7 +132,8 @@ export function InsightsPage() {
                 </div>
               </div>
               
-              {tree?.folders ? (
+              {/* Fix: Explicitly check if folders object has keys before rendering visualizations */}
+              {tree?.folders && Object.keys(tree.folders).length > 0 ? (
                 <div className="flex-1 min-h-0 flex flex-col relative">
                   {vizMode === '3d' ? (
                     <WebGPUFallback
@@ -150,8 +152,18 @@ export function InsightsPage() {
                   )}
                 </div>
               ) : (
-                <div className="flex-1 flex items-center justify-center text-text-secondary text-sm">
-                  {treeLoading ? <Loader2 className="animate-spin" /> : 'No data yet'}
+                <div className="flex-1 flex flex-col items-center justify-center text-text-secondary text-sm bg-white/5 rounded-2xl border border-white/5">
+                  {treeLoading ? (
+                    <div className="flex flex-col items-center gap-3">
+                      <Loader2 className="w-8 h-8 text-primary animate-spin" />
+                      <p>Loading folder structure...</p>
+                    </div>
+                  ) : (
+                    <div className="flex flex-col items-center gap-3 opacity-60">
+                      <Box className="w-12 h-12" />
+                      <p>No file hierarchy data available.</p>
+                    </div>
+                  )}
                 </div>
               )}
             </div>

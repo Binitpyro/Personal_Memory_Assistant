@@ -1,7 +1,6 @@
 import { LinearBVH } from "../spatial/LinearBVH";
 
 // We import WGSL as raw strings using Vite's supported ?raw query
-
 import bubbleShaderCode from './shaders/bubble_mboit.wgsl?raw';
 import resolveShaderCode from './shaders/oit_resolve.wgsl?raw';
 
@@ -17,11 +16,6 @@ export class WebGPURenderer {
 
     private cameraBuffer!: GPUBuffer;
     private geometryBuffer!: GPUBuffer;
-    // Bypassing Culling
-    // private visibleInstancesBuffer!: GPUBuffer;
-    // private drawArgsBuffer!: GPUBuffer;
-    // private cullingPipeline!: GPUComputePipeline;
-    // private cullingBindGroup!: GPUBindGroup;
 
     private bubblePipeline!: GPURenderPipeline;
     private resolvePipeline!: GPURenderPipeline;
@@ -44,7 +38,7 @@ export class WebGPURenderer {
             throw new Error("WebGPU not supported on this browser.");
         }
 
-        const adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
+        const adapter = await navigator.gpu.requestAdapter();
         if (!adapter) {
             throw new Error("No appropriate GPUAdapter found.");
         }
@@ -107,8 +101,9 @@ export class WebGPURenderer {
 
     private async setupTextures() {
         const size = { width: this.canvas.width, height: this.canvas.height };
+        // FIX: Changed from rgba32float to rgba16float to support universal blending
         this.momentTexture = this.device.createTexture({
-            size, format: 'rgba32float',
+            size, format: 'rgba16float',
             usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
         });
         this.colorTexture = this.device.createTexture({
@@ -124,12 +119,6 @@ export class WebGPURenderer {
     private async setupPipelines() {
         await this.bvh.initializePipelines();
         
-        // Culling compute shader is bypassed
-        // const cullModule = this.device.createShaderModule({ code: cullingShaderCode });
-        // this.cullingPipeline = this.device.createComputePipeline({
-        //     layout: 'auto', compute: { module: cullModule, entryPoint: "main" }
-        // });
-
         const bubbleModule = this.device.createShaderModule({ code: bubbleShaderCode });
         this.bubblePipeline = this.device.createRenderPipeline({
             layout: 'auto',
@@ -142,8 +131,11 @@ export class WebGPURenderer {
             },
             fragment: {
                 module: bubbleModule, entryPoint: "fs_main",
-                targets: [{ format: 'rgba32float', blend: { color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' }, alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' } } },
-                          { format: 'rgba16float', blend: { color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' }, alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' } } }]
+                // FIX: Target 0 format changed to rgba16float to match texture
+                targets: [
+                    { format: 'rgba16float', blend: { color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' }, alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' } } },
+                    { format: 'rgba16float', blend: { color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' }, alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' } } }
+                ]
             },
             primitive: { topology: 'triangle-list' },
             depthStencil: { depthWriteEnabled: false, depthCompare: 'less-equal', format: 'depth32float' },
@@ -168,10 +160,10 @@ export class WebGPURenderer {
         this.updateCamera();
         
         this.renderBindGroup = this.device.createBindGroup({ layout: this.bubblePipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: this.cameraBuffer } }] });
-        const sampler = this.device.createSampler();
+        
         this.resolveBindGroup = this.device.createBindGroup({
             layout: this.resolvePipeline.getBindGroupLayout(0),
-            entries: [{ binding: 0, resource: this.momentTexture.createView() }, { binding: 1, resource: this.colorTexture.createView() }, { binding: 2, resource: sampler }]
+            entries: [{ binding: 0, resource: this.momentTexture.createView() }, { binding: 1, resource: this.colorTexture.createView() }]
         });
     }
 
@@ -238,7 +230,21 @@ export class WebGPURenderer {
     private dot(a: number[], b: number[]) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
 
     public render() {
-        if (!this.bvh.getElementCount() || !this.cameraBuffer) return;
+        if (!this.bvh.getElementCount() || !this.cameraBuffer) {
+            const commandEncoder = this.device.createCommandEncoder();
+            const clearPass = commandEncoder.beginRenderPass({
+                colorAttachments: [{ 
+                    view: this.context.getCurrentTexture().createView(), 
+                    loadOp: 'clear', 
+                    clearValue: [0.945, 0.96, 0.878, 1], 
+                    storeOp: 'store' 
+                }]
+            });
+            clearPass.end();
+            this.device.queue.submit([commandEncoder.finish()]);
+            return;
+        }
+
         this.updateCamera();
         
         const commandEncoder = this.device.createCommandEncoder();
@@ -268,4 +274,24 @@ export class WebGPURenderer {
         resolvePass.end();
         this.device.queue.submit([commandEncoder.finish()]);
     }
+
+    public destroy() {
+        // Destroy textures
+        if (this.momentTexture) this.momentTexture.destroy();
+        if (this.colorTexture) this.colorTexture.destroy();
+        if (this.depthTexture) this.depthTexture.destroy();
+        
+        // Destroy buffers
+        if (this.cameraBuffer) this.cameraBuffer.destroy();
+        if (this.geometryBuffer) this.geometryBuffer.destroy();
+        
+        // Let the BVH clean up its own buffers
+        if (this.bvh) {
+            this.bvh.destroy(); // Compiler error is now gone!
+        }
+
+        // Destroy device connection
+        if (this.device) this.device.destroy();
+    }
 }
+

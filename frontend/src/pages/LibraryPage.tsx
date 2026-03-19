@@ -236,42 +236,42 @@ export function LibraryPage() {
       )}
 
       {/* Server Info */}
-      <div className="glass-card text-[10px] text-text-primary/90 flex flex-wrap items-center justify-between px-4 py-2 opacity-95 hover:opacity-100 transition-opacity duration-300 bg-white/10 border-white/20">
-        <div className="flex flex-wrap gap-x-6 gap-y-1">
-          <span className="flex gap-1.5">
+      <div className="glass-card flex flex-wrap items-center justify-between p-4 mt-8">
+        <div className="flex flex-wrap gap-x-6 gap-y-2 text-xs">
+          <span className="flex items-center gap-1.5">
             <span className="font-bold opacity-60 uppercase tracking-tighter text-primary-light">Version</span>
-            <span className="font-mono font-bold">{health?.version ?? '—'}</span>
+            <span className="font-mono font-bold text-text-primary">{health?.version ?? '—'}</span>
           </span>
-          <span className="flex gap-1.5">
+          <span className="flex items-center gap-1.5">
             <span className="font-bold opacity-60 uppercase tracking-tighter text-primary-light">DB</span>
-            <span className="font-mono font-bold">{health?.db ?? '—'}</span>
+            <span className="font-mono font-bold text-text-primary">{health?.db ?? '—'}</span>
           </span>
-          <span className="flex gap-1.5">
+          <span className="flex items-center gap-1.5">
             <span className="font-bold opacity-60 uppercase tracking-tighter text-primary-light">OS</span>
-            <span className="font-mono font-bold">{sysInfo?.os ?? '—'}</span>
+            <span className="font-mono font-bold text-text-primary">{sysInfo?.os ?? '—'}</span>
           </span>
-          <span className="flex gap-1.5">
+          <span className="flex items-center gap-1.5">
             <span className="font-bold opacity-60 uppercase tracking-tighter text-primary-light">Admin</span>
-            <span className="font-mono font-bold text-success">{sysInfo?.is_admin ? 'Yes' : 'No'}</span>
+            <span className={`font-mono font-bold ${sysInfo?.is_admin ? 'text-success' : 'text-warning'}`}>{sysInfo?.is_admin ? 'Yes' : 'No'}</span>
           </span>
-          <span className="flex gap-1.5">
+          <span className="flex items-center gap-1.5">
             <span className="font-bold opacity-60 uppercase tracking-tighter text-primary-light">Scan</span>
-            <span className="font-mono font-bold">{sysInfo?.scan_method ?? '—'}</span>
+            <span className="font-mono font-bold text-text-primary">{sysInfo?.scan_method ?? '—'}</span>
           </span>
         </div>
-        <div className="flex gap-2 border-l border-white/10 pl-4 ml-auto">
+        <div className="flex gap-2 pl-4 ml-auto border-l border-white/20">
           <button 
             onClick={handleDemo} 
-            className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 border border-emerald-500/20 transition-all font-black text-[9px] uppercase tracking-widest shadow-sm"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 border border-emerald-500/20 transition-all font-black text-[10px] uppercase tracking-widest shadow-sm"
           >
-            <Play className="w-2.5 h-2.5" />
+            <Play className="w-3 h-3" />
             Seed Demo
           </button>
           <button 
             onClick={handleClear} 
-            className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-600 border border-red-500/20 transition-all font-black text-[9px] uppercase tracking-widest shadow-sm"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-600 border border-red-500/20 transition-all font-black text-[10px] uppercase tracking-widest shadow-sm"
           >
-            <Trash2 className="w-2.5 h-2.5" />
+            <Trash2 className="w-3 h-3" />
             Clear Index
           </button>
         </div>

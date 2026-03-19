@@ -82,6 +82,8 @@ export class VerletIntegration {
             // Basic floor constraint
             if (p.pos[1] < 0) {
                 p.pos[1] = 0;
+                // Reflect Y velocity for bounce with damping
+                p.oldPos[1] = p.pos[1] + vy * 0.8;
                 // Add fake friction/damping for bounce
                 p.oldPos[0] = p.pos[0] - vx * 0.8;
                 p.oldPos[2] = p.pos[2] - vz * 0.8;

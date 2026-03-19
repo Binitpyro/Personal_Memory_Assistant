@@ -29,10 +29,9 @@ export function LibraryPage() {
 
   // Sync local indexing flag from backend status on page load/poll
   useEffect(() => {
-    if (status?.status === 'running' && !indexing) {
-      setIndexing(true)
-    }
-  }, [status?.status, indexing])
+    if (!status?.status) return
+    setIndexing(status.status === 'running')
+  }, [status?.status])
 
   // SSE progress stream while indexing (driven by isRunning, survives reload)
   useEffect(() => {
@@ -72,6 +71,7 @@ export function LibraryPage() {
   }, [folderPath])
 
   const handleClear = useCallback(async () => {
+    if (isRunning) return
     if (!confirm('This will permanently delete ALL indexed data. Continue?')) return
     try {
       await clearIndex()
@@ -87,6 +87,7 @@ export function LibraryPage() {
 
 
   const handleDemo = useCallback(async () => {
+    if (isRunning) return
     try {
       const res = await seedDemo()
       setIndexing(true)
@@ -262,14 +263,16 @@ export function LibraryPage() {
         <div className="flex gap-2 pl-4 ml-auto border-l border-white/20">
           <button 
             onClick={handleDemo} 
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 border border-emerald-500/20 transition-all font-black text-[10px] uppercase tracking-widest shadow-sm"
+            disabled={isRunning}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 border border-emerald-500/20 transition-all font-black text-[10px] uppercase tracking-widest shadow-sm disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <Play className="w-3 h-3" />
             Seed Demo
           </button>
           <button 
             onClick={handleClear} 
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-600 border border-red-500/20 transition-all font-black text-[10px] uppercase tracking-widest shadow-sm"
+            disabled={isRunning}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-600 border border-red-500/20 transition-all font-black text-[10px] uppercase tracking-widest shadow-sm disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <Trash2 className="w-3 h-3" />
             Clear Index

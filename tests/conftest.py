@@ -2,12 +2,13 @@ import pytest
 from httpx import AsyncClient, ASGITransport
 import aiosqlite
 from unittest.mock import AsyncMock, MagicMock
-from app.main import app, get_db, get_emb, get_chroma, get_llm
-from app.storage.db import DatabaseManager
 
 # Override settings to ensure we don't accidentally write to real disk
 from app.config import settings
 settings.db_path = ":memory:"
+
+from app.main import app, get_db, get_emb, get_chroma, get_llm
+from app.storage.db import DatabaseManager
 
 @pytest.fixture(scope="session")
 def anyio_backend():
@@ -31,7 +32,11 @@ async def mock_db():
 def mock_emb():
     mock = MagicMock()
     mock.embed_query = AsyncMock(return_value=[0.1] * 384)
-    mock.embed_texts = AsyncMock(return_value=[[0.1] * 384])
+    
+    async def _embed_texts(texts, *args, **kwargs):
+        return [[0.1] * 384 for _ in texts]
+        
+    mock.embed_texts = AsyncMock(side_effect=_embed_texts)
     return mock
 
 @pytest.fixture

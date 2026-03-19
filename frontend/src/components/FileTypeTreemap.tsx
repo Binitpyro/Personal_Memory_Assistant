@@ -181,7 +181,7 @@ function buildFolderTree(flatFiles: FileEntry[], getVal: (s: number) => number) 
 
     const parts = relative.split('/').filter(Boolean);
     let current = rootNode;
-    const startIdx = parts[0] === startFolderName ? 1 : 0;
+    const startIdx = (parts[0] === startFolderName && flatFiles.length > 1) ? 1 : 0;
 
     for (let i = startIdx; i < parts.length; i++) {
       const part = parts[i];
@@ -230,6 +230,10 @@ export function FileTypeTreemap({ allFiles, activeFilter, onFilterChange, onFile
   }, [allFiles, groupMode])
 
   const [navPath, setNavPath] = useState<NavSegment[]>([{ name: rootLabel, fullPath: null }])
+
+  useEffect(() => {
+    setNavPath([{ name: rootLabel, fullPath: null }])
+  }, [rootLabel])
 
   /* ── Build Data Logic ──────────────────────────────────── */
   const { treeData, totalSize } = useMemo(() => {
@@ -296,7 +300,15 @@ export function FileTypeTreemap({ allFiles, activeFilter, onFilterChange, onFile
       formatter: (info: any) => {
         const size = info.data?.realSize ?? info.value
         const pct = totalSize > 0 ? ((size / totalSize) * 100).toFixed(1) : '0.0'
-        return `<div style="font-weight:700;margin-bottom:4px;color:#3d15cb">${info.name}</div>Size: <b>${formatBytes(size)}</b> (${pct}%)`
+        const escapeHtml = (unsafe: string) => {
+            return unsafe
+                 .replace(/&/g, "&amp;")
+                 .replace(/</g, "&lt;")
+                 .replace(/>/g, "&gt;")
+                 .replace(/"/g, "&quot;")
+                 .replace(/'/g, "&#039;");
+        }
+        return `<div style="font-weight:700;margin-bottom:4px;color:#3d15cb">${escapeHtml(info.name)}</div>Size: <b>${formatBytes(size)}</b> (${pct}%)`
       }
     },
     animation: true,

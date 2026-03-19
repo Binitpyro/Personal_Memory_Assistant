@@ -158,6 +158,7 @@ export function ExplorerPage() {
         let relative = normPath
         if (normPathLower.startsWith(normTag)) {
           // Robustly remove the tag prefix
+          relative = normPath.slice(normTag.length);
           while (relative.startsWith('/')) { relative = relative.slice(1); }
         }
 

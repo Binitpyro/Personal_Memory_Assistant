@@ -5,26 +5,27 @@ import sys
 import pytest
 import tempfile
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
-from datetime import datetime
+from unittest.mock import AsyncMock, MagicMock, patch
 
-# 1. Setup Environment
-os.environ["GEMINI_API_KEY"] = "fake_key"
+@pytest.fixture
+def test_env_mocks(monkeypatch):
+    import sys
+    monkeypatch.setenv("GEMINI_API_KEY", "fake_key")
+    monkeypatch.setitem(sys.modules, "sentence_transformers", MagicMock())
+    monkeypatch.setitem(sys.modules, "torch", MagicMock())
+    monkeypatch.setitem(sys.modules, "pdfplumber", MagicMock())
+    monkeypatch.setitem(sys.modules, "docx", MagicMock())
 
-# MOCK heavy libraries
-sys.modules["sentence_transformers"] = MagicMock()
-sys.modules["torch"] = MagicMock()
-sys.modules["pdfplumber"] = MagicMock()
-sys.modules["docx"] = MagicMock()
-
-# Patch app.main globals
-with patch("app.main.lifespan", AsyncMock()), \
-     patch("app.main._get_embedding_service"), \
-     patch("app.main._get_chroma_client"), \
-     patch("app.main._get_llm_client"), \
-     patch("app.main.DatabaseManager"):
-    from app.main import app, get_db
-
+@pytest.fixture
+def app_with_mocks(test_env_mocks, monkeypatch):
+    from unittest.mock import patch
+    with patch("app.main.lifespan", AsyncMock()), \
+         patch("app.main._get_embedding_service"), \
+         patch("app.main._get_chroma_client"), \
+         patch("app.main._get_llm_client"), \
+         patch("app.main.DatabaseManager"):
+        from app.main import app, get_db
+        return app, get_db
 from app.search import context_builder, reranker, retrieval
 from app.indexing.service import IndexingService, _resolve_folder_overlaps, _detect_project_type, _build_folder_profile, _dominant_extension_project_type
 from app.storage.db import DatabaseManager
@@ -156,6 +157,7 @@ def test_desktop_startup_deep():
 
 # --- API ---
 from fastapi.testclient import TestClient
+from app.main import app, get_db
 
 def test_api_exhaustive(real_db, mock_emb, mock_chroma):
     app.dependency_overrides[get_db] = lambda: real_db
@@ -172,9 +174,10 @@ def test_api_exhaustive(real_db, mock_emb, mock_chroma):
 
 @pytest.fixture(autouse=True)
 async def cleanup():
+    existing_tasks = set(asyncio.all_tasks())
     yield
     for task in asyncio.all_tasks():
-        if task is not asyncio.current_task():
+        if task not in existing_tasks and task is not asyncio.current_task():
             task.cancel()
             try: await task
             except: pass

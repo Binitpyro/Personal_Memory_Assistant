@@ -1,6 +1,5 @@
 import { LinearBVH } from "../spatial/LinearBVH";
 
-// We import WGSL as raw strings using Vite's supported ?raw query
 import bubbleShaderCode from './shaders/bubble_mboit.wgsl?raw';
 import resolveShaderCode from './shaders/oit_resolve.wgsl?raw';
 
@@ -27,7 +26,7 @@ export class WebGPURenderer {
 
     private rotationX = 0.5;
     private rotationY = 0.5;
-    private zoom = 250;
+    private zoom = 550;
 
     constructor(canvas: HTMLCanvasElement) {
         this.canvas = canvas;
@@ -38,6 +37,7 @@ export class WebGPURenderer {
             throw new Error("WebGPU not supported on this browser.");
         }
 
+        // Fix: Removed powerPreference to silence the Chrome/Windows warning
         const adapter = await navigator.gpu.requestAdapter();
         if (!adapter) {
             throw new Error("No appropriate GPUAdapter found.");
@@ -63,31 +63,21 @@ export class WebGPURenderer {
         this.bvh = new LinearBVH(this.device);
 
         await this.createGeometryBuffer();
-        await this.setupTextures();
+        
+        // Force initial size to at least 1x1 to prevent WebGPU crashes
+        this.canvas.width = Math.max(1, this.canvas.clientWidth);
+        this.canvas.height = Math.max(1, this.canvas.clientHeight);
+        
+        this.setupTextures(); // Made synchronous
         await this.setupPipelines();
     }
 
     private async createGeometryBuffer() {
-        // Unit Cube: 36 vertices (6 faces * 2 triangles * 3 vertices)
+        // IMPOSTOR MAGIC: We no longer pass heavy 3D positions.
+        // Just a flat 2D square (Quad) from -1.0 to 1.0. (6 vertices, X and Y)
         const v = new Float32Array([
-            // +Z
-            -0.5, -0.5,  0.5,  0, 0, 1,   0.5, -0.5,  0.5,  0, 0, 1,   0.5,  0.5,  0.5,  0, 0, 1,
-            -0.5, -0.5,  0.5,  0, 0, 1,   0.5,  0.5,  0.5,  0, 0, 1,  -0.5,  0.5,  0.5,  0, 0, 1,
-            // -Z
-            -0.5, -0.5, -0.5,  0, 0,-1,   0.5,  0.5, -0.5,  0, 0,-1,   0.5, -0.5, -0.5,  0, 0,-1,
-            -0.5, -0.5, -0.5,  0, 0,-1,  -0.5,  0.5, -0.5,  0, 0,-1,   0.5,  0.5, -0.5,  0, 0,-1,
-            // +X
-             0.5, -0.5, -0.5,  1, 0, 0,   0.5,  0.5,  0.5,  1, 0, 0,   0.5, -0.5,  0.5,  1, 0, 0,
-             0.5, -0.5, -0.5,  1, 0, 0,   0.5,  0.5, -0.5,  1, 0, 0,   0.5,  0.5,  0.5,  1, 0, 0,
-            // -X
-            -0.5, -0.5, -0.5, -1, 0, 0,  -0.5, -0.5,  0.5, -1, 0, 0,  -0.5,  0.5,  0.5, -1, 0, 0,
-            -0.5, -0.5, -0.5, -1, 0, 0,  -0.5,  0.5,  0.5, -1, 0, 0,  -0.5,  0.5, -0.5, -1, 0, 0,
-            // +Y
-            -0.5,  0.5, -0.5,  0, 1, 0,   0.5,  0.5,  0.5,  0, 1, 0,   0.5,  0.5, -0.5,  0, 1, 0,
-            -0.5,  0.5, -0.5,  0, 1, 0,  -0.5,  0.5,  0.5,  0, 1, 0,   0.5,  0.5,  0.5,  0, 1, 0,
-            // -Y
-            -0.5, -0.5, -0.5,  0,-1, 0,   0.5, -0.5, -0.5,  0,-1, 0,   0.5, -0.5,  0.5,  0,-1, 0,
-            -0.5, -0.5, -0.5,  0,-1, 0,   0.5, -0.5,  0.5,  0,-1, 0,  -0.5, -0.5,  0.5,  0,-1, 0,
+            -1.0, -1.0,   1.0, -1.0,  -1.0,  1.0,  // Triangle 1
+            -1.0,  1.0,   1.0, -1.0,   1.0,  1.0,  // Triangle 2
         ]);
 
         this.geometryBuffer = this.device.createBuffer({
@@ -99,9 +89,8 @@ export class WebGPURenderer {
         this.geometryBuffer.unmap();
     }
 
-    private async setupTextures() {
+    private setupTextures() {
         const size = { width: this.canvas.width, height: this.canvas.height };
-        // FIX: Changed from rgba32float to rgba16float to support universal blending
         this.momentTexture = this.device.createTexture({
             size, format: 'rgba16float',
             usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
@@ -116,6 +105,34 @@ export class WebGPURenderer {
         });
     }
 
+    // FIX: Core resizing logic tied to the React ResizeObserver
+    public resize(width: number, height: number) {
+        const w = Math.max(1, width);
+        const h = Math.max(1, height);
+        
+        if (this.canvas.width === w && this.canvas.height === h) return;
+        
+        this.canvas.width = w;
+        this.canvas.height = h;
+
+        if (this.momentTexture) this.momentTexture.destroy();
+        if (this.colorTexture) this.colorTexture.destroy();
+        if (this.depthTexture) this.depthTexture.destroy();
+
+        this.setupTextures();
+
+        // Must rebind the new textures so the shader can see them
+        if (this.resolvePipeline) {
+            this.resolveBindGroup = this.device.createBindGroup({
+                layout: this.resolvePipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: this.momentTexture.createView() }, 
+                    { binding: 1, resource: this.colorTexture.createView() }
+                ]
+            });
+        }
+    }
+
     private async setupPipelines() {
         await this.bvh.initializePipelines();
         
@@ -123,18 +140,42 @@ export class WebGPURenderer {
         this.bubblePipeline = this.device.createRenderPipeline({
             layout: 'auto',
             vertex: {
-                module: bubbleModule, entryPoint: "vs_main",
+                module: bubbleModule, 
+                entryPoint: "vs_main",
                 buffers: [
-                    { arrayStride: 24, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }, { shaderLocation: 1, offset: 12, format: 'float32x3' }] },
-                    { arrayStride: 20, stepMode: 'instance', attributes: [{ shaderLocation: 2, offset: 0, format: 'float32x3' }, { shaderLocation: 3, offset: 12, format: 'float32' }, { shaderLocation: 4, offset: 16, format: 'uint32' }] },
+                    { 
+                        arrayStride: 8, 
+                        attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x2' }] 
+                    },
+                    { 
+                        arrayStride: 20, 
+                        stepMode: 'instance', 
+                        attributes: [
+                            { shaderLocation: 1, offset: 0, format: 'float32x3' },
+                            { shaderLocation: 2, offset: 12, format: 'float32' },
+                            { shaderLocation: 3, offset: 16, format: 'uint32' }
+                        ] 
+                    },
                 ]
             },
             fragment: {
-                module: bubbleModule, entryPoint: "fs_main",
-                // FIX: Target 0 format changed to rgba16float to match texture
+                module: bubbleModule, 
+                entryPoint: "fs_main",
                 targets: [
-                    { format: 'rgba16float', blend: { color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' }, alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' } } },
-                    { format: 'rgba16float', blend: { color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' }, alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' } } }
+                    { 
+                        format: 'rgba16float', 
+                        blend: { 
+                            color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' }, 
+                            alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' } 
+                        } 
+                    },
+                    { 
+                        format: 'rgba16float', 
+                        blend: { 
+                            color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' }, 
+                            alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' } 
+                        } 
+                    }
                 ]
             },
             primitive: { topology: 'triangle-list' },
@@ -146,8 +187,15 @@ export class WebGPURenderer {
             layout: 'auto',
             vertex: { module: resolveModule, entryPoint: "vs_main" },
             fragment: {
-                module: resolveModule, entryPoint: "fs_main",
-                targets: [{ format: this.format, blend: { color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' }, alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' } } }]
+                module: resolveModule, 
+                entryPoint: "fs_main",
+                targets: [{ 
+                    format: this.format, 
+                    blend: { 
+                        color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' }, 
+                        alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' } 
+                    } 
+                }]
             }
         });
     }
@@ -174,7 +222,7 @@ export class WebGPURenderer {
     }
 
     public handleZoom(delta: number) {
-        this.zoom = Math.max(10, Math.min(200, this.zoom + delta * 0.05));
+        this.zoom = Math.max(10, Math.min(500, this.zoom + delta * 0.05));
     }
 
     private updateCamera() {
@@ -186,7 +234,7 @@ export class WebGPURenderer {
         const view = this.lookAt([eyeX, eyeY, eyeZ], [0, 0, 0], [0, 1, 0]);
         const vpMatrix = this.multiply(projection, view);
         this.device.queue.writeBuffer(this.cameraBuffer, 0, vpMatrix);
-        this.device.queue.writeBuffer(this.cameraBuffer, 64, new Float32Array(24)); // Planes
+        this.device.queue.writeBuffer(this.cameraBuffer, 64, new Float32Array(24)); 
         this.device.queue.writeBuffer(this.cameraBuffer, 160, new Float32Array([eyeX, eyeY, eyeZ]));
     }
 
@@ -211,9 +259,13 @@ export class WebGPURenderer {
 
     private multiply(a: Float32Array, b: Float32Array) {
         const out = new Float32Array(16);
-        for (let i = 0; i < 4; i++) {
-            for (let j = 0; j < 4; j++) {
-                out[i * 4 + j] = a[i * 4 + 0] * b[0 * 4 + j] + a[i * 4 + 1] * b[1 * 4 + j] + a[i * 4 + 2] * b[2 * 4 + j] + a[i * 4 + 3] * b[3 * 4 + j];
+        for (let col = 0; col < 4; col++) {
+            for (let row = 0; row < 4; row++) {
+                out[col * 4 + row] =
+                    a[0 * 4 + row] * b[col * 4 + 0] +
+                    a[1 * 4 + row] * b[col * 4 + 1] +
+                    a[2 * 4 + row] * b[col * 4 + 2] +
+                    a[3 * 4 + row] * b[col * 4 + 3];
             }
         }
         return out;
@@ -254,15 +306,14 @@ export class WebGPURenderer {
                               { view: this.colorTexture.createView(), loadOp: 'clear', clearValue: [0, 0, 0, 0], storeOp: 'store' }],
             depthStencilAttachment: { view: this.depthTexture.createView(), depthClearValue: 1.0, depthLoadOp: 'clear', depthStoreOp: 'store' }
         });
+        
         renderPass.setPipeline(this.bubblePipeline);
         renderPass.setBindGroup(0, this.renderBindGroup);
         renderPass.setVertexBuffer(0, this.geometryBuffer);
-        
-        // Use the raw BVH element buffer directly
         renderPass.setVertexBuffer(1, this.bvh.getElementBuffer());
         
-        // Direct draw: 36 vertices (cube), N instances
-        renderPass.draw(36, this.bvh.getElementCount(), 0, 0);
+        // FIX 1: Change 36 to 6 (We are drawing 6-vertex squares now, not 36-vertex cubes!)
+        renderPass.draw(6, this.bvh.getElementCount(), 0, 0);
         renderPass.end();
 
         const resolvePass = commandEncoder.beginRenderPass({
@@ -270,28 +321,25 @@ export class WebGPURenderer {
         });
         resolvePass.setPipeline(this.resolvePipeline);
         resolvePass.setBindGroup(0, this.resolveBindGroup);
-        resolvePass.draw(6);
+        
+        // FIX 2: Change 6 to 3 (The Giant Triangle trick uses exactly 3 vertices)
+        resolvePass.draw(3);
         resolvePass.end();
+        
         this.device.queue.submit([commandEncoder.finish()]);
     }
-
     public destroy() {
-        // Destroy textures
         if (this.momentTexture) this.momentTexture.destroy();
         if (this.colorTexture) this.colorTexture.destroy();
         if (this.depthTexture) this.depthTexture.destroy();
         
-        // Destroy buffers
         if (this.cameraBuffer) this.cameraBuffer.destroy();
         if (this.geometryBuffer) this.geometryBuffer.destroy();
         
-        // Let the BVH clean up its own buffers
-        if (this.bvh) {
-            this.bvh.destroy(); // Compiler error is now gone!
+        if (this.bvh && typeof this.bvh.destroy === 'function') {
+            this.bvh.destroy();
         }
 
-        // Destroy device connection
         if (this.device) this.device.destroy();
     }
 }
-

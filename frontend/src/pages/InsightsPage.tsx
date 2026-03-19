@@ -1,7 +1,8 @@
 import { useMemo, useState, useCallback, useEffect } from 'react'
-import { BarChart3, PieChart, TrendingUp, FileType, Loader2, Flame, Snowflake, HardDrive } from 'lucide-react'
+import { BarChart3, PieChart, TrendingUp, FileType, Loader2, Flame, Snowflake, HardDrive, Box, LayoutGrid } from 'lucide-react'
 import { useApi } from '../useApi'
 import { getInsights, getInsightsByType, getFileTree } from '../api'
+import { WebGPUFallback } from '../components/WebGPUFallback'
 import { FileTypeTreemap } from '../components/FileTypeTreemap'
 
 function formatBytes(bytes: number): string {
@@ -12,12 +13,13 @@ function formatBytes(bytes: number): string {
 }
 
 export function InsightsPage() {
-  const { data: insights, loading: insightsLoading, error } = useApi(getInsights, { cacheKey: 'insights', refetchInterval: 30_000 })
+  const { data: insights, loading: insightsLoading, error } = useApi(getInsights, { cacheKey: 'insights' })
   const { data: tree, loading: treeLoading } = useApi(getFileTree, { cacheKey: 'file-tree' })
   const [typeFilter, setTypeFilter] = useState<string | null>(null)
   const [filteredTopFiles, setFilteredTopFiles] = useState<{ path: string; size: number }[]>([])
   const [filteredColdFiles, setFilteredColdFiles] = useState<{ path: string; usage_count?: number; size?: number }[]>([])
   const [filterLoading, setFilterLoading] = useState(false)
+  const [vizMode, setVizMode] = useState<'3d' | '2d'>('3d')
 
   const handleFilterChange = useCallback((ext: string | null) => {
     setTypeFilter(ext)
@@ -63,14 +65,16 @@ export function InsightsPage() {
   return (
     <div className="flex-1 overflow-y-auto p-6 space-y-6 animate-fade-in-up custom-scrollbar">
       {/* Header */}
-      <div>
-        <h1 className="text-2xl font-bold flex items-center gap-3">
-          <BarChart3 className="w-7 h-7 text-primary" />
-          Insights
-        </h1>
-        <p className="text-text-secondary mt-1">
-          Analytics and visualizations of your personal data
-        </p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold flex items-center gap-3">
+            <BarChart3 className="w-7 h-7 text-primary" />
+            Insights
+          </h1>
+          <p className="text-text-secondary mt-1 text-sm">
+            Analytics and visualizations of your personal data
+          </p>
+        </div>
       </div>
 
       {error && (
@@ -94,29 +98,72 @@ export function InsightsPage() {
               { label: 'File Types', value: typeCount.toString(), icon: TrendingUp, color: 'text-success' },
               { label: 'Top Used', value: (insights?.top_files?.length ?? 0).toString(), icon: BarChart3, color: 'text-warning' },
             ].map(({ label, value, icon: Icon, color }) => (
-              <div key={label} className="glass-card flex flex-col items-center justify-center py-6 px-2">
+              <div key={label} className="glass-card flex flex-col items-center justify-center py-6 px-4">
                 <Icon className={`w-6 h-6 ${color} mb-2`} />
                 <span className={`text-xl font-bold ${color} text-center`}>{value}</span>
-                <span className="text-text-secondary text-xs mt-1 text-center">{label}</span>
+                <span className="text-text-secondary text-xs mt-1 text-center uppercase tracking-wider font-semibold">{label}</span>
               </div>
             ))}
           </div>
 
           {/* Charts area */}
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-            {/* File Type Distribution — Treemap (spans 2 cols) */}
-            <div className="glass-card lg:col-span-2 flex flex-col h-[650px]">
-              <h2 className="text-lg font-semibold mb-4 text-primary-light shrink-0">File Type Hierarchy</h2>
-              {tree?.folders ? (
-                <FileTypeTreemap
-                  allFiles={tree.folders}
-                  activeFilter={typeFilter}
-                  onFilterChange={handleFilterChange}
-                  initialMode="type"
-                />
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 flex-1">
+            {/* File Type Distribution — 3D Crystal / Treemap fallback (spans 2 cols) */}
+            {/* FIX: Increased min-h and added h-full so the WebGPU canvas doesn't collapse */}
+            <div className="glass-card lg:col-span-2 flex flex-col min-h-[600px] h-full overflow-hidden">
+              <div className="flex items-center justify-between mb-4 shrink-0">
+                <h2 className="text-lg font-bold text-primary flex items-center gap-2">
+                  <PieChart className="w-5 h-5" />
+                  File Type Hierarchy
+                </h2>
+                <div className="flex items-center bg-black/5 p-1 rounded-xl border border-black/5 shadow-inner">
+                  <button
+                    onClick={() => setVizMode('3d')}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-bold transition-all ${vizMode === '3d' ? 'bg-primary text-white shadow-lg' : 'text-text-secondary hover:text-text-primary'}`}
+                  >
+                    <Box className="w-3.5 h-3.5" /> 3D CRYSTAL
+                  </button>
+                  <button
+                    onClick={() => setVizMode('2d')}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-bold transition-all ${vizMode === '2d' ? 'bg-primary text-white shadow-lg' : 'text-text-secondary hover:text-text-primary'}`}
+                  >
+                    <LayoutGrid className="w-3.5 h-3.5" /> 2D TREEMAP
+                  </button>
+                </div>
+              </div>
+              
+              {/* Fix: Explicitly check if folders object has keys before rendering visualizations */}
+              {tree?.folders && Object.keys(tree.folders).length > 0 ? (
+                <div className="flex-1 min-h-0 flex flex-col relative">
+                  {vizMode === '3d' ? (
+                    <WebGPUFallback
+                      allFiles={tree.folders}
+                      activeFilter={typeFilter}
+                      onFilterChange={handleFilterChange}
+                      initialMode="type"
+                    />
+                  ) : (
+                    <FileTypeTreemap
+                      allFiles={tree.folders}
+                      activeFilter={typeFilter}
+                      onFilterChange={handleFilterChange}
+                      initialMode="type"
+                    />
+                  )}
+                </div>
               ) : (
-                <div className="flex-1 flex items-center justify-center text-text-secondary text-sm">
-                  {treeLoading ? <Loader2 className="animate-spin" /> : 'No data yet'}
+                <div className="flex-1 flex flex-col items-center justify-center text-text-secondary text-sm bg-white/5 rounded-2xl border border-white/5">
+                  {treeLoading ? (
+                    <div className="flex flex-col items-center gap-3">
+                      <Loader2 className="w-8 h-8 text-primary animate-spin" />
+                      <p>Loading folder structure...</p>
+                    </div>
+                  ) : (
+                    <div className="flex flex-col items-center gap-3 opacity-60">
+                      <Box className="w-12 h-12" />
+                      <p>No file hierarchy data available.</p>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -128,11 +175,11 @@ export function InsightsPage() {
                 <div className="bg-primary/10 border border-primary/20 rounded-xl flex items-center justify-between p-3 shrink-0 shadow-sm animate-fade-in-up">
                   <div className="flex items-center gap-3">
                     <FileType className="w-4 h-4 text-primary" />
-                    <span className="text-xs font-bold text-white uppercase">{typeFilter} Active</span>
+                    <span className="text-xs font-bold text-primary uppercase">{typeFilter} Active</span>
                   </div>
-                  <button 
+                  <button
                     onClick={() => handleFilterChange(null)}
-                    className="text-[9px] font-black bg-primary/20 hover:bg-primary/30 px-2 py-1 rounded transition-all"
+                    className="text-[9px] font-black bg-primary/20 text-primary hover:bg-primary/30 px-2 py-1 rounded transition-all"
                   >
                     CLEAR
                   </button>
@@ -145,26 +192,34 @@ export function InsightsPage() {
                   <Flame className="w-5 h-5 text-warning" />
                   Top Files
                 </h2>
-                {filterLoading ? (
-                  <div className="flex items-center justify-center py-12">
-                    <Loader2 className="w-6 h-6 text-primary animate-spin" />
-                  </div>
-                ) : filteredTopFiles.length > 0 ? (
-                  <div className="space-y-2">
-                    {filteredTopFiles.slice(0, 10).map((f, i) => (
-                      <div key={i} className="group flex items-center justify-between text-sm bg-white/5 hover:bg-white/10 rounded-xl px-4 py-3 transition-all border border-white/5">
-                        <span className="truncate text-text-primary font-medium">{f.path.split(/[\\/]/).pop()}</span>
-                        <span className="text-primary-light text-xs font-mono font-bold shrink-0 ml-2">{formatBytes(f.size)}</span>
+                {(() => {
+                  if (filterLoading) {
+                    return (
+                      <div className="flex items-center justify-center py-12">
+                        <Loader2 className="w-6 h-6 text-primary animate-spin" />
                       </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="text-center py-8 opacity-40">
-                    <p className="text-text-secondary text-sm">
-                      {typeFilter ? `No ${typeFilter} files found` : 'No files indexed yet'}
-                    </p>
-                  </div>
-                )}
+                    )
+                  }
+                  if (filteredTopFiles.length > 0) {
+                    return (
+                      <div className="space-y-2">
+                        {filteredTopFiles.slice(0, 10).map((f) => (
+                          <div key={f.path} className="group flex items-center justify-between text-sm bg-white/5 hover:bg-white/10 rounded-xl px-4 py-3 transition-all border border-white/5">
+                            <span className="truncate text-text-primary font-medium">{f.path.split(/[\\/]/).pop()}</span>
+                            <span className="text-primary-light text-xs font-mono font-bold shrink-0 ml-2">{formatBytes(f.size)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )
+                  }
+                  return (
+                    <div className="text-center py-8 opacity-40">
+                      <p className="text-text-secondary text-sm">
+                        {typeFilter ? `No ${typeFilter} files found` : 'No files indexed yet'}
+                      </p>
+                    </div>
+                  )
+                })()}
               </div>
 
               {/* Cold Files */}
@@ -175,8 +230,8 @@ export function InsightsPage() {
                     Cold Files
                   </h2>
                   <div className="space-y-2">
-                    {filteredColdFiles.slice(0, 8).map((f, i) => (
-                      <div key={i} className="group flex items-center justify-between text-sm bg-white/5 hover:bg-white/10 rounded-xl px-4 py-3 transition-all border border-white/5">
+                    {filteredColdFiles.slice(0, 8).map((f) => (
+                      <div key={f.path} className="group flex items-center justify-between text-sm bg-white/5 hover:bg-white/10 rounded-xl px-4 py-3 transition-all border border-white/5">
                         <span className="truncate text-text-primary font-medium">{f.path.split(/[\\/]/).pop()}</span>
                         <span className="text-accent text-xs font-bold shrink-0 ml-2">
                           {f.usage_count !== undefined ? `${f.usage_count} hits` : formatBytes(f.size || 0)}

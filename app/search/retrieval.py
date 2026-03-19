@@ -48,79 +48,93 @@ _INVENTORY_RE = re.compile(
     r'\b(?:how many|count|do i have|files? do i|'
     r'files? i have|my files|all files|all my|total size|'
     r'breakdown|statistics|stats|types? of files?|extensions?|'
-    r'storage|disk space|largest files?|smallest files?|recent files?|oldest files?|'
+    r'storage|disk space|largest folders?|smallest folders?|'
     r'how big|how large|how much space|file count|indexed files?)\b',
     re.IGNORECASE,
 )
 
-_PROJECT_RE = re.compile(
-    r'\b(?:describe project|overview of|project summary|folder structure|'
-    r'tell me about the project|tech stack|frameworks used|languages? used|'
-    r'where is the project|what tech is this built with)\b',
-    re.IGNORECASE,
-)
+_LATEST_RE = re.compile(r'\b(?:latest|recent|newest|added lately|last updated|last modified)\b', re.IGNORECASE)
+_LARGEST_RE = re.compile(r'\b(?:largest|biggest|huge|oversized|most space|taking up space)\b', re.IGNORECASE)
 
-_UNREAL_RE = re.compile(r'\b(?:unreal|uasset|umap|uproject|ue5|ue4|engine)\b', re.IGNORECASE)
+async def _get_metadata_insights(
+    query: str,
+    db: DatabaseManager,
+    file_stats: Optional[Dict[str, Any]],
+    folder_profiles: List[Dict[str, Any]],
+    unreal_facts: List[Dict[str, Any]],
+) -> Optional[str]:
+    """Gather factual metadata insights based on the user query."""
+    inventory = bool(_LATEST_RE.search(query) or _LARGEST_RE.search(query) or "how many files" in query.lower())
+    project = "project" in query.lower() or "overview" in query.lower() or "summary" in query.lower()
+    unreal = "unreal" in query.lower() or "ue5" in query.lower() or "uproject" in query.lower()
+    latest = bool(_LATEST_RE.search(query))
+    largest = bool(_LARGEST_RE.search(query))
 
-def _is_inventory_query(query: str) -> bool:
-    """Heuristic: does the user want file-level stats rather than content?"""
-    return bool(_INVENTORY_RE.search(query))
+    if not (inventory or project or unreal or latest or largest):
+        return None
 
-def _is_project_query(query: str) -> bool:
-    """Heuristic: does the user want project-level information?"""
-    return bool(_PROJECT_RE.search(query))
+    lines: List[str] = ["=== Metadata Insights (Factual Source of Truth) ==="]
+    
+    if latest:
+        rows = await db.execute_query("SELECT path, modified_at FROM files ORDER BY modified_at DESC LIMIT 5")
+        if rows:
+            lines.append("Recently modified files:")
+            for r in rows:
+                name = Path(r[0]).name
+                lines.append(f"- {name} (last changed {r[1]})")
+    
+    if largest:
+        rows = await db.execute_query("SELECT path, size FROM files ORDER BY size DESC LIMIT 5")
+        if rows:
+            lines.append("Largest indexed files:")
+            for r in rows:
+                name = Path(r[0]).name
+                size_mb = round(r[1] / (1024 * 1024), 2)
+                lines.append(f"- {name} ({size_mb} MB)")
 
-def _is_unreal_query(query: str) -> bool:
-    """Heuristic: does the user explicitly ask about Unreal Engine data?"""
-    return bool(_UNREAL_RE.search(query))
+    unreal_profiles = [
+        profile for profile in folder_profiles
+        if "unreal" in str(profile.get("project_type", "")).lower()
+    ]
+
+    if inventory and file_stats:
+        lines.append(
+            f"Total indexed files: {file_stats['total_files']}. Total size: ~{file_stats['total_size_mb']} MB."
+        )
+        _append_inventory_type_lines(lines, file_stats)
+
+    if unreal and unreal_facts:
+        _append_unreal_fact_lines(lines, unreal_facts)
+    elif unreal and unreal_profiles:
+        _append_unreal_profile_hint(lines, unreal_profiles)
+
+    if project and folder_profiles:
+        _append_project_profile_lines(lines, folder_profiles)
+
+    lines.append("=" * 50)
+    return "\n".join(lines)
 
 def _append_unreal_fact_lines(lines: List[str], unreal_facts: List[Dict[str, Any]]) -> None:
     lines.append("Unreal project summary:")
-    for item in unreal_facts[:5]:
+    for uf in unreal_facts:
         lines.append(
-            f"- {item['project_name']} ({item['folder_path']}) on engine {item['engine_version']}: "
-            f"{item['total_assets']} assets, {item['map_count']} maps, "
-            f"{item['environment_assets']} environment assets, "
-            f"{item['character_blueprints']} character blueprints, "
-            f"{item['pawn_blueprints']} pawn blueprints, "
-            f"{item['skeletal_meshes']} skeletal meshes, "
-            f"{item['material_count']} materials, "
-            f"{item['niagara_systems']} Niagara systems."
+            f"  - {uf['project_name']} (UE {uf['engine_version']}): "
+            f"{uf['total_assets']} assets, {uf['map_count']} maps, "
+            f"{uf['character_blueprints']} char BPs, {uf['material_count']} materials."
         )
-    lines.append(
-        "Tip: import richer Unreal metadata JSON via /unreal/import for best "
-        "character/environment detail."
-    )
 
 def _append_unreal_profile_hint(lines: List[str], unreal_profiles: List[Dict[str, Any]]) -> None:
-    detected = ", ".join(profile.get("folder_tag", "Unknown") for profile in unreal_profiles[:4])
-    lines.append(
-        "Detected Unreal project(s): "
-        f"{detected}. Would you like me to run deeper Unreal analysis "
-        "for environment, characters, maps, and gameplay assets?"
-    )
-    lines.append(
-        "To enable this, import Unreal metadata JSON with POST /unreal/import "
-        "(json_path + optional folder_tag)."
-    )
+    lines.append("Unreal Engine projects detected:")
+    for up in unreal_profiles:
+        lines.append(f"  - {up['folder_tag']} ({up['file_count']} files)")
 
 def _append_project_profile_lines(lines: List[str], folder_profiles: List[Dict[str, Any]]) -> None:
     lines.append("Indexed project/folder profiles:")
-    for profile in folder_profiles[:8]:
-        size_mb = round((profile.get("total_size_bytes", 0) or 0) / (1024 * 1024), 2)
+    for fp in folder_profiles:
+        size_mb = round(fp["total_size_bytes"] / (1024 * 1024), 2)
         lines.append(
-            f"- {profile['folder_tag']} ({profile['project_type']}): "
-            f"{profile['file_count']} files, {size_mb} MB, path: {profile['folder_path']}"
+            f"  - {fp['folder_tag']} ({fp['project_type']}): {fp['file_count']} files, {size_mb} MB"
         )
-
-def _append_inventory_type_lines(lines: List[str], file_stats: Dict[str, Any]) -> None:
-    top_types = file_stats.get("by_type", [])[:6]
-    if not top_types:
-        return
-    lines.append(
-        "Top file types: "
-        + ", ".join(f"{item['ext']} ({item['count']})" for item in top_types)
-    )
 
 def _build_fast_answer(
     query: str,
@@ -128,41 +142,25 @@ def _build_fast_answer(
     folder_profiles: List[Dict[str, Any]],
     unreal_facts: List[Dict[str, Any]],
 ) -> Optional[str]:
-    """Build a deterministic answer for inventory/project questions."""
-    inventory = _is_inventory_query(query)
-    project = _is_project_query(query)
-    unreal = _is_unreal_query(query)
+    """Provide immediate answers for pure metadata/inventory queries without hitting the LLM."""
+    query_lower = query.lower()
+    
+    # Very specific fast paths
+    if "how many files" in query_lower or "total size" in query_lower or "disk space" in query_lower:
+        if file_stats:
+            return f"You currently have {file_stats['total_files']} indexed files taking up a total of {file_stats['total_size_mb']} MB."
 
-    if not (inventory or project or unreal):
-        return None
-
-    lines: List[str] = []
-    unreal_profiles = [
-        profile for profile in folder_profiles
-        if "unreal" in str(profile.get("project_type", "")).lower()
-    ]
-
-    if file_stats:
-        lines.append(
-            f"You currently have {file_stats['total_files']} indexed files "
-            f"(~{file_stats['total_size_mb']} MB)."
-        )
-
-    if unreal and unreal_facts:
+    if "unreal" in query_lower and ("overview" in query_lower or "summary" in query_lower) and unreal_facts:
+        lines = ["Here is your Unreal project summary:"]
         _append_unreal_fact_lines(lines, unreal_facts)
+        return "\n".join(lines)
 
-    if unreal_profiles and not unreal_facts:
-        _append_unreal_profile_hint(lines, unreal_profiles)
-
-    if project and folder_profiles:
+    if "project" in query_lower and ("overview" in query_lower or "summary" in query_lower) and folder_profiles:
+        lines = ["Here is a summary of your indexed projects:"]
         _append_project_profile_lines(lines, folder_profiles)
+        return "\n".join(lines)
 
-    if inventory and file_stats:
-        _append_inventory_type_lines(lines, file_stats)
-
-    if not lines:
-        return None
-    return "\n".join(lines)
+    return None
 
 _FTS5_OPERATOR_RE = re.compile(r'["*^]|\bAND\b|\bOR\b|\bNOT\b|\bNEAR\b', re.IGNORECASE)
 
@@ -365,7 +363,7 @@ async def hybrid_retrieve(
 
     placeholders = ",".join("?" for _ in chunk_ids_ordered)
     query_sql = (
-        f"SELECT c.id, c.text_preview, f.path, f.folder_tag "
+        f"SELECT c.id, zlib_decompress(c.text_preview) as text_preview, f.path, f.folder_tag "
         f"FROM chunks c JOIN files f ON c.file_id = f.id "
         f"WHERE c.id IN ({placeholders})"
     )
@@ -445,9 +443,9 @@ async def full_rag(
             cached_copy["cache_hit"] = True
             return cached_copy
 
-    inventory = _is_inventory_query(query)
-    project = _is_project_query(query)
-    unreal = _is_unreal_query(query)
+    inventory = bool(_LATEST_RE.search(query) or _LARGEST_RE.search(query) or "how many files" in query.lower())
+    project = "project" in query.lower() or "overview" in query.lower() or "summary" in query.lower()
+    unreal = "unreal" in query.lower() or "ue5" in query.lower() or "uproject" in query.lower()
 
     folder_profiles, file_stats, unreal_facts = await _load_query_metadata(
         db, inventory=inventory, project=project, unreal=unreal,
@@ -528,9 +526,9 @@ async def full_rag_stream(
 ) -> AsyncGenerator[str, None]:
     """Retrieves context and yields answer chunks + initial metadata."""
     t_start = time.perf_counter()
-    inventory = _is_inventory_query(query)
-    project = _is_project_query(query)
-    unreal = _is_unreal_query(query)
+    inventory = bool(_LATEST_RE.search(query) or _LARGEST_RE.search(query) or "how many files" in query.lower())
+    project = "project" in query.lower() or "overview" in query.lower() or "summary" in query.lower()
+    unreal = "unreal" in query.lower() or "ue5" in query.lower() or "uproject" in query.lower()
 
     folder_profiles, file_stats, unreal_facts = await _load_query_metadata(
         db, inventory=inventory, project=project, unreal=unreal,

@@ -24,10 +24,10 @@ class EmbeddingService:
         self._max_cache_size = 2000  # Increased from 1000
 
     def load_model(self) -> None:
-        """Loads the embedding model (blocking).
-
-        Prefers ONNX Runtime backend when ``onnxruntime`` is installed
-        (gives ~2-3x speedup on CPU).  Falls back to PyTorch.
+        """
+        Load the embedding model synchronously and mark the service as ready.
+        
+        Attempts to instantiate a SentenceTransformer model for the configured model_name, selecting GPU when available or preferring an ONNX Runtime backend on CPU if the required packages are present; falls back to the PyTorch backend if ONNX is unavailable or initialization fails. On successful load, the model is assigned to `self.model` (and converted to FP16 on CUDA). On any failure the exception is logged but not re-raised. This method always clears the internal loading flag and sets the readiness event so waiters are unblocked.
         """
         if self.model:
             self._ready.set()
@@ -43,17 +43,24 @@ class EmbeddingService:
             backend = "torch"  # default
             if device == "cpu":
                 try:
-                    import onnxruntime  # noqa: F401
-                    import optimum # noqa: F401
+                    import onnxruntime
+                    import optimum.onnxruntime
                     backend = "onnx"
-                    logger.info("ONNX Runtime and Optimum detected — using ONNX backend for faster CPU inference.")
-                except ImportError:
-                    logger.info("onnxruntime or optimum not installed — using default PyTorch backend.")
+                    logger.info("ONNX Runtime and Optimum verified — using ONNX backend for faster CPU inference.")
+                except ImportError as e:
+                    logger.info("ONNX backend unavailable (missing %s) — falling back to PyTorch.", str(e))
+                except Exception as e:
+                    logger.info("ONNX initialization failed: %s — falling back to PyTorch.", str(e))
 
             logger.info("Loading embedding model: %s on device: %s (backend: %s)", self.model_name, device, backend)
             
             if backend == "onnx":
-                self.model = SentenceTransformer(self.model_name, device=device, backend=backend)
+                self.model = SentenceTransformer(
+                    self.model_name, 
+                    device=device, 
+                    backend=backend,
+                    model_kwargs={"file_name": "onnx/model_O4.onnx"}
+                )
             else:
                 self.model = SentenceTransformer(self.model_name, device=device)
             
@@ -84,10 +91,20 @@ class EmbeddingService:
         return self._ready.is_set()
 
     async def embed_texts(self, texts: List[str], batch_size: Optional[int] = None) -> List[List[float]]:
-        """Generates embeddings for a list of texts asynchronously.
-
-        Optimisation: deduplicates identical texts so the model only encodes
-        each unique string once, then maps results back to the original order.
+        """
+        Create vector embeddings for the provided texts.
+        
+        Deduplicates identical input strings so each unique text is encoded once, encodes unique texts in batches (using `batch_size` or the configured default), reports per-batch progress to the indexing service, and returns embeddings mapped to the original input order.
+        
+        Parameters:
+            texts (List[str]): Strings to embed.
+            batch_size (Optional[int]): Maximum number of texts per encoding batch; when omitted the configured default is used.
+        
+        Returns:
+            List[List[float]]: A list of embedding vectors corresponding to each input string in the same order as `texts`.
+        
+        Raises:
+            RuntimeError: If the embedding model failed to load and embeddings cannot be generated.
         """
         if not self.model:
             if self._loading:
@@ -120,16 +137,35 @@ class EmbeddingService:
         loop = asyncio.get_running_loop()
         model = self.model  # capture for closure
         
-        unique_embeddings = await loop.run_in_executor(
-            None,
-            lambda: model.encode(
-                unique_texts,
-                batch_size=effective_batch_size,
-                show_progress_bar=False,
-                convert_to_numpy=True,
-                normalize_embeddings=True, # Ensure unit length for cosine similarity
-            ).tolist(),
-        )
+        # Internal progress reporting
+        from app.indexing.service import progress
+        
+        def encode_with_progress():
+            """
+            Encode deduplicated texts in batches while reporting progress for each batch.
+            
+            Encodes `unique_texts` in batches of `effective_batch_size`, updates progress via `progress.set_current_file(...)` for each batch, and returns the concatenated embeddings in the same order as `unique_texts`.
+            
+            Returns:
+                list[list[float]]: A list of embedding vectors (one per input text) where each embedding is a list of floats.
+            """
+            num_batches = (len(unique_texts) + effective_batch_size - 1) // effective_batch_size
+            results = []
+            for i in range(0, len(unique_texts), effective_batch_size):
+                batch_num = i // effective_batch_size + 1
+                progress.set_current_file(f"Phase 2/3: Embedding batch {batch_num}/{num_batches}…")
+                batch = unique_texts[i : i + effective_batch_size]
+                batch_embeddings = model.encode(
+                    batch,
+                    show_progress_bar=False,
+                    convert_to_numpy=True,
+                    normalize_embeddings=True,
+                )
+                results.append(batch_embeddings)
+            import numpy as np
+            return np.vstack(results).tolist()
+
+        unique_embeddings = await loop.run_in_executor(None, encode_with_progress)
 
         # Map back to original order
         embeddings = [unique_embeddings[original_map[i]] for i in range(len(texts))]

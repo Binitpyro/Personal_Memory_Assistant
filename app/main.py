@@ -35,25 +35,40 @@ from app.utils.metrics import metrics_tracker
 
 _BASE_DIR = Path(__file__).parent.parent
 _REACT_DIR = _BASE_DIR / "static" / "react"
-_REACT_INDEX = _REACT_DIR / "index.html"
+INDEX_HTML = "index.html"
+_REACT_INDEX = _REACT_DIR / INDEX_HTML
 templates = Jinja2Templates(directory="templates")
 
 _indexing_service_cls: Any = None
 _progress_obj: Any = None
 _full_rag_func: Any = None
 _insights_service_cls: Any = None
+
 _static_asset_version_cache: dict[str, tuple[int, str]] = {}
 _file_tree_cache: dict[str, Any] = {"data": None, "ts": 0.0}
 _insights_cache: dict[str, Any] = {"data": None, "ts": 0.0}
 _CACHE_TTL = 10  # seconds
 _bg_tasks: set[asyncio.Task] = set()
 
-APP_VERSION = "0.0.36"
+APP_VERSION = "0.0.41"
 
 def _versioned_static_url(asset_name: str) -> str:
-    asset_rel = Path("static") / asset_name
+    # Look in the base static directory for legacy assets
+    """
+    Return a cacheable URL for a static asset that includes a version token derived from the asset's modification time.
+    
+    Parameters:
+        asset_name (str): File name of the static asset (relative to the application's `static` directory).
+    
+    Returns:
+        str: A path under `/static/` for the asset. If the file exists, the URL includes a `?v=<hex>` query token computed from the file's modification time; if the file cannot be stat-ed, returns `/static/<asset_name>` without a token.
+    
+    Notes:
+        The function caches the computed (mtime_ns, url) pair to avoid repeated filesystem stat calls.
+    """
+    asset_path = _BASE_DIR / "static" / asset_name
     try:
-        mtime_ns = asset_rel.stat().st_mtime_ns
+        mtime_ns = asset_path.stat().st_mtime_ns
     except OSError:
         return f"/static/{asset_name}"
 
@@ -133,10 +148,31 @@ def get_llm(): return _get_llm_client()
 
 @asynccontextmanager
 async def lifespan(fastapi_app: FastAPI):
+    """
+    Lifespan context manager that initializes application services on startup and performs cleanup on shutdown.
+    
+    On startup this connects and initializes the database schema, logs a Windows administrative privilege check (used to determine NTFS MFT fast-scan advisory), begins background model loading for embeddings, connects the Chroma vector store, and schedules a background reranker preload; it then yields to allow the app to serve. On shutdown it closes the database connection.
+    """
     loop = asyncio.get_running_loop()
     logger.info("Initializing database...")
     await db_manager.connect()
     await db_manager.init_db(schema_path=settings.schema_path)
+    # ── Admin privilege check for NTFS fast scanning ──
+    if plat.system() == "Windows":
+        try:
+            is_admin = bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:
+            is_admin = False
+        if is_admin:
+            logger.info("Running with Administrator privileges — NTFS MFT fast scanning enabled.")
+        else:
+            logger.warning(
+                "╔══════════════════════════════════════════════════════════════╗\n"
+                "║  NOT running as Administrator.                              ║\n"
+                "║  NTFS MFT fast scanning is DISABLED (using slower scandir). ║\n"
+                "║  Restart with 'Run as Administrator' for best performance.  ║\n"
+                "╚══════════════════════════════════════════════════════════════╝"
+            )
     emb = _get_embedding_service()
     logger.info("Starting background model load...")
     emb.load_model_background()
@@ -158,6 +194,7 @@ async def lifespan(fastapi_app: FastAPI):
 
 app = FastAPI(title="Personal Memory Assistant", lifespan=lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=500)
+app.mount("/static", StaticFiles(directory="static"), name="static")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -223,13 +260,37 @@ async def health(db: DatabaseManager = Depends(get_db)):
 
 @api_router.post("/index/start")
 async def index_start(request: IndexRequest, background_tasks: BackgroundTasks, db: DatabaseManager = Depends(get_db), emb=Depends(get_emb), chroma=Depends(get_chroma)):
+    """
+    Start background indexing for the request's validated folders and schedule a database compaction after indexing.
+    
+    Clears in-memory file-tree and insights caches, enqueues a background task that runs the indexing service over the validated folders and then attempts to run `db.vacuum()` (logs a warning on failure).
+    
+    Parameters:
+        request (IndexRequest): Request model whose `validated_folders` property provides the folder paths to index.
+        background_tasks (BackgroundTasks): FastAPI background task registry used to run indexing and compaction asynchronously.
+    
+    Returns:
+        dict: `{"message": "Indexing started"}` on success; returns HTTP 400 JSON `{"error": "No valid folder paths provided."}` if no folders are valid.
+    """
     folders = request.validated_folders
     if not folders: return JSONResponse(status_code=400, content={"error": "No valid folder paths provided."})
     indexing_service_cls, _ = _ensure_indexing()
     service = indexing_service_cls(db, emb, chroma)
     _file_tree_cache["data"] = None
     _insights_cache["data"] = None
-    background_tasks.add_task(service.index_folders, folders)
+    async def _index_then_compact():
+        """
+        Run the indexing process for the configured folders and attempt to compact the database afterwards.
+        
+        Attempts to run a database VACUUM after indexing and logs whether compaction succeeded or failed.
+        """
+        await service.index_folders(folders)
+        try:
+            await db.vacuum()
+            logger.info("Auto-compact completed after indexing.")
+        except Exception as e:
+            logger.warning("Auto-compact after indexing failed: %s", e)
+    background_tasks.add_task(_index_then_compact)
     return {"message": "Indexing started"}
 
 @api_router.get("/index/status")
@@ -241,10 +302,41 @@ async def index_status(db: DatabaseManager = Depends(get_db)):
 
 @api_router.get("/index/progress-stream")
 async def progress_stream():
+    """
+    Stream indexing progress as server-sent events.
+    
+    Each SSE event is named "progress" and carries a JSON object with the following keys:
+    `status`, `total_files`, `processed_files`, `total_chunks`, `skipped_files`, `new_files`,
+    `changed_files`, `current_file`, `scan_method`, `scan_duration_ms`, and `progress_percent`.
+    
+    Returns:
+        EventSourceResponse: An SSE response that yields periodic "progress" events until indexing stops.
+    """
     _, progress = _ensure_indexing()
     async def event_generator():
+        """
+        Stream indexing progress events for server-sent events (SSE).
+        
+        Yields periodic progress events containing the current indexing status and metrics until indexing is no longer running.
+        
+        Returns:
+        	A generator that yields dictionaries with keys:
+        		- `event` (str): Always `"progress"`.
+        		- `data` (str): JSON-encoded object with the following fields:
+        			- `status` (str): Current progress status (e.g., `"running"`, `"completed"`).
+        			- `total_files` (int): Total number of files discovered for indexing.
+        			- `processed_files` (int): Number of files processed so far.
+        			- `total_chunks` (int): Current chunk count from the database.
+        			- `skipped_files` (int): Number of files skipped during indexing.
+        			- `new_files` (int): Number of newly discovered files.
+        			- `changed_files` (int): Number of files detected as changed.
+        			- `current_file` (str | None): Path of the file currently being processed, if any.
+        			- `scan_method` (str): Method used to scan files (e.g., `"scandir"`, `"ntfs_mft"`).
+        			- `scan_duration_ms` (int): Duration of the ongoing scan in milliseconds.
+        			- `progress_percent` (int): Integer percent complete (0–100).
+        """
         while True:
-            file_count, chunk_count = await db_manager.get_counts()
+            _, chunk_count = await db_manager.get_counts()
             pct = int((progress.processed_files / progress.total_files) * 100) if progress.total_files > 0 else 0
             data = {
                 "status": progress.status,
@@ -276,8 +368,14 @@ async def cleanup_stale(db: DatabaseManager = Depends(get_db)):
 
 @api_router.post("/index/clear")
 async def clear_index(db: DatabaseManager = Depends(get_db), chroma=Depends(get_chroma)):
+    """
+    Delete all indexed records from the database and remove all documents from the vector store; also clears the in-memory file tree and insights caches.
+    
+    Returns:
+        The value returned by `db.clear_all()`.
+    """
     res = await db.clear_all()
-    await chroma.reset_collections()
+    await chroma.clear_all()
     _file_tree_cache["data"] = _insights_cache["data"] = None
     return res
 
@@ -360,6 +458,19 @@ async def get_insights_by_type(extension: str, db: DatabaseManager = Depends(get
 
 @api_router.get("/files/tree")
 async def get_files_tree(db: DatabaseManager = Depends(get_db)):
+    """
+    Return a cached file-tree grouping of indexed files by folder tag.
+    
+    Uses a short in-memory TTL cache to avoid repeated database queries. On success returns a mapping of folder tags to lists of file entries and aggregate counts; on error returns empty defaults.
+    
+    Returns:
+        dict: {
+            "folders": dict mapping folder_tag (str) to list of entries, where each entry is
+                {"path": str, "size": int, "type": str, "usage_count": int},
+            "total_files": int,
+            "total_size": int
+        } — returns {"folders": {}, "total_files": 0, "total_size": 0} if an error occurs.
+    """
     try:
         now = time.time()
         if _file_tree_cache["data"] and (now - _file_tree_cache["ts"]) < _CACHE_TTL: return _file_tree_cache["data"]
@@ -377,8 +488,89 @@ async def get_files_tree(db: DatabaseManager = Depends(get_db)):
     except Exception:
         return {"folders": {}, "total_files": 0, "total_size": 0}
 
+@api_router.get("/visualizer/stream")
+async def stream_visualizer_binary(db: DatabaseManager = Depends(get_db)):
+    """
+    Stream a binary payload representing all files and folders for consumption by the WebGPU visualizer.
+    
+    The response begins with a 4-byte little-endian unsigned integer containing the total number of nodes (files + folders). Following the header, each node is encoded as 20 bytes: four little-endian 32-bit floats (x, y, z, size) followed by one little-endian 32-bit unsigned integer (typeHash). Folder entries use a negative `size` value to distinguish them from files.
+    """
+    import struct
+    import math
+
+    async def binary_generator():
+        # First, we need the total count to send as a header.
+        # This prevents WebGPU from allocating incorrectly.
+        """
+        Generate a binary stream of node records for WebGPU visualization.
+        
+        Yields a 4-byte little-endian unsigned integer header containing the total node count (file nodes + folder profiles), followed by one or more binary chunks. Each chunk is a sequence of 20-byte records packed as little-endian: four 32-bit floats (x, y, z, norm_size) followed by one 32-bit unsigned integer (typeHash). Coordinates and norm_size are deterministic values derived from the node index and size; folders use a negative `norm_size` to distinguish them and files use a positive `norm_size`. The `typeHash` is a deterministic 32-bit hash computed from the node's filename. Chunks are yielded incrementally (buffered to roughly 1 MB) to limit memory usage.
+         
+        Returns:
+            Async iterator yielding `bytes`: the first yielded value is the 4-byte header, subsequent yields are binary payload chunks containing packed node records.
+        """
+        file_count, _ = await db.get_counts()
+        folder_count = len(await db.get_all_folder_profiles())
+        total_nodes = file_count + folder_count
+
+        yield struct.pack("<I", total_nodes)
+
+        buffer = bytearray()
+        i = 0
+
+        async for node in db.stream_all_nodes():
+            path = node["path"]
+            size = float(node["size"])
+            is_folder = node["is_folder"]
+
+            # Deterministic layout logic mimicking frontend
+            angle = i * 0.1
+            radius = 10.0 + math.sqrt(i) * 2.0
+            x = math.cos(angle) * radius
+            y = math.sin(angle) * radius
+            z = (i % 100.0) - 50.0
+
+            if is_folder:
+                # Folders are drawn larger and distinguished by a negative size value
+                norm_size = -max(2.0, math.log10(size + 1.0) * 1.5)
+            else:
+                norm_size = max(0.5, math.log10(size + 1.0) * 0.8)
+
+            # Simple string hash matching the frontend logic
+            hash_val = 0
+            name = path.split("\\")[-1].split("/")[-1]
+            for char in name:
+                hash_val = ((hash_val << 5) - hash_val) + ord(char)
+                hash_val &= 0xFFFFFFFF
+
+            # Pack: 4 floats + 1 unsigned int = 20 bytes
+            buffer.extend(struct.pack("<ffffI", x, y, z, norm_size, hash_val))
+            i += 1
+
+            # Yield every 50,000 nodes (1MB) to keep memory footprint low
+            if len(buffer) >= 1000000:
+                yield bytes(buffer)
+                buffer.clear()
+
+        # Yield remainder
+        if buffer:
+            yield bytes(buffer)
+
+    return StreamingResponse(binary_generator(), media_type="application/octet-stream")
 @api_router.post("/index/folder/remove")
 async def remove_folder_index(request: IndexRequest, db: DatabaseManager = Depends(get_db), chroma=Depends(get_chroma)):
+    """
+    Remove indexed files under the provided folder paths and delete their associated vector and summary documents.
+    
+    Given an IndexRequest, finds files whose stored path matches each validated folder (handling both Unix and Windows path variants), deletes associated Chroma chunk documents and per-file summaries, removes the file records from the database, and clears in-memory file-tree and insights caches.
+    
+    Parameters:
+        request (IndexRequest): Request containing folder paths to remove; uses `request.validated_folders`.
+    
+    Returns:
+        dict: A message of the form `{"message": "Successfully removed N files."}` indicating how many files were removed.
+        JSONResponse (status 400): If no valid folder paths are provided, returns `{"error": "No valid folder paths provided."}`.
+    """
     folders = request.validated_folders
     if not folders: return JSONResponse(status_code=400, content={"error": "No valid folder paths provided."})
     removed_total = 0
@@ -403,11 +595,42 @@ async def remove_folder_index(request: IndexRequest, db: DatabaseManager = Depen
 
 @api_router.post("/unreal/import")
 async def unreal_import(request: UnrealImportRequest, db: DatabaseManager = Depends(get_db), emb=Depends(get_emb), chroma=Depends(get_chroma)):
+    """
+    Import Unreal project metadata from the provided JSON file, persist extracted facts to the database, and store an embedded profile summary in the vector store when available.
+    
+    Parameters:
+        request (UnrealImportRequest): Request containing `validated_json_path` (path to the metadata JSON) and optional `folder_tag` used to tag the imported facts.
+    
+    Returns:
+        dict: Parsed `facts` extracted from the metadata on success.
+        JSONResponse: On failure, a JSONResponse with an `error` message and appropriate HTTP status code.
+    """
     try:
         path = request.validated_json_path
         if not os.path.exists(path): return JSONResponse(status_code=400, content={"error": "Metadata file not found."})
-        result = await parse_unreal_metadata(path, request.folder_tag, db, emb, chroma)
-        return result
+        
+        # Run sync parser in executor
+        loop = asyncio.get_running_loop()
+        facts = await loop.run_in_executor(None, parse_unreal_metadata, path, request.folder_tag)
+        
+        # Persist facts to DB
+        await db.upsert_unreal_project_facts(facts)
+        
+        # Embed profile text and store in summary collection
+        if facts.get("profile_text"):
+            embeddings = await emb.embed_texts([facts["profile_text"]])
+            await chroma.add_summaries_batch([{
+                "doc_id": f"unreal_import_{facts['folder_tag']}",
+                "embedding": embeddings[0],
+                "metadata": {
+                    "file_path": facts["folder_path"],
+                    "folder_tag": facts["folder_tag"],
+                    "project_type": "Unreal Engine",
+                    "is_unreal_import": "true"
+                }
+            }])
+            
+        return facts
     except Exception as e:
         logger.error("Unreal import failed: %s", e)
         return JSONResponse(status_code=500, content={"error": str(e)})
@@ -433,10 +656,20 @@ async def get_metrics(): return metrics_tracker.get_stats()
 
 @api_router.post("/system/compact-db")
 async def compact_db(db: DatabaseManager = Depends(get_db)):
+    """
+    Start a background database compaction (VACUUM) task.
+    
+    Schedules a vacuum operation to run in the background and tracks the created task.
+    
+    Returns:
+        dict: A single-key mapping `{"message": "Compaction started in background."}` confirming the background task was scheduled.
+    """
     async def _do_vacuum():
         try: await db.vacuum()
         except Exception as e: logger.error("Vacuum failed: %s", e)
-    asyncio.create_task(_do_vacuum())
+    t = asyncio.create_task(_do_vacuum())
+    _bg_tasks.add(t)
+    t.add_done_callback(_bg_tasks.discard)
     return {"message": "Compaction started in background."}
 
 @api_router.get("/system/compact-db/status")
@@ -451,10 +684,46 @@ async def clear_cache():
 
 @api_router.post("/demo/seed")
 async def demo_seed(background_tasks: BackgroundTasks, db: DatabaseManager = Depends(get_db), emb=Depends(get_emb), chroma=Depends(get_chroma)):
-    return {"message": "Demo seeding not fully implemented in this mock.", "folder": "demo_data"}
+    """
+    Start background indexing of the bundled demo_data folder and schedule a database compaction after indexing.
+    
+    Clears in-memory file-tree and insights caches, enqueues a background task that runs the indexing service on the demo_data folder and attempts a DB vacuum when indexing completes.
+    
+    Parameters:
+    	background_tasks (BackgroundTasks): FastAPI BackgroundTasks instance used to schedule the indexing-and-compact task.
+    
+    Returns:
+    	On success, a dict with keys `message` and `folder` describing the started job. If the demo_data folder is not found, a JSONResponse with status code 400 and an `error` message is returned.
+    """
+    demo_folder = str(_BASE_DIR / "demo_data")
+    if not os.path.isdir(demo_folder):
+        return JSONResponse(status_code=400, content={"error": "demo_data folder not found."})
+    indexing_service_cls, _ = _ensure_indexing()
+    service = indexing_service_cls(db, emb, chroma)
+    _file_tree_cache["data"] = _insights_cache["data"] = None
+    async def _demo_index_then_compact():
+        """
+        Index the demo folder and attempt to compact the database afterward.
+        
+        Runs the demo indexing process and then tries to run a database compaction (vacuum). Logs success or failure of the compaction.
+        """
+        await service.index_folders([demo_folder])
+        try:
+            await db.vacuum()
+            logger.info("Auto-compact completed after demo indexing.")
+        except Exception as e:
+            logger.warning("Auto-compact after demo indexing failed: %s", e)
+    background_tasks.add_task(_demo_index_then_compact)
+    return {"message": "Demo indexing started for demo_data folder.", "folder": demo_folder}
 
 @api_router.get("/pick/folder")
 async def pick_folder():
+    """
+    Open a native folder-selection dialog and return the chosen directory path.
+    
+    Returns:
+        result (dict): A dictionary with key `"path"` whose value is the selected directory path as a string, or an empty string if the user cancelled the dialog.
+    """
     def _dialog():
         import tkinter as tk
         from tkinter import filedialog
@@ -473,14 +742,47 @@ async def health_root(db: DatabaseManager = Depends(get_db)):
 
 @app.get("/")
 async def root(request: Request):
-    if _REACT_INDEX.exists(): return FileResponse(_REACT_INDEX)
-    return templates.TemplateResponse(request, "index.html", {"app_version": APP_VERSION, "pma_css_url": _versioned_static_url("pma.css"), "pma_js_url": _versioned_static_url("pma.js")})
+    """
+    Serve the single-page application entry point, preferring the built React index file when available.
+    
+    Parameters:
+        request (Request): The incoming FastAPI request used when rendering the template.
+    
+    Returns:
+        FileResponse: If the React-built index file exists.
+        TemplateResponse: Otherwise, renders the configured SPA template with `app_version`, `pma_css_url`, and `pma_js_url` context.
+    """
+    if _REACT_INDEX.exists():
+        return FileResponse(_REACT_INDEX)
+    return templates.TemplateResponse(
+        request, 
+        INDEX_HTML, 
+        {"app_version": APP_VERSION, "pma_css_url": _versioned_static_url("pma.css"), "pma_js_url": _versioned_static_url("pma.js")}
+    )
 
 @app.get("/{full_path:path}")
 async def spa_catch_all(request: Request, full_path: str):
+    """
+    Serve a requested file from the React static directory or return the SPA index HTML when the client accepts HTML; otherwise respond with a 404 JSON error.
+    
+    If the requested path matches an existing file under the React build directory, that file is returned. If the client accepts "text/html", the React index file is returned (from disk if present, otherwise rendered from the TEMPLATE). For other requests that do not match a static file and do not accept HTML, a 404 JSON response is returned.
+    
+    Parameters:
+    	full_path (str): The requested path relative to the React static directory.
+    
+    Returns:
+    	FileResponse or TemplateResponse or JSONResponse: The matched static file response, the SPA index HTML response, or a JSON 404 error response.
+    """
     candidate = _REACT_DIR / full_path
-    if candidate.exists() and candidate.is_file(): return FileResponse(candidate)
+    if candidate.exists() and candidate.is_file():
+        return FileResponse(candidate)
+    
     if "text/html" in request.headers.get("accept", ""):
-        if _REACT_INDEX.exists(): return FileResponse(_REACT_INDEX)
-        return templates.TemplateResponse(request, "index.html", {"app_version": APP_VERSION, "pma_css_url": _versioned_static_url("pma.css"), "pma_js_url": _versioned_static_url("pma.js")})
+        if _REACT_INDEX.exists():
+            return FileResponse(_REACT_INDEX)
+        return templates.TemplateResponse(
+            request, 
+            INDEX_HTML, 
+            {"app_version": APP_VERSION, "pma_css_url": _versioned_static_url("pma.css"), "pma_js_url": _versioned_static_url("pma.js")}
+        )
     return JSONResponse(status_code=404, content={"error": "Not found"})

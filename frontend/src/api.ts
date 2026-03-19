@@ -117,13 +117,13 @@ export interface QueryResponse {
   timing?: Record<string, number>;
 }
 
-export const postQuery = (question: string, options: { file_type?: string, folder_tag?: string, history?: {role: string, content: string}[] } = {}) =>
+export const postQuery = (question: string, options: { file_type?: string, folder_tag?: string, history?: { role: string, content: string }[] } = {}) =>
   json<QueryResponse>('/query', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ 
-      question, 
-      file_type: options.file_type || null, 
+    body: JSON.stringify({
+      question,
+      file_type: options.file_type || null,
       folder_tag: options.folder_tag || null,
       history: options.history || null
     }),
@@ -164,8 +164,8 @@ export const getFileTree = () => json<FileTree>('/files/tree');
 
 export interface InsightsResponse {
   total_size_bytes: number;
-  file_count: number;
   database_size_bytes: number;
+  file_count: number;
   top_files: { path: string; size: number }[];
   cold_files: { path: string; usage_count: number }[];
   type_breakdown: Record<string, { count: number; size: number }>;
@@ -173,6 +173,14 @@ export interface InsightsResponse {
 }
 
 export const getInsights = () => json<InsightsResponse>('/insights');
+
+export const getVisualizerStream = async (): Promise<ArrayBuffer> => {
+  const res = await fetch(`${BASE}/visualizer/stream`);
+  if (!res.ok) {
+    throw new Error(`Failed to fetch visualizer stream: HTTP ${res.status}`);
+  }
+  return await res.arrayBuffer();
+};
 
 // ── Clear Caches ──────────────────────────────────────────────────────
 
@@ -195,19 +203,47 @@ export const getInsightsByType = (typeFilter: string) =>
 export const seedDemo = () =>
   json<{ message: string; folder: string }>('/demo/seed', { method: 'POST' });
 
-// ── SSE Progress Stream ───────────────────────────────────────────────
+/**
+ * Subscribes to the backend indexing progress stream and invokes the callback for each progress event.
+ *
+ * Automatically defers the initial connection by 300ms and will attempt to reconnect up to 10 times with a 1s delay on error. The returned function stops any active connection and prevents further reconnection attempts.
+ *
+ * @param onData - Callback invoked with the progress payload containing all `IndexStatus` fields plus a `current_file` string.
+ * @returns A function that unsubscribes: closes the active stream and disables future reconnections.
+ */
 
 export function subscribeProgress(onData: (data: IndexStatus & { current_file: string }) => void): () => void {
-  const es = new EventSource(`${BASE}/index/progress-stream`);
-  es.addEventListener('progress', (e) => {
-    try {
-      onData(JSON.parse(e.data));
-    } catch { /* ignore malformed */ }
-  });
-  es.onerror = () => {
-    es.close();
-  };
-  return () => es.close();
+  let es: EventSource | null = null;
+  let closed = false;
+  let retries = 0;
+  const MAX_RETRIES = 10;
+
+  /**
+   * Establishes an EventSource connection to the indexing progress stream and routes parsed events to the provided handler.
+   *
+   * Listens for 'progress' events, parses each event's JSON payload and invokes `onData` (malformed JSON is ignored). On any error the connection is closed and, unless the subscription is marked closed, the function retries reconnecting after 1 second up to `MAX_RETRIES`, resetting the retry count on successful progress events.
+   */
+  function connect() {
+    if (closed) return;
+    es = new EventSource(`${BASE}/index/progress-stream`);
+    es.addEventListener('progress', (e) => {
+      retries = 0; // reset on success
+      try {
+        onData(JSON.parse(e.data));
+      } catch { /* ignore malformed */ }
+    });
+    es.onerror = () => {
+      es?.close();
+      if (!closed && retries < MAX_RETRIES) {
+        retries++;
+        setTimeout(connect, 1000);
+      }
+    };
+  }
+
+  // Small delay to allow backend SSE to be ready
+  setTimeout(connect, 300);
+  return () => { closed = true; es?.close(); };
 }
 
 // ── SSE Query Stream ──────────────────────────────────────────────────
@@ -222,13 +258,26 @@ export interface QueryStreamChunk {
   retrieval_ms?: number;
 }
 
+/**
+ * Submits a query to the backend stream endpoint and invokes `onChunk` for each parsed JSON chunk received.
+ *
+ * Sends a POST to the stream endpoint with `question`, `file_type`, `folder_tag`, and `history` (serialized as `null` when not provided). As newline-delimited JSON chunks arrive, each parsed object is passed to `onChunk`; on non-abort errors an error chunk `{ type: 'error', text: string }` is delivered.
+ *
+ * @param question - The user's query text
+ * @param onChunk - Callback invoked for each parsed stream chunk
+ * @param options - Optional request modifiers
+ * @param options.file_type - Restrict retrieval to a specific file extension (e.g., "pdf")
+ * @param options.folder_tag - Restrict retrieval to a specific folder tag
+ * @param options.history - Optional conversational history items to include with the query
+ * @returns A function that cancels the streaming request when called
+ */
 export function subscribeQuery(
   question: string,
   onChunk: (chunk: QueryStreamChunk) => void,
-  options: { file_type?: string; folder_tag?: string, history?: {role: string, content: string}[] } = {}
+  options: { file_type?: string; folder_tag?: string, history?: { role: string, content: string }[] } = {}
 ): () => void {
   const controller = new AbortController();
-  
+
   fetch(`${BASE}/query/stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -243,7 +292,7 @@ export function subscribeQuery(
     if (!response.ok) throw new Error('Stream request failed');
     const reader = response.body?.getReader();
     if (!reader) return;
-    
+
     const decoder = new TextDecoder();
     while (true) {
       const { done, value } = await reader.read();

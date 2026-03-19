@@ -13,13 +13,48 @@ _MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 _MAX_RERANKER_INPUT_LEN = 256  # Phase 3.2: reduced from 384 for faster inference (<1% relevance impact)
 
 def _get_model() -> CrossEncoder:
-    """Lazily load the cross-encoder (≈ 80 MB, ~120 ms on CPU). Thread-safe."""
+    """
+    Lazily loads and returns the module-level CrossEncoder reranker, ensuring only one instance is created across threads.
+    
+    This function returns a cached global reranker instance, loading and initializing it on first call. Initialization may choose an appropriate inference backend based on the execution environment (for example, ONNX or Torch). Subsequent calls return the already-loaded instance.
+    
+    Returns:
+        CrossEncoder: The shared CrossEncoder instance used for reranking.
+    """
     global _reranker
     if _reranker is None:
         with _reranker_lock:
             if _reranker is None:  # double-checked locking
-                logger.info("Loading reranker model: %s", _MODEL_NAME)
-                _reranker = CrossEncoder(_MODEL_NAME, max_length=512)
+                import torch
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                
+                backend = "torch"
+                model_kwargs = None
+                if device == "cpu":
+                    try:
+                        import onnxruntime
+                        import optimum.onnxruntime
+                        backend = "onnx"
+                        # Reranker typically uses onnx/model.onnx if O4 is missing, 
+                        # but we check if we can specify a file.
+                        model_kwargs = {"file_name": "onnx/model.onnx"} 
+                        logger.info("ONNX verified for Reranker — accelerating CPU inference.")
+                    except ImportError:
+                        pass
+
+                logger.info("Loading reranker model: %s (backend: %s)", _MODEL_NAME, backend)
+                
+                if backend == "onnx":
+                    _reranker = CrossEncoder(
+                        _MODEL_NAME, 
+                        max_length=512, 
+                        device=device, 
+                        backend=backend,
+                        model_kwargs=model_kwargs
+                    )
+                else:
+                    _reranker = CrossEncoder(_MODEL_NAME, max_length=512, device=device)
+                
                 logger.info("Reranker model loaded.")
     return _reranker
 

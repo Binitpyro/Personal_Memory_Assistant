@@ -5,12 +5,31 @@ Handles interactions with SQLite using aiosqlite for metadata storage.
 
 import logging
 import os
+import zlib
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import aiosqlite
 
 logger = logging.getLogger(__name__)
+
+def _zlib_decompress_fn(blob: Any) -> str:
+    """
+    Return decompressed UTF-8 text for a zlib-compressed SQLite value, with safe fallbacks.
+    
+    If `blob` is falsy, returns an empty string. If `blob` is already a `str`, returns it unchanged. If `blob` is a zlib-compressed bytes-like object, returns its UTF-8 decoded decompressed text. On any decompression or decoding failure, returns `str(blob)` as a fallback.
+    
+    Returns:
+        str: Decompressed UTF-8 text when available; otherwise an empty string or the string representation of `blob`.
+    """
+    if not blob:
+        return ""
+    if isinstance(blob, str):
+        return blob
+    try:
+        return zlib.decompress(blob).decode("utf-8")
+    except Exception:
+        return str(blob)
 
 class DatabaseManager:
     """Manages the SQLite database connection and operations."""
@@ -21,19 +40,34 @@ class DatabaseManager:
         self.conn: Optional[aiosqlite.Connection] = None
 
     async def connect(self) -> None:
-        """Establish connection to the SQLite database."""
+        """
+        Open and configure the SQLite connection for this DatabaseManager.
+        
+        If not already connected, opens a connection to `self.db_path`, sets the row factory to
+        `aiosqlite.Row`, registers the `zlib_decompress` SQL function, and applies PRAGMA settings
+        that control durability, locking and performance.
+        
+        The applied PRAGMAs include:
+        - journal_mode, foreign_keys, synchronous, busy_timeout
+        - cache_size, mmap_size, temp_store, page_size, threads, read_uncommitted, wal_autocheckpoint
+        """
         if not self.conn:
             self.conn = await aiosqlite.connect(self.db_path)
             self.conn.row_factory = aiosqlite.Row
+            
+            # Register Zlib Decompression for FTS5 queries and triggers
+            await self.conn.create_function("zlib_decompress", 1, _zlib_decompress_fn)
+            
             await self.conn.execute("PRAGMA journal_mode = WAL;")
             await self.conn.execute("PRAGMA foreign_keys = ON;")
             await self.conn.execute("PRAGMA synchronous = NORMAL;")
             await self.conn.execute("PRAGMA busy_timeout = 5000;")
             # ── Performance PRAGMAs ──────────────────────────────────
-            await self.conn.execute("PRAGMA cache_size = -64000;")   # 64 MB page cache
-            await self.conn.execute("PRAGMA mmap_size = 268435456;") # 256 MB memory-mapped I/O
+            await self.conn.execute("PRAGMA cache_size = -2000000;")   # 2 GB page cache
+            await self.conn.execute("PRAGMA mmap_size = 30000000000;") # 30 GB memory-mapped I/O
             await self.conn.execute("PRAGMA temp_store = MEMORY;")   # temp tables in RAM
-            await self.conn.execute("PRAGMA page_size = 8192;")      # larger pages reduce B-tree depth
+            await self.conn.execute("PRAGMA page_size = 32768;")     # maximum page size for deep trees
+            await self.conn.execute("PRAGMA threads = 4;")           # allow background sorting threads
             await self.conn.execute("PRAGMA read_uncommitted = ON;") # readers skip WAL frames
             await self.conn.execute("PRAGMA wal_autocheckpoint = 1000;") # explicit WAL checkpoint control
 
@@ -165,17 +199,33 @@ class DatabaseManager:
             cur = await conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='chunk_fts'")
             row = await cur.fetchone()
             if row and "detail=column" not in row[0]:
-                logger.info("Storage optimization: Rebuilding chunk_fts with detail=column...")
-                # We simply drop the table. The schema.sql ran before this and 
-                # will re-create it next time, but we must manually create it now so it's ready.
-                await conn.execute("DROP TABLE IF EXISTS chunk_fts")
-                await conn.execute(
-                    "CREATE VIRTUAL TABLE chunk_fts USING fts5("
-                    "chunks_text, content=chunks, content_rowid=id, detail=column)"
-                )
-                await conn.execute("INSERT INTO chunk_fts(chunk_fts) VALUES('rebuild')")
+                # We use content="" (contentless) because the actual text is compressed
+                # in the source table and decompressed via triggers into the FTS index.
+                await conn.executescript("""
+                    DROP TRIGGER IF EXISTS chunks_ai;
+                    DROP TRIGGER IF EXISTS chunks_ad;
+                    DROP TRIGGER IF EXISTS chunks_au;
+                    DROP TABLE IF EXISTS chunk_fts;
+                    
+                    CREATE VIRTUAL TABLE chunk_fts USING fts5(
+                        chunks_text, content='', detail=column
+                    );
+                    
+                    CREATE TRIGGER chunks_ai AFTER INSERT ON chunks BEGIN
+                      INSERT INTO chunk_fts(rowid, chunks_text) VALUES (new.id, zlib_decompress(new.text_preview));
+                    END;
+                    
+                    CREATE TRIGGER chunks_ad AFTER DELETE ON chunks BEGIN
+                      INSERT INTO chunk_fts(chunk_fts, rowid, chunks_text) VALUES('delete', old.id, zlib_decompress(old.text_preview));
+                    END;
+                    
+                    CREATE TRIGGER chunks_au AFTER UPDATE ON chunks BEGIN
+                      INSERT INTO chunk_fts(chunk_fts, rowid, chunks_text) VALUES('delete', old.id, zlib_decompress(old.text_preview));
+                      INSERT INTO chunk_fts(rowid, chunks_text) VALUES (new.id, zlib_decompress(new.text_preview));
+                    END;
+                """)
                 await conn.commit()
-                logger.info("Storage optimization: Rebuilt chunk_fts successfully.")
+                logger.info("Storage optimization: Optimized chunk_fts schema.")
         except Exception as exc:
             logger.warning("Failed to rebuild FTS table: %s", exc)
 
@@ -237,14 +287,32 @@ class DatabaseManager:
             return file_id
 
     async def insert_chunk(self, chunk_data: Dict[str, Any]) -> int:
-        """Inserts a chunk and returns the new chunk id."""
+        """
+        Insert a single chunk row and return its new database id.
+        
+        The `text_preview` value in `chunk_data` will be compressed before storage if it is a `str`; if it is already a bytes-like value it is stored as provided.
+        
+        Parameters:
+            chunk_data (Dict[str, Any]): Mapping containing keys:
+                - file_id (int): The parent file's id.
+                - start_offset (int): Chunk start byte offset.
+                - end_offset (int): Chunk end byte offset.
+                - text_preview (str | bytes): Text to store (will be compressed if a `str`).
+        
+        Returns:
+            int: The newly inserted chunk's `id`.
+        
+        Raises:
+            RuntimeError: If the INSERT with `RETURNING id` does not return a row.
+        """
         conn = self._get_conn()
+        compressed_text = zlib.compress(chunk_data["text_preview"].encode("utf-8")) if isinstance(chunk_data["text_preview"], str) else chunk_data["text_preview"]
         query = """
         INSERT INTO chunks (file_id, start_offset, end_offset, text_preview)
         VALUES (:file_id, :start_offset, :end_offset, :text_preview)
         RETURNING id;
         """
-        async with conn.execute(query, chunk_data) as cursor:
+        async with conn.execute(query, {**chunk_data, "text_preview": compressed_text}) as cursor:
             row = await cursor.fetchone()
             if row is None:
                 raise RuntimeError("INSERT RETURNING id failed for chunk")
@@ -252,20 +320,35 @@ class DatabaseManager:
             return chunk_id
 
     async def insert_chunks_bulk(self, chunks: List[Dict[str, Any]]) -> List[int]:
-        """Insert multiple chunks efficiently in a single transaction.
-
-        Uses a batch INSERT approach: inserts all rows first,
-        then reads back the generated IDs.  This is significantly
-        faster than individual INSERT RETURNING for large batches.
+        """
+        Insert multiple chunk records and return their database row IDs.
+        
+        Processes each input chunk without mutating the caller's dictionaries (string `text_preview` values are compressed before insertion), returns an empty list for empty input, and yields the IDs of the inserted rows in the same relative order they were written to the database.
+        
+        Parameters:
+            chunks (List[Dict[str, Any]]): Sequence of chunk objects each containing `file_id`, `start_offset`, `end_offset`, and `text_preview` (string or bytes). String `text_preview` values will be compressed before being stored.
+        
+        Returns:
+            List[int]: List of inserted chunk row IDs in insertion order (empty list if no chunks were provided).
         """
         if not chunks:
             return []
         conn = self._get_conn()
 
+        # Safely compress text without mutating the caller's dictionaries
+        insert_data = [
+            {
+                "file_id": c["file_id"],
+                "start_offset": c["start_offset"],
+                "end_offset": c["end_offset"],
+                "text_preview": zlib.compress(c["text_preview"].encode("utf-8")) if isinstance(c["text_preview"], str) else c["text_preview"]
+            } for c in chunks
+        ]
+
         # For small batches, the per-row RETURNING approach is fine
-        if len(chunks) <= 20:
+        if len(insert_data) <= 20:
             ids: List[int] = []
-            for chunk in chunks:
+            for chunk in insert_data:
                 async with conn.execute(
                     "INSERT INTO chunks (file_id, start_offset, end_offset, text_preview) "
                     "VALUES (:file_id, :start_offset, :end_offset, :text_preview) RETURNING id;",
@@ -274,6 +357,7 @@ class DatabaseManager:
                     row = await cursor.fetchone()
                     if row:
                         ids.append(row[0])
+            await conn.commit()
             return ids
 
         # For larger batches, use executemany + read back IDs
@@ -285,11 +369,15 @@ class DatabaseManager:
                 row = await cur.fetchone()
                 start_id = (row[0] if row else 0) + 1
 
-            await conn.executemany(
-                "INSERT INTO chunks (file_id, start_offset, end_offset, text_preview) "
-                "VALUES (:file_id, :start_offset, :end_offset, :text_preview);",
-                chunks,
-            )
+            # Prevent SQLITE_MAX_VARIABLE_NUMBER crashes by slicing insert_data
+            MAX_ROWS_PER_QUERY = 5000
+            for i in range(0, len(insert_data), MAX_ROWS_PER_QUERY):
+                batch = insert_data[i:i + MAX_ROWS_PER_QUERY]
+                await conn.executemany(
+                    "INSERT INTO chunks (file_id, start_offset, end_offset, text_preview) "
+                    "VALUES (:file_id, :start_offset, :end_offset, :text_preview);",
+                    batch,
+                )
 
             # Read back the generated IDs (they are sequential in SQLite)
             async with conn.execute(
@@ -310,9 +398,12 @@ class DatabaseManager:
             await self.conn.commit()
 
     async def delete_file_chunks(self, file_id: int, *, auto_commit: bool = True) -> None:
-        """Deletes all chunks associated with a file.
-
-        Set ``auto_commit=False`` when called from a larger batch transaction.
+        """
+        Delete all chunk rows belonging to the specified file.
+        
+        Parameters:
+            file_id (int): The `files.id` whose chunks should be removed from the `chunks` table.
+            auto_commit (bool, optional): If `True`, commit the transaction after deletion. Set to `False` when performing this deletion as part of a larger transaction.
         """
         conn = self._get_conn()
         await conn.execute("DELETE FROM chunks WHERE file_id = ?", (file_id,))
@@ -320,13 +411,26 @@ class DatabaseManager:
             await conn.commit()
 
     async def get_file_chunks(self, file_id: int) -> List[aiosqlite.Row]:
-        """Returns all chunks for a given file id."""
+        """
+        Retrieve all chunk rows for the given file id with the chunk `text_preview` decompressed.
+        
+        Returns:
+            List[aiosqlite.Row]: Rows containing `id`, `file_id`, `start_offset`, `end_offset`, `created_at`, and `text_preview` (decompressed UTF-8 string).
+        """
         conn = self._get_conn()
-        async with conn.execute("SELECT * FROM chunks WHERE file_id = ?", (file_id,)) as cursor:
+        async with conn.execute("SELECT id, file_id, start_offset, end_offset, created_at, zlib_decompress(text_preview) as text_preview FROM chunks WHERE file_id = ?", (file_id,)) as cursor:
             return list(await cursor.fetchall())
 
     async def get_file_by_path(self, path: str) -> Optional[aiosqlite.Row]:
-        """Returns file metadata by path."""
+        """
+        Retrieve the file record for the given filesystem path.
+        
+        Parameters:
+            path (str): Filesystem path to look up.
+        
+        Returns:
+            Optional[aiosqlite.Row]: The matching row from the `files` table, or `None` if no file exists for the path.
+        """
         conn = self._get_conn()
         async with conn.execute("SELECT * FROM files WHERE path = ?", (path,)) as cursor:
             return await cursor.fetchone()
@@ -433,7 +537,12 @@ class DatabaseManager:
         await conn.commit()
 
     async def get_all_files(self) -> List[aiosqlite.Row]:
-        """Returns all indexed files ordered by folder and path."""
+        """
+        List all indexed files ordered by folder tag and path.
+        
+        Returns:
+            rows (List[aiosqlite.Row]): Rows for each file with columns `path`, `size`, `type`, `folder_tag`, and `usage_count`, ordered by `folder_tag` then `path`.
+        """
         conn = self._get_conn()
         async with conn.execute(
             "SELECT path, size, type, folder_tag, usage_count "
@@ -441,10 +550,68 @@ class DatabaseManager:
         ) as cursor:
             return list(await cursor.fetchall())
 
-    async def get_file_stats_summary(self) -> Dict[str, Any]:
-        """Return aggregate file statistics grouped by type and folder_tag.
+    async def stream_all_nodes(self):
+        """
+        Yield folder profile records first, then file records as a stream of node dictionaries.
+        
+        Yields:
+            dict: A node dictionary representing either a folder or a file.
+                - Folder node (when `is_folder` is `True`):
+                    - `is_folder` (bool): True.
+                    - `path` (str): Folder path.
+                    - `project_type` (str | None): Project type for the folder.
+                    - `file_count` (int | None): Number of files in the folder.
+                    - `size` (int | None): Total size in bytes for the folder.
+                - File node (when `is_folder` is `False`):
+                    - `is_folder` (bool): False.
+                    - `path` (str): File path.
+                    - `size` (int | None): File size in bytes.
+                    - `type` (str | None): File type/extension.
+                    - `folder_tag` (str | None): Associated folder tag.
+        """
+        conn = self._get_conn()
+        # First stream all folder profiles
+        async with conn.execute(
+            "SELECT folder_path, project_type, file_count, total_size_bytes FROM folder_profiles"
+        ) as cursor:
+            async for row in cursor:
+                yield {
+                    "is_folder": True,
+                    "path": row["folder_path"],
+                    "project_type": row["project_type"],
+                    "file_count": row["file_count"],
+                    "size": row["total_size_bytes"]
+                }
+        
+        # Then stream all files
+        async with conn.execute(
+            "SELECT path, size, type, folder_tag FROM files"
+        ) as cursor:
+            async for row in cursor:
+                yield {
+                    "is_folder": False,
+                    "path": row["path"],
+                    "size": row["size"],
+                    "type": row["type"],
+                    "folder_tag": row["folder_tag"]
+                }
 
-        Uses a single-pass CTE to avoid scanning the files table twice.
+    async def get_file_stats_summary(self) -> Dict[str, Any]:
+        """
+        Compute aggregate file statistics grouped by file type and folder tag.
+        
+        Returns:
+            dict: Summary with the following keys:
+                total_files (int): Total number of files.
+                total_size_mb (float): Total size of all files in megabytes (rounded to 2 decimal places).
+                by_type (List[dict]): List of dictionaries per file type with keys:
+                    - ext (str|None): File extension/type.
+                    - count (int): Number of files of this type.
+                    - size_mb (float): Total size for this type in megabytes (rounded to 2 decimal places).
+                by_folder (List[dict]): List of dictionaries per folder tag with keys:
+                    - folder (str): Folder tag, or "Unknown" when NULL.
+                    - count (int): Number of files in that folder.
+                database_size_bytes (int): Size of the SQLite database file in bytes, or 0 if the file does not exist.
         """
         conn = self._get_conn()
 

@@ -5,9 +5,10 @@ from app.search.reranker import rerank
 
 
 def test_query_heuristics_and_fts_sanitization():
-    # Test new heuristics logic via regexes
-    assert retrieval._LATEST_RE.search("show me the latest files")
-    assert retrieval._LARGEST_RE.search("what is the biggest file")
+    # Test new heuristics logic via intent determination
+    from app.project_constants import determine_query_intent
+    assert determine_query_intent("show me the latest files")["latest"]
+    assert determine_query_intent("what is the biggest file")["largest"]
 
     sanitized = retrieval._sanitize_fts_query('hello AND "world" * test')
     assert sanitized == '"hello" "world" "test"'

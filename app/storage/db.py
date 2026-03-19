@@ -206,6 +206,9 @@ class DatabaseManager:
                       INSERT INTO chunk_fts(chunk_fts, rowid, chunks_text) VALUES('delete', old.id, zlib_decompress(old.text_preview));
                       INSERT INTO chunk_fts(rowid, chunks_text) VALUES (new.id, zlib_decompress(new.text_preview));
                     END;
+                    
+                    INSERT INTO chunk_fts(rowid, chunks_text)
+                    SELECT id, zlib_decompress(text_preview) FROM chunks;
                 """)
                 await conn.commit()
                 logger.info("Storage optimization: Optimized chunk_fts schema.")

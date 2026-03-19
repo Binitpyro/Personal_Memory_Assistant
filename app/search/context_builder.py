@@ -7,8 +7,6 @@ def _compress_text(text: str) -> str:
     """Normalize whitespace and remove excessive newlines to save tokens."""
     # Replace 3+ newlines with 2
     text = re.sub(r'\n{3,}', '\n\n', text)
-    # Replace multiple spaces with single space
-    text = re.sub(r' +', ' ', text)
     return text.strip()
 
 def _format_file_stats(stats: Dict[str, Any]) -> str:

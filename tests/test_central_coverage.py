@@ -108,10 +108,20 @@ from app.main import app
 
 @pytest.fixture
 def client(real_db):
-    from app.main import get_db
+    from app.main import app, get_db
     app.dependency_overrides[get_db] = lambda: real_db
+    
+    # Store and clear router events to prevent executing real initialization logic
+    old_startup = app.router.on_startup.copy()
+    old_shutdown = app.router.on_shutdown.copy()
+    app.router.on_startup.clear()
+    app.router.on_shutdown.clear()
+    
     with TestClient(app) as c:
         yield c
+        
+    app.router.on_startup = old_startup
+    app.router.on_shutdown = old_shutdown
     app.dependency_overrides.clear()
 
 def test_main_endpoints_high_coverage(client):

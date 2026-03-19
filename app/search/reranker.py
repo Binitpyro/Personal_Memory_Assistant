@@ -38,13 +38,17 @@ def _get_model() -> CrossEncoder:
                 logger.info("Loading reranker model: %s (backend: %s)", _MODEL_NAME, backend)
                 
                 if backend == "onnx":
-                    _reranker = CrossEncoder(
-                        _MODEL_NAME, 
-                        max_length=512, 
-                        device=device, 
-                        backend=backend,
-                        model_kwargs=model_kwargs
-                    )
+                    try:
+                        _reranker = CrossEncoder(
+                            _MODEL_NAME, 
+                            max_length=512, 
+                            device=device, 
+                            backend=backend,
+                            model_kwargs=model_kwargs
+                        )
+                    except TypeError:
+                        logger.warning("ONNX backend not supported by this sentence-transformers version. Falling back.")
+                        _reranker = CrossEncoder(_MODEL_NAME, max_length=512, device=device)
                 else:
                     _reranker = CrossEncoder(_MODEL_NAME, max_length=512, device=device)
                 

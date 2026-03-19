@@ -13,6 +13,10 @@ from app.embeddings.service import EmbeddingService
 from app.vector_store.chroma_client import ChromaClient
 from app.scanner.scanner import scan_folder as fast_scan
 from app.config import settings
+from app.project_constants import (
+    PROJECT_SIGNATURES, TEXT_EXTENSIONS, UNREAL_BINARY_EXTENSIONS,
+    UNREAL_PROJECT_EXTENSIONS, KEY_NAMES, KEY_EXTS
+)
 
 try:
     import rust_core
@@ -21,51 +25,6 @@ except ImportError:
     RUST_CORE_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
-
-UNREAL_PROJECT_EXT = ".uproject"
-UNITY_SCENE_EXT = ".unity"
-NODE_PACKAGE_FILE = "package.json"
-PYTHON_PROJECT_LABEL = "Python project"
-
-# ── Project-type detection rules ────────────────────────────────────
-_PROJECT_SIGNATURES: List[Tuple[str, str, List[Tuple[str, str]]]] = [
-    ("Unreal Engine", "Unreal Engine game/application project",
-     [("ext", UNREAL_PROJECT_EXT)]),
-    ("Unreal Engine (assets only)", "Unreal Engine asset folder (Content)",
-     [("ext", ".uasset")]),
-    ("Unity", "Unity game/application project",
-     [("dir", "Assets"), ("ext", UNITY_SCENE_EXT)]),
-    ("Unity", "Unity game/application project",
-     [("ext", UNITY_SCENE_EXT)]),
-    ("Godot", "Godot engine project",
-     [("file", "project.godot")]),
-    ("React", "React web application",
-     [("file", NODE_PACKAGE_FILE), ("dir", "src")]),
-    ("Node.js", "Node.js / JavaScript project",
-     [("file", NODE_PACKAGE_FILE)]),
-    ("Python", PYTHON_PROJECT_LABEL,
-     [("file", "pyproject.toml")]),
-    ("Python", PYTHON_PROJECT_LABEL,
-     [("file", "setup.py")]),
-    ("Python", PYTHON_PROJECT_LABEL,
-     [("file", "requirements.txt")]),
-    ("Rust", "Rust project",
-     [("file", "Cargo.toml")]),
-    ("Go", "Go project",
-     [("file", "go.mod")]),
-    ("Java/Maven", "Java Maven project",
-     [("file", "pom.xml")]),
-    ("Java/Gradle", "Java Gradle project",
-     [("file", "build.gradle")]),
-    (".NET/C#", ".NET / C# project",
-     [("ext", ".csproj")]),
-    ("C/C++", "C/C++ project",
-     [("file", "CMakeLists.txt")]),
-    ("C/C++", "C/C++ project",
-     [("file", "Makefile")]),
-    ("LaTeX", "LaTeX document project",
-     [("ext", ".tex")]),
-]
 
 
 def _indicator_matches(
@@ -91,7 +50,7 @@ def _detect_project_type(
     """Infer the project type from file extensions, filenames, and directories."""
     extensions, filenames, directories = _collect_project_markers(files, folder)
 
-    for proj_type, desc, indicators in _PROJECT_SIGNATURES:
+    for proj_type, desc, indicators in PROJECT_SIGNATURES:
         if all(
             _indicator_matches(kind, pattern, extensions, filenames, directories)
             for kind, pattern in indicators
@@ -164,19 +123,10 @@ def _build_folder_profile(
     total_size = 0
     key_files_list: List[str] = []
 
-    _KEY_NAMES = {
-        "readme.md", "readme.txt", "readme",
-        "package.json", "pyproject.toml", "setup.py", "requirements.txt",
-        "cargo.toml", "go.mod", "pom.xml", "build.gradle",
-        "cmakelists.txt", "makefile", ".gitignore",
-        "dockerfile", "docker-compose.yml",
-    }
-    _KEY_EXTS = {UNREAL_PROJECT_EXT, ".sln", ".csproj", UNITY_SCENE_EXT}
-
     for fp, _ in folder_files:
         ext = fp.suffix.lower()
         ext_counts[ext] += 1
-        if fp.name.lower() in _KEY_NAMES or ext in _KEY_EXTS:
+        if fp.name.lower() in KEY_NAMES or ext in KEY_EXTS:
             key_files_list.append(fp.name)
 
     total_size = 0
@@ -299,13 +249,6 @@ progress = IndexingProgress()
 indexing_lock = asyncio.Lock()
 
 class IndexingService:
-    _TEXT_EXTENSIONS = frozenset({
-        ".txt", ".md", ".py", ".js", ".ts", ".java", ".c", ".cpp", ".rs",
-        ".go", ".rb", ".html", ".css", ".xml", ".yaml", ".yml", ".toml",
-        ".ini", ".cfg", ".sh", ".bat", ".log", ""
-    })
-    _UNREAL_BINARY_EXTENSIONS = frozenset({".uasset", ".umap"})
-    _UNREAL_PROJECT_EXTENSIONS = frozenset({".uproject", ".uplugin"})
 
     def __init__(
         self, 
@@ -352,7 +295,7 @@ class IndexingService:
 
             files_to_index, skipped, new_count, changed_count = await self._detect_changes(all_files)
 
-            progress.reset(len(files_to_index) * 2)
+            progress.reset(len(files_to_index))
             progress.scan_method = scan_method
             progress.scan_duration_ms = scan_duration
             progress.skipped_files = skipped
@@ -495,11 +438,11 @@ class IndexingService:
 
             if item.get("_summary_embedding"):
                 summary_items.append({"doc_id": f"file_{file_id}", "embedding": item["_summary_embedding"], "metadata": {"file_id": file_id, "file_path": file_path, "folder_tag": folder_tag}})
-            
-            progress.update(0)
+
+            progress.update(len(item["chunks"]), current_file="")
         except Exception as e:
             logger.error("Error storing %s: %s", item.get("path", "unknown"), e)
-            progress.update(0)
+
 
     async def _delete_existing_chunks(self, file_id: int) -> None:
         old_chunks = await self.db.get_file_chunks(file_id)
@@ -550,7 +493,7 @@ class IndexingService:
             return await loop.run_in_executor(None, self._extract_and_prepare, path, folder_tag)
         except Exception as e:
             logger.error("Error preparing %s: %s", path, e)
-            progress.update(0)
+
             return None
 
     def _extract_and_prepare(self, path: Path, folder_tag: str) -> Optional[Dict[str, Any]]:
@@ -562,11 +505,11 @@ class IndexingService:
             sha256 = self._calculate_sha256(path)
 
             res = {"path": path, "folder_tag": folder_tag, "file_data": {"path": str(path.absolute()), "size": stat.st_size, "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(), "type": path.suffix.lower(), "folder_tag": folder_tag, "summary": summary, "sha256": sha256}, "chunks": chunks, "summary": summary}
-            progress.update(0)
+
             return res
         except Exception as e:
             logger.error("Error preparing %s: %s", path, e)
-            progress.update(0)
+
             return None
 
     def _scan_all_folders(self, unique_folders: List[Path]) -> Tuple[List[Tuple[Path, str]], str, float]:
@@ -576,6 +519,7 @@ class IndexingService:
 
     def _scan_all_folders_rust(self, unique_folders: List[Path]) -> Tuple[List[Tuple[Path, str]], str, float]:
         import time
+        import platform
         t0 = time.perf_counter()
         folder_strs = [str(f) for f in unique_folders]
         ext_strs = list(self.supported_extensions)
@@ -583,24 +527,31 @@ class IndexingService:
         
         # Pre-resolve folders once to avoid overhead in the loop
         resolved_folders = [(f.resolve(), f.name) for f in unique_folders]
+        is_windows = platform.system() == "Windows"
 
         try:
             # rust_core.scan_folders returns canonicalized strings
             rust_paths = rust_core.scan_folders(folder_strs, ext_strs)
             for path_str in rust_paths:
                 path_obj = Path(path_str)
-                # On Windows, rust_core returns lowercase or normalized paths, but 
-                # path_str is already absolute from canonicalize().
-                # String matching is much faster than Path.resolve()
-                abs_p_str = str(path_obj).lower()
-                if abs_p_str in seen_paths: continue
-                seen_paths.add(abs_p_str)
+                
+                # Check seen paths using string or obj depending on OS
+                if is_windows:
+                    seen_key = str(path_obj).lower()
+                else:
+                    seen_key = path_obj
+                    
+                if seen_key in seen_paths: continue
+                seen_paths.add(seen_key)
                 
                 matched_folder_name = "Unknown"
                 for f_resolved, f_name in resolved_folders:
-                    if abs_p_str.startswith(str(f_resolved).lower()):
+                    try:
+                        path_obj.relative_to(f_resolved)
                         matched_folder_name = f_name
                         break
+                    except ValueError:
+                        pass
                 all_files.append((path_obj, matched_folder_name))
             
             return all_files, "rust_jwalk", (time.perf_counter() - t0) * 1000
@@ -714,22 +665,24 @@ class IndexingService:
         extractor = {".pdf": self._extract_pdf, ".docx": self._extract_docx, ".csv": self._extract_csv, ".json": self._extract_json}.get(ext)
         
         if not extractor:
-            if ext in IndexingService._TEXT_EXTENSIONS or ext in IndexingService._UNREAL_PROJECT_EXTENSIONS:
+            if ext in TEXT_EXTENSIONS or ext in UNREAL_PROJECT_EXTENSIONS:
                 if self._is_binary(path):
                     size_mb = path.stat().st_size / (1024 * 1024)
                     return f"[BINARY: {path.name}] Size: {size_mb:.2f} MB. Binary content not indexed."
                 return self._extract_plain_text(path)
-            if ext in IndexingService._UNREAL_BINARY_EXTENSIONS: return self._extract_unreal_asset_stub(path)
+            if ext in UNREAL_BINARY_EXTENSIONS: return self._extract_unreal_asset_stub(path)
             
             # Fallback for unknown extensions: check if binary
             if self._is_binary(path):
                 return f"[UNKNOWN BINARY: {path.name}] Binary content not indexed."
             return self._extract_plain_text(path)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            fut = pool.submit(extractor, path)
-            try: return fut.result(timeout=settings.gemini_timeout)
-            except Exception: return ""
+        if not hasattr(self, '_extractor_pool'):
+            self._extractor_pool = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+            
+        fut = self._extractor_pool.submit(extractor, path)
+        try: return fut.result(timeout=settings.gemini_timeout)
+        except Exception: return ""
 
     def _extract_plain_text(self, path: Path) -> str:
         try:

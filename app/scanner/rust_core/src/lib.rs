@@ -132,7 +132,17 @@ fn find_sentence_boundary(text: &str, char_pos: usize, char_window: usize) -> us
 /// Fast parallel directory scanner returning a list of valid file paths.
 #[pyfunction]
 fn scan_folders(folders: Vec<String>, extensions: Vec<String>) -> PyResult<Vec<String>> {
-    let ext_set: HashSet<String> = extensions.into_iter().map(|e| e.to_lowercase()).collect();
+    let ext_set: HashSet<String> = extensions
+        .into_iter()
+        .map(|e| {
+            let lower = e.to_lowercase();
+            if lower.starts_with('.') || lower.is_empty() {
+                lower
+            } else {
+                format!(".{}", lower)
+            }
+        })
+        .collect();
     
     let results: Vec<Vec<String>> = folders.into_par_iter().map(|folder| {
         WalkDirGeneric::<((), ())>::new(&folder)
@@ -165,35 +175,124 @@ fn scan_folders(folders: Vec<String>, extensions: Vec<String>) -> PyResult<Vec<S
     Ok(flat_results)
 }
 
+mod layout;
+use layout::{Node, LayoutConfig, simulate_layout};
+use std::collections::VecDeque;
+use std::collections::HashMap;
+
 /// Generates a tightly packed binary buffer for 3D visualization.
-/// Format: [node1_x, node1_y, node1_z, node1_size, node1_typehash]...
+/// Format: Array of Node (position, radius, parent_index, flags, type_hash, pad) - 32 bytes each
 #[pyfunction]
 fn get_spatial_binary(files: Vec<(String, f32, String)>) -> PyResult<Vec<u8>> {
-    let mut buffer = Vec::with_capacity(files.len() * 20);
-    
-    for (i, (path, size, ext)) in files.into_iter().enumerate() {
-        // Procedural layout logic mirroring frontend but native
-        let angle = (i as f32) * 0.1;
-        let radius = 10.0 + (i as f32).sqrt() * 2.0;
-        let x = angle.cos() * radius;
-        let y = angle.sin() * radius;
-        let z = (i as f32 % 100.0) - 50.0;
-        
-        let norm_size = (size + 1.0).log10().max(0.5);
-        
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        use std::hash::Hasher;
-        use std::hash::Hash;
-        path.hash(&mut hasher);
-        let type_hash = (hasher.finish() & 0xFFFFFFFF) as u32;
-
-        buffer.write_f32::<LittleEndian>(x).unwrap();
-        buffer.write_f32::<LittleEndian>(y).unwrap();
-        buffer.write_f32::<LittleEndian>(z).unwrap();
-        buffer.write_f32::<LittleEndian>(norm_size).unwrap();
-        buffer.write_u32::<LittleEndian>(type_hash).unwrap();
+    struct TreeNode {
+        size: f32,
+        is_folder: bool,
+        type_hash: u32,
+        children: Vec<usize>,
+        parent: u32,
     }
     
+    let mut nodes = Vec::new();
+    let mut path_to_idx = HashMap::new();
+
+    nodes.push(TreeNode {
+        size: 0.0,
+        is_folder: true,
+        type_hash: 0,
+        children: vec![],
+        parent: u32::MAX,
+    });
+    path_to_idx.insert("".to_string(), 0);
+
+    for (path, size, _ext) in files {
+        let path = path.replace("\\", "/");
+        let parts: Vec<&str> = path.split('/').collect();
+        let mut current_path = String::new();
+        let mut parent_idx = 0;
+        
+        for (i, part) in parts.iter().enumerate() {
+            if part.is_empty() { continue; }
+            
+            let is_last = i == parts.len() - 1;
+            let p = if current_path.is_empty() { part.to_string() } else { format!("{}/{}", current_path, part) };
+            
+            let idx = *path_to_idx.entry(p.clone()).or_insert_with(|| {
+                let new_idx = nodes.len();
+                nodes[parent_idx].children.push(new_idx);
+                
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                use std::hash::{Hash, Hasher};
+                p.hash(&mut hasher);
+                let type_hash = (hasher.finish() & 0xFFFFFFFF) as u32;
+
+                nodes.push(TreeNode {
+                    size: if is_last { size } else { 0.0 }, // folders don't have direct size
+                    is_folder: !is_last,
+                    type_hash,
+                    children: vec![],
+                    parent: parent_idx as u32,
+                });
+                new_idx
+            });
+            
+            parent_idx = idx;
+            current_path = p;
+        }
+    }
+    
+    let mut bfs_order = Vec::new();
+    let mut queue = VecDeque::new();
+    queue.push_back(0);
+    while let Some(idx) = queue.pop_front() {
+        bfs_order.push(idx);
+        for &child in &nodes[idx].children {
+            queue.push_back(child);
+        }
+    }
+
+    let mut new_indices = vec![0; nodes.len()];
+    for (new_idx, &old_idx) in bfs_order.iter().enumerate() {
+        new_indices[old_idx] = new_idx;
+    }
+
+    let mut gpu_nodes = vec![Node::default(); nodes.len()];
+    for (new_idx, &old_idx) in bfs_order.iter().enumerate() {
+        let old_node = &nodes[old_idx];
+        let parent_idx = if old_node.parent == u32::MAX { u32::MAX } else { new_indices[old_node.parent as usize] as u32 };
+        
+        let pos = if parent_idx == u32::MAX {
+            [0.0, 0.0, 0.0]
+        } else {
+            let parent_pos = gpu_nodes[parent_idx as usize].position;
+            let angle = (new_idx as f32) * 2.39996; // discrete spiral angle approximation
+            let r = 10.0;
+            [parent_pos[0] + angle.cos() * r, parent_pos[1] + angle.sin() * r, parent_pos[2] + (new_idx as f32 % 10.0) - 5.0]
+        };
+        
+        let radius = if old_node.is_folder { 20.0 } else { 10.0 + (old_node.size + 1.0).log10().max(0.5) * 2.0 };
+        
+        gpu_nodes[new_idx] = Node {
+            position: pos,
+            radius,
+            parent_index: parent_idx,
+            flags: if old_node.is_folder { 1 } else { 0 },
+            type_hash: old_node.type_hash,
+            pad: 0,
+        };
+    }
+    
+    let config = LayoutConfig::default();
+    simulate_layout(&mut gpu_nodes, &config);
+
+    // Stream the binary data
+    let mut buffer = Vec::new();
+    let slice_u8 = unsafe {
+        std::slice::from_raw_parts(
+            gpu_nodes.as_ptr() as *const u8,
+            gpu_nodes.len() * std::mem::size_of::<Node>()
+        )
+    };
+    buffer.extend_from_slice(slice_u8);
     Ok(buffer)
 }
 

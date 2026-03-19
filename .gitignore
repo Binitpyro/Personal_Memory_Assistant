@@ -209,6 +209,18 @@ PMA Obsidian/
 scripts/
 GEMINI.md
 
+# Runtime data & logs
+data/
+logs/
+
+# Temp/test files at root
+_dep_test_err.txt
+_dep_test_out.txt
+_test_clear.py
+issues.json
+pma.db
+pylint_results.txt
+
 # Built executables
 *.exe
 dist/

@@ -3,7 +3,7 @@ import { FileTypeTreemap } from './FileTypeTreemap';
 import { WebGPURenderer } from '../renderer/WebGPURenderer';
 import { getVisualizerStream, type FileEntry } from '../api';
 
-const WebGPUCanvas = () => {
+const WebGPUCanvas = ({ allFiles }: { allFiles: Record<string, FileEntry[]> }) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const rendererRef = useRef<WebGPURenderer | null>(null);
     const requestRef = useRef<number>(0);
@@ -36,16 +36,16 @@ const WebGPUCanvas = () => {
                 });
                 resizeObserver.observe(canvas);
 
-                // 1. Fetch the data exactly ONCE
+                // 1. Fetch the data whenever allFiles changes
                 const buffer = await getVisualizerStream();
                 if (isCancelled) return;
 
                 // 2. Check the data payload
                 if (buffer.byteLength > 4) {
                     const headerView = new Uint8Array(buffer, 0, 4);
-                    
+
                     console.log("FIRST 4 BYTES FROM BACKEND:", headerView);
-                    
+
                     // 60, 33 is "<!" from "<!DOCTYPE html>"
                     if (headerView[0] === 60 && headerView[1] === 33) {
                         console.error("VITE TRAP: The backend sent HTML instead of Binary 3D Data!");
@@ -55,7 +55,7 @@ const WebGPUCanvas = () => {
                         setLoadError("Backend disconnected. Vite sent HTML.");
                         return;
                     }
-                    
+
                     await renderer.loadData(buffer);
                 } else {
                     if (!isCancelled) {
@@ -64,7 +64,7 @@ const WebGPUCanvas = () => {
                         if (resizeObserver) resizeObserver.disconnect();
                         setLoadError("No 3D data available. Please index some files first.");
                     }
-                    return; 
+                    return;
                 }
 
                 // 3. Start the animation loop
@@ -73,7 +73,7 @@ const WebGPUCanvas = () => {
                     requestRef.current = requestAnimationFrame(animate);
                 };
                 requestRef.current = requestAnimationFrame(animate);
-                
+
             } catch (err) {
                 console.error("Failed to initialize WebGPU:", err);
                 if (!isCancelled) {
@@ -95,7 +95,7 @@ const WebGPUCanvas = () => {
                 rendererRef.current.destroy();
             }
         };
-    }, []);
+    }, [allFiles]);
 
     const handleMouseDown = (e: React.MouseEvent) => {
         setIsDragging(true);
@@ -112,9 +112,25 @@ const WebGPUCanvas = () => {
 
     const handleMouseUp = () => setIsDragging(false);
 
-    const handleWheel = (e: React.WheelEvent) => {
-        if (rendererRef.current) rendererRef.current.handleZoom(e.deltaY);
-    };
+    useEffect(() => {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+
+        const handleNativeWheel = (e: WheelEvent) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (rendererRef.current) {
+                rendererRef.current.handleZoom(e.deltaY);
+            }
+        };
+
+        // Passive: false allows e.preventDefault() to actually stop the page from scrolling
+        canvas.addEventListener('wheel', handleNativeWheel, { passive: false });
+
+        return () => {
+            canvas.removeEventListener('wheel', handleNativeWheel);
+        };
+    }, []);
 
     if (loadError) {
         return (
@@ -128,7 +144,7 @@ const WebGPUCanvas = () => {
     }
 
     return (
-        <div className="w-full h-full min-h-[500px] relative bg-[#f1f5e0] rounded-3xl overflow-hidden border border-white/40 shadow-inner">
+        <div className="w-full h-full min-h-[400px] relative bg-[#f1f5e0] rounded-3xl overflow-hidden border border-white/40 shadow-inner">
             <div className="absolute top-6 left-8 z-10 pointer-events-none">
                 <h2 className="text-2xl font-bold text-primary flex items-center gap-3">
                     <span className="w-3 h-3 bg-accent rounded-full animate-pulse shadow-[0_0_12px_rgba(142,72,234,0.6)]" />
@@ -138,15 +154,14 @@ const WebGPUCanvas = () => {
                     DreamScape 3D
                 </p>
             </div>
-            <canvas 
-                ref={canvasRef} 
-                className="w-full h-full cursor-grab active:cursor-grabbing block" 
-                style={{ minHeight: '500px', height: '100%', width: '100%' }}
+            <canvas
+                ref={canvasRef}
+                className="w-full h-full cursor-grab active:cursor-grabbing block"
+                style={{ minHeight: '400px', height: '100%', width: '100%' }}
                 onMouseDown={handleMouseDown}
                 onMouseMove={handleMouseMove}
                 onMouseUp={handleMouseUp}
                 onMouseLeave={handleMouseUp}
-                onWheel={handleWheel}
             />
         </div>
     );
@@ -214,7 +229,7 @@ export const WebGPUFallback: React.FC<WebGPUFallbackProps> = ({ allFiles, active
             </div>
         );
     }
-    return <WebGPUCanvas />;
+    return <WebGPUCanvas allFiles={allFiles} />;
 };
 
 export default WebGPUFallback;

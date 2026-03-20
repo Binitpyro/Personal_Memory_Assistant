@@ -50,7 +50,7 @@ _insights_cache: dict[str, Any] = {"data": None, "ts": 0.0}
 _CACHE_TTL = 10  # seconds
 _bg_tasks: set[asyncio.Task] = set()
 
-APP_VERSION = "0.0.41"
+APP_VERSION = "0.0.52"
 
 def _versioned_static_url(asset_name: str) -> str:
     # Look in the base static directory for legacy assets

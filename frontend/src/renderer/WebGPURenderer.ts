@@ -1,6 +1,5 @@
 import bubbleShaderCode from './shaders/bubble_mboit.wgsl?raw';
 import resolveShaderCode from './shaders/oit_resolve.wgsl?raw';
-import cullingShaderCode from './shaders/culling.wgsl?raw';
 import pickingShaderCode from './shaders/picking.wgsl?raw';
 
 export class WebGPURenderer {
@@ -19,17 +18,13 @@ export class WebGPURenderer {
     private pickBuffer!: GPUBuffer;
 
     private nodeBuffer?: GPUBuffer;
-    private indirectBuffer?: GPUBuffer;
-    private visibleIndicesBuffer?: GPUBuffer;
 
     private bubblePipeline!: GPURenderPipeline;
     private resolvePipeline!: GPURenderPipeline;
-    private cullingPipeline!: GPUComputePipeline;
     private pickingPipeline!: GPURenderPipeline;
 
-    private renderBindGroup?: GPUBindGroup;
+    private renderBindGroup!: GPUBindGroup;
     private resolveBindGroup!: GPUBindGroup;
-    private cullingBindGroup?: GPUBindGroup;
     private pickingBindGroup?: GPUBindGroup;
 
     private nodeCount = 0;
@@ -104,7 +99,7 @@ export class WebGPURenderer {
     private setupTextures() {
         const size = { width: this.canvas.width, height: this.canvas.height };
         this.momentTexture = this.device.createTexture({
-            size, format: 'rgba32float',
+            size, format: 'rgba16float',
             usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
         });
         this.colorTexture = this.device.createTexture({
@@ -158,6 +153,16 @@ export class WebGPURenderer {
                     {
                         arrayStride: 8,
                         attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x2' }]
+                    },
+                    {
+                        arrayStride: 32, // matches the Rust Node layout
+                        stepMode: 'instance',
+                        attributes: [
+                            { shaderLocation: 1, offset: 0, format: 'float32x3' }, // position
+                            { shaderLocation: 2, offset: 12, format: 'float32' },  // radius
+                            { shaderLocation: 3, offset: 20, format: 'uint32' },   // flags
+                            { shaderLocation: 4, offset: 24, format: 'uint32' }    // type_hash
+                        ]
                     }
                 ]
             },
@@ -166,7 +171,7 @@ export class WebGPURenderer {
                 entryPoint: "fs_main",
                 targets: [
                     {
-                        format: 'rgba32float',
+                        format: 'rgba16float',
                         blend: {
                             color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
                             alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' }
@@ -182,7 +187,7 @@ export class WebGPURenderer {
                 ]
             },
             primitive: { topology: 'triangle-list' },
-            depthStencil: { depthWriteEnabled: false, depthCompare: 'less-equal', format: 'depth32float' }, // MBOIT doesn't write depth
+            depthStencil: { depthWriteEnabled: true, depthCompare: 'less', format: 'depth32float' }, // WBOIT requires true depth to sort intersections properly
         });
 
         const pickingModule = this.device.createShaderModule({ code: pickingShaderCode });
@@ -191,7 +196,22 @@ export class WebGPURenderer {
             vertex: {
                 module: pickingModule,
                 entryPoint: "vs_main",
-                buffers: [{ arrayStride: 8, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x2' }] }]
+                buffers: [
+                    {
+                        arrayStride: 8,
+                        attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x2' }]
+                    },
+                    {
+                        arrayStride: 32,
+                        stepMode: 'instance',
+                        attributes: [
+                            { shaderLocation: 1, offset: 0, format: 'float32x3' }, // position
+                            { shaderLocation: 2, offset: 12, format: 'float32' },  // radius
+                            { shaderLocation: 3, offset: 20, format: 'uint32' },   // flags
+                            { shaderLocation: 4, offset: 24, format: 'uint32' }    // type_hash
+                        ]
+                    }
+                ]
             },
             fragment: {
                 module: pickingModule,
@@ -218,12 +238,6 @@ export class WebGPURenderer {
                 }]
             }
         });
-
-        const cullingModule = this.device.createShaderModule({ code: cullingShaderCode });
-        this.cullingPipeline = this.device.createComputePipeline({
-            layout: 'auto',
-            compute: { module: cullingModule, entryPoint: "cs_main" }
-        });
     }
 
     public async loadData(data: ArrayBuffer) {
@@ -231,62 +245,35 @@ export class WebGPURenderer {
         if (this.nodeCount === 0) return;
 
         if (this.nodeBuffer) this.nodeBuffer.destroy();
-        if (this.indirectBuffer) this.indirectBuffer.destroy();
-        if (this.visibleIndicesBuffer) this.visibleIndicesBuffer.destroy();
 
         this.nodeBuffer = this.device.createBuffer({
             size: Math.max(32, data.byteLength),
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
         });
         if (data.byteLength > 0) {
             this.device.queue.writeBuffer(this.nodeBuffer, 0, data);
         }
 
-        this.indirectBuffer = this.device.createBuffer({
-            size: 16,
-            usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-        });
-        this.device.queue.writeBuffer(this.indirectBuffer, 0, new Uint32Array([6, 0, 0, 0]));
-
-        this.visibleIndicesBuffer = this.device.createBuffer({
-            size: Math.max(4, this.nodeCount * 4),
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-        });
-
         if (!this.cameraBuffer) {
-            this.cameraBuffer = this.device.createBuffer({ size: 256, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+            this.cameraBuffer = this.device.createBuffer({ size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
         }
         this.updateCamera();
-
-        this.cullingBindGroup = this.device.createBindGroup({
-            layout: this.cullingPipeline.getBindGroupLayout(0),
-            entries: [
-                { binding: 0, resource: { buffer: this.cameraBuffer } },
-                { binding: 1, resource: { buffer: this.nodeBuffer } },
-                { binding: 2, resource: { buffer: this.indirectBuffer } },
-                { binding: 3, resource: { buffer: this.visibleIndicesBuffer } }
-            ]
-        });
 
         this.renderBindGroup = this.device.createBindGroup({
             layout: this.bubblePipeline.getBindGroupLayout(0),
             entries: [
-                { binding: 0, resource: { buffer: this.cameraBuffer } },
-                { binding: 1, resource: { buffer: this.nodeBuffer } },
-                { binding: 2, resource: { buffer: this.visibleIndicesBuffer } }
+                { binding: 0, resource: { buffer: this.cameraBuffer } }
             ]
         });
 
         this.pickingBindGroup = this.device.createBindGroup({
             layout: this.pickingPipeline.getBindGroupLayout(0),
             entries: [
-                { binding: 0, resource: { buffer: this.cameraBuffer } },
-                { binding: 1, resource: { buffer: this.nodeBuffer } },
-                { binding: 2, resource: { buffer: this.visibleIndicesBuffer } }
+                { binding: 0, resource: { buffer: this.cameraBuffer } }
             ]
         });
 
-        this.setupTextures();
+        // Texture recreation was causing unnecessary GPU memory pressure, removed.
     }
 
     public async pick(x: number, y: number): Promise<number | null> {
@@ -299,15 +286,7 @@ export class WebGPURenderer {
 
         const commandEncoder = this.device.createCommandEncoder();
 
-        // Re-run culling since camera might have moved
-        if (this.cullingPipeline && this.cullingBindGroup && this.indirectBuffer) {
-            commandEncoder.clearBuffer(this.indirectBuffer, 4, 4); // Reset instanceCount
-            const computePass = commandEncoder.beginComputePass();
-            computePass.setPipeline(this.cullingPipeline);
-            computePass.setBindGroup(0, this.cullingBindGroup);
-            computePass.dispatchWorkgroups(Math.ceil(this.nodeCount / 64));
-            computePass.end();
-        }
+
 
         const renderPass = commandEncoder.beginRenderPass({
             colorAttachments: [{
@@ -323,10 +302,9 @@ export class WebGPURenderer {
         renderPass.setScissorRect(px, py, 1, 1);
         if (this.pickingBindGroup) renderPass.setBindGroup(0, this.pickingBindGroup);
         if (this.geometryBuffer) renderPass.setVertexBuffer(0, this.geometryBuffer);
+        if (this.nodeBuffer) renderPass.setVertexBuffer(1, this.nodeBuffer);
 
-        if (this.indirectBuffer) {
-            renderPass.drawIndirect(this.indirectBuffer, 0);
-        }
+        renderPass.draw(6, this.nodeCount, 0, 0);
         renderPass.end();
 
         commandEncoder.copyTextureToBuffer(
@@ -379,8 +357,14 @@ export class WebGPURenderer {
         const vpMatrix = this.multiply(projection, view);
 
         if (this.cameraBuffer) {
-            this.device.queue.writeBuffer(this.cameraBuffer, 0, vpMatrix);
-            this.device.queue.writeBuffer(this.cameraBuffer, 160, new Float32Array([...this.cameraPosition, 0]));
+            // CameraUniform has:
+            // mat4x4<f32> viewProj; // 64 bytes (16 floats)
+            // vec3<f32> eyePosition; // 12 bytes + 4 bytes padding (4 floats)
+            // Total = 80 bytes (20 floats)
+            const uniformData = new Float32Array(20);
+            uniformData.set(vpMatrix, 0);
+            uniformData.set([this.cameraPosition[0], this.cameraPosition[1], this.cameraPosition[2], 0], 16);
+            this.device.queue.writeBuffer(this.cameraBuffer, 0, uniformData);
         }
     }
 
@@ -448,15 +432,6 @@ export class WebGPURenderer {
 
         const commandEncoder = this.device.createCommandEncoder();
 
-        if (this.cullingPipeline && this.cullingBindGroup && this.indirectBuffer) {
-            commandEncoder.clearBuffer(this.indirectBuffer, 4, 4); // Reset instanceCount
-            const computePass = commandEncoder.beginComputePass();
-            computePass.setPipeline(this.cullingPipeline);
-            computePass.setBindGroup(0, this.cullingBindGroup);
-            computePass.dispatchWorkgroups(Math.ceil(this.nodeCount / 64));
-            computePass.end();
-        }
-
         const renderPass = commandEncoder.beginRenderPass({
             colorAttachments: [{ view: this.momentTexture.createView(), loadOp: 'clear', clearValue: [0, 0, 0, 0], storeOp: 'store' },
             { view: this.colorTexture.createView(), loadOp: 'clear', clearValue: [0, 0, 0, 0], storeOp: 'store' }],
@@ -466,10 +441,9 @@ export class WebGPURenderer {
         renderPass.setPipeline(this.bubblePipeline);
         if (this.renderBindGroup) renderPass.setBindGroup(0, this.renderBindGroup);
         if (this.geometryBuffer) renderPass.setVertexBuffer(0, this.geometryBuffer);
+        if (this.nodeBuffer) renderPass.setVertexBuffer(1, this.nodeBuffer);
 
-        if (this.indirectBuffer) {
-            renderPass.drawIndirect(this.indirectBuffer, 0);
-        }
+        renderPass.draw(6, this.nodeCount, 0, 0);
         renderPass.end();
 
         const resolvePass = commandEncoder.beginRenderPass({
@@ -493,9 +467,8 @@ export class WebGPURenderer {
         if (this.geometryBuffer) this.geometryBuffer.destroy();
         if (this.pickBuffer) this.pickBuffer.destroy();
         if (this.nodeBuffer) this.nodeBuffer.destroy();
-        if (this.indirectBuffer) this.indirectBuffer.destroy();
-        if (this.visibleIndicesBuffer) this.visibleIndicesBuffer.destroy();
 
         if (this.device) this.device.destroy();
+        if (this.context) this.context.unconfigure();
     }
 }

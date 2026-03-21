@@ -4,11 +4,16 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import './index.css'
 import { AppShell } from './components/AppShell'
 
+import { QueryClientProvider } from '@tanstack/react-query'
+import { queryClient } from './queryClient'
+
 // Lazy-load pages so the initial bundle only contains the shell + current route
 const LibraryPage = lazy(() => import('./pages/LibraryPage').then(m => ({ default: m.LibraryPage })))
 const SearchPage = lazy(() => import('./pages/SearchPage').then(m => ({ default: m.SearchPage })))
 const ExplorerPage = lazy(() => import('./pages/ExplorerPage').then(m => ({ default: m.ExplorerPage })))
 const InsightsPage = lazy(() => import('./pages/InsightsPage').then(m => ({ default: m.InsightsPage })))
+const SettingsPage = lazy(() => import('./pages/SettingsPage').then(m => ({ default: m.SettingsPage })))
+const SetupPage = lazy(() => import('./pages/SetupPage').then(m => ({ default: m.SetupPage })))
 
 function PageLoader() {
   return (
@@ -20,18 +25,22 @@ function PageLoader() {
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <BrowserRouter>
-      <Suspense fallback={<PageLoader />}>
-        <Routes>
-          <Route element={<AppShell />}>
-            <Route path="/" element={<Navigate to="/library" replace />} />
-            <Route path="/library" element={<LibraryPage />} />
-            <Route path="/search" element={<SearchPage />} />
-            <Route path="/explorer" element={<ExplorerPage />} />
-            <Route path="/insights" element={<InsightsPage />} />
-          </Route>
-        </Routes>
-      </Suspense>
-    </BrowserRouter>
+    <QueryClientProvider client={queryClient}>
+      <BrowserRouter>
+        <Suspense fallback={<PageLoader />}>
+          <Routes>
+            <Route path="/setup" element={<SetupPage />} />
+            <Route element={<AppShell />}>
+              <Route path="/" element={<Navigate to="/library" replace />} />
+              <Route path="/library" element={<LibraryPage />} />
+              <Route path="/search" element={<SearchPage />} />
+              <Route path="/explorer" element={<ExplorerPage />} />
+              <Route path="/insights" element={<InsightsPage />} />
+              <Route path="/settings" element={<SettingsPage />} />
+            </Route>
+          </Routes>
+        </Suspense>
+      </BrowserRouter>
+    </QueryClientProvider>
   </StrictMode>,
 )

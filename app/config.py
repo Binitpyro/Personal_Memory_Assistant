@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     retrieval_top_k: int = 15
     context_max_tokens: int = 8000  # Balanced for reliability and depth
 
-    dev_mode: bool = True  # Default on for hackathon; set to False for prod
+    dev_mode: bool = False  # Set to True for verbose dev logs and debug endpoints
     log_level: str = "INFO"
 
     @property

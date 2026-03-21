@@ -96,7 +96,6 @@ fn fs_main(in: VertexOutput) -> MBOITOutput {
 
     if in.is_folder > 0.5 {
         // --- THE CRYSTAL (Folders) ---
-        // Replaced high-frequency static noise with low-frequency stable distortion
         let hash_f = f32(in.type_hash % 100u);
         let distortion = vec3<f32>(
             sin(localNormal.y * 3.0 + hash_f),
@@ -105,16 +104,14 @@ fn fs_main(in: VertexOutput) -> MBOITOutput {
         ) * 0.4;
 
         let perturbedNormal = normalize(localNormal + distortion);
-        
-        // Snap to sharp facets
         let facets = 4.0;
         let facetedNormal = normalize(round(perturbedNormal * facets) / facets);
 
-        // Glassy specular highlight
         let dt = dot(vec3<f32>(0.0, 0.0, 1.0), facetedNormal);
         let baseColor = vec3<f32>(0.2, 0.6, 0.9) + vec3<f32>(f32(in.type_hash % 10u) / 20.0, 0.05, 0.1);
         finalColor = baseColor + pow(max(dt, 0.0), 16.0);
-        alpha = 0.85;
+        
+        alpha = 0.15; 
     } else {
         // --- THE BUBBLE (Files) ---
         // Organic wobble + Iridescence
@@ -134,8 +131,11 @@ fn fs_main(in: VertexOutput) -> MBOITOutput {
     // WBOIT: Weighted Blended Order Independent Transparency
     let depth_val = max(0.1, in.view_depth - (z * in.sphere_radius));
     
-    // McGuire 2013 WBOIT weight function, clamped to a lower max (100) to prevent Float16 overflow
+    // WBOIT weight calculation...
     let weight = clamp(pow(alpha, 1.5) * max(1e-2, 3e3 / (1e-5 + pow(abs(depth_val) * 0.05, 3.0))), 1e-2, 100.0);
+
+    // FIX: Write the procedural spherical depth to the GPU depth buffer
+    out.depth = trueClipPos.z / trueClipPos.w; 
 
     out.moments = vec4<f32>(alpha, 0.0, 0.0, 0.0);
     out.color = vec4<f32>(finalColor * alpha * weight, alpha * weight);

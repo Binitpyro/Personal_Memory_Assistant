@@ -156,6 +156,52 @@ function collapseFolderChains(node: any): any {
   return node;
 }
 
+function insertFileIntoTree(
+  rootNode: any,
+  f: FileEntry,
+  startFolderName: string,
+  stripPath: string,
+  getVal: (s: number) => number
+) {
+  const fullPath = normalizePath(f.path);
+  let relative = fullPath;
+  if (stripPath && fullPath.startsWith(stripPath)) {
+    relative = fullPath.slice(stripPath.length).replace(/^\/+/, '');
+  }
+
+  const parts = relative.split('/').filter(Boolean);
+  let current = rootNode;
+  const startIdx = parts[0] === startFolderName ? 1 : 0;
+
+  for (let i = startIdx; i < parts.length; i++) {
+    const part = parts[i];
+    const isFile = (i === parts.length - 1);
+    if (isFile) {
+      const ext = ('.' + part.split('.').pop()?.toLowerCase()) || '.other';
+      const category = CATEGORY_MAP[ext] || 'Other';
+      current.children.set(part, {
+        name: part,
+        value: getVal(f.size),
+        realSize: f.size,
+        fileData: f,
+        itemStyle: { color: COLORS[category] || COLORS.Other }
+      });
+    } else {
+      if (!current.children.has(part)) {
+        current.children.set(part, {
+          name: part,
+          children: new Map(),
+          fullPath: current.fullPath + '/' + part,
+          realSize: 0,
+          value: 0,
+          itemStyle: { color: '#1e1a3a' }
+        });
+      }
+      current = current.children.get(part);
+    }
+  }
+}
+
 function buildFolderTree(flatFiles: FileEntry[], getVal: (s: number) => number) {
   const normalizedPaths = flatFiles.map(f => normalizePath(f.path));
   const commonPrefix = findCommonPrefix(normalizedPaths);
@@ -173,48 +219,43 @@ function buildFolderTree(flatFiles: FileEntry[], getVal: (s: number) => number) 
   };
 
   for (const f of flatFiles) {
-    const fullPath = normalizePath(f.path);
-    let relative = fullPath;
-    if (stripPath && fullPath.startsWith(stripPath)) {
-      relative = fullPath.slice(stripPath.length).replace(/^\/+/, '');
-    }
-
-    const parts = relative.split('/').filter(Boolean);
-    let current = rootNode;
-    const startIdx = (parts[0] === startFolderName && flatFiles.length > 1) ? 1 : 0;
-
-    for (let i = startIdx; i < parts.length; i++) {
-      const part = parts[i];
-      const isFile = (i === parts.length - 1);
-      if (isFile) {
-        const ext = ('.' + part.split('.').pop()?.toLowerCase()) || '.other';
-        const category = CATEGORY_MAP[ext] || 'Other';
-        current.children.set(part, {
-          name: part,
-          value: getVal(f.size),
-          realSize: f.size,
-          fileData: f,
-          itemStyle: { color: COLORS[category] || COLORS.Other }
-        });
-      } else {
-        if (!current.children.has(part)) {
-          current.children.set(part, {
-            name: part,
-            children: new Map(),
-            fullPath: current.fullPath + '/' + part,
-            realSize: 0,
-            value: 0,
-            itemStyle: { color: '#1e1a3a' }
-          });
-        }
-        current = current.children.get(part);
-      }
-    }
+    insertFileIntoTree(rootNode, f, startFolderName, stripPath, getVal);
   }
 
   const finalizedTree = finalizeTree(rootNode);
   return collapseFolderChains(finalizedTree);
 }
+
+interface BreadcrumbProps {
+  navPath: NavSegment[];
+  onBreadcrumbClick: (index: number) => void;
+}
+
+const Breadcrumb: React.FC<BreadcrumbProps> = ({ navPath, onBreadcrumbClick }) => (
+  <div className="flex items-center gap-1 bg-black/5 px-3 py-2 rounded-xl border border-white/10 overflow-x-auto no-scrollbar scroll-smooth">
+    {navPath.map((seg, i) => {
+      const isLast = i === navPath.length - 1;
+      const isFile = isLast && !seg.fullPath;
+      let Icon = Folder;
+      if (i === 0) Icon = Home;
+      else if (isFile) Icon = File;
+
+      const itemKey = seg.fullPath ? `${seg.fullPath}-${i}` : `${seg.name}-${i}`;
+      return (
+        <div key={itemKey} className="flex items-center shrink-0">
+          <button
+            onClick={() => onBreadcrumbClick(i)}
+            className={`flex items-center gap-1.5 px-2 py-1 rounded-lg text-[11px] font-medium transition-all hover:bg-black/5 ${isLast ? 'text-primary bg-primary/10' : 'text-text-secondary hover:text-text-primary'}`}
+          >
+            <Icon className="w-3 h-3" />
+            <span className="max-w-[120px] truncate">{seg.name}</span>
+          </button>
+          {!isLast && <span className="text-text-secondary/20 mx-0.5">/</span>}
+        </div>
+      );
+    })}
+  </div>
+);
 
 export function FileTypeTreemap({ allFiles, activeFilter, onFilterChange, onFileSelect, onDeleteFolder, initialMode = 'folder' }: FileTypeTreemapProps) {
   const chartRef = useRef<ReactEChartsCore>(null)
@@ -223,8 +264,9 @@ export function FileTypeTreemap({ allFiles, activeFilter, onFilterChange, onFile
   // Dynamic Root Label
   const rootLabel = useMemo(() => {
     if (groupMode === 'type') return 'File Types'
-    const paths = Object.values(allFiles).flat().map(f => normalizePath(f.path))
-    if (paths.length === 0) return 'Root'
+    const flat = Object.values(allFiles).flat()
+    if (flat.length === 0) return 'Root'
+    const paths = flat.map(f => normalizePath(f.path))
     const prefix = findCommonPrefix(paths)
     return prefix.split('/').pop() || 'Root'
   }, [allFiles, groupMode])
@@ -239,33 +281,26 @@ export function FileTypeTreemap({ allFiles, activeFilter, onFilterChange, onFile
   const { treeData, totalSize } = useMemo(() => {
     const flatFiles = Object.values(allFiles).flat()
     const total = flatFiles.reduce((s, f) => s + f.size, 0)
-
-    // Square root scale: better than pow(0.2) for relative impact, 
-    // better than linear for seeing small files.
     const getVal = (s: number) => Math.sqrt(s + 1) * 10
 
-    if (groupMode === 'type') {
-      return { treeData: buildTypeTree(flatFiles, getVal), totalSize: total }
-    } else {
-      return { treeData: [buildFolderTree(flatFiles, getVal)], totalSize: total }
-    }
+    const data = groupMode === 'type'
+      ? buildTypeTree(flatFiles, getVal)
+      : [buildFolderTree(flatFiles, getVal)]
+
+    return { treeData: data, totalSize: total }
   }, [allFiles, groupMode])
 
   /* ── Navigation ────────────────────────────────────────── */
   const handleHome = useCallback(() => {
-    const instance = chartRef.current?.getEchartsInstance()
-    if (instance) {
-      instance.dispatchAction({ type: 'treemapRootToNode', targetNode: null })
-      setNavPath([{ name: rootLabel, fullPath: null }])
-    }
+    chartRef.current?.getEchartsInstance().dispatchAction({ type: 'treemapRootToNode', targetNode: null })
+    setNavPath([{ name: rootLabel, fullPath: null }])
   }, [rootLabel])
 
   const handleBack = useCallback(() => {
     const instance = chartRef.current?.getEchartsInstance()
     if (!instance) return
     try {
-      const series = (instance as any).getModel().getSeriesByIndex(0)
-      const currentRoot = series.getViewRoot()
+      const currentRoot = (instance as any).getModel().getSeriesByIndex(0).getViewRoot()
       if (currentRoot?.parent) {
         instance.dispatchAction({ type: 'treemapRootToNode', targetNode: currentRoot.parent })
         setNavPath(prev => prev.length > 1 ? prev.slice(0, -1) : [{ name: rootLabel, fullPath: null }])
@@ -277,37 +312,28 @@ export function FileTypeTreemap({ allFiles, activeFilter, onFilterChange, onFile
     const instance = chartRef.current?.getEchartsInstance()
     if (!instance) return
     if (index === 0) { handleHome(); return }
-    const targetName = navPath[index].name
-    instance.dispatchAction({ type: 'treemapRootToNode', targetNode: targetName })
+    instance.dispatchAction({ type: 'treemapRootToNode', targetNode: navPath[index].name })
     setNavPath(prev => prev.slice(0, index + 1))
   }, [navPath, handleHome])
 
   const handleDeleteCurrent = useCallback(() => {
-    if (!onDeleteFolder || navPath.length <= 1) return
-    const current = navPath.at(-1)!
-    if (current.fullPath && confirm(`Remove index for all files in "${current.name}"?\n\nPath: ${current.fullPath}`)) {
+    const current = navPath.at(-1)
+    if (onDeleteFolder && current?.fullPath && confirm(`Remove index for all files in "${current.name}"?\n\nPath: ${current.fullPath}`)) {
       onDeleteFolder(current.fullPath)
     }
   }, [onDeleteFolder, navPath])
 
   const option = useMemo(() => ({
-    backgroundColor: 'transparent', 
+    backgroundColor: 'transparent',
     tooltip: {
-      backgroundColor: 'rgba(255, 255, 255, 0.95)', 
-      borderColor: 'rgba(149, 159, 147, 0.2)', 
+      backgroundColor: 'rgba(255, 255, 255, 0.95)',
+      borderColor: 'rgba(149, 159, 147, 0.2)',
       textStyle: { color: '#1e293b' },
       extraCssText: 'box-shadow: 0 10px 30px rgba(0,0,0,0.1); border-radius: 12px; backdrop-filter: blur(8px);',
       formatter: (info: any) => {
         const size = info.data?.realSize ?? info.value
         const pct = totalSize > 0 ? ((size / totalSize) * 100).toFixed(1) : '0.0'
-        const escapeHtml = (unsafe: string) => {
-            return unsafe
-                 .replace(/&/g, "&amp;")
-                 .replace(/</g, "&lt;")
-                 .replace(/>/g, "&gt;")
-                 .replace(/"/g, "&quot;")
-                 .replace(/'/g, "&#039;");
-        }
+        const escapeHtml = (u: string) => u.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll("\"", "&quot;").replaceAll("'", "&#039;");
         return `<div style="font-weight:700;margin-bottom:4px;color:#3d15cb">${escapeHtml(info.name)}</div>Size: <b>${formatBytes(size)}</b> (${pct}%)`
       }
     },
@@ -324,12 +350,7 @@ export function FileTypeTreemap({ allFiles, activeFilter, onFilterChange, onFile
       breadcrumb: { show: false },
       leafDepth: undefined,
       visibleMinSize: 10,
-      label: {
-        show: true,
-        formatter: '{b}',
-        color: '#1e293b',
-        fontSize: 10
-      },
+      label: { show: true, formatter: '{b}', color: '#1e293b', fontSize: 10 },
       upperLabel: {
         show: true,
         height: 22,
@@ -342,43 +363,18 @@ export function FileTypeTreemap({ allFiles, activeFilter, onFilterChange, onFile
           return size == null ? ` ${params.name}` : `\u{1F4C1} ${params.name} (${formatBytes(size)})`
         }
       },
-      itemStyle: {
-        borderColor: '#f1f5e0',
-        borderWidth: 1,
-        gapWidth: 1
-      },
+      itemStyle: { borderColor: '#f1f5e0', borderWidth: 1, gapWidth: 1 },
       levels: [
         {
-          colorAlpha: [1, 1],
-          colorSaturation: [1, 1],
-          itemStyle: {
-            color: '#f8fbf0',
-            borderColor: '#3d15cb',
-            borderWidth: 3,
-            gapWidth: 3
-          },
+          itemStyle: { color: '#f8fbf0', borderColor: '#3d15cb', borderWidth: 3, gapWidth: 3 },
           upperLabel: { show: true, height: 26, backgroundColor: 'rgba(255,255,255,0.8)', color: '#3d15cb', fontWeight: 'bold', fontSize: 12 }
         },
         {
-          colorAlpha: [1, 1],
-          colorSaturation: [1, 1],
-          itemStyle: {
-            color: '#fdfdfd',
-            borderColor: '#3d15cb',
-            borderWidth: 3,
-            gapWidth: 3
-          },
+          itemStyle: { color: '#fdfdfd', borderColor: '#3d15cb', borderWidth: 3, gapWidth: 3 },
           upperLabel: { show: true, height: 24, backgroundColor: 'rgba(255,255,255,0.7)', color: '#3d15cb', fontWeight: 'bold', fontSize: 11 }
         },
         {
-          colorAlpha: [1, 1],
-          colorSaturation: [1, 1],
-          itemStyle: {
-            color: '#ffffff',
-            borderColor: '#9984d4',
-            borderWidth: 2,
-            gapWidth: 2
-          },
+          itemStyle: { color: '#ffffff', borderColor: '#9984d4', borderWidth: 2, gapWidth: 2 },
           upperLabel: {
             show: true,
             height: 22,
@@ -394,8 +390,6 @@ export function FileTypeTreemap({ allFiles, activeFilter, onFilterChange, onFile
           }
         },
         {
-          colorAlpha: [1, 1],
-          colorSaturation: [1, 1],
           itemStyle: { color: '#ffffff', borderColor: '#9984d4', borderWidth: 1.5, gapWidth: 1.5 },
           upperLabel: { show: true, height: 20, backgroundColor: 'rgba(255,255,255,0.5)', color: '#3d15cb', fontSize: 10 }
         },
@@ -409,61 +403,27 @@ export function FileTypeTreemap({ allFiles, activeFilter, onFilterChange, onFile
 
   const onEvents = useMemo(() => ({
     click: (params: any) => {
-      // 1. Outline effect for folders
       if (params.data?.children && chartRef.current) {
         const instance = chartRef.current.getEchartsInstance();
-        instance.dispatchAction({
-          type: 'highlight',
-          seriesIndex: 0,
-          dataIndex: params.dataIndex
-        });
-        setTimeout(() => {
-          instance.dispatchAction({
-            type: 'downplay',
-            seriesIndex: 0,
-            dataIndex: params.dataIndex
-          });
-        }, 1000);
-      }
+        instance.dispatchAction({ type: 'highlight', seriesIndex: 0, dataIndex: params.dataIndex });
+        setTimeout(() => instance.dispatchAction({ type: 'downplay', seriesIndex: 0, dataIndex: params.dataIndex }), 1000);
 
-      // 2. Navigation & Selection logic
-      if (params.data?.children) {
-        // Construct hierarchical path from root to current node using treePathInfo
         const pathInfo = params.treePathInfo || [];
-        const newNav = pathInfo
-          .map((p: any) => ({
-            name: p.name,
-            fullPath: p.data?.fullPath || null
-          }))
-          .filter((p: any) => p.name !== '');
-
-        setNavPath(newNav);
+        setNavPath(pathInfo.map((p: any) => ({ name: p.name, fullPath: p.data?.fullPath || null })).filter((p: any) => p.name !== ''));
       }
 
       if (params.data?.fileData && onFileSelect) onFileSelect(params.data.fileData)
 
-      // Improved extension filter logic: works in any mode, searches path for an extension
       if (onFilterChange) {
-        const pathInfo = params.treePathInfo || [];
-        const extNode = pathInfo.find((p: any) => p.name?.startsWith('.'));
-        if (extNode) {
-          onFilterChange(extNode.name === activeFilter ? null : extNode.name);
-        }
+        const extNode = (params.treePathInfo || []).find((p: any) => p.name?.startsWith('.'));
+        if (extNode) onFilterChange(extNode.name === activeFilter ? null : extNode.name);
       }
     },
     contextmenu: (params: any) => { params.event.stop(); handleBack() }
-  }), [handleBack, onFilterChange, onFileSelect, activeFilter, groupMode])
+  }), [handleBack, onFilterChange, onFileSelect, activeFilter])
 
-  // Automatically highlight the active filter node
   useEffect(() => {
-    const instance = chartRef.current?.getEchartsInstance();
-    if (instance && activeFilter) {
-      instance.dispatchAction({
-        type: 'highlight',
-        seriesIndex: 0,
-        name: activeFilter
-      });
-    }
+    if (activeFilter) chartRef.current?.getEchartsInstance().dispatchAction({ type: 'highlight', seriesIndex: 0, name: activeFilter });
   }, [activeFilter, treeData]);
 
   return (
@@ -475,7 +435,7 @@ export function FileTypeTreemap({ allFiles, activeFilter, onFilterChange, onFile
             <button onClick={handleHome} className="flex items-center gap-1 px-3 py-1.5 bg-black/5 hover:bg-primary/10 border border-white/20 rounded-xl text-xs font-bold transition-all text-text-primary"><Home className="w-4 h-4" /> HOME</button>
           </div>
           <div className="flex items-center gap-3">
-            {onDeleteFolder && navPath.length > 1 && navPath[navPath.length - 1].fullPath && (
+            {onDeleteFolder && navPath.length > 1 && navPath.at(-1)?.fullPath && (
               <button onClick={handleDeleteCurrent} className="flex items-center gap-1 px-3 py-1.5 bg-error/10 hover:bg-error/20 border border-error/20 text-error rounded-xl text-[10px] font-bold transition-all"><Trash2 className="w-3.5 h-3.5" /> DELETE FOLDER INDEX</button>
             )}
             <div className="flex items-center bg-black/5 p-1 rounded-xl border border-white/20">
@@ -484,36 +444,11 @@ export function FileTypeTreemap({ allFiles, activeFilter, onFilterChange, onFile
             </div>
           </div>
         </div>
-        <div className="flex items-center gap-1 bg-black/5 px-3 py-2 rounded-xl border border-white/10 overflow-x-auto no-scrollbar scroll-smooth">
-          {navPath.map((seg, i) => {
-            const isLast = i === navPath.length - 1;
-            const isFile = isLast && !seg.fullPath;
-            let Icon;
-            if (i === 0) Icon = Home;
-            else if (isFile) Icon = File;
-            else Icon = Folder;
-            const itemKey = seg.fullPath ? `${seg.fullPath}-${i}` : `${seg.name}-${i}`;
-            return (
-              <div key={itemKey} className="flex items-center shrink-0">
-                <button onClick={() => handleBreadcrumbClick(i)} className={`flex items-center gap-1.5 px-2 py-1 rounded-lg text-[11px] font-medium transition-all hover:bg-black/5 ${isLast ? 'text-primary bg-primary/10' : 'text-text-secondary hover:text-text-primary'}`}>
-                  <Icon className="w-3 h-3" />
-                  <span className="max-w-[120px] truncate">{seg.name}</span>
-                </button>
-                {!isLast && <span className="text-text-secondary/20 mx-0.5">/</span>}
-              </div>
-            )
-          })}
-        </div>
+        <Breadcrumb navPath={navPath} onBreadcrumbClick={handleBreadcrumbClick} />
       </div>
       <div className="flex-1 relative rounded-2xl overflow-hidden border border-white/40 shadow-xl bg-white/30 group">
         <div className="absolute top-12 right-4 z-10 pointer-events-none opacity-0 group-hover:opacity-60 transition-opacity text-[10px] font-bold text-text-primary uppercase bg-white/80 border border-white/40 px-3 py-1.5 rounded-full shadow-sm">Right-click: Back • Scroll: Zoom • Drag: Pan</div>
-        <ReactEChartsCore
-          ref={chartRef}
-          echarts={echarts}
-          option={option}
-          style={{ height: '100%', width: '100%' }}
-          onEvents={onEvents}
-        />
+        <ReactEChartsCore ref={chartRef} echarts={echarts} option={option} style={{ height: '100%', width: '100%' }} onEvents={onEvents} />
       </div>
     </div>
   )

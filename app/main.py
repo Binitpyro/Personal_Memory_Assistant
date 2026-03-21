@@ -50,7 +50,7 @@ _insights_cache: dict[str, Any] = {"data": None, "ts": 0.0}
 _CACHE_TTL = 10  # seconds
 _bg_tasks: set[asyncio.Task] = set()
 
-APP_VERSION = "0.0.52"
+APP_VERSION = "0.0.55"
 
 def _versioned_static_url(asset_name: str) -> str:
     # Look in the base static directory for legacy assets
@@ -170,6 +170,21 @@ async def lifespan(fastapi_app: FastAPI):
         except Exception as e:
             logger.debug("Reranker preload skipped: %s", e)
     loop.run_in_executor(None, _bg_preload_reranker)
+
+    async def _bg_startup_cleanup():
+        """Fire-and-forget: remove stale file records from the DB."""
+        try:
+            await asyncio.sleep(5)  # let the server fully boot first
+            removed = await db_manager.cleanup_stale_files()
+            if removed:
+                logger.info("Background startup: cleared %d deleted file(s) from index.", removed)
+        except Exception as e:
+            logger.warning("Background startup cleanup error: %s", e)
+
+    task = asyncio.create_task(_bg_startup_cleanup())
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
+
     logger.info("Server ready (v%s)", APP_VERSION)
     yield
     logger.info("Shutting down...")
@@ -188,13 +203,26 @@ app.add_middleware(
 
 @app.middleware("http")
 async def add_request_id(request: Request, call_next):
+    # Enforce Local Access Token if running in desktop mode with a token
+    expected_token = os.environ.get("PMA_LOCAL_TOKEN")
+    if expected_token and request.url.path.startswith("/api/"):
+        # Allow OPTIONS for CORS preflight
+        if request.method != "OPTIONS":
+            provided_token = request.headers.get("X-Local-Access-Token")
+            # Fallback to query param for things like EventSource
+            if not provided_token:
+                provided_token = request.query_params.get("token")
+            
+            if provided_token != expected_token:
+                return JSONResponse(status_code=401, content={"error": "Unauthorized local access."})
+
     request_id = str(uuid.uuid4())[:8]
     request.state.request_id = request_id
     t0 = time.perf_counter()
     response = await call_next(request)
     elapsed = (time.perf_counter() - t0) * 1000
     response.headers["X-Request-ID"] = request_id
-    if request.url.path not in ("/health", "/index/progress-stream"):
+    if request.url.path not in ("/api/health", "/api/index/progress-stream"):
         logger.info("[%s] %s %s → %d (%.0fms)", request_id, request.method, request.url.path, response.status_code, elapsed)
     return response
 
@@ -205,358 +233,21 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         content={"error": "Validation error", "detail": exc.errors()}
     )
 
-class IndexRequest(BaseModel):
-    folders: List[str] = Field(..., max_length=50)
-    @property
-    def validated_folders(self) -> List[str]:
-        cleaned = []
-        for f in self.folders:
-            p = f.strip().strip('"').strip("'")
-            if not p: continue
-            resolved = os.path.realpath(os.path.normpath(p))
-            if os.path.isdir(resolved): cleaned.append(resolved)
-        return cleaned
-
-class QueryRequest(BaseModel):
-    question: str = Field(..., min_length=1, max_length=2000)
-    file_type: Optional[str] = Field(None)
-    folder_tag: Optional[str] = Field(None)
-    history: Optional[List[Dict[str, str]]] = Field(None) # List of {"role": "user/assistant", "content": "..."}
-    @property
-    def validated_question(self) -> str: return self.question.strip()
-
-class UnrealImportRequest(BaseModel):
-    json_path: str = Field(..., min_length=1)
-    folder_tag: Optional[str] = Field(None)
-    @property
-    def validated_json_path(self) -> str:
-        return os.path.realpath(self.json_path.strip().strip('"').strip("'"))
-
 api_router = APIRouter()
 
-@api_router.get("/health")
-async def health(db: DatabaseManager = Depends(get_db)):
-    db_ok = await db.is_healthy()
-    emb = _get_embedding_service()
-    _, progress = _ensure_indexing()
-    return {"version": APP_VERSION, "status": "ok" if db_ok else "degraded", "db": "connected" if db_ok else "error", "model_ready": emb.is_ready, "indexing": progress.status}
+from app.api.auth import auth_router
+from app.api.models import models_router
+from app.api.indexing import router as indexing_router
+from app.api.search import router as search_router
+from app.api.insights import router as insights_router
+from app.api.system import router as system_router
 
-@api_router.post("/index/start")
-async def index_start(request: IndexRequest, background_tasks: BackgroundTasks, db: DatabaseManager = Depends(get_db), emb=Depends(get_emb), chroma=Depends(get_chroma)):
-    folders = request.validated_folders
-    if not folders: return JSONResponse(status_code=400, content={"error": "No valid folder paths provided."})
-    indexing_service_cls, _ = _ensure_indexing()
-    service = indexing_service_cls(db, emb, chroma)
-    _file_tree_cache["data"] = None
-    _insights_cache["data"] = None
-    async def _index_then_compact():
-        await service.index_folders(folders)
-        try:
-            await db.vacuum()
-            logger.info("Auto-compact completed after indexing.")
-        except Exception as e:
-            logger.warning("Auto-compact after indexing failed: %s", e)
-    background_tasks.add_task(_index_then_compact)
-    return {"message": "Indexing started"}
-
-@api_router.get("/index/status")
-async def index_status(db: DatabaseManager = Depends(get_db)):
-    _, progress = _ensure_indexing()
-    file_count, chunk_count = await db.get_counts()
-    percentage = int((progress.processed_files / progress.total_files) * 100) if progress.total_files > 0 else 0
-    return {"status": progress.status, "files_indexed": file_count, "chunks_indexed": chunk_count, "progress_percent": percentage, "scan_method": progress.scan_method, "processed_files": progress.processed_files, "total_files": progress.total_files}
-
-@api_router.get("/index/progress-stream")
-async def progress_stream():
-    _, progress = _ensure_indexing()
-    async def event_generator():
-        while True:
-            _, chunk_count = await db_manager.get_counts()
-            pct = int((progress.processed_files / progress.total_files) * 100) if progress.total_files > 0 else 0
-            data = {
-                "status": progress.status,
-                "total_files": progress.total_files,
-                "processed_files": progress.processed_files,
-                "total_chunks": chunk_count,
-                "skipped_files": progress.skipped_files,
-                "new_files": progress.new_files,
-                "changed_files": progress.changed_files,
-                "current_file": progress.current_file,
-                "scan_method": progress.scan_method,
-                "scan_duration_ms": progress.scan_duration_ms,
-                "progress_percent": pct
-            }
-            yield {"event": "progress", "data": json.dumps(data)}
-            if progress.status != "running": break
-            await asyncio.sleep(0.5)
-    return EventSourceResponse(event_generator())
-
-@api_router.post("/index/cleanup")
-async def cleanup_stale(db: DatabaseManager = Depends(get_db)):
-    try:
-        cleaned = await db.cleanup_stale_files()
-        _file_tree_cache["data"] = _insights_cache["data"] = None
-        return {"message": f"Cleaned {len(cleaned)} stale file(s).", "cleaned_paths": cleaned}
-    except Exception as e:
-        logger.error("Cleanup failed: %s", e)
-        return JSONResponse(status_code=500, content={"error": "Cleanup failed."})
-
-@api_router.post("/index/clear")
-async def clear_index(db: DatabaseManager = Depends(get_db), chroma=Depends(get_chroma)):
-    res = await db.clear_all()
-    await chroma.clear_all()
-    _file_tree_cache["data"] = _insights_cache["data"] = None
-    return res
-
-@api_router.get("/index/export")
-async def export_index(db: DatabaseManager = Depends(get_db)):
-    try:
-        file_count, chunk_count = await db.get_counts()
-        files = await db.get_all_files()
-        return {"file_count": file_count, "chunk_count": chunk_count, "files": [dict(f) for f in files]}
-    except Exception as e:
-        logger.error("Export failed: %s", e)
-        return JSONResponse(status_code=500, content={"error": "Export failed."})
-
-@api_router.post("/query")
-async def query(request: QueryRequest, background_tasks: BackgroundTasks, db: DatabaseManager = Depends(get_db), emb=Depends(get_emb), chroma=Depends(get_chroma), llm=Depends(get_llm)):
-    question = request.validated_question
-    if not question: return JSONResponse(status_code=400, content={"error": "Question cannot be empty."})
-    full_rag = _ensure_rag()
-    results = await full_rag(query=question, db=db, embedding_service=emb, chroma_client=chroma, llm_client=llm, file_type=request.file_type, folder_tag=request.folder_tag)
-    
-    if results.get("mode") != "fast_path":
-        source_paths = [res["file_path"] for res in results.get("sources", []) if res.get("file_path")]
-        if source_paths:
-            async def _bg_increment():
-                try:
-                    # Create a fresh connection if needed or use db_manager safely
-                    await db.batch_increment_usage(source_paths)
-                except Exception as e:
-                    logger.warning("Failed to increment usage counts: %s", e)
-            background_tasks.add_task(_bg_increment)
-
-    if not results.get("cache_hit"):
-        async def _bg_save_query():
-            try: await db.save_query(question=question, answer=results.get("answer", ""), source_count=results.get("retrieved_count", 0), latency_ms=results.get("latency_ms", 0))
-            except Exception as e: logger.warning("Failed to save query history: %s", e)
-        t = asyncio.create_task(_bg_save_query())
-        _bg_tasks.add(t)
-        t.add_done_callback(_bg_tasks.discard)
-    return results
-
-@api_router.post("/query/stream")
-async def query_stream(request: QueryRequest, db: DatabaseManager = Depends(get_db), emb=Depends(get_emb), chroma=Depends(get_chroma), llm=Depends(get_llm)):
-    question = request.validated_question
-    full_rag = _ensure_rag()
-    async def stream_results():
-        results = await full_rag(query=question, db=db, embedding_service=emb, chroma_client=chroma, llm_client=llm, file_type=request.file_type, folder_tag=request.folder_tag)
-        yield json.dumps({"type": "sources", "sources": results.get("sources", []), "latency_retrieval_ms": results.get("latency_ms", 0)}) + "\n"
-        yield json.dumps({"type": "content", "text": results.get("answer", "")}) + "\n"
-    return StreamingResponse(stream_results(), media_type="text/event-stream")
-
-@api_router.get("/query/history")
-async def query_history(limit: int = 20, db: DatabaseManager = Depends(get_db)):
-    try:
-        history = await db.get_query_history(limit=limit)
-        return {"history": history}
-    except Exception:
-        return {"history": []}
-
-@api_router.post("/query/history/clear")
-async def clear_query_history(db: DatabaseManager = Depends(get_db)):
-    try:
-        return await db.clear_query_history()
-    except Exception as e:
-        logger.error("Failed to clear query history: %s", e)
-        return JSONResponse(status_code=500, content={"error": "Failed to clear history."})
-
-@api_router.get("/insights")
-async def get_insights(db: DatabaseManager = Depends(get_db)):
-    now = time.time()
-    if _insights_cache["data"] and (now - _insights_cache["ts"]) < _CACHE_TTL: return _insights_cache["data"]
-    insights_service_cls = _ensure_insights()
-    stats = await insights_service_cls(db).get_stats()
-    _insights_cache["data"], _insights_cache["ts"] = stats, now
-    return stats
-
-@api_router.get("/insights/by-type")
-async def get_insights_by_type(extension: str, db: DatabaseManager = Depends(get_db)):
-    insights_service_cls = _ensure_insights()
-    return await insights_service_cls(db).get_filtered_files(extension)
-
-@api_router.get("/files/tree")
-async def get_files_tree(db: DatabaseManager = Depends(get_db)):
-    try:
-        now = time.time()
-        if _file_tree_cache["data"] and (now - _file_tree_cache["ts"]) < _CACHE_TTL: return _file_tree_cache["data"]
-        files = await db.get_all_files()
-        folders: dict = {}
-        total_size = 0
-        for f in files:
-            tag = f["folder_tag"] or "Unknown"
-            if tag not in folders: folders[tag] = []
-            folders[tag].append({"path": f["path"], "size": f["size"], "type": f["type"], "usage_count": f["usage_count"]})
-            total_size += f["size"]
-        result = {"folders": folders, "total_files": len(files), "total_size": total_size}
-        _file_tree_cache["data"], _file_tree_cache["ts"] = result, now
-        return result
-    except Exception:
-        return {"folders": {}, "total_files": 0, "total_size": 0}
-
-from fastapi import Response
-
-@api_router.get("/visualizer/stream")
-async def stream_visualizer_binary(db: DatabaseManager = Depends(get_db)):
-    """
-    Streams all files and folders as a raw 32-byte struct binary format for WebGPU.
-    Format per node is generated by rust_core.get_spatial_binary:
-    [position(vec3), radius(f32), parent_index(u32), flags(u32), type_hash(u32), pad(u32)] (32 bytes)
-    """
-    try:
-        import rust_core
-        loop = asyncio.get_running_loop()
-        
-        files_for_layout = []
-        async for node in db.stream_all_nodes():
-            if not node["is_folder"]:
-                files_for_layout.append((node["path"], float(node["size"]), node["type"]))
-        
-        if not files_for_layout:
-            return Response(content=b"", media_type="application/octet-stream")
-            
-        binary_data = await loop.run_in_executor(None, rust_core.get_spatial_binary, files_for_layout)
-        return Response(content=bytes(binary_data), media_type="application/octet-stream")
-    except ImportError:
-        logger.error("rust_core not available for WebGPU layout generation.")
-        return Response(status_code=501, content=b"")
-    except Exception as e:
-        logger.error("Failed to generate spatial binary: %s", e)
-        return Response(status_code=500, content=b"")
-@api_router.post("/index/folder/remove")
-async def remove_folder_index(request: IndexRequest, db: DatabaseManager = Depends(get_db), chroma=Depends(get_chroma)):
-    folders = request.validated_folders
-    if not folders: return JSONResponse(status_code=400, content={"error": "No valid folder paths provided."})
-    removed_total = 0
-    for folder in folders:
-        try:
-            f_norm = folder.replace("\\", "/")
-            if not f_norm.endswith("/"): f_norm += "/"
-            p1, p2 = f_norm + "%", f_norm.replace("/", "\\") + "%"
-            p3, p4 = f_norm[:-1], f_norm[:-1].replace("/", "\\")
-            rows = await db.execute_query("SELECT id FROM files WHERE path LIKE ? OR path LIKE ? OR path = ? OR path = ?", (p1, p2, p3, p4))
-            if not rows: continue
-            file_ids = [r[0] for r in rows]
-            chunk_rows = await db.execute_query(f"SELECT id FROM chunks WHERE file_id IN ({','.join('?' for _ in file_ids)})", tuple(file_ids))
-            chunk_ids = [str(r[0]) for r in chunk_rows]
-            if chunk_ids: await chroma.delete_documents(chunk_ids)
-            for f_id in file_ids: await chroma.delete_summary(f_id=f"file_{f_id}")
-            await db.execute_write(f"DELETE FROM files WHERE id IN ({','.join('?' for _ in file_ids)})", tuple(file_ids))
-            removed_total += len(file_ids)
-        except Exception as e: logger.error("Failed to remove folder index for %s: %s", folder, e)
-    _file_tree_cache["data"] = _insights_cache["data"] = None
-    return {"message": f"Successfully removed {removed_total} files."}
-
-@api_router.post("/unreal/import")
-async def unreal_import(request: UnrealImportRequest, db: DatabaseManager = Depends(get_db), emb=Depends(get_emb), chroma=Depends(get_chroma)):
-    try:
-        path = request.validated_json_path
-        if not os.path.exists(path): return JSONResponse(status_code=400, content={"error": "Metadata file not found."})
-        
-        # Run sync parser in executor
-        loop = asyncio.get_running_loop()
-        facts = await loop.run_in_executor(None, parse_unreal_metadata, path, request.folder_tag)
-        
-        # Persist facts to DB
-        await db.upsert_unreal_project_facts(facts)
-        
-        # Embed profile text and store in summary collection
-        if facts.get("profile_text"):
-            embeddings = await emb.embed_texts([facts["profile_text"]])
-            await chroma.add_summaries_batch([{
-                "doc_id": f"unreal_import_{facts['folder_tag']}",
-                "embedding": embeddings[0],
-                "metadata": {
-                    "file_path": facts["folder_path"],
-                    "folder_tag": facts["folder_tag"],
-                    "project_type": "Unreal Engine",
-                    "is_unreal_import": "true"
-                }
-            }])
-            
-        return facts
-    except Exception as e:
-        logger.error("Unreal import failed: %s", e)
-        return JSONResponse(status_code=500, content={"error": str(e)})
-
-@api_router.get("/system/info")
-async def get_system_info():
-    volumes = []
-    if plat.system() == "Windows":
-        import ctypes
-        bitmask = ctypes.windll.kernel32.GetLogicalDrives()
-        for letter in string.ascii_uppercase:
-            if bitmask & 1:
-                drive = f"{letter}:\\"
-                try:
-                    total, used, free = shutil.disk_usage(drive)
-                    volumes.append({"letter": letter, "total_gb": total // (1024**3), "used_gb": used // (1024**3), "free_gb": free // (1024**3)})
-                except OSError: pass
-            bitmask >>= 1
-    return {"os": plat.system(), "is_admin": ctypes.windll.shell32.IsUserAnAdmin() if plat.system() == "Windows" else False, "scan_method": "ntfs_mft" if plat.system() == "Windows" else "scandir", "volumes": volumes}
-
-@api_router.get("/system/metrics")
-async def get_metrics(): return metrics_tracker.get_stats()
-
-@api_router.post("/system/compact-db")
-async def compact_db(db: DatabaseManager = Depends(get_db)):
-    async def _do_vacuum():
-        try: await db.vacuum()
-        except Exception as e: logger.error("Vacuum failed: %s", e)
-    t = asyncio.create_task(_do_vacuum())
-    _bg_tasks.add(t)
-    t.add_done_callback(_bg_tasks.discard)
-    return {"message": "Compaction started in background."}
-
-@api_router.get("/system/compact-db/status")
-async def compact_status(): return {"is_running": False, "last_run": None, "error": None} # Minimal mock
-
-@api_router.post("/system/clear-cache")
-async def clear_cache():
-    _file_tree_cache["data"] = _insights_cache["data"] = None
-    from app.search.retrieval import clear_retrieval_cache
-    clear_retrieval_cache()
-    return {"message": "Caches cleared."}
-
-@api_router.post("/demo/seed")
-async def demo_seed(background_tasks: BackgroundTasks, db: DatabaseManager = Depends(get_db), emb=Depends(get_emb), chroma=Depends(get_chroma)):
-    demo_folder = str(_BASE_DIR / "demo_data")
-    if not os.path.isdir(demo_folder):
-        return JSONResponse(status_code=400, content={"error": "demo_data folder not found."})
-    indexing_service_cls, _ = _ensure_indexing()
-    service = indexing_service_cls(db, emb, chroma)
-    _file_tree_cache["data"] = _insights_cache["data"] = None
-    async def _demo_index_then_compact():
-        await service.index_folders([demo_folder])
-        try:
-            await db.vacuum()
-            logger.info("Auto-compact completed after demo indexing.")
-        except Exception as e:
-            logger.warning("Auto-compact after demo indexing failed: %s", e)
-    background_tasks.add_task(_demo_index_then_compact)
-    return {"message": "Demo indexing started for demo_data folder.", "folder": demo_folder}
-
-@api_router.get("/pick/folder")
-async def pick_folder():
-    def _dialog():
-        import tkinter as tk
-        from tkinter import filedialog
-        root = tk.Tk()
-        root.withdraw()
-        root.wm_attributes('-topmost', 1)
-        return filedialog.askdirectory(parent=root, title="Select Folder") or ""
-    path = await asyncio.get_running_loop().run_in_executor(None, _dialog)
-    return {"path": path}
+api_router.include_router(auth_router)
+api_router.include_router(models_router)
+api_router.include_router(indexing_router, prefix="/index", tags=["indexing"])
+api_router.include_router(search_router, prefix="/query", tags=["search"])
+api_router.include_router(insights_router, tags=["insights"])
+api_router.include_router(system_router, tags=["system"])
 
 app.include_router(api_router, prefix="/api")
 

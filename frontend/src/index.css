@@ -1,4 +1,6 @@
 @import "tailwindcss";
+/* daisyui: configured via vite.config / postcss plugin; keep directive below for Tailwind v4 */
+/* stylelint-disable-next-line at-rule-no-unknown */
 @plugin "daisyui";
 
 /* ── Light Skeuomorphic + Glassmorphism Theme ──────────────────── */

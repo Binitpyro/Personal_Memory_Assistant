@@ -13,6 +13,7 @@ from app.embeddings.service import EmbeddingService
 from app.vector_store.chroma_client import ChromaClient
 from app.scanner.scanner import scan_folder as fast_scan
 from app.config import settings
+from app.indexing.extractors import EXTRACTORS
 from app.project_constants import (
     PROJECT_SIGNATURES, TEXT_EXTENSIONS, UNREAL_BINARY_EXTENSIONS,
     UNREAL_PROJECT_EXTENSIONS, KEY_NAMES, KEY_EXTS
@@ -320,6 +321,9 @@ class IndexingService:
             from app.search.retrieval import clear_retrieval_cache
             clear_retrieval_cache()
 
+            # Shrink WAL file after bulk writes (§5.1)
+            asyncio.create_task(self.db.wal_checkpoint())
+
             progress.complete()
             logger.info("Indexing completed: %d processed.", len(files_to_index))
 
@@ -331,6 +335,26 @@ class IndexingService:
         logger.info("Pipeline phase 1/3: extracting text from %d files … (Batch %d-%d)", batch_total, offset, offset + batch_total)
         progress.set_current_file(f"Phase 1/3: Extracting {batch_total} files (Batch {offset}/{grand_total})…")
         
+        pre_extracted = {}
+        if RUST_CORE_AVAILABLE:
+            rust_paths = []
+            for fp, _ in files_to_index:
+                ext = fp.suffix.lower()
+                if ext in TEXT_EXTENSIONS and ext not in [".json", ".csv"]:
+                    rust_paths.append(str(fp.absolute()))
+                    
+            if rust_paths:
+                logger.info("Tier-1 Rust Extraction: Bulk reading %d files...", len(rust_paths))
+                loop = asyncio.get_running_loop()
+                try:
+                    rust_results = await loop.run_in_executor(
+                        None, rust_core.extract_text_files, rust_paths, self.max_file_size
+                    )
+                    for p_str, txt in rust_results:
+                        pre_extracted[p_str] = txt
+                except Exception as e:
+                    logger.warning("Rust bulk extraction failed, falling back to Python: %s", e)
+
         semaphore = asyncio.Semaphore(self._concurrency * 2)
         extracted_count = 0
         extracted_lock = asyncio.Lock()
@@ -338,7 +362,8 @@ class IndexingService:
         async def _safe_extract(path: Path, tag: str):
             nonlocal extracted_count
             async with semaphore:
-                res = await self._extract_and_prepare_async(path, tag)
+                cached_text = pre_extracted.get(str(path.absolute()))
+                res = await self._extract_and_prepare_async(path, tag, cached_text)
                 async with extracted_lock:
                     extracted_count += 1
                     overall = total_so_far + extracted_count
@@ -487,19 +512,19 @@ class IndexingService:
             summaries = [{"doc_id": f"folder_profile_{p['folder_tag']}", "embedding": e, "metadata": {"file_path": p["folder_path"], "folder_tag": p["folder_tag"], "project_type": p["project_type"], "is_folder_profile": "true"}} for p, e in zip(profiles, embs)]
             await self.chroma_client.add_summaries_batch(summaries)
 
-    async def _extract_and_prepare_async(self, path: Path, folder_tag: str) -> Optional[Dict[str, Any]]:
+    async def _extract_and_prepare_async(self, path: Path, folder_tag: str, pre_text: Optional[str] = None) -> Optional[Dict[str, Any]]:
         loop = asyncio.get_running_loop()
         try:
-            return await loop.run_in_executor(None, self._extract_and_prepare, path, folder_tag)
+            return await loop.run_in_executor(None, self._extract_and_prepare, path, folder_tag, pre_text)
         except Exception as e:
             logger.error("Error preparing %s: %s", path, e)
 
             return None
 
-    def _extract_and_prepare(self, path: Path, folder_tag: str) -> Optional[Dict[str, Any]]:
+    def _extract_and_prepare(self, path: Path, folder_tag: str, pre_text: Optional[str] = None) -> Optional[Dict[str, Any]]:
         try:
             stat = path.stat()
-            text = self._extract_text(path)
+            text = pre_text if pre_text is not None else self._extract_text(path)
             summary = self._generate_summary(text, path)
             chunks = self._create_chunks(text, file_path=str(path))
             sha256 = self._calculate_sha256(path)
@@ -662,86 +687,36 @@ class IndexingService:
 
     def _extract_text(self, path: Path) -> str:
         ext = path.suffix.lower()
-        extractor = {".pdf": self._extract_pdf, ".docx": self._extract_docx, ".csv": self._extract_csv, ".json": self._extract_json}.get(ext)
         
-        if not extractor:
-            if ext in TEXT_EXTENSIONS or ext in UNREAL_PROJECT_EXTENSIONS:
-                if self._is_binary(path):
-                    size_mb = path.stat().st_size / (1024 * 1024)
-                    return f"[BINARY: {path.name}] Size: {size_mb:.2f} MB. Binary content not indexed."
-                return self._extract_plain_text(path)
-            if ext in UNREAL_BINARY_EXTENSIONS: return self._extract_unreal_asset_stub(path)
-            
-            # Fallback for unknown extensions: check if binary
-            if self._is_binary(path):
-                return f"[UNKNOWN BINARY: {path.name}] Binary content not indexed."
-            return self._extract_plain_text(path)
+        # 1. Tier-2 Python Parsers (Structured Documents)
+        for extractor in EXTRACTORS:
+            if extractor.can_handle(path):
+                if not hasattr(self, '_extractor_pool'):
+                    self._extractor_pool = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+                fut = self._extractor_pool.submit(extractor.extract, path, self.max_file_size)
+                try: 
+                    return fut.result(timeout=settings.gemini_timeout)
+                except Exception: 
+                    return ""
 
-        if not hasattr(self, '_extractor_pool'):
-            self._extractor_pool = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+        # 2. Tier-1 Rust Parsers / Plain Text Fallback
+        if ext in TEXT_EXTENSIONS or ext in UNREAL_PROJECT_EXTENSIONS:
+            if self._is_binary(path):
+                size_mb = path.stat().st_size / (1024 * 1024)
+                return f"[BINARY: {path.name}] Size: {size_mb:.2f} MB. Binary content not indexed."
+            return self._extract_plain_text(path)
             
-        fut = self._extractor_pool.submit(extractor, path)
-        try: return fut.result(timeout=settings.gemini_timeout)
-        except Exception: return ""
+        if ext in UNREAL_BINARY_EXTENSIONS: 
+            return self._extract_unreal_asset_stub(path)
+            
+        # 3. Fallback for unknown extensions: check if binary
+        if self._is_binary(path):
+            return f"[UNKNOWN BINARY: {path.name}] Binary content not indexed."
+        return self._extract_plain_text(path)
 
     def _extract_plain_text(self, path: Path) -> str:
         try:
             with open(path, "r", encoding="utf-8", errors="replace") as f: return f.read(self.max_file_size)
-        except Exception: return ""
-
-    def _extract_pdf(self, path: Path) -> str:
-        try:
-            import fitz
-            content, total = [], 0
-            with fitz.open(path) as doc:
-                if doc.is_encrypted:
-                    return f"[ENCRYPTED PDF: {path.name}] Cannot extract text from password-protected file."
-                for page in doc:
-                    txt = page.get_text()
-                    if txt:
-                        content.append(txt); total += len(txt)
-                        if total > self.max_file_size: break
-            return "\n".join(content)[:self.max_file_size]
-        except Exception: return ""
-
-    def _extract_docx(self, path: Path) -> str:
-        try:
-            from docx import Document
-            # docx might throw exceptions for encrypted files
-            doc = Document(str(path))
-            paras, total = [], 0
-            for p in doc.paragraphs:
-                if p.text.strip():
-                    paras.append(p.text); total += len(p.text)
-                    if total > self.max_file_size: break
-            return "\n".join(paras)[:self.max_file_size]
-        except Exception as e:
-            err_msg = str(e).lower()
-            if "encrypted" in err_msg or "password" in err_msg:
-                return f"[ENCRYPTED DOCX: {path.name}] Cannot extract text from password-protected file."
-            return ""
-
-    def _extract_csv(self, path: Path) -> str:
-        try:
-            import csv
-            rows = []
-            with open(path, encoding="utf-8", errors="replace", newline="") as f:
-                reader = csv.reader(f)
-                for i, row in enumerate(reader):
-                    if i > 5000: break
-                    rows.append(", ".join(row))
-            return "\n".join(rows)
-        except Exception: return ""
-
-    def _extract_json(self, path: Path) -> str:
-        import json, re
-        try:
-            with open(path, "r", encoding="utf-8-sig", errors="replace") as f: text = f.read(self.max_file_size)
-            try: return json.dumps(json.loads(text), indent=2, ensure_ascii=False)[:200000]
-            except Exception: pass
-            try: return json.dumps(json.loads(re.sub(r',\s*([}\]])', r'\1', text)), indent=2, ensure_ascii=False)[:200000]
-            except Exception: pass
-            return text[:200000]
         except Exception: return ""
 
     @staticmethod
@@ -810,7 +785,7 @@ class IndexingService:
                     prefix, 
                     base_offset
                 )
-            except (Exception, BaseException) as e:
+            except Exception as e:
                 logger.warning("Rust create_chunks failed, falling back to python: %s", e)
                 
         chunks, start, text_len = [], 0, len(text)

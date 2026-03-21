@@ -246,7 +246,7 @@ export function InsightsPage() {
                       <div key={f.path} className="group flex items-center justify-between text-sm bg-white/5 hover:bg-white/10 rounded-xl px-4 py-3 transition-all border border-white/5">
                         <span className="truncate text-text-primary font-medium">{f.path.split(/[\\/]/).pop()}</span>
                         <span className="text-accent text-xs font-bold shrink-0 ml-2">
-                          {f.usage_count !== undefined ? `${f.usage_count} hits` : formatBytes(f.size || 0)}
+                          {f.usage_count === undefined ? formatBytes(f.size || 0) : `${f.usage_count} hits`}
                         </span>
                       </div>
                     ))}

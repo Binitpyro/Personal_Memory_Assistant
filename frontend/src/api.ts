@@ -4,10 +4,31 @@
  * base URL resolution, and easy-to-mock endpoints for tests.
  */
 
-const BASE = '/api'; // Prefix all calls with /api to avoid collision with React Router paths
+const BASE = '/api'; export const ENDPOINT = (import.meta as any).env.VITE_API_URL || "http://127.0.0.1:8000"
 
-async function json<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${url}`, init);
+// ── Security Token Injection ──────────────────────────────────────────
+
+const params = new URLSearchParams(window.location.search);
+const tokenFromUrl = params.get('token');
+export const localToken = tokenFromUrl || sessionStorage.getItem('pma_token') || '';
+
+if (tokenFromUrl) {
+  sessionStorage.setItem('pma_token', tokenFromUrl);
+  // Clean up URL so the token isn't sitting in the address bar
+  window.history.replaceState({}, document.title, window.location.pathname);
+}
+
+// ── API Wrappers ──────────────────────────────────────────────────────
+
+/** Basic fetch wrapper for JSON responses */
+export async function json<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(options.headers as any),
+  };
+  if (localToken) headers['X-Local-Access-Token'] = localToken;
+
+  const res = await fetch(`/api${endpoint}`, { ...options, headers });
   if (!res.ok) {
     const body = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error(body.error || `HTTP ${res.status}`);
@@ -44,6 +65,34 @@ export interface IndexStatus {
 }
 
 export const getIndexStatus = () => json<IndexStatus>('/index/status');
+
+export async function* streamGenerator(endpoint: string, payload: any, signal?: AbortSignal) {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  if (localToken) headers['X-Local-Access-Token'] = localToken;
+
+  const response = await fetch(`/api${endpoint}`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(payload),
+    signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(`HTTP error! status: ${response.status}`);
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) return;
+
+  const decoder = new TextDecoder();
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    yield decoder.decode(value);
+  }
+}
 
 export const startIndexing = (folders: string[]) =>
   json<{ message: string }>('/index/start', {
@@ -174,14 +223,17 @@ export interface InsightsResponse {
 
 export const getInsights = () => json<InsightsResponse>('/insights');
 
-export const getVisualizerStream = async (): Promise<ArrayBuffer> => {
-  const res = await fetch(`${BASE}/visualizer/stream`);
+export const getVisualizerStream = async (filter?: string | null): Promise<ArrayBuffer> => {
+  const url = filter
+    ? `${BASE}/visualizer/stream?extension=${encodeURIComponent(filter)}`
+    : `${BASE}/visualizer/stream`;
+
+  const res = await fetch(url);
   if (!res.ok) {
     throw new Error(`Failed to fetch visualizer stream: HTTP ${res.status}`);
   }
   return await res.arrayBuffer();
 };
-
 // ── Clear Caches ──────────────────────────────────────────────────────
 
 export const clearBackendCaches = () =>
@@ -237,7 +289,7 @@ export function subscribeProgress(onData: (data: IndexStatus & { current_file: s
 // ── SSE Query Stream ──────────────────────────────────────────────────
 
 export interface QueryStreamChunk {
-  type: 'content' | 'sources' | 'fast_path' | 'error' | 'cached_full';
+  type: 'content' | 'sources' | 'fast_path' | 'error' | 'cached_full' | 'metadata' | 'done';
   text?: string;
   answer?: string;
   sources?: QuerySource[];
@@ -247,22 +299,21 @@ export interface QueryStreamChunk {
 }
 
 export function subscribeQuery(
-  question: string,
-  onChunk: (chunk: QueryStreamChunk) => void,
-  options: { file_type?: string; folder_tag?: string, history?: { role: string, content: string }[] } = {}
+  payload: any,
+  onChunk: (chunk: QueryStreamChunk) => void
 ): () => void {
-  const controller = new AbortController();
+  const controller = new AbortController()
 
-  fetch(`${BASE}/query/stream`, {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  }
+  if (localToken) headers['X-Local-Access-Token'] = localToken
+
+  fetch('/api/query/stream', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      question,
-      file_type: options.file_type || null,
-      folder_tag: options.folder_tag || null,
-      history: options.history || null,
-    }),
-    signal: controller.signal,
+    headers,
+    body: JSON.stringify(payload),
+    signal: controller.signal
   }).then(async (response) => {
     if (!response.ok) throw new Error('Stream request failed');
     const reader = response.body?.getReader();
@@ -281,6 +332,7 @@ export function subscribeQuery(
         } catch { /* ignore malformed */ }
       }
     }
+    onChunk({ type: 'done' });
   }).catch(err => {
     if (err.name !== 'AbortError') {
       onChunk({ type: 'error', text: err.message });
@@ -289,3 +341,21 @@ export function subscribeQuery(
 
   return () => controller.abort();
 }
+
+// ── Auth ──────────────────────────────────────────────────────────────
+
+export interface AuthStatus {
+  connected: boolean;
+}
+
+export const getAuthStatus = () => json<AuthStatus>('/auth/google/status');
+export const disconnectAuth = () => json<{ message: string }>('/auth/google/disconnect', { method: 'POST' });
+
+// ── Models ────────────────────────────────────────────────────────────
+
+export interface LocalModelDetection {
+  ollama: { detected: boolean; models: string[] };
+  lm_studio: { detected: boolean; models: string[] };
+}
+
+export const getLocalModels = () => json<LocalModelDetection>('/llm/detect');

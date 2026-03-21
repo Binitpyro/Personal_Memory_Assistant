@@ -2,6 +2,7 @@ import logging
 import httpx
 import json
 from typing import Optional, AsyncGenerator, List, Dict
+from pathlib import Path
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from app.config import settings
 
@@ -15,6 +16,29 @@ class LLMClient:
         self.model = settings.gemini_model
         self._gemini_client: Optional[httpx.AsyncClient] = None
         self._ollama_client: Optional[httpx.AsyncClient] = None
+        self._oauth_token = self._load_oauth_token()
+
+    def _load_oauth_token(self) -> Optional[str]:
+        token_path = Path("data/credentials.json")
+        if token_path.exists():
+            try:
+                import json
+                from google.oauth2.credentials import Credentials
+                from google.auth.transport.requests import Request as GoogleRequest
+                with open(token_path, "r") as f:
+                    token_data = json.load(f)
+                creds = Credentials.from_authorized_user_info(token_data)
+                if not creds.valid:
+                    if creds.expired and creds.refresh_token:
+                        creds.refresh(GoogleRequest())
+                        token_data['token'] = creds.token
+                        with open(token_path, "w") as f:
+                            json.dump(token_data, f)
+                if creds.valid:
+                    return creds.token
+            except Exception as e:
+                logger.warning("Failed to load OAuth token: %s", e)
+        return None
 
     def _get_gemini_client(self) -> httpx.AsyncClient:
         if self._gemini_client is None or self._gemini_client.is_closed:
@@ -58,7 +82,7 @@ Answer:
 
     async def generate_answer(self, query: str, context: str, history: Optional[List[Dict[str, str]]] = None) -> str:
         prompt = self._build_prompt(query, context)
-        if self.api_key:
+        if self.api_key or self._oauth_token:
             return await self._call_gemini(prompt, history=history)
         if await self._check_ollama_health():
             return await self._call_ollama(prompt)
@@ -66,7 +90,7 @@ Answer:
 
     async def stream_answer(self, query: str, context: str, history: Optional[List[Dict[str, str]]] = None) -> AsyncGenerator[str, None]:
         prompt = self._build_prompt(query, context)
-        if self.api_key:
+        if self.api_key or self._oauth_token:
             async for chunk in self._stream_gemini(prompt, history=history):
                 yield chunk
             return
@@ -105,21 +129,25 @@ Answer:
             "generationConfig": {
                 "temperature": 0.2,
                 "topP": 0.8,
-                "maxOutputTokens": 1024,
+                "maxOutputTokens": getattr(settings, 'gemini_max_output_tokens', 4096),
             },
         }
         
         client = self._get_gemini_client()
         try:
-            # Try with ?key= parameter first, as it's the most common for AI Studio keys
-            response = await client.post(url, params={"key": self.api_key}, json=payload)
-            
-            if response.status_code != 200:
-                logger.error("Gemini error %d: %s", response.status_code, response.text)
-                # Fallback: try with x-goog-api-key header if param failed with 404/401
-                if response.status_code in (404, 401):
-                    logger.info("Retrying Gemini with header-based auth...")
-                    response = await client.post(url, headers={"x-goog-api-key": self.api_key}, json=payload)
+            # If using OAuth
+            if self._oauth_token:
+                headers = {"Authorization": f"Bearer {self._oauth_token}"}
+                response = await client.post(url, headers=headers, json=payload)
+            else:
+                # Try with ?key= parameter first
+                response = await client.post(url, params={"key": self.api_key}, json=payload)
+                
+                if response.status_code != 200:
+                    logger.error("Gemini error %d: %s", response.status_code, response.text)
+                    if response.status_code in (404, 401):
+                        logger.info("Retrying Gemini with header-based auth...")
+                        response = await client.post(url, headers={"x-goog-api-key": self.api_key}, json=payload)
             
             if response.status_code != 200:
                 return f"Gemini API error {response.status_code}: {response.text[:100]}"
@@ -145,12 +173,18 @@ Answer:
             "generationConfig": {
                 "temperature": 0.2,
                 "topP": 0.8,
-                "maxOutputTokens": 1024,
+                "maxOutputTokens": getattr(settings, 'gemini_max_output_tokens', 4096),
             },
         }
         client = self._get_gemini_client()
         try:
-            async with client.stream("POST", url, params={"key": self.api_key}, json=payload) as response:
+            if self._oauth_token:
+                headers = {"Authorization": f"Bearer {self._oauth_token}"}
+                req = client.stream("POST", url, headers=headers, json=payload)
+            else:
+                req = client.stream("POST", url, params={"key": self.api_key}, json=payload)
+                
+            async with req as response:
                 if response.status_code != 200:
                     yield f"Error: {response.status_code}"
                     return

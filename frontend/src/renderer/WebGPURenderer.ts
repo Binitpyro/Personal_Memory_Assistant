@@ -35,7 +35,7 @@ export class WebGPURenderer {
 
     public focusPosition: number[] | null = null;
     public cameraPosition: number[] = [0, 0, 0];
-
+    private isFirstFrame = true;
     constructor(canvas: HTMLCanvasElement) {
         this.canvas = canvas;
     }
@@ -77,14 +77,15 @@ export class WebGPURenderer {
         this.canvas.width = Math.max(1, this.canvas.clientWidth);
         this.canvas.height = Math.max(1, this.canvas.clientHeight);
 
-        this.setupTextures();
         await this.setupPipelines();
+        this.setupTextures();
+
     }
 
     private async createGeometryBuffer() {
         const v = new Float32Array([
-            -1.0, -1.0, 1.0, -1.0, -1.0, 1.0,
-            -1.0, 1.0, 1.0, -1.0, 1.0, 1.0,
+            -1, -1, 1, -1, -1, 1,
+            -1, 1, 1, -1, 1, 1,
         ]);
 
         this.geometryBuffer = this.device.createBuffer({
@@ -114,15 +115,13 @@ export class WebGPURenderer {
             size, format: 'r32uint',
             usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC
         });
-        if (this.resolvePipeline) {
-            this.resolveBindGroup = this.device.createBindGroup({
-                layout: this.resolvePipeline.getBindGroupLayout(0),
-                entries: [
-                    { binding: 0, resource: this.momentTexture.createView() },
-                    { binding: 1, resource: this.colorTexture.createView() }
-                ]
-            });
-        }
+        this.resolveBindGroup = this.device.createBindGroup({
+            layout: this.resolvePipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: this.momentTexture.createView() },
+                { binding: 1, resource: this.colorTexture.createView() }
+            ]
+        });
     }
 
     public resize(width: number, height: number) {
@@ -187,7 +186,7 @@ export class WebGPURenderer {
                 ]
             },
             primitive: { topology: 'triangle-list' },
-            depthStencil: { depthWriteEnabled: true, depthCompare: 'less', format: 'depth32float' }, // WBOIT requires true depth to sort intersections properly
+            depthStencil: { depthWriteEnabled: false, depthCompare: 'less', format: 'depth32float' },
         });
 
         const pickingModule = this.device.createShaderModule({ code: pickingShaderCode });
@@ -295,7 +294,7 @@ export class WebGPURenderer {
                 clearValue: { r: 0xFFFFFFFF, g: 0, b: 0, a: 0 },
                 storeOp: 'store'
             }],
-            depthStencilAttachment: { view: this.depthTexture.createView(), depthClearValue: 1.0, depthLoadOp: 'clear', depthStoreOp: 'store' }
+            depthStencilAttachment: { view: this.depthTexture.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' }
         });
 
         renderPass.setPipeline(this.pickingPipeline);
@@ -320,7 +319,6 @@ export class WebGPURenderer {
         const data = new Uint32Array(arrayBuffer);
         const hash = data[0];
 
-        // Copy out the data so we can unmap the buffer safely
         const result = hash === 0xFFFFFFFF ? null : hash;
         this.pickBuffer.unmap();
 
@@ -328,8 +326,8 @@ export class WebGPURenderer {
     }
 
     public handleMouseMove(dx: number, dy: number) {
-        this.rotationY -= dx * 0.01;
-        this.rotationX -= dy * 0.01;
+        this.rotationY -= dx * 0.005;
+        this.rotationX += dy * 0.005;
         this.rotationX = Math.max(-Math.PI / 2 + 0.1, Math.min(Math.PI / 2 - 0.1, this.rotationX));
     }
 
@@ -348,19 +346,19 @@ export class WebGPURenderer {
         const eyeY = target[1] + this.zoom * Math.sin(this.rotationX);
         const eyeZ = target[2] + this.zoom * Math.cos(this.rotationX) * Math.cos(this.rotationY);
 
-        // Fluid interpolation point
-        this.cameraPosition[0] += (eyeX - this.cameraPosition[0]) * 0.1;
-        this.cameraPosition[1] += (eyeY - this.cameraPosition[1]) * 0.1;
-        this.cameraPosition[2] += (eyeZ - this.cameraPosition[2]) * 0.1;
+        if (this.isFirstFrame) {
+            this.cameraPosition = [eyeX, eyeY, eyeZ];
+            this.isFirstFrame = false;
+        } else {
+            this.cameraPosition[0] += (eyeX - this.cameraPosition[0]) * 0.1;
+            this.cameraPosition[1] += (eyeY - this.cameraPosition[1]) * 0.1;
+            this.cameraPosition[2] += (eyeZ - this.cameraPosition[2]) * 0.1;
+        }
 
         const view = this.lookAt(this.cameraPosition, target, [0, 1, 0]);
         const vpMatrix = this.multiply(projection, view);
 
         if (this.cameraBuffer) {
-            // CameraUniform has:
-            // mat4x4<f32> viewProj; // 64 bytes (16 floats)
-            // vec3<f32> eyePosition; // 12 bytes + 4 bytes padding (4 floats)
-            // Total = 80 bytes (20 floats)
             const uniformData = new Float32Array(20);
             uniformData.set(vpMatrix, 0);
             uniformData.set([this.cameraPosition[0], this.cameraPosition[1], this.cameraPosition[2], 0], 16);
@@ -369,7 +367,7 @@ export class WebGPURenderer {
     }
 
     private perspective(fovy: number, aspect: number, near: number, far: number) {
-        const f = 1.0 / Math.tan(fovy / 2);
+        const f = 1 / Math.tan(fovy / 2);
         const out = new Float32Array(16);
         out[0] = f / aspect; out[5] = f; out[10] = far / (near - far); out[11] = -1; out[14] = (near * far) / (near - far);
         return out;
@@ -403,7 +401,7 @@ export class WebGPURenderer {
 
     private subtract(a: number[], b: number[]) { return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]; }
     private normalize(a: number[]) {
-        const len = Math.sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
+        const len = Math.hypot(a[0], a[1], a[2]);
         if (len === 0) return [0, 0, 1];
         return [a[0] / len, a[1] / len, a[2] / len];
     }
@@ -435,7 +433,7 @@ export class WebGPURenderer {
         const renderPass = commandEncoder.beginRenderPass({
             colorAttachments: [{ view: this.momentTexture.createView(), loadOp: 'clear', clearValue: [0, 0, 0, 0], storeOp: 'store' },
             { view: this.colorTexture.createView(), loadOp: 'clear', clearValue: [0, 0, 0, 0], storeOp: 'store' }],
-            depthStencilAttachment: { view: this.depthTexture.createView(), depthClearValue: 1.0, depthLoadOp: 'clear', depthStoreOp: 'store' }
+            depthStencilAttachment: { view: this.depthTexture.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' }
         });
 
         renderPass.setPipeline(this.bubblePipeline);

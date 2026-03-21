@@ -9,6 +9,7 @@ interface Message {
   sources?: QuerySource[]
   latency_ms?: number
   isStreaming?: boolean
+  mode?: 'fast_path' | 'full_rag'
 }
 
 export function SearchPage() {
@@ -16,6 +17,7 @@ export function SearchPage() {
   const [messages, setMessages] = useState<Message[]>([])
   const [searching, setSearching] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [showHistory, setShowHistory] = useState(false)
 
   const { data: historyData, refetch: refetchHistory } = useApi(getQueryHistory, { cacheKey: 'query-history' })
 
@@ -49,8 +51,9 @@ export function SearchPage() {
     let fullText = ''
     let sources: QuerySource[] = []
     let latency = 0
+    let mode: 'fast_path' | 'full_rag' = 'full_rag'
 
-    const unsubscribe = subscribeQuery(userMsg, (chunk: QueryStreamChunk) => {
+    const unsubscribe = subscribeQuery({ question: userMsg, history: historyForApi }, (chunk: QueryStreamChunk) => {
       if (chunk.type === 'error') {
         setError(chunk.text || 'Search failed')
         setSearching(false)
@@ -64,6 +67,21 @@ export function SearchPage() {
         latency = chunk.latency_ms || chunk.retrieval_ms || 0
       }
 
+      if (chunk.type === 'fast_path') {
+        // Fast-path answer: text comes in a single chunk
+        mode = 'fast_path'
+        fullText = chunk.answer || chunk.text || ''
+        sources = chunk.sources || []
+        latency = chunk.latency_ms || 0
+        setMessages(prev => {
+          const last = prev.at(-1)
+          if (last?.role === 'assistant') {
+            return [...prev.slice(0, -1), { ...last, content: fullText, sources, latency_ms: latency, mode }]
+          }
+          return prev
+        })
+      }
+
       if (chunk.type === 'content' && chunk.text) {
         fullText += chunk.text
         setMessages(prev => {
@@ -71,30 +89,25 @@ export function SearchPage() {
           if (last?.role === 'assistant') {
             return [
               ...prev.slice(0, -1),
-              { ...last, content: fullText, sources, latency_ms: latency }
+              { ...last, content: fullText, sources, latency_ms: latency, mode: 'full_rag' }
             ]
           }
           return prev
         })
       }
 
-      // If the backend indicates it's finished (using a custom end chunk or just stopping)
-      // Since SSE reader loop handles 'done', we just wait for the search to stop
-    }, { history: historyForApi })
+      if (chunk.type === 'done') {
+        setSearching(false)
+        setMessages(prev => {
+          const last = prev.at(-1)
+          if (last) return [...prev.slice(0, -1), { ...last, isStreaming: false }]
+          return prev
+        })
+        invalidateCache('query-history')
+        refetchHistory()
+      }
 
-    // We don't have a reliable "done" event in the current subscribeQuery simple implementation
-    // So we'll wrap it or just set searching to false after a delay or based on common markers
-    // For now, let's assume it finishes when fullText stops updating or add a timeout
-    setTimeout(() => {
-      setSearching(false)
-      setMessages(prev => {
-        const last = prev.at(-1)
-        if (last) return [...prev.slice(0, -1), { ...last, isStreaming: false }]
-        return prev
-      })
-      invalidateCache('query-history')
-      refetchHistory()
-    }, 15000) // 15s max for now, proper implementation would yield a 'done' chunk
+    })
 
     return unsubscribe
   }, [question, searching, messages, refetchHistory])
@@ -164,8 +177,8 @@ export function SearchPage() {
                 )}
                 <div className={`flex flex-col gap-2 max-w-[85%] ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
                   <div className={`px-5 py-3 rounded-2xl text-sm leading-relaxed shadow-sm border ${msg.role === 'user'
-                      ? 'bg-primary text-white border-primary-light/20 rounded-tr-none'
-                      : 'glass-card !p-3 text-text-primary border-white/80 rounded-tl-none'
+                    ? 'bg-primary text-white border-primary-light/20 rounded-tr-none'
+                    : 'glass-card !p-3 text-text-primary border-white/80 rounded-tl-none'
                     }`}>
                     {msg.isStreaming && !msg.content ? (
                       <div className="flex gap-1 py-1">
@@ -177,6 +190,21 @@ export function SearchPage() {
                       <div className="whitespace-pre-wrap">{msg.content}</div>
                     )}
                   </div>
+
+                  {/* Mode Badge */}
+                  {msg.role === 'assistant' && !msg.isStreaming && msg.mode && (
+                    <div className="flex items-center gap-2 mt-1">
+                      <span className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full border ${msg.mode === 'fast_path'
+                        ? 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+                        : 'bg-primary/10 text-primary-light border-primary/20'
+                        }`}>
+                        {msg.mode === 'fast_path' ? '⚡ Fast Answer' : '🔍 RAG Answer'}
+                      </span>
+                      {msg.latency_ms != null && msg.latency_ms > 0 && (
+                        <span className="text-[10px] text-text-secondary/50">{msg.latency_ms.toFixed(0)}ms</span>
+                      )}
+                    </div>
+                  )}
 
                   {msg.role === 'assistant' && msg.sources && msg.sources.length > 0 && (
                     <div className="flex flex-wrap gap-2 mt-1">
@@ -210,7 +238,29 @@ export function SearchPage() {
           {error && (
             <div className="bg-error/10 border border-error/20 text-error text-xs p-3 rounded-xl flex items-center justify-between">
               <span>{error}</span>
-              <button onClick={() => setError(null)} className="font-bold opacity-60 hover:opacity-100">✕</button>
+              <button onClick={() => setError(null)} className="font-bold opacity-60 hover:opacity-100">&times;</button>
+            </div>
+          )}
+          {/* Recent searches dropdown */}
+          {showHistory && historyData?.history && historyData.history.length > 0 && (
+            <div className="absolute bottom-full mb-2 left-0 right-0 glass rounded-2xl border border-primary/10 shadow-2xl overflow-hidden z-20">
+              <div className="px-4 py-2 text-[10px] font-black text-text-secondary border-b border-white/5 uppercase tracking-widest">Recent Searches</div>
+              <div className="max-h-48 overflow-y-auto custom-scrollbar">
+                {historyData.history.slice(0, 10).map((h: any, i: number) => (
+                  <button
+                    key={i}
+                    className="w-full text-left px-4 py-2.5 text-sm text-text-primary hover:bg-primary/10 transition-colors flex items-center gap-3 border-b border-white/5 last:border-none"
+                    onClick={() => {
+                      setQuestion(h.question)
+                      setShowHistory(false)
+                      inputRef.current?.focus()
+                    }}
+                  >
+                    <Clock className="w-3.5 h-3.5 text-text-secondary shrink-0" />
+                    <span className="truncate">{h.question}</span>
+                  </button>
+                ))}
+              </div>
             </div>
           )}
           <div className="relative group">
@@ -238,7 +288,12 @@ export function SearchPage() {
           <div className="flex items-center justify-between px-2">
             <div className="flex gap-4 text-[10px] text-text-secondary font-bold uppercase tracking-widest">
               <span className="flex items-center gap-1"><Sparkles className="w-3 h-3 text-primary" /> Gemini 2.5 Flash Lite</span>
-              <span className="flex items-center gap-1"><Clock className="w-3 h-3" /> Context Enabled</span>
+              <button
+                onClick={() => setShowHistory(v => !v)}
+                className={`flex items-center gap-1 hover:text-text-primary transition-colors ${showHistory ? 'text-primary' : ''}`}
+              >
+                <Clock className="w-3 h-3" /> {historyData?.history?.length ?? 0} Recent
+              </button>
             </div>
             {historyData?.history && historyData.history.length > 0 && (
               <button

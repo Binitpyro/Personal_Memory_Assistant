@@ -15,12 +15,18 @@ import sys
 import subprocess
 import time
 import ctypes
+import secrets
+import socket
 from pathlib import Path
 
 APP_NAME = "Personal Memory Assistant"
 HOST = "127.0.0.1"
-PORT = 8000
-URL = f"http://{HOST}:{PORT}"
+
+def get_free_port() -> int:
+    """Finds an available port to bind the local server."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind((HOST, 0))
+        return s.getsockname()[1]
 
 # ── Re-entrance guard ────────────────────────────────────────────────────
 # When PyInstaller-frozen, sys.executable == the .exe itself.  If we fall
@@ -97,7 +103,7 @@ def _show_error(msg: str) -> None:
         print(f"ERROR: {msg}", file=sys.stderr)
 
 
-def _kill_stale_server() -> None:
+def _kill_stale_server(port: int) -> None:
     """Kill any process already listening on PORT so the new server can bind."""
     if sys.platform != "win32":
         return
@@ -113,14 +119,14 @@ def _kill_stale_server() -> None:
             # Match lines like  TCP  127.0.0.1:8000  ...  LISTENING  12345
             # Use exact port match (e.g. :8000 followed by space) to avoid
             # false positives like :80000
-            if f":{PORT} " in line and "LISTENING" in line:
+            if f":{port} " in line and "LISTENING" in line:
                 parts = line.split()
                 try:
                     pid = int(parts[-1])
                 except (ValueError, IndexError):
                     continue
                 if pid and pid != my_pid:
-                    print(f"  Killing stale server (PID {pid}) on port {PORT}...")
+                    print(f"  Killing stale server (PID {pid}) on port {port}...")
                     subprocess.run(
                         ["taskkill", "/F", "/PID", str(pid)],
                         capture_output=True, timeout=5,
@@ -157,18 +163,26 @@ def main():
         )
         sys.exit(1)
 
+    # Generate secure access properties
+    dynamic_port = get_free_port()
+    base_url = f"http://{HOST}:{dynamic_port}"
+    local_access_token = secrets.token_urlsafe(32)
+
     admin_note = " (Admin - MFT enabled)" if is_admin() else ""
     print(f"  {APP_NAME}{admin_note}")
-    print(f"  Starting server at {URL} ...")
+    print(f"  Starting server at {base_url} ...")
     print(f"  Python: {python}")
     print()
 
     # Kill any leftover server on the same port before starting a new one
-    _kill_stale_server()
+    _kill_stale_server(dynamic_port)
 
     # Launch the server as a subprocess
     env = os.environ.copy()
     env["PMA_DEV_MODE"] = "0"  # Production mode for .exe
+    env["PMA_PORT"] = str(dynamic_port)
+    env["PMA_LOCAL_TOKEN"] = local_access_token
+    
     server_proc = subprocess.Popen(
         [python, "__main__.py", "--no-reload"],
         cwd=str(root),
@@ -178,8 +192,25 @@ def main():
         creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
     )
 
-    # Wait for server to be ready
-    if not wait_for_server():
+    # Wait for server to be ready using the dynamic port
+    def wait_for_ready(url: str, timeout: int = 120) -> bool:
+        import urllib.request
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                # We bypass auth for root `/health` if we leave it unprotected, 
+                # but if we protect it, we must supply the token header here.
+                req = urllib.request.Request(f"{url}/api/health")
+                req.add_header("X-Local-Access-Token", local_access_token)
+                with urllib.request.urlopen(req, timeout=2) as r:
+                    if r.status == 200:
+                        return True
+            except Exception:
+                pass
+            time.sleep(0.25)
+        return False
+
+    if not wait_for_ready(base_url):
         _show_error(
             "Server failed to start within 120 seconds.\n\n"
             "Check that dependencies are installed:\n  pip install -r requirements.txt"
@@ -209,9 +240,11 @@ def main():
     print(f"  Close the window to stop the server.")
     print()
 
+    webview_url = f"{base_url}/?token={local_access_token}"
+
     window = webview.create_window(
         title="Personal Memory Assistant",
-        url=URL,
+        url=webview_url,
         width=1280,
         height=860,
         min_size=(900, 600),

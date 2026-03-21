@@ -16,8 +16,9 @@ from app.config import settings
 
 from app.project_constants import (
     RETRIEVAL_CACHE_MAX_SIZE, RAG_CACHE_MAX_SIZE, 
-    FTS5_OPERATOR_RE, determine_query_intent, is_metadata_intent
+    FTS5_OPERATOR_RE, is_metadata_intent
 )
+from app.search.planner import QueryPlanner, PlanMode
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,20 @@ def clear_retrieval_cache():
     _index_generation += 1
     logger.info("Retrieval + RAG response caches cleared (generation=%d).", _index_generation)
 
+async def _append_latest_files(lines: List[str], db: DatabaseManager):
+    rows = await db.execute_query("SELECT path, modified_at FROM files ORDER BY modified_at DESC LIMIT 5")
+    if rows:
+        lines.append("Recently modified files:")
+        for r in rows:
+            lines.append(f"- {Path(r[0]).name} (last changed {r[1]})")
+
+async def _append_largest_files(lines: List[str], db: DatabaseManager):
+    rows = await db.execute_query("SELECT path, size FROM files ORDER BY size DESC LIMIT 5")
+    if rows:
+        lines.append("Largest indexed files:")
+        for r in rows:
+            lines.append(f"- {Path(r[0]).name} ({round(r[1] / (1024 * 1024), 2)} MB)")
+
 async def _get_metadata_insights(
     query: str,
     db: DatabaseManager,
@@ -62,22 +77,10 @@ async def _get_metadata_insights(
     lines: List[str] = ["=== Metadata Insights (Factual Source of Truth) ==="]
     
     if intent["latest"]:
-
-        rows = await db.execute_query("SELECT path, modified_at FROM files ORDER BY modified_at DESC LIMIT 5")
-        if rows:
-            lines.append("Recently modified files:")
-            for r in rows:
-                name = Path(r[0]).name
-                lines.append(f"- {name} (last changed {r[1]})")
+        await _append_latest_files(lines, db)
     
-    if largest:
-        rows = await db.execute_query("SELECT path, size FROM files ORDER BY size DESC LIMIT 5")
-        if rows:
-            lines.append("Largest indexed files:")
-            for r in rows:
-                name = Path(r[0]).name
-                size_mb = round(r[1] / (1024 * 1024), 2)
-                lines.append(f"- {name} ({size_mb} MB)")
+    if intent.get("largest"):
+        await _append_largest_files(lines, db)
 
     unreal_profiles = [
         profile for profile in folder_profiles
@@ -134,19 +137,22 @@ def _build_fast_answer(
 ) -> Optional[str]:
     """Provide immediate answers for pure metadata/inventory queries without hitting the LLM."""
     query_lower = query.lower()
-    intent = determine_query_intent(query)
+    
+    planner = QueryPlanner()
+    plan = planner.plan(query)
+    intent = plan.intents
     
     # Very specific fast paths
-    if "how many files" in query_lower or "total size" in query_lower or "disk space" in query_lower:
+    if plan.mode == PlanMode.FAST_METADATA:
         if file_stats:
             return f"You currently have {file_stats['total_files']} indexed files taking up a total of {file_stats['total_size_mb']} MB."
 
-    if intent["metadata_intent"] and unreal_facts and intent["unreal"]:
+    if plan.mode == PlanMode.FAST_PROJECT and unreal_facts and intent["unreal"]:
         lines = ["Here is your Unreal project summary:"]
         _append_unreal_fact_lines(lines, unreal_facts)
         return "\n".join(lines)
 
-    if intent["metadata_intent"] and folder_profiles and intent["project"]:
+    if plan.mode == PlanMode.FAST_PROJECT and folder_profiles and intent["project"]:
         lines = ["Here is a summary of your indexed projects:"]
         _append_project_profile_lines(lines, folder_profiles)
         return "\n".join(lines)
@@ -432,10 +438,12 @@ async def full_rag(
             cached_copy["cache_hit"] = True
             return cached_copy
 
-    intent = determine_query_intent(query)
-    inventory = intent["inventory"]
-    project = intent["project"]
-    unreal = intent["unreal"]
+    planner = QueryPlanner()
+    plan = planner.plan(query)
+    
+    inventory = plan.intents["inventory"]
+    project = plan.intents["project"]
+    unreal = plan.intents["unreal"]
 
     folder_profiles, file_stats, unreal_facts = await _load_query_metadata(
         db, inventory=inventory, project=project, unreal=unreal,
@@ -516,10 +524,13 @@ async def full_rag_stream(
 ) -> AsyncGenerator[str, None]:
     """Retrieves context and yields answer chunks + initial metadata."""
     t_start = time.perf_counter()
-    intent = determine_query_intent(query)
-    inventory = intent["inventory"]
-    project = intent["project"]
-    unreal = intent["unreal"]
+    
+    planner = QueryPlanner()
+    plan = planner.plan(query)
+    
+    inventory = plan.intents["inventory"]
+    project = plan.intents["project"]
+    unreal = plan.intents["unreal"]
 
     folder_profiles, file_stats, unreal_facts = await _load_query_metadata(
         db, inventory=inventory, project=project, unreal=unreal,

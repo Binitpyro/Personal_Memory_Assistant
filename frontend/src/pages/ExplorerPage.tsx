@@ -40,10 +40,7 @@ function FolderNode({ node, depth, onSelect, selectedPath, onDeleteFolder }: Fol
 
   return (
     <div className="select-none">
-      <div
-        role="button"
-        tabIndex={0}
-        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setOpen(!open); }}
+      <button
         className={`group flex items-center gap-2 w-full px-2 py-1 rounded-lg transition-colors cursor-pointer text-left ${open ? 'bg-black/5' : 'hover:bg-black/5'}`}
         onClick={() => setOpen(!open)}
       >
@@ -62,7 +59,7 @@ function FolderNode({ node, depth, onSelect, selectedPath, onDeleteFolder }: Fol
         >
           <Trash2 className="w-3.5 h-3.5" />
         </button>
-      </div>
+      </button>
 
       {
         open && (
@@ -87,11 +84,8 @@ function FolderNode({ node, depth, onSelect, selectedPath, onDeleteFolder }: Fol
                 const fileName = f.path.split(/[\\/]/).pop() ?? f.path
                 const isSelected = f.path === selectedPath
                 return (
-                  <div
+                  <button
                     key={f.path}
-                    role="button"
-                    tabIndex={0}
-                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') onSelect(f); }}
                     onClick={() => onSelect(f)}
                     className={`flex items-center gap-2 w-full px-6 py-1 rounded-lg text-left text-sm transition-colors cursor-pointer ${isSelected ? 'bg-primary/20 text-primary-light' : 'hover:bg-white/5 text-text-secondary'
                       }`}
@@ -99,7 +93,7 @@ function FolderNode({ node, depth, onSelect, selectedPath, onDeleteFolder }: Fol
                     <File className="w-3.5 h-3.5 shrink-0 opacity-60" />
                     <span className="truncate flex-1">{fileName}</span>
                     <span className="text-[10px] opacity-40 tabular-nums">{formatSize(f.size)}</span>
-                  </div>
+                  </button>
                 )
               })
             }
@@ -212,6 +206,8 @@ export function ExplorerPage() {
     return [...filtered].sort((a, b) => (a.usage_count || 0) - (b.usage_count || 0)).slice(0, 15)
   }, [tree, activeExtension])
 
+  const isEmptyTree = !hierarchicalTree || hierarchicalTree.length === 0;
+
   return (
     <div className="flex flex-col h-full p-6 animate-fade-in-up overflow-hidden">
       {/* Header */}
@@ -256,7 +252,7 @@ export function ExplorerPage() {
             <div className="flex-1 flex items-center justify-center">
               <Loader2 className="w-12 h-12 text-primary animate-spin" />
             </div>
-          ) : !hierarchicalTree || hierarchicalTree.length === 0 ? (
+          ) : isEmptyTree ? (
             <div className="flex-1 flex items-center justify-center text-text-secondary text-lg">
               No indexed data. Go to Library to add folders.
             </div>
@@ -362,11 +358,8 @@ export function ExplorerPage() {
             </h3>
             <div className="space-y-1.5 overflow-y-auto custom-scrollbar pr-2 flex-1">
               {largestFiles.map(f => (
-                <div
+                <button
                   key={f.path}
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setSelectedFile(f); }}
                   onClick={() => setSelectedFile(f)}
                   className="w-full text-left group flex items-center gap-3 p-2 rounded-xl bg-black/[0.02] hover:bg-primary/10 cursor-pointer transition-all border border-black/5 hover:border-primary/20"
                 >
@@ -378,7 +371,7 @@ export function ExplorerPage() {
                     <div className="text-[9px] text-text-secondary font-bold uppercase tracking-tight">{formatSize(f.size)}</div>
                   </div>
                   <ChevronRight className="w-3.5 h-3.5 text-text-secondary/20 group-hover:text-primary transition-all" />
-                </div>
+                </button>
               ))}
             </div>
           </div>
@@ -390,11 +383,8 @@ export function ExplorerPage() {
             </h3>
             <div className="space-y-1.5 overflow-y-auto custom-scrollbar pr-2 flex-1">
               {coldFiles.map(f => (
-                <div
+                <button
                   key={f.path}
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setSelectedFile(f); }}
                   onClick={() => setSelectedFile(f)}
                   className="w-full text-left group flex items-center gap-3 p-2 rounded-xl bg-black/[0.02] hover:bg-accent/10 cursor-pointer transition-all border border-black/5 hover:border-accent/20"
                 >
@@ -406,7 +396,7 @@ export function ExplorerPage() {
                     <div className="text-[9px] text-text-secondary font-bold">{f.usage_count || 0} hits</div>
                   </div>
                   <ChevronRight className="w-3.5 h-3.5 text-text-secondary/20 group-hover:text-accent transition-all" />
-                </div>
+                </button>
               ))}
             </div>
           </div>

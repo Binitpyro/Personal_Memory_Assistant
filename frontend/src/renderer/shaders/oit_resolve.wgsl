@@ -24,14 +24,13 @@ fn fs_main(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let accum = textureLoad(colorTexture, coords, 0);
 
     if moments.x <= 0.0001 {
-        // Return the clear color of the background
         return vec4<f32>(0.945, 0.96, 0.878, 1.0);
     }
 
-    // Standard WBOIT resolve logic
-    let avgColor = accum.rgb / max(accum.a, 0.0001);
     let totalAlpha = moments.x;
-    let visibility = 1.0 - exp(-totalAlpha); // Approximate total coverage
+    let visibility = 1.0 - exp(-totalAlpha); 
+    
+    let avgColor = accum.rgb / max(accum.a, 0.0001);
     let backgroundColor = vec3<f32>(0.945, 0.96, 0.878);
 
     return vec4<f32>(avgColor * visibility + backgroundColor * (1.0 - visibility), 1.0);

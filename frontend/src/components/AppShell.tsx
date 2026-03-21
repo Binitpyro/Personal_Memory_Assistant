@@ -1,17 +1,27 @@
-import { Outlet, NavLink } from 'react-router-dom'
-import { BookOpen, Search, FolderTree, BarChart3, Brain } from 'lucide-react'
+import { Outlet, NavLink, useNavigate, useLocation } from 'react-router-dom'
+import { BookOpen, Search, FolderTree, BarChart3, Brain, Settings } from 'lucide-react'
 import { useApi } from '../useApi'
 import { getHealth } from '../api'
+import { useEffect } from 'react'
 
 const navItems = [
   { to: '/library', label: 'Library', icon: BookOpen },
   { to: '/search', label: 'Search', icon: Search },
   { to: '/explorer', label: 'Explorer', icon: FolderTree },
   { to: '/insights', label: 'Insights', icon: BarChart3 },
+  { to: '/settings', label: 'Settings', icon: Settings },
 ] as const
 
 export function AppShell() {
+  const navigate = useNavigate()
+  const location = useLocation()
   const { data: health } = useApi(getHealth, { cacheKey: 'health', refetchInterval: 60_000 })
+
+  useEffect(() => {
+    if (!localStorage.getItem('pma_setup_complete') && location.pathname !== '/setup') {
+      navigate('/setup', { replace: true })
+    }
+  }, [navigate, location.pathname])
 
   return (
     <div className="flex min-h-screen w-full">
@@ -32,10 +42,9 @@ export function AppShell() {
               key={to}
               to={to}
               className={({ isActive }) =>
-                `flex items-center gap-3 px-3 py-3 rounded-xl transition-all duration-200 ${
-                  isActive
-                    ? 'bg-white/80 text-primary shadow-[inset_2px_2px_4px_rgba(149,159,147,0.1),inset_-2px_-2px_4px_rgba(255,255,255,0.8),2px_2px_5px_rgba(149,159,147,0.2)]'
-                    : 'text-text-secondary hover:bg-black/5 hover:text-text-primary'
+                `flex items-center gap-3 px-3 py-3 rounded-xl transition-all duration-200 ${isActive
+                  ? 'bg-white/80 text-primary shadow-[inset_2px_2px_4px_rgba(149,159,147,0.1),inset_-2px_-2px_4px_rgba(255,255,255,0.8),2px_2px_5px_rgba(149,159,147,0.2)]'
+                  : 'text-text-secondary hover:bg-black/5 hover:text-text-primary'
                 }`
               }
             >

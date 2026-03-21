@@ -238,6 +238,45 @@ class DatabaseManager:
         await conn.commit()
         logger.info("Database maintenance completed.")
 
+    async def wal_checkpoint(self) -> None:
+        """Force a WAL checkpoint to truncate the WAL file back to zero size.
+        
+        Call this after a large indexing run to reclaim disk space.
+        Uses TRUNCATE mode which is safe and doesn't block readers.
+        """
+        conn = self._get_conn()
+        try:
+            await conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            await conn.commit()
+            logger.info("WAL checkpoint completed — WAL file truncated.")
+        except Exception as e:
+            logger.warning("WAL checkpoint failed: %s", e)
+
+    async def cleanup_stale_files(self) -> int:
+        """Remove DB records for files that no longer exist on disk.
+        
+        Returns the number of records removed.
+        This is safe to run as a background task on startup.
+        """
+        conn = self._get_conn()
+        removed = 0
+        try:
+            cur = await conn.execute("SELECT id, path FROM files")
+            rows = await cur.fetchall()
+            stale_ids = [row[0] for row in rows if not Path(row[1]).exists()]
+            if stale_ids:
+                placeholders = ",".join("?" for _ in stale_ids)
+                await conn.execute(f"DELETE FROM files WHERE id IN ({placeholders})", stale_ids)
+                await conn.execute(f"DELETE FROM chunks WHERE file_id IN ({placeholders})", stale_ids)
+                await conn.commit()
+                removed = len(stale_ids)
+                logger.info("Startup cleanup: removed %d stale file records.", removed)
+            else:
+                logger.debug("Startup cleanup: no stale files found.")
+        except Exception as e:
+            logger.warning("Stale file cleanup failed: %s", e)
+        return removed
+
     async def insert_file(
         self,
         file_data: Dict[str, Any],

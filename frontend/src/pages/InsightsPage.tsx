@@ -1,9 +1,10 @@
-import { useMemo, useState, useCallback, useEffect } from 'react'
+import { useMemo, useState, useCallback, useEffect, Suspense, lazy } from 'react'
 import { BarChart3, PieChart, TrendingUp, FileType, Loader2, Flame, Snowflake, HardDrive, Box, LayoutGrid } from 'lucide-react'
 import { useApi } from '../useApi'
 import { getInsights, getInsightsByType, getFileTree } from '../api'
-import { WebGPUFallback } from '../components/WebGPUFallback'
-import { FileTypeTreemap } from '../components/FileTypeTreemap'
+
+const WebGPUFallback = lazy(() => import('../components/WebGPUFallback').then(m => ({ default: m.WebGPUFallback })))
+const FileTypeTreemap = lazy(() => import('../components/FileTypeTreemap').then(m => ({ default: m.FileTypeTreemap })))
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
@@ -140,21 +141,28 @@ export function InsightsPage() {
               {/* Fix: Explicitly check if folders object has keys before rendering visualizations */}
               {tree?.folders && Object.keys(tree.folders).length > 0 ? (
                 <div className="flex-1 min-h-0 flex flex-col relative">
-                  {vizMode === '3d' ? (
-                    <WebGPUFallback
-                      allFiles={tree.folders}
-                      activeFilter={typeFilter}
-                      onFilterChange={handleFilterChange}
-                      initialMode="type"
-                    />
-                  ) : (
-                    <FileTypeTreemap
-                      allFiles={tree.folders}
-                      activeFilter={typeFilter}
-                      onFilterChange={handleFilterChange}
-                      initialMode="type"
-                    />
-                  )}
+                  <Suspense fallback={
+                    <div className="flex-1 flex flex-col items-center justify-center">
+                      <Loader2 className="w-8 h-8 text-primary animate-spin mb-3" />
+                      <p className="text-text-secondary text-sm">Loading visualization engine...</p>
+                    </div>
+                  }>
+                    {vizMode === '3d' ? (
+                      <WebGPUFallback
+                        allFiles={tree.folders}
+                        activeFilter={typeFilter}
+                        onFilterChange={handleFilterChange}
+                        initialMode="type"
+                      />
+                    ) : (
+                      <FileTypeTreemap
+                        allFiles={tree.folders}
+                        activeFilter={typeFilter}
+                        onFilterChange={handleFilterChange}
+                        initialMode="type"
+                      />
+                    )}
+                  </Suspense>
                 </div>
               ) : (
                 <div className="flex-1 flex flex-col items-center justify-center text-text-secondary text-sm bg-white/5 rounded-2xl border border-white/5">

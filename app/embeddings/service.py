@@ -17,6 +17,7 @@ class EmbeddingService:
         self.model: Optional["SentenceTransformer"] = None
         self._loading = False
         self._ready = threading.Event()
+        self.optimal_batch_size = settings.embedding_batch_size
         
         # LRU cache for query embeddings to avoid redundant computation
         self._query_cache: OrderedDict[str, List[float]] = OrderedDict()
@@ -66,8 +67,13 @@ class EmbeddingService:
             
             if device == "cuda":
                 self.model.half() # Use FP16 on GPU
+                self.optimal_batch_size = 512
+            elif backend == "onnx":
+                self.optimal_batch_size = 64
+            else:
+                self.optimal_batch_size = 32
                 
-            logger.info("Model loaded successfully (backend=%s).", backend)
+            logger.info("Model loaded successfully (backend=%s, optimal_batch_size=%d).", backend, self.optimal_batch_size)
         except Exception as e:
             logger.exception("Failed to load embedding model: %s", e)
         finally:
@@ -120,7 +126,7 @@ class EmbeddingService:
             original_map.append(text_to_idx[text])
 
         # Optimization: Dynamic batching based on text count and settings
-        effective_batch_size = batch_size or settings.embedding_batch_size
+        effective_batch_size = batch_size or self.optimal_batch_size
         if len(unique_texts) < effective_batch_size:
             effective_batch_size = max(1, len(unique_texts))
 

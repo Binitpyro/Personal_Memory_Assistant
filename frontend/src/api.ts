@@ -48,6 +48,17 @@ export interface HealthResponse {
 
 export const getHealth = () => json<HealthResponse>('/health');
 
+export interface AppConfig {
+  app_version: string
+  embedding_model: string
+  gemini_model: string
+  gemini_max_output_tokens: number
+  dev_mode: boolean
+  prompt_version: string
+}
+
+export const getAppConfig = () => json<AppConfig>('/system/config')
+
 // ── Indexing ──────────────────────────────────────────────────────────
 
 export interface IndexStatus {
@@ -359,3 +370,19 @@ export interface LocalModelDetection {
 }
 
 export const getLocalModels = () => json<LocalModelDetection>('/llm/detect');
+
+export interface LLMPreferences {
+  provider: 'auto' | 'gemini' | 'ollama' | 'lm_studio';
+  gemini_model?: string | null;
+  ollama_model?: string | null;
+  lm_studio_model?: string | null;
+}
+
+export const getLLMPreferences = () => json<LLMPreferences>('/llm/preferences');
+
+export const setLLMPreferences = (prefs: LLMPreferences) =>
+  json<{ message: string; llm: LLMPreferences }>('/llm/preferences', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(prefs)
+  });

@@ -3,6 +3,51 @@ from typing import List, Dict, Any, Optional, Set
 from pathlib import Path
 from app.config import settings
 
+try:
+    import tiktoken  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    tiktoken = None
+
+_ENCODING = None
+
+
+def _get_encoding():
+    """Lazily initialize tokenizer encoding for token-accurate budgeting."""
+    global _ENCODING
+    if _ENCODING is not None:
+        return _ENCODING
+
+    if tiktoken is None:
+        _ENCODING = False
+        return _ENCODING
+
+    try:
+        _ENCODING = tiktoken.get_encoding("cl100k_base")
+    except Exception:
+        _ENCODING = False
+    return _ENCODING
+
+
+def _token_count(text: str) -> int:
+    enc = _get_encoding()
+    if not enc:
+        # Conservative fallback when tiktoken is unavailable.
+        return max(1, len(text) // 4)
+    return len(enc.encode(text))
+
+
+def _truncate_to_tokens(text: str, max_tokens: int) -> str:
+    if max_tokens <= 0 or not text:
+        return ""
+    enc = _get_encoding()
+    if not enc:
+        return text[: max_tokens * 4]
+    token_ids = enc.encode(text)
+    if len(token_ids) <= max_tokens:
+        return text
+    return enc.decode(token_ids[:max_tokens]).rstrip() + "…"
+
+
 def _compress_text(text: str) -> str:
     """Normalize whitespace and remove excessive newlines to save tokens."""
     # Replace 3+ newlines with 2
@@ -43,30 +88,49 @@ def _deduplicate_by_file(results: List[Dict[str, Any]], max_per_file: int = 2) -
             deduped.append(res)
     return deduped
 
-def _format_snippets(deduplicated: List[Dict[str, Any]], max_chars: int, total_len: int) -> List[str]:
-    context_parts = []
+def _format_snippets(
+    deduplicated: List[Dict[str, Any]],
+    remaining_tokens: int,
+) -> List[str]:
+    context_parts: List[str] = []
+    used_tokens = 0
+
     for i, res in enumerate(deduplicated):
+        if used_tokens >= remaining_tokens:
+            break
+
         snippet_id = i + 1
         path = res.get("file_path", "Unknown File")
         text = res.get("text", "")
-        
-        # Phase 4.1: Top-2 snippets get 40% of budget, rest share remainder
-        if i < 2:
-            budget = int(max_chars * 0.2)  # 20% each for top 2 = 40% total
+
+        remaining_for_snippets = max(remaining_tokens - used_tokens, 0)
+        remaining_count = max(len(deduplicated) - i, 1)
+        if i < 3:
+            # Reserve more budget for top-ranked chunks while still hard-limited.
+            snippet_budget = max(120, int(remaining_for_snippets * 0.34))
         else:
-            remaining_count = max(len(deduplicated) - 2, 1)
-            budget = int((max_chars * 0.6) / remaining_count)
-        budget = max(budget, min(600, max_chars))  # At least 600 chars
-
-        if len(text) > budget:
-            text = text[:budget] + "…"
-
-        part = f"Snippet {snippet_id} [{path}]:\n{text}\n---\n"
-        if total_len + len(part) > max_chars:
+            snippet_budget = max(80, int(remaining_for_snippets / remaining_count))
+        snippet_budget = min(snippet_budget, remaining_for_snippets)
+        if snippet_budget <= 0:
             break
-            
+
+        label = f"Snippet {snippet_id} [{path}]:\n"
+        label_tokens = _token_count(label)
+        if label_tokens >= snippet_budget:
+            continue
+
+        body_budget = max(1, snippet_budget - label_tokens - 3)  # reserve for delimiter
+        text = _truncate_to_tokens(text, body_budget)
+        part = f"{label}{text}\n---\n"
+        part_tokens = _token_count(part)
+        if used_tokens + part_tokens > remaining_tokens:
+            part = f"{label}{_truncate_to_tokens(text, max(1, remaining_tokens - used_tokens - label_tokens))}\n---\n"
+            part_tokens = _token_count(part)
+            if used_tokens + part_tokens > remaining_tokens:
+                break
+
         context_parts.append(part)
-        total_len += len(part)
+        used_tokens += part_tokens
     return context_parts
 
 def build_context(
@@ -90,25 +154,30 @@ def build_context(
     if max_tokens <= 0:
         max_tokens = settings.context_max_tokens
 
-    context_parts = []
-    total_len = 0
-    max_chars = max_tokens * 4  # ~4 chars per token heuristic
+    context_parts: List[str] = []
+    used_tokens = 0
 
     # ── 1. Metadata Insights (Highest Priority Factual Data) ─────
     if metadata_insights:
-        context_parts.append(metadata_insights)
-        total_len += len(metadata_insights)
+        part = _truncate_to_tokens(metadata_insights, max_tokens - used_tokens)
+        if part:
+            context_parts.append(part)
+            used_tokens += _token_count(part)
 
     # ── 2. Folder Profiles (Project-level context) ──────────────
-    if folder_profiles_text:
-        context_parts.append(folder_profiles_text)
-        total_len += len(folder_profiles_text)
+    if folder_profiles_text and used_tokens < max_tokens:
+        part = _truncate_to_tokens(folder_profiles_text, max_tokens - used_tokens)
+        if part:
+            context_parts.append(part)
+            used_tokens += _token_count(part)
 
     # ── 3. File Statistics (Aggregate Data) ────────────────────
-    if file_stats:
+    if file_stats and used_tokens < max_tokens:
         stats_block = _format_file_stats(file_stats)
-        context_parts.append(stats_block)
-        total_len += len(stats_block)
+        part = _truncate_to_tokens(stats_block, max_tokens - used_tokens)
+        if part:
+            context_parts.append(part)
+            used_tokens += _token_count(part)
 
     # ── 4. Semantic Snippets (Chunk-level data) ────────────────
     # Deduplicate: max 2 snippets from the same file for diversity
@@ -120,9 +189,10 @@ def build_context(
         if top_score > 0:
             score_threshold = top_score * 0.2
             deduplicated = [r for r in deduplicated if r.get("score", 1.0) >= score_threshold]
-    
-    snippet_parts = _format_snippets(deduplicated, max_chars, total_len)
+
+    snippet_parts = _format_snippets(deduplicated, max(0, max_tokens - used_tokens))
     context_parts.extend(snippet_parts)
-            
-    final_context = "\n".join(context_parts)
-    return _compress_text(final_context)
+
+    final_context = _compress_text("\n".join(context_parts))
+    # Final hard stop to guarantee budget.
+    return _truncate_to_tokens(final_context, max_tokens)

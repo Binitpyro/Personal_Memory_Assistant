@@ -55,18 +55,31 @@ async def get_files_tree(db: DatabaseManager = Depends(get_db)):
         return _file_tree_cache["data"]
     try:
         files = await db.get_all_files()
-        tree = {}
-        for row in files:
-            parts = row["path"].split(importlib_os_sep())
-            current = tree
-            for part in parts[:-1]:
-                current = current.setdefault(part, {})
-            current[parts[-1]] = {"__id": row["id"], "__size": row["size"], "__type": row["type"]}
+        folders = {}
+        total_size = 0
+        for f in files:
+            tag = f.get("folder_tag", "Unknown")
+            if tag not in folders:
+                folders[tag] = []
+            folders[tag].append({
+                "id": f.get("id"),
+                "path": f["path"],
+                "size": f["size"],
+                "type": f["type"],
+                "usage_count": f.get("usage_count", 0)
+            })
+            total_size += f["size"]
             
-        _file_tree_cache["data"] = tree
+        data = {
+            "folders": folders,
+            "total_files": len(files),
+            "total_size": total_size
+        }
+        _file_tree_cache["data"] = data
         _file_tree_cache["ts"] = now
-        return tree
+        return data
     except Exception as e:
+        logger.error(f"Error building file tree: {e}")
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 def importlib_os_sep():

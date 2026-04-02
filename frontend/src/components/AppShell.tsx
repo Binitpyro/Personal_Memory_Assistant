@@ -1,7 +1,7 @@
 import { Outlet, NavLink, useNavigate, useLocation } from 'react-router-dom'
 import { BookOpen, Search, FolderTree, BarChart3, Brain, Settings } from 'lucide-react'
 import { useApi } from '../useApi'
-import { getHealth } from '../api'
+import { getAppConfig, getHealth } from '../api'
 import { useEffect } from 'react'
 
 const navItems = [
@@ -16,6 +16,7 @@ export function AppShell() {
   const navigate = useNavigate()
   const location = useLocation()
   const { data: health } = useApi(getHealth, { cacheKey: 'health', refetchInterval: 60_000 })
+  const { data: appConfig } = useApi(getAppConfig, { cacheKey: 'app-config', refetchInterval: 120_000 })
 
   useEffect(() => {
     if (!localStorage.getItem('pma_setup_complete') && location.pathname !== '/setup') {
@@ -59,7 +60,12 @@ export function AppShell() {
         {/* Footer */}
         <div className="px-5 py-4 border-t border-primary/10">
           <span className="text-xs text-text-secondary opacity-0 group-hover:opacity-100 transition-opacity duration-300 whitespace-nowrap">
-            v{health?.version ?? '0.0.41'}
+            v{appConfig?.app_version ?? health?.version ?? '—'}
+            {appConfig?.gemini_model ? (
+              <span className="block text-[10px] opacity-70 truncate max-w-[12rem]" title={appConfig.gemini_model}>
+                {appConfig.gemini_model}
+              </span>
+            ) : null}
           </span>
         </div>
       </aside>

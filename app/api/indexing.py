@@ -3,7 +3,7 @@ import json
 import logging
 from typing import List, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends
+from fastapi import APIRouter, BackgroundTasks, Depends, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
@@ -12,6 +12,7 @@ from app.api.deps import (
     get_db, get_emb, get_chroma, ensure_indexing
 )
 from app.storage.db import DatabaseManager
+from app.api.limiter import limiter
 
 logger = logging.getLogger(__name__)
 
@@ -19,15 +20,42 @@ router = APIRouter()
 
 class IndexRequest(BaseModel):
     folders: List[str] = Field(..., max_length=50)
+
     @property
     def validated_folders(self) -> List[str]:
         import os
+        import sys
+
+        # System directories that must never be indexed
+        BLOCKED_ROOTS: tuple[str, ...] = (
+            "C:\\Windows", "C:\\Program Files", "C:\\Program Files (x86)",
+            "/etc", "/proc", "/sys", "/dev", "/boot",
+        )
+
         cleaned = []
         for f in self.folders:
             p = f.strip().strip('"').strip("'")
-            if not p: continue
-            resolved = os.path.realpath(os.path.normpath(p))
-            if os.path.isdir(resolved): cleaned.append(resolved)
+            if not p:
+                continue
+            # Resolve symlinks and normalise separators
+            try:
+                resolved = os.path.realpath(os.path.normpath(p))
+            except Exception:
+                continue
+            # Block path-traversal sequences in the original input
+            if ".." in p.replace("\\", "/").split("/"):
+                logger.warning("Rejected folder with traversal sequence: %s", p)
+                continue
+            # Block sensitive system directories
+            r_lower = resolved.lower()
+            if any(r_lower.startswith(b.lower()) for b in BLOCKED_ROOTS):
+                logger.warning("Rejected blocked system path: %s", resolved)
+                continue
+            # Must exist and be a directory
+            if os.path.isdir(resolved):
+                cleaned.append(resolved)
+            else:
+                logger.debug("Folder not found or not a directory: %s", resolved)
         return cleaned
 
 class UnrealImportRequest(BaseModel):
@@ -39,14 +67,16 @@ class UnrealImportRequest(BaseModel):
         return os.path.realpath(self.json_path.strip().strip('"').strip("'"))
 
 @router.post("/start")
+@limiter.limit("3/minute")
 async def index_start(
-    request: IndexRequest, 
+    request: Request,
+    payload: IndexRequest, 
     background_tasks: BackgroundTasks, 
     db: DatabaseManager = Depends(get_db), 
     emb=Depends(get_emb), 
     chroma=Depends(get_chroma)
 ):
-    folders = request.validated_folders
+    folders = payload.validated_folders
     if not folders: 
         return JSONResponse(status_code=400, content={"error": "No valid folder paths provided."})
     

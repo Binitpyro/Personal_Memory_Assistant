@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from app.config import settings
+from app.project_constants import APP_VERSION
 from app.insights.unreal_import import parse_unreal_metadata
 from app.storage.db import DatabaseManager
 from app.utils.metrics import metrics_tracker
@@ -49,8 +50,6 @@ _file_tree_cache: dict[str, Any] = {"data": None, "ts": 0.0}
 _insights_cache: dict[str, Any] = {"data": None, "ts": 0.0}
 _CACHE_TTL = 10  # seconds
 _bg_tasks: set[asyncio.Task] = set()
-
-APP_VERSION = "0.0.55"
 
 def _versioned_static_url(asset_name: str) -> str:
     # Look in the base static directory for legacy assets
@@ -98,41 +97,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-db_manager = DatabaseManager(db_path=settings.db_path)
+from app.api.deps import db_manager, get_db, get_emb, get_chroma, get_llm
 
-_embedding_service = None
-_chroma_client = None
-_llm_client = None
+async def health(db: DatabaseManager):
+    """Shared payload for /health and /api/health."""
+    emb = get_emb()
+    model_ready = emb.model is not None
+    db_ok = db.conn is not None
+    status = "ok" if model_ready and db_ok else "degraded"
+    return {
+        "version": APP_VERSION,
+        "status": status,
+        "db": "connected" if db_ok else "disconnected",
+        "model_ready": model_ready,
+        "indexing": "idle",
+    }
 
-def _get_embedding_service():
-    global _embedding_service
-    if _embedding_service is None:
-        from app.embeddings.service import EmbeddingService
-        _embedding_service = EmbeddingService()
-    return _embedding_service
-
-def _get_chroma_client():
-    global _chroma_client
-    if _chroma_client is None:
-        from app.vector_store.chroma_client import ChromaClient
-        _chroma_client = ChromaClient(persist_directory=settings.chroma_persist_dir)
-    return _chroma_client
-
-def _get_llm_client():
-    global _llm_client
-    if _llm_client is None:
-        from app.search.llm_client import LLMClient
-        _llm_client = LLMClient()
-    return _llm_client
-
-async def get_db():
-    if not db_manager.conn:
-        await db_manager.connect()
-    return db_manager
-
-def get_emb(): return _get_embedding_service()
-def get_chroma(): return _get_chroma_client()
-def get_llm(): return _get_llm_client()
 
 @asynccontextmanager
 async def lifespan(fastapi_app: FastAPI):
@@ -156,10 +136,10 @@ async def lifespan(fastapi_app: FastAPI):
                 "║  Restart with 'Run as Administrator' for best performance.  ║\n"
                 "╚══════════════════════════════════════════════════════════════╝"
             )
-    emb = _get_embedding_service()
+    emb = get_emb()
     logger.info("Starting background model load...")
     emb.load_model_background()
-    chroma = _get_chroma_client()
+    chroma = get_chroma()
     logger.info("Initializing Chroma...")
     await loop.run_in_executor(None, chroma.connect)
     def _bg_preload_reranker():
@@ -185,6 +165,31 @@ async def lifespan(fastapi_app: FastAPI):
     _bg_tasks.add(task)
     task.add_done_callback(_bg_tasks.discard)
 
+    async def _bg_auto_vacuum():
+        """Auto-vacuum if DB hasn't been vacuumed in 7 days and is > 500 MB."""
+        try:
+            await asyncio.sleep(10)  # run after cleanup
+            db_size = os.path.getsize(settings.db_path)
+            if db_size < 500 * 1024 * 1024:  # < 500 MB — skip
+                return
+            import time as _time
+            marker = Path("data/.last_vacuum")
+            if marker.exists():
+                days_since = (_time.time() - marker.stat().st_mtime) / 86400
+                if days_since < 7:
+                    return
+            logger.info("Auto-vacuum: DB is %.1f MB, running background VACUUM…", db_size / 1024 / 1024)
+            await db_manager.vacuum()
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.touch()
+            logger.info("Auto-vacuum complete.")
+        except Exception as e:
+            logger.warning("Auto-vacuum error: %s", e)
+
+    vac_task = asyncio.create_task(_bg_auto_vacuum())
+    _bg_tasks.add(vac_task)
+    vac_task.add_done_callback(_bg_tasks.discard)
+
     logger.info("Server ready (v%s)", APP_VERSION)
     yield
     logger.info("Shutting down...")
@@ -193,6 +198,13 @@ async def lifespan(fastapi_app: FastAPI):
 app = FastAPI(title="Personal Memory Assistant", lifespan=lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=500)
 app.mount("/static", StaticFiles(directory=str(_BASE_DIR / "static")), name="static")
+
+from slowapi.errors import RateLimitExceeded
+from slowapi import _rate_limit_exceeded_handler
+from app.api.limiter import limiter
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -241,6 +253,7 @@ from app.api.indexing import router as indexing_router
 from app.api.search import router as search_router
 from app.api.insights import router as insights_router
 from app.api.system import router as system_router
+from app.api.debug import router as debug_router
 
 api_router.include_router(auth_router)
 api_router.include_router(models_router)
@@ -248,6 +261,11 @@ api_router.include_router(indexing_router, prefix="/index", tags=["indexing"])
 api_router.include_router(search_router, prefix="/query", tags=["search"])
 api_router.include_router(insights_router, tags=["insights"])
 api_router.include_router(system_router, tags=["system"])
+api_router.include_router(debug_router)
+
+@api_router.get("/health")
+async def api_health(db: DatabaseManager = Depends(get_db)):
+    return await health(db)
 
 app.include_router(api_router, prefix="/api")
 

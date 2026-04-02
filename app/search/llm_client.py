@@ -14,9 +14,14 @@ class LLMClient:
         self.ollama_url = settings.ollama_url
         self.ollama_model = settings.ollama_model
         self.model = settings.gemini_model
+        self.provider_preference = "auto"
+        self.lm_studio_url = "http://localhost:1234/v1/chat/completions"
+        self.lm_studio_model = ""
         self._gemini_client: Optional[httpx.AsyncClient] = None
         self._ollama_client: Optional[httpx.AsyncClient] = None
+        self._lm_studio_client: Optional[httpx.AsyncClient] = None
         self._oauth_token = self._load_oauth_token()
+        self._load_runtime_preferences()
 
     def _load_oauth_token(self) -> Optional[str]:
         token_path = Path("data/credentials.json")
@@ -50,6 +55,42 @@ class LLMClient:
             self._ollama_client = httpx.AsyncClient(timeout=settings.ollama_timeout)
         return self._ollama_client
 
+    def _get_lm_studio_client(self) -> httpx.AsyncClient:
+        if self._lm_studio_client is None or self._lm_studio_client.is_closed:
+            self._lm_studio_client = httpx.AsyncClient(timeout=settings.ollama_timeout)
+        return self._lm_studio_client
+
+    def _load_runtime_preferences(self) -> None:
+        pref_path = Path("data/settings.json")
+        if not pref_path.exists():
+            return
+        try:
+            with open(pref_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            llm_prefs = data.get("llm", {})
+            self.provider_preference = llm_prefs.get("provider", "auto")
+            self.model = llm_prefs.get("gemini_model", self.model)
+            self.ollama_model = llm_prefs.get("ollama_model", self.ollama_model)
+            self.lm_studio_model = llm_prefs.get("lm_studio_model", self.lm_studio_model)
+        except Exception as e:
+            logger.debug("Unable to load runtime LLM preferences: %s", e)
+
+    def apply_preferences(
+        self,
+        provider: Optional[str] = None,
+        gemini_model: Optional[str] = None,
+        ollama_model: Optional[str] = None,
+        lm_studio_model: Optional[str] = None,
+    ) -> None:
+        if provider:
+            self.provider_preference = provider
+        if gemini_model:
+            self.model = gemini_model
+        if ollama_model:
+            self.ollama_model = ollama_model
+        if lm_studio_model is not None:
+            self.lm_studio_model = lm_studio_model
+
     def _build_prompt(self, query: str, context: str) -> str:
         return f"""
 You are a personal memory assistant. Answer the user's question using ONLY the provided context snippets.
@@ -82,23 +123,41 @@ Answer:
 
     async def generate_answer(self, query: str, context: str, history: Optional[List[Dict[str, str]]] = None) -> str:
         prompt = self._build_prompt(query, context)
-        if self.api_key or self._oauth_token:
+        provider = (self.provider_preference or "auto").lower()
+
+        if provider in {"gemini", "auto"} and (self.api_key or self._oauth_token):
             return await self._call_gemini(prompt, history=history)
-        if await self._check_ollama_health():
+        if provider in {"lm_studio", "auto"} and await self._check_lm_studio_health():
+            return await self._call_lm_studio(prompt, history=history)
+        if provider in {"ollama", "auto"} and await self._check_ollama_health():
             return await self._call_ollama(prompt)
         return "LLM unavailable. Please provide a GEMINI_API_KEY or ensure Ollama is running."
 
     async def stream_answer(self, query: str, context: str, history: Optional[List[Dict[str, str]]] = None) -> AsyncGenerator[str, None]:
         prompt = self._build_prompt(query, context)
-        if self.api_key or self._oauth_token:
+        provider = (self.provider_preference or "auto").lower()
+
+        if provider in {"gemini", "auto"} and (self.api_key or self._oauth_token):
             async for chunk in self._stream_gemini(prompt, history=history):
                 yield chunk
             return
-        if await self._check_ollama_health():
+        if provider in {"lm_studio", "auto"} and await self._check_lm_studio_health():
+            async for chunk in self._stream_lm_studio(prompt, history=history):
+                yield chunk
+            return
+        if provider in {"ollama", "auto"} and await self._check_ollama_health():
             async for chunk in self._stream_ollama(prompt):
                 yield chunk
             return
         yield "LLM unavailable."
+
+    async def _check_lm_studio_health(self) -> bool:
+        try:
+            client = self._get_lm_studio_client()
+            resp = await client.get(self.lm_studio_url.replace("/chat/completions", "/models"), timeout=1.0)
+            return resp.status_code == 200
+        except Exception:
+            return False
 
     @retry(
         stop=stop_after_attempt(3),
@@ -129,7 +188,7 @@ Answer:
             "generationConfig": {
                 "temperature": 0.2,
                 "topP": 0.8,
-                "maxOutputTokens": getattr(settings, 'gemini_max_output_tokens', 4096),
+                "maxOutputTokens": settings.gemini_max_output_tokens,
             },
         }
         
@@ -173,7 +232,7 @@ Answer:
             "generationConfig": {
                 "temperature": 0.2,
                 "topP": 0.8,
-                "maxOutputTokens": getattr(settings, 'gemini_max_output_tokens', 4096),
+                "maxOutputTokens": settings.gemini_max_output_tokens,
             },
         }
         client = self._get_gemini_client()
@@ -229,3 +288,50 @@ Answer:
                     chunk = json.loads(line).get("response")
                     if chunk: yield chunk
         except Exception: yield "Ollama stream failed."
+
+    async def _call_lm_studio(self, prompt: str, history: Optional[List[Dict[str, str]]] = None) -> str:
+        try:
+            client = self._get_lm_studio_client()
+            messages = history[:] if history else []
+            messages.append({"role": "user", "content": prompt})
+            model_name = self.lm_studio_model or "local-model"
+            resp = await client.post(
+                self.lm_studio_url,
+                json={"model": model_name, "messages": messages, "stream": False, "temperature": 0.2},
+            )
+            if resp.status_code != 200:
+                return f"LM Studio error {resp.status_code}"
+            data = resp.json()
+            return data.get("choices", [{}])[0].get("message", {}).get("content", "No response.")
+        except Exception:
+            return "LM Studio failed."
+
+    async def _stream_lm_studio(self, prompt: str, history: Optional[List[Dict[str, str]]] = None) -> AsyncGenerator[str, None]:
+        try:
+            client = self._get_lm_studio_client()
+            messages = history[:] if history else []
+            messages.append({"role": "user", "content": prompt})
+            model_name = self.lm_studio_model or "local-model"
+            async with client.stream(
+                "POST",
+                self.lm_studio_url,
+                json={"model": model_name, "messages": messages, "stream": True, "temperature": 0.2},
+            ) as resp:
+                if resp.status_code != 200:
+                    yield f"LM Studio error {resp.status_code}"
+                    return
+                async for line in resp.aiter_lines():
+                    if not line or not line.startswith("data: "):
+                        continue
+                    payload = line[6:].strip()
+                    if payload == "[DONE]":
+                        break
+                    try:
+                        parsed = json.loads(payload)
+                        delta = parsed.get("choices", [{}])[0].get("delta", {}).get("content")
+                        if delta:
+                            yield delta
+                    except Exception:
+                        continue
+        except Exception:
+            yield "LM Studio stream failed."

@@ -83,6 +83,59 @@ fn create_chunks(py: Python, text: &str, chunk_size_chars: usize, chunk_overlap_
     Ok(chunks)
 }
 
+/// Chunks markdown text by heading sections (up to level 3).
+#[pyfunction]
+fn chunk_markdown(py: Python, text: &str, chunk_size_chars: usize, chunk_overlap_chars: usize, prefix: &str) -> PyResult<Vec<PyObject>> {
+    let mut chunks = Vec::new();
+    let re = regex::Regex::new(r"(?m)^#{1,3}\s").unwrap();
+    
+    let mut last_byte = 0;
+    for mat in re.find_iter(text) {
+        if mat.start() > last_byte {
+            let sec = &text[last_byte..mat.start()];
+            if !sec.trim().is_empty() {
+                // Calculate char offset for this section
+                let start_char = text[..last_byte].chars().count();
+                let sec_chars = sec.chars().count();
+                
+                if sec_chars <= chunk_size_chars {
+                    let dict = PyDict::new(py);
+                    dict.set_item("start_offset", start_char)?;
+                    dict.set_item("end_offset", start_char + sec_chars)?;
+                    dict.set_item("text_preview", format!("{}{}", prefix, sec.trim()))?;
+                    chunks.push(dict.into());
+                } else {
+                    let mut c = create_chunks(py, sec, chunk_size_chars, chunk_overlap_chars, prefix, start_char)?;
+                    chunks.append(&mut c);
+                }
+            }
+        }
+        last_byte = mat.start();
+    }
+    
+    if last_byte < text.len() {
+        let sec = &text[last_byte..];
+        if !sec.trim().is_empty() {
+            let start_char = text[..last_byte].chars().count();
+            let sec_chars = sec.chars().count();
+            
+            if sec_chars <= chunk_size_chars {
+                let dict = PyDict::new(py);
+                dict.set_item("start_offset", start_char)?;
+                dict.set_item("end_offset", start_char + sec_chars)?;
+                dict.set_item("text_preview", format!("{}{}", prefix, sec.trim()))?;
+                chunks.push(dict.into());
+            } else {
+                let mut c = create_chunks(py, sec, chunk_size_chars, chunk_overlap_chars, prefix, start_char)?;
+                chunks.append(&mut c);
+            }
+        }
+    }
+    
+    Ok(chunks)
+}
+
+
 /// Finds the nearest sentence-ending punctuation near `char_pos`.
 #[pyfunction]
 fn find_sentence_boundary(text: &str, char_pos: usize, char_window: usize) -> usize {
@@ -487,9 +540,10 @@ fn extract_text_files(paths: Vec<String>, max_size: usize) -> PyResult<Vec<(Stri
 /// A Python module implemented in Rust using PyO3.
 #[pymodule]
 fn rust_core(_py: Python, m: &PyModule) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(find_sentence_boundary, m)?)?;
-    m.add_function(wrap_pyfunction!(create_chunks, m)?)?;
     m.add_function(wrap_pyfunction!(scan_folders, m)?)?;
+    m.add_function(wrap_pyfunction!(create_chunks, m)?)?;
+    m.add_function(wrap_pyfunction!(chunk_markdown, m)?)?;
+    m.add_function(wrap_pyfunction!(find_sentence_boundary, m)?)?;
     m.add_function(wrap_pyfunction!(get_spatial_binary, m)?)?;
     m.add_function(wrap_pyfunction!(calculate_sha256, m)?)?;
     m.add_function(wrap_pyfunction!(extract_text_files, m)?)?;

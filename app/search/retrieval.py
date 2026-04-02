@@ -480,7 +480,12 @@ async def full_rag(
     if not retrieved and not file_stats and not folder_profiles_text:
         return {"answer": "I couldn't find any relevant documents.", "sources": [], "retrieved_count": 0, "latency_ms": round((time.perf_counter() - t_start) * 1000, 1)}
         
-    context = build_context(retrieved, file_stats=file_stats, folder_profiles_text=folder_profiles_text)
+    context = build_context(
+        retrieved,
+        max_tokens=settings.context_max_tokens,
+        file_stats=file_stats,
+        folder_profiles_text=folder_profiles_text,
+    )
     
     t_llm = time.perf_counter()
     with Timer("llm_generation"):
@@ -511,7 +516,7 @@ async def full_rag(
 
     return result
 
-async def full_rag_stream(
+async def stream_rag(
     query: str,
     db: DatabaseManager,
     embedding_service: EmbeddingService,
@@ -521,13 +526,13 @@ async def full_rag_stream(
     file_type: Optional[str] = None,
     folder_tag: Optional[str] = None,
     history: Optional[List[Dict[str, str]]] = None,
-) -> AsyncGenerator[str, None]:
-    """Retrieves context and yields answer chunks + initial metadata."""
+) -> AsyncGenerator[Dict[str, Any], None]:
+    """NDJSON stream events for /api/query/stream (match SearchPage chunk types)."""
     t_start = time.perf_counter()
-    
+
     planner = QueryPlanner()
     plan = planner.plan(query)
-    
+
     inventory = plan.intents["inventory"]
     project = plan.intents["project"]
     unreal = plan.intents["unreal"]
@@ -538,50 +543,68 @@ async def full_rag_stream(
 
     fast_answer = _build_fast_answer(query, file_stats, folder_profiles, unreal_facts)
     if fast_answer and not history:
-        # For fast path, just yield the whole thing as one chunk since it's instant
-        metadata = {
-            "type": "metadata",
-            "sources": [{"file_path": p.get("folder_path", ""), "folder_tag": p.get("folder_tag", ""), "text": p.get("profile_text", "")} for p in folder_profiles],
-            "latency_ms": round((time.perf_counter() - t_start) * 1000, 1)
+        source_rows = [
+            {"file_path": p.get("folder_path", ""), "folder_tag": p.get("folder_tag", ""), "text": p.get("profile_text", "")}
+            for p in folder_profiles
+        ]
+        total_ms = round((time.perf_counter() - t_start) * 1000, 1)
+        yield {
+            "type": "fast_path",
+            "answer": fast_answer,
+            "sources": source_rows,
+            "latency_ms": total_ms,
         }
-        yield json.dumps(metadata) + "\n"
-        yield json.dumps({"type": "content", "text": fast_answer}) + "\n"
+        try:
+            await db.save_query(query, fast_answer, len(source_rows), total_ms)
+        except Exception as e:
+            logger.warning("Failed to save streamed fast-path history: %s", e, exc_info=True)
         return
 
     include_profiles_text = project or inventory or unreal
     from app.utils.metrics import Timer
-    
+
     with Timer("retrieval"):
         retrieved, file_stats, folder_profiles_text = await _gather_full_rag_inputs(
-            query=query, db=db, embedding_service=embedding_service, chroma_client=chroma_client,
-            k=k, inventory=inventory, project=project, unreal=unreal, cached_file_stats=file_stats,
+            query=query,
+            db=db,
+            embedding_service=embedding_service,
+            chroma_client=chroma_client,
+            k=k,
+            inventory=inventory,
+            project=project,
+            unreal=unreal,
+            cached_file_stats=file_stats,
             include_profiles_text=include_profiles_text,
         )
 
     if file_type or folder_tag:
         retrieved = _filter_retrieved_results(retrieved, file_type=file_type, folder_tag=folder_tag)
-    
+
     if not retrieved and not file_stats and not folder_profiles_text:
-        yield json.dumps({"type": "content", "text": "I couldn't find any relevant documents."}) + "\n"
+        yield {"type": "content", "text": "I couldn't find any relevant documents."}
         return
-        
-    context = build_context(retrieved, file_stats=file_stats, folder_profiles_text=folder_profiles_text)
-    
-    # Yield sources immediately before starting LLM
-    metadata = {
-        "type": "metadata",
+
+    retrieval_ms = round((time.perf_counter() - t_start) * 1000, 1)
+    yield {
+        "type": "sources",
         "sources": retrieved,
-        "latency_retrieval_ms": round((time.perf_counter() - t_start) * 1000, 1)
+        "latency_ms": retrieval_ms,
+        "retrieval_ms": retrieval_ms,
     }
-    yield json.dumps(metadata) + "\n"
+
+    context = build_context(
+        retrieved,
+        max_tokens=settings.context_max_tokens,
+        file_stats=file_stats,
+        folder_profiles_text=folder_profiles_text,
+    )
 
     full_answer = ""
     with Timer("llm_generation"):
         async for chunk in llm_client.stream_answer(query, context, history=history):
             full_answer += chunk
-            yield json.dumps({"type": "content", "text": chunk}) + "\n"
-    
-    # Optional: save history at the end
+            yield {"type": "content", "text": chunk}
+
     try:
         total_ms = round((time.perf_counter() - t_start) * 1000, 1)
         await db.save_query(query, full_answer, len(retrieved), total_ms)

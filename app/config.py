@@ -13,7 +13,7 @@ class Settings(BaseSettings):
 
     chroma_persist_dir: str = "data/chroma_db"
 
-    embedding_model: str = "all-MiniLM-L6-v2"
+    embedding_model: str = "BAAI/bge-small-en-v1.5"
     embedding_batch_size: int = 512  # Doubled: modern GPUs/CPUs handle this well
 
     chunk_size: int = 512
@@ -24,6 +24,7 @@ class Settings(BaseSettings):
 
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.5-flash-lite"
+    gemini_max_output_tokens: int = 4096
     gemini_timeout: float = 90.0
 
     ollama_url: str = "http://localhost:11434/api/generate"

@@ -7,7 +7,8 @@ from unittest.mock import AsyncMock, MagicMock
 from app.config import settings
 settings.db_path = ":memory:"
 
-from app.main import app, get_db, get_emb, get_chroma, get_llm
+from app.main import app
+from app.api.deps import get_db, get_emb, get_chroma, get_llm
 from app.storage.db import DatabaseManager
 
 @pytest.fixture(scope="session")

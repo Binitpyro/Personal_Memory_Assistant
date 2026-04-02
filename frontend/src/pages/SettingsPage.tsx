@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { Settings, Shield, Key, CheckCircle2, AlertCircle, LogOut, Cpu, HardDrive } from 'lucide-react'
 import { useApi, invalidateCache } from '../useApi'
-import { getAuthStatus, disconnectAuth, getLocalModels, getSystemInfo } from '../api'
+import { getAuthStatus, disconnectAuth, getLocalModels, getSystemInfo, getLLMPreferences, setLLMPreferences } from '../api'
 import { useSearchParams } from 'react-router-dom'
 
 export function SettingsPage() {
@@ -9,8 +9,14 @@ export function SettingsPage() {
     const { data: authStatus, refetch: refetchAuth } = useApi(getAuthStatus, { cacheKey: 'auth-status' })
     const { data: localModels } = useApi(getLocalModels, { cacheKey: 'local-models' })
     const { data: sysInfo } = useApi(getSystemInfo, { cacheKey: 'system-info' })
+    const { data: llmPrefs, refetch: refetchPrefs } = useApi(getLLMPreferences, { cacheKey: 'llm-prefs' })
 
     const [message, setMessage] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
+    const [provider, setProvider] = useState<'auto' | 'gemini' | 'ollama' | 'lm_studio'>('auto')
+    const [geminiModel, setGeminiModel] = useState('gemini-2.5-flash-lite')
+    const [ollamaModel, setOllamaModel] = useState('')
+    const [lmStudioModel, setLmStudioModel] = useState('')
+    const [savingPrefs, setSavingPrefs] = useState(false)
 
     useEffect(() => {
         // If we just redirected back from Google OAuth
@@ -18,6 +24,14 @@ export function SettingsPage() {
             setMessage({ type: 'ok', text: 'Successfully connected Google Account.' })
         }
     }, [searchParams])
+
+    useEffect(() => {
+        if (!llmPrefs) return
+        setProvider(llmPrefs.provider || 'auto')
+        setGeminiModel(llmPrefs.gemini_model || 'gemini-2.5-flash-lite')
+        setOllamaModel(llmPrefs.ollama_model || '')
+        setLmStudioModel(llmPrefs.lm_studio_model || '')
+    }, [llmPrefs])
 
     const handleConnectGoogle = () => {
         // Redirect top-level window to the backend OAuth start route
@@ -33,6 +47,25 @@ export function SettingsPage() {
             setMessage({ type: 'ok', text: 'Disconnected account.' })
         } catch (e) {
             setMessage({ type: 'err', text: e instanceof Error ? e.message : 'Disconnection failed' })
+        }
+    }
+
+    const handleSavePrefs = async () => {
+        setSavingPrefs(true)
+        try {
+            await setLLMPreferences({
+                provider,
+                gemini_model: geminiModel || null,
+                ollama_model: ollamaModel || null,
+                lm_studio_model: lmStudioModel || null
+            })
+            invalidateCache('llm-prefs')
+            refetchPrefs()
+            setMessage({ type: 'ok', text: 'LLM preferences saved.' })
+        } catch (e) {
+            setMessage({ type: 'err', text: e instanceof Error ? e.message : 'Failed to save preferences' })
+        } finally {
+            setSavingPrefs(false)
         }
     }
 
@@ -195,6 +228,64 @@ export function SettingsPage() {
                             <p className="text-sm text-text-secondary">Ensure LM Studio's Local Server is running on localhost:1234.</p>
                         )}
                     </div>
+                </div>
+            </div>
+
+            {/* LLM Preferences */}
+            <div className="glass p-6 rounded-2xl border border-primary/10">
+                <div className="flex items-start gap-4 mb-6">
+                    <div className="p-3 bg-primary/10 rounded-xl">
+                        <Cpu className="w-6 h-6 text-primary" />
+                    </div>
+                    <div>
+                        <h2 className="text-lg font-bold text-text-primary">Advanced Model Selection</h2>
+                        <p className="text-sm text-text-secondary mt-1">
+                            Choose your preferred provider and default model. PMA applies these preferences at runtime.
+                        </p>
+                    </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <label className="text-sm text-text-secondary flex flex-col gap-1">
+                        Provider
+                        <select value={provider} onChange={(e) => setProvider(e.target.value as any)} className="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-text-primary">
+                            <option value="auto">Auto (recommended)</option>
+                            <option value="gemini">Gemini</option>
+                            <option value="ollama">Ollama</option>
+                            <option value="lm_studio">LM Studio</option>
+                        </select>
+                    </label>
+
+                    <label className="text-sm text-text-secondary flex flex-col gap-1">
+                        Gemini model
+                        <input value={geminiModel} onChange={(e) => setGeminiModel(e.target.value)} className="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-text-primary" placeholder="gemini-2.5-flash-lite" />
+                    </label>
+
+                    <label className="text-sm text-text-secondary flex flex-col gap-1">
+                        Ollama model
+                        <select value={ollamaModel} onChange={(e) => setOllamaModel(e.target.value)} className="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-text-primary">
+                            <option value="">(auto)</option>
+                            {(localModels?.ollama.models || []).map((m) => <option key={m} value={m}>{m}</option>)}
+                        </select>
+                    </label>
+
+                    <label className="text-sm text-text-secondary flex flex-col gap-1">
+                        LM Studio model
+                        <select value={lmStudioModel} onChange={(e) => setLmStudioModel(e.target.value)} className="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-text-primary">
+                            <option value="">(auto)</option>
+                            {(localModels?.lm_studio.models || []).map((m) => <option key={m} value={m}>{m}</option>)}
+                        </select>
+                    </label>
+                </div>
+
+                <div className="mt-4">
+                    <button
+                        onClick={handleSavePrefs}
+                        disabled={savingPrefs}
+                        className="glass-button !bg-primary !text-white hover:!bg-primary-h !py-2 !px-4"
+                    >
+                        {savingPrefs ? 'Saving...' : 'Save LLM Preferences'}
+                    </button>
                 </div>
             </div>
 

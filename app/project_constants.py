@@ -1,5 +1,28 @@
 import re
 from typing import Dict
+from pathlib import Path
+
+def _get_app_version() -> str:
+    try:
+        from importlib.metadata import version
+        return version("personal-memory-assistant")
+    except Exception:
+        pass
+
+    try:
+        import tomllib # Python 3.11+
+        pyproject_path = Path(__file__).parent.parent / "pyproject.toml"
+        if pyproject_path.exists():
+            with open(pyproject_path, "rb") as f:
+                data = tomllib.load(f)
+                return data.get("project", {}).get("version", "0.0.55")
+    except Exception:
+        pass
+        
+    return "0.0.55"
+
+# Release version (dynamically loaded from pyproject.toml)
+APP_VERSION = _get_app_version()
 
 # Cache Constants
 RETRIEVAL_CACHE_MAX_SIZE = 500

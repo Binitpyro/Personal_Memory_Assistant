@@ -1,5 +1,6 @@
 import { useState, useMemo } from 'react'
-import { FolderTree, File, Folder, ChevronRight, ChevronDown, Loader2, LayoutGrid, List, Trash2 } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
+import { FolderTree, File, Folder, ChevronRight, ChevronDown, Loader2, LayoutGrid, List, Trash2, Search, Download, Bot } from 'lucide-react'
 import { useApi, invalidateCache } from '../useApi'
 import { getFileTree, removeFolderIndex, type FileEntry } from '../api'
 import { FileTypeTreemap } from '../components/FileTypeTreemap'
@@ -111,6 +112,31 @@ export function ExplorerPage() {
   const [selectedFile, setSelectedFile] = useState<FileEntry | null>(null)
   const [viewMode, setViewMode] = useState<'tree' | 'treemap'>('tree')
   const [activeExtension, setActiveExtension] = useState<string | null>(null)
+  const [searchQuery, setSearchQuery] = useState('')
+  const navigate = useNavigate()
+
+  const handleExportCSV = () => {
+    if (!tree?.folders) return
+    const flat = Object.values(tree.folders).flat()
+    const filtered = flat.filter(f => {
+      const extMatch = activeExtension ? ('.' + f.path.split('.').pop()?.toLowerCase()) === activeExtension.toLowerCase() : true
+      const searchMatch = searchQuery ? f.path.toLowerCase().includes(searchQuery.toLowerCase()) : true
+      return extMatch && searchMatch
+    })
+
+    const lines = ['Path,Size_Bytes,Usage_Count,Type']
+    filtered.forEach(f => {
+      lines.push(`"${f.path}",${f.size},${f.usage_count || 0},"${f.type}"`)
+    })
+
+    const blob = new Blob([lines.join('\n')], { type: 'text/csv' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'pma_explorer_export.csv'
+    a.click()
+    URL.revokeObjectURL(url)
+  }
 
   const handleDeleteFolder = async (path: string) => {
     try {
@@ -137,9 +163,11 @@ export function ExplorerPage() {
       const partsTag = tag.split(/[\\/]/).filter(Boolean);
       const tagName = partsTag.at(-1) || tag;
 
-      const filteredFiles = activeExtension
-        ? files.filter(f => ('.' + f.path.split('.').pop()?.toLowerCase()) === activeExtension.toLowerCase())
-        : files;
+      const filteredFiles = files.filter(f => {
+        const extMatch = activeExtension ? ('.' + f.path.split('.').pop()?.toLowerCase()) === activeExtension.toLowerCase() : true;
+        const searchMatch = searchQuery ? f.path.toLowerCase().includes(searchQuery.toLowerCase()) : true;
+        return extMatch && searchMatch;
+      });
 
       if (filteredFiles.length === 0 && activeExtension) return;
 
@@ -191,20 +219,24 @@ export function ExplorerPage() {
   const largestFiles = useMemo(() => {
     if (!tree?.folders) return []
     const flat = Object.values(tree.folders).flat()
-    const filtered = activeExtension
-      ? flat.filter(f => ('.' + f.path.split('.').pop()?.toLowerCase()) === activeExtension.toLowerCase())
-      : flat
+    const filtered = flat.filter(f => {
+      const extMatch = activeExtension ? ('.' + f.path.split('.').pop()?.toLowerCase()) === activeExtension.toLowerCase() : true;
+      const searchMatch = searchQuery ? f.path.toLowerCase().includes(searchQuery.toLowerCase()) : true;
+      return extMatch && searchMatch;
+    })
     return [...filtered].sort((a, b) => b.size - a.size).slice(0, 15)
-  }, [tree, activeExtension])
+  }, [tree, activeExtension, searchQuery])
 
   const coldFiles = useMemo(() => {
     if (!tree?.folders) return []
     const flat = Object.values(tree.folders).flat()
-    const filtered = activeExtension
-      ? flat.filter(f => ('.' + f.path.split('.').pop()?.toLowerCase()) === activeExtension.toLowerCase())
-      : flat
+    const filtered = flat.filter(f => {
+      const extMatch = activeExtension ? ('.' + f.path.split('.').pop()?.toLowerCase()) === activeExtension.toLowerCase() : true;
+      const searchMatch = searchQuery ? f.path.toLowerCase().includes(searchQuery.toLowerCase()) : true;
+      return extMatch && searchMatch;
+    })
     return [...filtered].sort((a, b) => (a.usage_count || 0) - (b.usage_count || 0)).slice(0, 15)
-  }, [tree, activeExtension])
+  }, [tree, activeExtension, searchQuery])
 
   const isEmptyTree = !hierarchicalTree || hierarchicalTree.length === 0;
 
@@ -227,21 +259,40 @@ export function ExplorerPage() {
           </p>
         </div>
 
-        <div className="flex bg-black/5 p-1 rounded-xl border border-black/5 shadow-inner">
+        <div className="flex items-center gap-4">
+          <div className="relative">
+            <Search className="w-4 h-4 text-text-secondary absolute left-3 top-1/2 -translate-y-1/2 opacity-50" />
+            <input
+              type="text"
+              placeholder="Filter files..."
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+              className="pl-9 pr-4 py-2 bg-black/5 rounded-xl border border-black/5 text-sm text-text-primary placeholder:text-text-secondary focus:outline-none focus:ring-2 focus:ring-primary/40 shadow-inner w-56"
+            />
+          </div>
           <button
-            onClick={() => setViewMode('tree')}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${viewMode === 'tree' ? 'bg-primary text-white shadow-lg' : 'text-text-secondary hover:text-text-primary'
-              }`}
+            onClick={handleExportCSV}
+            className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold text-text-secondary hover:text-text-primary hover:bg-black/5 border border-black/5 transition-all shadow-sm"
           >
-            <List className="w-4 h-4" /> TREE
+            <Download className="w-4 h-4" /> CSV
           </button>
-          <button
-            onClick={() => setViewMode('treemap')}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${viewMode === 'treemap' ? 'bg-primary text-white shadow-lg' : 'text-text-secondary hover:text-text-primary'
-              }`}
-          >
-            <LayoutGrid className="w-4 h-4" /> TREEMAP
-          </button>
+
+          <div className="flex bg-black/5 p-1 rounded-xl border border-black/5 shadow-inner ml-2">
+            <button
+              onClick={() => setViewMode('tree')}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${viewMode === 'tree' ? 'bg-primary text-white shadow-lg' : 'text-text-secondary hover:text-text-primary'
+                }`}
+            >
+              <List className="w-4 h-4" /> TREE
+            </button>
+            <button
+              onClick={() => setViewMode('treemap')}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${viewMode === 'treemap' ? 'bg-primary text-white shadow-lg' : 'text-text-secondary hover:text-text-primary'
+                }`}
+            >
+              <LayoutGrid className="w-4 h-4" /> TREEMAP
+            </button>
+          </div>
         </div>
       </div>
 
@@ -342,6 +393,13 @@ export function ExplorerPage() {
                     <dd className="text-sm font-black text-text-primary">{selectedFile.usage_count ?? 0}</dd>
                   </div>
                 </dl>
+                <button
+                  onClick={() => navigate('/search', { state: { query: `Summarize or explain this file: ${selectedFile.path}` } })}
+                  className="w-full mt-2 flex items-center justify-center gap-2 py-2.5 bg-primary/10 hover:bg-primary/20 text-primary rounded-xl text-sm font-bold transition-all border border-primary/20"
+                >
+                  <Bot className="w-4 h-4" />
+                  Ask AI about this file
+                </button>
               </div>
             ) : (
               <div className="text-center py-4 opacity-30">

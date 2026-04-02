@@ -382,7 +382,7 @@ class IndexingService:
         logger.info("Pipeline phase 2/3: embedding %d texts …", len(all_texts))
         progress.set_current_file(f"Phase 2/3: Embedding {len(all_texts)} texts…")
         
-        all_embeddings = await self.embedding_service.embed_texts(all_texts, batch_size=settings.embedding_batch_size)
+        all_embeddings = await self.embedding_service.embed_texts(all_texts)
 
         self._assign_embeddings(prepared, text_map, all_embeddings)
         logger.info("Pipeline phase 3/3: storing %d files …", len(prepared))
@@ -751,10 +751,32 @@ class IndexingService:
     def _create_chunks(self, text: str, file_path: str = "") -> List[Dict[str, Any]]:
         if not text: return []
         prefix = self._build_context_prefix(file_path)
-        if Path(file_path).suffix.lower() == ".md":
+        ext = Path(file_path).suffix.lower()
+        if ext == ".md":
             chunks = self._chunk_markdown(text, prefix)
             if chunks: return chunks
+            
+        code_exts = {".py", ".js", ".ts", ".rs", ".go", ".c", ".cpp", ".java", ".rb", ".swift", ".kt"}
+        if ext in code_exts:
+            chunks = self._chunk_code(text, prefix)
+            if chunks: return chunks
+            
         return self._split_text(text, prefix, 0)
+
+    def _chunk_code(self, text: str, prefix: str) -> List[Dict[str, Any]]:
+        import re
+        # Split at top-level functions, classes, structs, etc.
+        sections = [s for s in re.split(r'(?=^(?:class|def|fn|function|struct|interface|impl|trait)\s)', text, flags=re.MULTILINE) if s.strip()]
+        chunks, offset = [], 0
+        for sec in sections:
+            start = text.find(sec, offset)
+            if start == -1: start = offset
+            if len(sec) <= self.chunk_size:
+                chunks.append({"start_offset": start, "end_offset": start + len(sec), "text_preview": prefix + sec.strip()})
+            else:
+                chunks.extend(self._split_text(sec, prefix, start))
+            offset = start + len(sec)
+        return chunks
 
     @staticmethod
     def _build_context_prefix(file_path: str) -> str:
@@ -762,6 +784,12 @@ class IndexingService:
         return f"[{p.suffix.lstrip('.').upper() or 'file'}: {p.name}] "
 
     def _chunk_markdown(self, text: str, prefix: str) -> List[Dict[str, Any]]:
+        if RUST_CORE_AVAILABLE:
+            try:
+                return rust_core.chunk_markdown(text, self.chunk_size, self.chunk_overlap, prefix)
+            except Exception as e:
+                logger.warning("Rust chunk_markdown failed, falling back to python: %s", e)
+                
         import re
         sections = [s for s in re.split(r'(?=^#{1,3}\s)', text, flags=re.MULTILINE) if s.strip()]
         chunks, offset = [], 0

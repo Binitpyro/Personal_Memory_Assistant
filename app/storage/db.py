@@ -81,7 +81,29 @@ class DatabaseManager:
         await self._migrate(conn)
 
     async def _migrate(self, conn: "aiosqlite.Connection") -> None:
-        """Apply safe, idempotent schema migrations."""
+        """Apply safe, idempotent schema migrations with audit tracking."""
+        # ── Migration tracking table (5.3) ──────────────────────────────
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                migration_name TEXT UNIQUE NOT NULL,
+                applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+        await conn.commit()
+
+        async def _already_applied(name: str) -> bool:
+            async with conn.execute(
+                "SELECT 1 FROM schema_migrations WHERE migration_name = ?", (name,)
+            ) as cur:
+                return await cur.fetchone() is not None
+
+        async def _mark_applied(name: str) -> None:
+            await conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations (migration_name) VALUES (?)", (name,)
+            )
+            await conn.commit()
+
         migrations = [
             ("summary", "ALTER TABLE files ADD COLUMN summary TEXT DEFAULT ''"),
             ("sha256", "ALTER TABLE files ADD COLUMN sha256 TEXT DEFAULT ''"),
@@ -91,16 +113,22 @@ class DatabaseManager:
              "ALTER TABLE chunks ADD COLUMN created_at TEXT NOT NULL DEFAULT ''"),
         ]
         for col_name, ddl in migrations:
+            if await _already_applied(col_name):
+                logger.debug("Migration '%s' already recorded — skipping.", col_name)
+                continue
             try:
                 await conn.execute(ddl)
                 await conn.commit()
-                logger.info("Migration applied: added column '%s'.", col_name)
+                await _mark_applied(col_name)
+                logger.info("Migration applied: '%s'.", col_name)
             except Exception as exc:
                 if "duplicate column" in str(exc).lower():
-                    logger.debug("Column '%s' already exists — skipping.", col_name)
+                    await _mark_applied(col_name)  # backfill tracking for pre-existing columns
+                    logger.debug("Column '%s' already exists — backfilling migration record.", col_name)
                 else:
-                    logger.error("Migration failed for column '%s': %s", col_name, exc)
+                    logger.error("Migration failed for '%s': %s", col_name, exc)
                     raise
+
 
         # Phase 6.2: Covering index for change detection (depends on sha256 column above)
         try:

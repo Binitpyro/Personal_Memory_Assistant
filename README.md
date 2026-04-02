@@ -1,4 +1,4 @@
-# 🧠 Personal Memory Assistant (PMA)
+# 🧠 Personal Memory Assistant (PMA) v0.0.62
 
 A **local-first AI-powered assistant** that indexes your personal and project files, then answers natural language questions with source-backed precision.
 

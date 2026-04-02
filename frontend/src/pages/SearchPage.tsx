@@ -1,7 +1,8 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
-import { Search, Send, Sparkles, Loader2, FileText, Clock, Trash2, User, Bot, RotateCcw } from 'lucide-react'
+import { useLocation } from 'react-router-dom'
+import { Search, Send, Sparkles, Loader2, FileText, Clock, Trash2, User, Bot, RotateCcw, Filter } from 'lucide-react'
 import { useApi, invalidateCache } from '../useApi'
-import { getQueryHistory, clearQueryHistory, subscribeQuery, type QuerySource, type QueryStreamChunk } from '../api'
+import { getQueryHistory, clearQueryHistory, subscribeQuery, getFileTree, type QuerySource, type QueryStreamChunk } from '../api'
 
 interface Message {
   role: 'user' | 'assistant'
@@ -13,16 +14,28 @@ interface Message {
 }
 
 export function SearchPage() {
+  const location = useLocation()
   const [question, setQuestion] = useState('')
   const [messages, setMessages] = useState<Message[]>([])
   const [searching, setSearching] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [showHistory, setShowHistory] = useState(false)
+  const [selectedFileType, setSelectedFileType] = useState('')
+  const [selectedFolderTag, setSelectedFolderTag] = useState('')
 
   const { data: historyData, refetch: refetchHistory } = useApi(getQueryHistory, { cacheKey: 'query-history' })
+  const { data: fileTree } = useApi(getFileTree, { cacheKey: 'files-tree', refetchInterval: 15000 })
 
   const inputRef = useRef<HTMLInputElement>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (location.state?.query) {
+      setQuestion(location.state.query)
+      // Clear state so it doesn't persist on refresh
+      window.history.replaceState({}, document.title)
+    }
+  }, [location])
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
@@ -53,7 +66,12 @@ export function SearchPage() {
     let latency = 0
     let mode: 'fast_path' | 'full_rag' = 'full_rag'
 
-    const unsubscribe = subscribeQuery({ question: userMsg, history: historyForApi }, (chunk: QueryStreamChunk) => {
+    const unsubscribe = subscribeQuery({
+      question: userMsg,
+      history: historyForApi,
+      file_type: selectedFileType || null,
+      folder_tag: selectedFolderTag || null
+    }, (chunk: QueryStreamChunk) => {
       if (chunk.type === 'error') {
         setError(chunk.text || 'Search failed')
         setSearching(false)
@@ -110,7 +128,7 @@ export function SearchPage() {
     })
 
     return unsubscribe
-  }, [question, searching, messages, refetchHistory])
+  }, [question, searching, messages, refetchHistory, selectedFileType, selectedFolderTag])
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -136,6 +154,16 @@ export function SearchPage() {
     setQuestion('')
     setError(null)
   }
+
+  const folderOptions = Object.keys(fileTree?.folders ?? {}).sort()
+  const fileTypeOptions = Array.from(
+    new Set(
+      Object.values(fileTree?.folders ?? {})
+        .flat()
+        .map(entry => entry.type)
+        .filter(Boolean)
+    )
+  ).sort()
 
   return (
     <div className="flex-1 flex flex-col h-full overflow-hidden animate-fade-in-up">
@@ -284,6 +312,45 @@ export function SearchPage() {
                 {searching ? <Loader2 className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
               </button>
             </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 px-1">
+            <span className="text-[10px] text-text-secondary font-bold uppercase tracking-widest flex items-center gap-1">
+              <Filter className="w-3 h-3" /> Quick Filters
+            </span>
+            <select
+              value={selectedFileType}
+              onChange={(e) => setSelectedFileType(e.target.value)}
+              className="text-[11px] bg-white/5 border border-white/10 rounded-lg px-2 py-1 text-text-primary"
+              disabled={searching}
+            >
+              <option value="">All file types</option>
+              {fileTypeOptions.map((ext) => (
+                <option key={ext} value={ext}>{ext}</option>
+              ))}
+            </select>
+            <select
+              value={selectedFolderTag}
+              onChange={(e) => setSelectedFolderTag(e.target.value)}
+              className="text-[11px] bg-white/5 border border-white/10 rounded-lg px-2 py-1 text-text-primary"
+              disabled={searching}
+            >
+              <option value="">All folders</option>
+              {folderOptions.map((folder) => (
+                <option key={folder} value={folder}>{folder}</option>
+              ))}
+            </select>
+            {(selectedFileType || selectedFolderTag) && (
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedFileType('')
+                  setSelectedFolderTag('')
+                }}
+                className="text-[10px] px-2 py-1 rounded-lg border border-primary/20 text-primary-light hover:bg-primary/10"
+              >
+                Clear filters
+              </button>
+            )}
           </div>
           <div className="flex items-center justify-between px-2">
             <div className="flex gap-4 text-[10px] text-text-secondary font-bold uppercase tracking-widest">

@@ -10,14 +10,30 @@ from fastapi import APIRouter, Depends, BackgroundTasks
 from fastapi.responses import JSONResponse
 
 from app.api.deps import (
-    get_db, get_emb, get_chroma, ensure_indexing
+    get_db, get_emb, get_chroma, get_llm, ensure_indexing
 )
 from app.storage.db import DatabaseManager
 from app.config import settings
+from app.project_constants import APP_VERSION
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+@router.get("/system/config")
+async def get_app_config():
+    """Public app metadata for reactive UI (model name, version, embeddings)."""
+    llm = get_llm()
+    return {
+        "app_version": APP_VERSION,
+        "embedding_model": settings.embedding_model,
+        "gemini_model": getattr(llm, "model", settings.gemini_model),
+        "gemini_max_output_tokens": settings.gemini_max_output_tokens,
+        "dev_mode": settings.dev_mode,
+        "prompt_version": "inline-v1",
+    }
+
 
 @router.get("/system/metrics")
 async def get_metrics(): 

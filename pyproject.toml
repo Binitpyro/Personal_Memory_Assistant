@@ -1,6 +1,6 @@
 [project]
 name = "personal-memory-assistant"
-version = "0.0.55"
+version = "0.0.62"
 description = "A local-first Personal Memory Assistant with hybrid RAG search"
 requires-python = ">=3.11"
 license = {text = "MIT"}
@@ -22,6 +22,9 @@ dependencies = [
     "python-docx>=1.1.0",
     "tenacity>=8.2.0",
     "sse-starlette>=1.6.0",
+    "slowapi>=0.1.0",
+    "google-auth>=2.0.0",
+    "google-auth-oauthlib>=1.0.0",
 ]
 
 [project.scripts]

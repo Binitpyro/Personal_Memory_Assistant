@@ -239,8 +239,8 @@ class IndexingService:
 
         pre_extracted = await self._rust_pre_extract(files_to_index)
 
-        embed_queue = asyncio.Queue(maxsize=1000)
-        store_queue = asyncio.Queue(maxsize=1000)
+        embed_queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=1000)
+        store_queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=1000)
 
         await asyncio.gather(
             self._extractor_worker(
@@ -251,7 +251,7 @@ class IndexingService:
         )
 
     async def _rust_pre_extract(self, files_to_index: list[tuple[Path, str]]) -> dict[str, str]:
-        pre_extracted = {}
+        pre_extracted: dict[str, str] = {}
         if not RUST_CORE_AVAILABLE:
             return pre_extracted
 
@@ -370,8 +370,12 @@ class IndexingService:
         except Exception:
             return
 
-    async def _embedder_worker(self, embed_queue: asyncio.Queue, store_queue: asyncio.Queue):
-        chunk_batch = []
+    async def _embedder_worker(
+        self,
+        embed_queue: asyncio.Queue[dict[str, Any] | None],
+        store_queue: asyncio.Queue[dict[str, Any] | None],
+    ):
+        chunk_batch: list[dict[str, Any]] = []
         while True:
             item = await embed_queue.get()
             if item is None:
@@ -412,9 +416,9 @@ class IndexingService:
         for idx, item in enumerate(batch_items):
             item["chunk"]["_embedding"] = all_embeddings[idx]
 
-    async def _storer_worker(self, store_queue: asyncio.Queue):
+    async def _storer_worker(self, store_queue: asyncio.Queue[dict[str, Any] | None]):
         active_files: dict[str, dict[str, Any]] = {}
-        pending_chunks = []
+        pending_chunks: list[dict[str, Any]] = []
 
         while True:
             item = await store_queue.get()

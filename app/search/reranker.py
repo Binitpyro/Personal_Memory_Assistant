@@ -20,17 +20,16 @@ def _try_init_onnx(device: str) -> tuple[str, dict | None]:
     model_kwargs = None
     if device == "cpu":
         try:
-            import onnxruntime
-            import optimum.onnxruntime
-
             # Verify that the package is actually usable to prevent deferred ImportErrors
-            from optimum.onnxruntime import ORTModelForFeatureExtraction
+            import onnxruntime as _ort  # noqa: F401
+            import optimum.onnxruntime as _opt_ort  # noqa: F401
+            from optimum.onnxruntime import ORTModelForFeatureExtraction as _ORTModel  # noqa: F401
 
             backend = "onnx"
             # Reranker typically uses onnx/model.onnx if O4 is missing,
             # but we check if we can specify a file.
             model_kwargs = {"file_name": "onnx/model.onnx"}
-            logger.info("ONNX verified for Reranker — accelerating CPU inference.")
+            logger.info("ONNX verified for Reranker - accelerating CPU inference.")
         except (ImportError, AttributeError, Exception) as e:
             logger.debug("ONNX initialization skipped (backend fallback to torch): %s", e)
             pass
@@ -62,7 +61,8 @@ def _get_model() -> CrossEncoder:
                         )
                     except TypeError:
                         logger.warning(
-                            "ONNX backend not supported by this sentence-transformers version. Falling back."
+                            "ONNX backend not supported by this sentence-transformers "
+                            "version. Falling back."
                         )
                         _reranker = CrossEncoder(_MODEL_NAME, max_length=512, device=device)
                 else:
@@ -141,7 +141,7 @@ async def rerank(
         lambda: model.predict(pairs, show_progress_bar=False).tolist(),
     )
 
-    for item, score in zip(candidates, scores):
+    for item, score in zip(candidates, scores, strict=False):
         item["rerank_score"] = round(float(score), 6)
 
     ranked = sorted(candidates, key=lambda x: x["rerank_score"], reverse=True)

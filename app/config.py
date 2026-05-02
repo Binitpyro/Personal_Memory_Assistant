@@ -11,7 +11,7 @@ def _get_extensions_set(raw: str) -> set[str]:
 
 
 class Settings(BaseSettings):
-    """Application-wide settings – single source of truth."""
+    """Application-wide settings - single source of truth."""
 
     host: str = "127.0.0.1"
     port: int = 8000

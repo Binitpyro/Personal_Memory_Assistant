@@ -1,6 +1,7 @@
 import ctypes
 import ctypes.wintypes as wintypes
 import logging
+import platform as _platform
 import struct
 import time
 from collections import defaultdict
@@ -21,8 +22,6 @@ NTFS_ROOT_REF = 5
 
 _MFT_BUF_SIZE = 128 * 1024  # 128 KB
 _ERROR_HANDLE_EOF = 38  # Win32 ERROR_HANDLE_EOF
-
-import platform as _platform
 
 if _platform.system() == "Windows":
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)

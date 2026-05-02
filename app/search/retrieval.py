@@ -117,9 +117,9 @@ async def _get_metadata_insights(
     ]
 
     if intent["inventory"] and file_stats:
-        lines.append(
-            f"Total indexed files: {file_stats['total_files']}. Total size: ~{file_stats['total_size_mb']} MB."
-        )
+        file_count = file_stats["total_files"]
+        size_mb = file_stats["total_size_mb"]
+        lines.append(f"Total indexed files: {file_count}. Total size: ~{size_mb} MB.")
         append_inventory_type_lines(lines, file_stats)
 
     if intent["unreal"] and unreal_facts:
@@ -146,9 +146,10 @@ def _build_fast_answer(
     intent = plan.intents
 
     # Very specific fast paths
-    if plan.mode == PlanMode.FAST_METADATA:
-        if file_stats:
-            return f"You currently have {file_stats['total_files']} indexed files taking up a total of {file_stats['total_size_mb']} MB."
+    if plan.mode == PlanMode.FAST_METADATA and file_stats:
+        f_count = file_stats["total_files"]
+        s_mb = file_stats["total_size_mb"]
+        return f"You currently have {f_count} indexed files taking up a total of {s_mb} MB."
 
     if plan.mode == PlanMode.FAST_PROJECT and unreal_facts and intent["unreal"]:
         lines = ["Here is your Unreal project summary:"]
@@ -193,7 +194,7 @@ async def _fts_search(
 
         params.append(2 * k)
         fts_sql = (
-            "SELECT cf.rowid, cf.chunks_text FROM chunk_fts cf "
+            "SELECT cf.rowid, cf.chunks_text FROM chunk_fts cf "  # noqa: S608
             "JOIN chunks c ON c.id = cf.rowid "
             "JOIN files f ON f.id = c.file_id "
             f"WHERE {' AND '.join(where_clauses)} "
@@ -399,7 +400,7 @@ async def hybrid_retrieve(
 
     placeholders = ",".join("?" for _ in chunk_ids_ordered)
     query_sql = (
-        f"SELECT c.id, zlib_decompress(c.text_preview) as text_preview, f.path, f.folder_tag "
+        f"SELECT c.id, zlib_decompress(c.text_preview) as text_preview, f.path, f.folder_tag "  # noqa: S608
         f"FROM chunks c JOIN files f ON c.file_id = f.id "
         f"WHERE c.id IN ({placeholders})"
     )
@@ -594,7 +595,11 @@ async def full_rag(
             answer = await llm_client.generate_answer(query, context, history=history)
         except Exception as e:
             logger.error("LLM Generation failed: %s", e)
-            answer = "I'm sorry, but I encountered an error while generating the answer. This could be due to a timeout or connection issue with the AI service. Please try again."
+            answer = (
+                "I'm sorry, but I encountered an error while generating the answer. "
+                "This could be due to a timeout or connection issue with the AI service. "
+                "Please try again."
+            )
             _llm_error = True
     llm_ms = round((time.perf_counter() - t_llm) * 1000, 1)
 
@@ -844,7 +849,7 @@ async def _get_top_relevant_profiles(lancedb_client, db, query_emb, k=2) -> str:
 
         # Fetch the actual synthesized profile text from SQLite
         placeholders = ",".join("?" for _ in tags)
-        sql = f"SELECT profile_text FROM folder_profiles WHERE folder_tag IN ({placeholders})"
+        sql = f"SELECT profile_text FROM folder_profiles WHERE folder_tag IN ({placeholders})"  # noqa: S608  # noqa: S608
         rows = await db.execute_query(sql, tuple(tags))
 
         return "\n".join(r[0] for r in rows)

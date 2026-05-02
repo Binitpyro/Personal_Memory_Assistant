@@ -195,7 +195,9 @@ def _format_snippets(
         part = f"{label}{text}\n---\n"
         part_tokens = _token_count(part)
         if used_tokens + part_tokens > remaining_tokens:
-            part = f"{label}{_truncate_to_tokens(text, max(1, remaining_tokens - used_tokens - label_tokens))}\n---\n"
+            token_budget = max(1, remaining_tokens - used_tokens - label_tokens)
+            text_truncated = _truncate_to_tokens(text, token_budget)
+            part = f"{label}{text_truncated}\n---\n"
             part_tokens = _token_count(part)
             if used_tokens + part_tokens > remaining_tokens:
                 break
@@ -293,7 +295,9 @@ def build_context(
                 top_score = deduplicated[0].get("score", 1.0)
                 if top_score > 0:
                     score_threshold = top_score * 0.2
-                    deduplicated = [r for r in deduplicated if r.get("score", 1.0) >= score_threshold]
+                    deduplicated = [
+                        r for r in deduplicated if r.get("score", 1.0) >= score_threshold
+                    ]
 
             snippet_parts = _format_snippets(deduplicated, max(0, max_tokens - used_tokens))
             context_parts.extend(snippet_parts)

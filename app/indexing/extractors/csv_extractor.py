@@ -1,7 +1,7 @@
 import csv
 import logging
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +27,7 @@ class CsvExtractor:
                         break
                     # Convert to key: value format
                     formatted_row = ", ".join(
-                        f"{h}: {v}" for h, v in zip(headers, row) if v.strip()
+                        f"{h}: {v}" for h, v in zip(headers, row, strict=False) if v.strip()
                     )
                     if formatted_row:
                         yield formatted_row

@@ -13,7 +13,6 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
 
 from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -21,7 +20,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 
+from app import state
+from app.api.auth import auth_router
+from app.api.debug import router as debug_router
+from app.api.deps import db_manager, get_db, get_emb
+from app.api.indexing import router as indexing_router
+from app.api.insights import router as insights_router
+from app.api.limiter import limiter
+from app.api.models import models_router
+from app.api.search import router as search_router
+from app.api.system import router as system_router
+from app.api.telemetry import router as telemetry_router
 from app.config import settings
 from app.project_constants import APP_VERSION
 from app.storage.db import DatabaseManager
@@ -38,11 +50,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Shared mutable state
-from app import state
-from app.state import bg_tasks as _bg_tasks
-from app.api.deps import db_manager, get_db, get_emb, get_lancedb, get_llm
-
 
 # ── Internal Helpers ──────────────────────────────────────────────────
 def _missing_frontend_response() -> HTMLResponse:
@@ -58,7 +65,8 @@ def _missing_frontend_response() -> HTMLResponse:
             "code{background:#1e293b;padding:2px 6px;border-radius:6px}</style></head>"
             "<body><main><h1>Frontend bundle not found</h1>"
             "<p>PMA could not find <code>static/react/index.html</code>.</p>"
-            "<p>Build the frontend with <code>cd frontend && npm run build</code> or run the desktop shell with <code>npm run tauri dev</code>.</p>"
+            "<p>Build the frontend with <code>cd frontend && npm run build</code> or "
+            "run the desktop shell with <code>npm run tauri dev</code>.</p>"
             "</main></body></html>"
         ),
         status_code=503,
@@ -90,7 +98,7 @@ def _log_admin_status():
             is_admin = False
 
         if is_admin:
-            logger.info("Running with Administrator privileges — NTFS MFT fast scanning enabled.")
+            logger.info("Running with Administrator privileges - NTFS MFT fast scanning enabled.")
         else:
             logger.warning(
                 "╔══════════════════════════════════════════════════════════════╗\n"
@@ -110,6 +118,7 @@ def _log_startup_info():
 
 
 # ── Lifespan & Background Tasks ───────────────────────────────────────
+
 
 @asynccontextmanager
 async def lifespan(fastapi_app: FastAPI):
@@ -214,7 +223,7 @@ async def _split_brain_sync(db_manager, lancedb_client, emb_svc):
                 if emb_svc.model is None:
                     raise RuntimeError("Embedding model not ready for back-fill.")
 
-            BACKFILL_BATCH = 5000
+            backfill_batch = 5000
             bf_offset = 0
             bf_total = 0
             while True:
@@ -224,7 +233,7 @@ async def _split_brain_sync(db_manager, lancedb_client, emb_svc):
                     "LEFT JOIN chunk_embeddings ce ON ce.chunk_id = c.id "
                     "WHERE ce.chunk_id IS NULL "
                     "LIMIT ? OFFSET ?",
-                    (BACKFILL_BATCH, bf_offset),
+                    (backfill_batch, bf_offset),
                 ) as cur:
                     rows = await cur.fetchall()
                 if not rows:
@@ -236,12 +245,12 @@ async def _split_brain_sync(db_manager, lancedb_client, emb_svc):
                 )
                 blob_data = [
                     (chunk_id, np.array(emb, dtype=np.float16).tobytes())
-                    for chunk_id, emb in zip(ids_batch, embeddings)
+                    for chunk_id, emb in zip(ids_batch, embeddings, strict=False)
                 ]
                 await db_manager.insert_chunk_embeddings_bulk(blob_data)
                 bf_total += len(blob_data)
-                bf_offset += BACKFILL_BATCH
-                if len(rows) < BACKFILL_BATCH:
+                bf_offset += backfill_batch
+                if len(rows) < backfill_batch:
                     break
             logger.info("Split-brain back-fill complete.")
 
@@ -249,13 +258,13 @@ async def _split_brain_sync(db_manager, lancedb_client, emb_svc):
         max_ldb_id = await loop.run_in_executor(None, lancedb_client.get_max_id, "pma_chunks")
         logger.info("Split-brain: Syncing missing chunks after ID %d...", max_ldb_id)
 
-        BATCH_SIZE = 5000
+        batch_size = 5000
         last_id = max_ldb_id
         total_synced = 0
 
         while True:
             sqlite_data = await db_manager.get_all_chunk_data_for_sync(
-                limit=BATCH_SIZE, last_id=last_id
+                limit=batch_size, last_id=last_id
             )
             if not sqlite_data:
                 break
@@ -274,7 +283,7 @@ async def _split_brain_sync(db_manager, lancedb_client, emb_svc):
             total_synced += len(sqlite_data)
             last_id = max(int(row["chunk_id"]) for row in sqlite_data)
 
-            if len(sqlite_data) < BATCH_SIZE:
+            if len(sqlite_data) < batch_size:
                 break
 
         state.split_brain_sync_status = "done"
@@ -304,9 +313,8 @@ async def _bg_auto_vacuum(db_manager):
         if db_size < 500 * 1024 * 1024:
             return
         marker = Path("data/.last_vacuum")
-        if marker.exists():
-            if (time.time() - marker.stat().st_mtime) / 86400 < 7:
-                return
+        if marker.exists() and (time.time() - marker.stat().st_mtime) / 86400 < 7:
+            return
         logger.info("Auto-vacuum: running background VACUUM…")
         await db_manager.vacuum()
         marker.parent.mkdir(parents=True, exist_ok=True)
@@ -321,10 +329,6 @@ async def _bg_auto_vacuum(db_manager):
 app = FastAPI(title="Personal Memory Assistant", lifespan=lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=500)
 app.mount("/static", StaticFiles(directory=str(_BASE_DIR / "static")), name="static")
-
-from slowapi import _rate_limit_exceeded_handler
-from slowapi.errors import RateLimitExceeded
-from app.api.limiter import limiter
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
@@ -347,21 +351,18 @@ app.add_middleware(
 async def security_and_telemetry_middleware(request: Request, call_next):
     # 1. Enforce Local Access Token if running in desktop mode
     expected_token = os.environ.get("X_LOCAL_ACCESS_TOKEN")
-    if expected_token and request.url.path.startswith("/api/"):
-        if request.method != "OPTIONS":
-            provided_token = request.headers.get("X-Local-Access-Token")
-            if not provided_token:
-                provided_token = request.query_params.get("token")
+    if expected_token and request.url.path.startswith("/api/") and request.method != "OPTIONS":
+        provided_token = request.headers.get("X-Local-Access-Token")
+        if not provided_token:
+            provided_token = request.query_params.get("token")
 
-            if not provided_token or not secrets.compare_digest(provided_token, expected_token):
-                return JSONResponse(
-                    status_code=401, content={"error": "Unauthorized local access."}
-                )
+        if not provided_token or not secrets.compare_digest(provided_token, expected_token):
+            return JSONResponse(status_code=401, content={"error": "Unauthorized local access."})
 
     # 2. Telemetry and Security Headers
     request_id = str(uuid.uuid4())[:8]
     request.state.request_id = request_id
-    
+
     t0 = time.perf_counter()
     response = await call_next(request)
     elapsed_ms = (time.perf_counter() - t0) * 1000
@@ -392,15 +393,6 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 
 api_router = APIRouter()
-
-from app.api.auth import auth_router
-from app.api.debug import router as debug_router
-from app.api.indexing import router as indexing_router
-from app.api.insights import router as insights_router
-from app.api.models import models_router
-from app.api.search import router as search_router
-from app.api.system import router as system_router
-from app.api.telemetry import router as telemetry_router
 
 api_router.include_router(auth_router)
 api_router.include_router(models_router)

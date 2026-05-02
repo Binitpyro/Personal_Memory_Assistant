@@ -1,12 +1,11 @@
 import logging
 import re
 from dataclasses import dataclass, field
+from enum import Enum
 
 from app.project_constants import determine_query_intent
 
 logger = logging.getLogger(__name__)
-
-from enum import Enum
 
 
 class PlanMode(Enum):

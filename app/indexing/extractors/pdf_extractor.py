@@ -1,6 +1,6 @@
 import logging
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +17,10 @@ class PdfExtractor:
             reader = PdfReader(str(path))
             total = 0
             if reader.is_encrypted:
-                yield f"[ENCRYPTED PDF: {path.name}] Cannot extract text from password-protected file."
+                yield (
+                    f"[ENCRYPTED PDF: {path.name}] "
+                    "Cannot extract text from password-protected file."
+                )
                 return
 
             for page in reader.pages:

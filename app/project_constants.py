@@ -1,5 +1,8 @@
+import logging
 import re
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 def _get_app_version() -> str:
@@ -8,6 +11,7 @@ def _get_app_version() -> str:
 
         return version("personal-memory-assistant")
     except Exception:
+        logger.debug("importlib.metadata version lookup failed.", exc_info=True)
         pass
 
     try:
@@ -19,6 +23,7 @@ def _get_app_version() -> str:
                 data = tomllib.load(f)
                 return data.get("project", {}).get("version", "0.0.55")
     except Exception:
+        logger.debug("Fallback pyproject.toml version lookup failed.", exc_info=True)
         pass
 
     return "0.0.55"
@@ -53,7 +58,8 @@ FTS5_OPERATOR_RE = re.compile(r'["*^]|\bAND\b|\bOR\b|\bNOT\b|\bNEAR\b', re.IGNOR
 def is_metadata_intent(query: str) -> bool:
     return bool(
         re.search(
-            r"\b(project summary|summary of project|unreal project overview|unreal summary|show project summary|project overview)\b",
+            r"\b(project summary|summary of project|unreal project overview|"
+            r"unreal summary|show project summary|project overview)\b",
             query.lower(),
         )
     )

@@ -60,6 +60,7 @@ def get_drive_fs_type(drive_letter: str) -> str:
         if result:
             return file_system_name_buffer.value
     except Exception:
+        logger.debug("Failed to detect Windows file system name.", exc_info=True)
         pass
     return "Unknown"
 

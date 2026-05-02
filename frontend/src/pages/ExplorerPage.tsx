@@ -21,6 +21,8 @@ interface TreeNode {
 
 /* ── Recursive Node Component ───────────────────────────── */
 
+const MAX_VISIBLE_FILES = 100;
+
 interface FolderNodeProps {
   readonly node: TreeNode
   readonly depth: number
@@ -38,6 +40,10 @@ function FolderNode({ node, depth, onSelect, selectedPath, onDeleteFolder }: Fol
       onDeleteFolder(node.fullPath)
     }
   }
+
+  const sortedFiles = useMemo(() => [...node.files].sort((a, b) => b.size - a.size), [node.files]);
+  const visibleFiles = sortedFiles.slice(0, MAX_VISIBLE_FILES);
+  const remainingFiles = sortedFiles.length - MAX_VISIBLE_FILES;
 
   return (
     <div className="select-none">
@@ -79,9 +85,7 @@ function FolderNode({ node, depth, onSelect, selectedPath, onDeleteFolder }: Fol
               ))
             }
 
-            {[...node.files]
-              .sort((a, b) => b.size - a.size)
-              .map((f) => {
+            {visibleFiles.map((f) => {
                 const fileName = f.path.split(/[\\/]/).pop() ?? f.path
                 const isSelected = f.path === selectedPath
                 return (
@@ -98,6 +102,13 @@ function FolderNode({ node, depth, onSelect, selectedPath, onDeleteFolder }: Fol
                 )
               })
             }
+
+            {remainingFiles > 0 && (
+              <div className="px-6 py-2 text-[10px] italic text-text-secondary opacity-50 flex items-center gap-2">
+                <span className="w-1 h-1 rounded-full bg-text-secondary"></span>
+                {remainingFiles} more files in this folder
+              </div>
+            )}
           </div>
         )
       }
@@ -240,6 +251,54 @@ export function ExplorerPage() {
 
   const isEmptyTree = !hierarchicalTree || hierarchicalTree.length === 0;
 
+  const renderMainContent = () => {
+    if (loading) {
+      return (
+        <div className="flex-1 flex items-center justify-center">
+          <Loader2 className="w-12 h-12 text-primary animate-spin" />
+        </div>
+      )
+    }
+
+    if (isEmptyTree) {
+      return (
+        <div className="flex-1 flex items-center justify-center text-text-secondary text-lg">
+          No indexed data. Go to Library to add folders.
+        </div>
+      )
+    }
+
+    return (
+      <div className="flex-1 flex flex-col overflow-hidden">
+        {viewMode === 'tree' ? (
+          <div className="p-4 space-y-1 overflow-y-auto flex-1 custom-scrollbar">
+            {hierarchicalTree.map((root) => (
+              <FolderNode
+                key={root.fullPath}
+                node={root}
+                depth={0}
+                onSelect={setSelectedFile}
+                selectedPath={selectedFile?.path ?? null}
+                onDeleteFolder={handleDeleteFolder}
+              />
+            ))}
+          </div>
+        ) : (
+          <div className="flex-1 p-2 flex flex-col min-h-0">
+            <FileTypeTreemap
+              allFiles={tree!.folders}
+              onFileSelect={setSelectedFile}
+              onDeleteFolder={handleDeleteFolder}
+              activeFilter={activeExtension}
+              onFilterChange={setActiveExtension}
+              initialMode="folder"
+            />
+          </div>
+        )}
+      </div>
+    )
+  }
+
   return (
     <div className="flex flex-col h-full p-6 animate-fade-in-up overflow-hidden">
       {/* Header */}
@@ -264,6 +323,7 @@ export function ExplorerPage() {
             <Search className="w-4 h-4 text-text-secondary absolute left-3 top-1/2 -translate-y-1/2 opacity-50" />
             <input
               type="text"
+              aria-label="Filter indexed files by path or name"
               placeholder="Filter files..."
               value={searchQuery}
               onChange={e => setSearchQuery(e.target.value)}
@@ -272,6 +332,7 @@ export function ExplorerPage() {
           </div>
           <button
             onClick={handleExportCSV}
+            aria-label="Export file list to CSV format"
             className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold text-text-secondary hover:text-text-primary hover:bg-black/5 border border-black/5 transition-all shadow-sm"
           >
             <Download className="w-4 h-4" /> CSV
@@ -299,48 +360,7 @@ export function ExplorerPage() {
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 flex-1 min-h-0">
         {/* Main View Area */}
         <div className="glass-card lg:col-span-8 flex flex-col overflow-hidden p-0">
-          {loading ? (
-            <div className="flex-1 flex items-center justify-center">
-              <Loader2 className="w-12 h-12 text-primary animate-spin" />
-            </div>
-          ) : isEmptyTree ? (
-            <div className="flex-1 flex items-center justify-center text-text-secondary text-lg">
-              No indexed data. Go to Library to add folders.
-            </div>
-          ) : (
-            <div className="flex-1 flex flex-col overflow-hidden">
-              {(() => {
-                if (viewMode === 'tree') {
-                  return (
-                    <div className="p-4 space-y-1 overflow-y-auto flex-1 custom-scrollbar">
-                      {hierarchicalTree.map((root) => (
-                        <FolderNode
-                          key={root.fullPath}
-                          node={root}
-                          depth={0}
-                          onSelect={setSelectedFile}
-                          selectedPath={selectedFile?.path ?? null}
-                          onDeleteFolder={handleDeleteFolder}
-                        />
-                      ))}
-                    </div>
-                  )
-                }
-                return (
-                  <div className="flex-1 p-2 flex flex-col min-h-0">
-                    <FileTypeTreemap
-                      allFiles={tree!.folders}
-                      onFileSelect={setSelectedFile}
-                      onDeleteFolder={handleDeleteFolder}
-                      activeFilter={activeExtension}
-                      onFilterChange={setActiveExtension}
-                      initialMode="folder"
-                    />
-                  </div>
-                )
-              })()}
-            </div>
-          )}
+          {renderMainContent()}
         </div>
 
         {/* Sidebar */}

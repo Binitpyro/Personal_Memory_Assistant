@@ -1,17 +1,18 @@
 import asyncio
 import time
-import os
-import gc
+
 from playwright.async_api import async_playwright
 
 # Ensure we're targeting the correct local endpoint mapped from Vite
 VITE_URL = "http://localhost:5173"
+
 
 async def generate_mock_db(size: int):
     # Generates a pseudo 4M target
     print(f"[{time.strftime('%X')}] Generating {size} mock files in memory...")
     # Typically this calls into the rust_core extensions to populate 4M files in < 2 seconds
     pass
+
 
 async def run_benchmark():
     print("=" * 50)
@@ -20,10 +21,10 @@ async def run_benchmark():
 
     # Target parameters
     target_count = 4_000_000
-    target_fps_threshold = 72.0 # 13.8ms max frame time
-    
+    target_fps_threshold = 72.0  # 13.8ms max frame time
+
     await generate_mock_db(target_count)
-    
+
     # Run Playwright to gauge FPS
     async with async_playwright() as p:
         print(f"[{time.strftime('%X')}] Launching Headless Chromium (GPU Enabled)...")
@@ -35,23 +36,23 @@ async def run_benchmark():
                 "--hide-scrollbars",
                 "--mute-audio",
                 "--disable-frame-rate-limit",
-                "--disable-gpu-vsync"
-            ]
+                "--disable-gpu-vsync",
+            ],
         )
-        
+
         context = await browser.new_context()
         page = await context.new_page()
-        
+
         print(f"[{time.strftime('%X')}] Loading Localhost ...")
-        
+
         try:
             await page.goto(VITE_URL, wait_until="networkidle")
-        except Exception as e:
+        except Exception:
             print(f"❌ Failed to reach Vite dev server at {VITE_URL}.")
             print("Ensure `npm run dev` is active.")
             await browser.close()
             return
-            
+
         # Inject synthetic 4M node Float32Array directly into the Window context to bypass offline API
         print(f"[{time.strftime('%X')}] Synthesizing 4M nodes inside WebGPU context...")
         await page.evaluate("""
@@ -121,22 +122,25 @@ async def run_benchmark():
                 requestAnimationFrame(tick);
             })
         """)
-        
+
         print("\n" + "-" * 30)
-        print(f"🎯 BENCHMARK RESULTS")
+        print("🎯 BENCHMARK RESULTS")
         print("-" * 30)
         print(f"Nodes Rendered  : {target_count:,}")
         print(f"Average FPS     : {fps_metrics:.2f}")
         print(f"Target          : > {target_fps_threshold} FPS")
         print("-" * 30 + "\n")
-        
+
         if fps_metrics >= target_fps_threshold:
             print("✅ TEST PASSED: WebGPU OIT effectively matching native hardware refresh rates.")
         else:
-            print(f"⚠️ TEST WARNING: Framerate ({fps_metrics:.2f}) dropped below threshold ({target_fps_threshold}).")
+            print(
+                f"⚠️ TEST WARNING: Framerate ({fps_metrics:.2f}) dropped below threshold ({target_fps_threshold})."
+            )
             print("Potential bottlenecks: LBVH sorting passes or Workgroup size.")
-            
+
         await browser.close()
+
 
 if __name__ == "__main__":
     try:

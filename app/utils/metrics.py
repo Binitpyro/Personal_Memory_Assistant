@@ -1,17 +1,17 @@
-import math
-import time
 import logging
+import math
 import threading
+import time
 from collections import deque
-from typing import Dict, List, Any
 
 logger = logging.getLogger(__name__)
 
+
 class LatencyTracker:
     """Lightweight in-memory tracker for stage-level latencies."""
-    
+
     def __init__(self, window_size: int = 100):
-        self._history: Dict[str, deque] = {}
+        self._history: dict[str, deque] = {}
         self._window_size = window_size
         self._lock = threading.Lock()
 
@@ -21,7 +21,7 @@ class LatencyTracker:
                 self._history[stage] = deque(maxlen=self._window_size)
             self._history[stage].append(duration_ms)
 
-    def get_stats(self) -> Dict[str, Dict[str, float]]:
+    def get_stats(self) -> dict[str, dict[str, float]]:
         stats = {}
         with self._lock:
             for stage, values in self._history.items():
@@ -34,14 +34,17 @@ class LatencyTracker:
                     "p95": round(sorted_vals[max(0, math.ceil(len(sorted_vals) * 0.95) - 1)], 2),
                     "p99": round(sorted_vals[max(0, math.ceil(len(sorted_vals) * 0.99) - 1)], 2),
                     "max": round(sorted_vals[-1], 2),
-                    "count": len(sorted_vals)
+                    "count": len(sorted_vals),
                 }
         return stats
 
+
 metrics_tracker = LatencyTracker()
+
 
 class Timer:
     """Context manager for timing code blocks and recording to the tracker."""
+
     def __init__(self, stage: str):
         self.stage = stage
         self.start_time = 0.0

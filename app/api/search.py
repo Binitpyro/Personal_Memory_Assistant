@@ -1,46 +1,51 @@
 import json
 import logging
-from typing import Dict, List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.api.deps import (
-    get_db, get_emb, get_chroma, get_llm, ensure_rag
-)
-from app.storage.db import DatabaseManager
+from app.api.deps import ensure_rag, get_db, get_emb, get_lancedb, get_llm
 from app.api.limiter import limiter
+from app.storage.db import DatabaseManager
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+
 class QueryRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=2000)
-    file_type: Optional[str] = Field(None)
-    folder_tag: Optional[str] = Field(None)
-    history: Optional[List[Dict[str, str]]] = Field(None) # List of {"role": "user/assistant", "content": "..."}
+    file_type: str | None = Field(None)
+    folder_tag: str | None = Field(None)
+    history: list[dict[str, str]] | None = Field(
+        None
+    )  # List of {"role": "user/assistant", "content": "..."}
+
     @property
-    def validated_question(self) -> str: return self.question.strip()
+    def validated_question(self) -> str:
+        return self.question.strip()
+
 
 @router.post("")
 @limiter.limit("30/minute")
 async def query(
     request: Request,
-    payload: QueryRequest, 
-    background_tasks: BackgroundTasks, 
-    db: DatabaseManager = Depends(get_db), 
-    emb=Depends(get_emb), 
-    chroma=Depends(get_chroma), 
-    llm=Depends(get_llm)
+    payload: QueryRequest,
+    background_tasks: BackgroundTasks,
+    db: DatabaseManager = Depends(get_db),
+    emb=Depends(get_emb),
+    lancedb_client=Depends(get_lancedb),
+    llm=Depends(get_llm),
 ):
     q = payload.validated_question
     history = payload.history or []
     full_rag = ensure_rag()
-    
+
     try:
-        res = await full_rag(q, db, emb, chroma, llm, request.file_type, request.folder_tag, history)
+        res = await full_rag(
+            q, db, emb, lancedb_client, llm, payload.file_type, payload.folder_tag, history
+        )
 
         async def _bg_save_query():
             await db.save_query(
@@ -57,27 +62,31 @@ async def query(
         logger.exception("Query failed: %s", e)
         return JSONResponse(status_code=500, content={"error": str(e)})
 
+
 @router.post("/stream")
 async def query_stream(
-    request: QueryRequest, 
-    db: DatabaseManager = Depends(get_db), 
-    emb=Depends(get_emb), 
-    chroma=Depends(get_chroma), 
-    llm=Depends(get_llm)
+    request: QueryRequest,
+    db: DatabaseManager = Depends(get_db),
+    emb=Depends(get_emb),
+    lancedb_client=Depends(get_lancedb),
+    llm=Depends(get_llm),
 ):
     q = request.validated_question
     history = request.history or []
     from app.search.retrieval import stream_rag
-    
+
     async def stream_results():
         try:
-            async for chunk in stream_rag(q, db, emb, chroma, llm, request.file_type, request.folder_tag, history):
+            async for chunk in stream_rag(
+                q, db, emb, lancedb_client, llm, request.file_type, request.folder_tag, history
+            ):
                 yield json.dumps(chunk) + "\n"
         except Exception as e:
             logger.exception("Stream errored: %s", e)
             yield json.dumps({"type": "error", "text": str(e)}) + "\n"
-            
+
     return StreamingResponse(stream_results(), media_type="application/x-ndjson")
+
 
 @router.get("/history")
 async def query_history(limit: int = 20, db: DatabaseManager = Depends(get_db)):
@@ -92,6 +101,7 @@ async def query_history(limit: int = 20, db: DatabaseManager = Depends(get_db)):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
+
 @router.post("/history/clear")
 async def clear_query_history(db: DatabaseManager = Depends(get_db)):
     try:
@@ -99,19 +109,3 @@ async def clear_query_history(db: DatabaseManager = Depends(get_db)):
         return {"message": "Query history cleared"}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
-
-@router.post("/debug/query-plan")
-async def debug_query_plan(payload: QueryRequest):
-    from app.config import settings
-    if not settings.dev_mode:
-        return JSONResponse(status_code=403, content={"error": "Dev mode is disabled."})
-    
-    from app.search.planner import QueryPlanner
-    planner = QueryPlanner()
-    plan = planner.plan(payload.validated_question)
-    return {
-        "question": payload.validated_question,
-        "intents": plan.intents,
-        "keywords": plan.keywords,
-        "mode": plan.mode.value
-    }

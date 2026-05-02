@@ -1,8 +1,9 @@
 import { Outlet, NavLink, useNavigate, useLocation } from 'react-router-dom'
-import { BookOpen, Search, FolderTree, BarChart3, Brain, Settings } from 'lucide-react'
+import { BookOpen, Search, FolderTree, BarChart3, Brain, Settings, RefreshCw } from 'lucide-react'
 import { useApi } from '../useApi'
 import { getAppConfig, getHealth } from '../api'
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 
 const navItems = [
   { to: '/library', label: 'Library', icon: BookOpen },
@@ -15,8 +16,49 @@ const navItems = [
 export function AppShell() {
   const navigate = useNavigate()
   const location = useLocation()
-  const { data: health } = useApi(getHealth, { cacheKey: 'health', refetchInterval: 60_000 })
-  const { data: appConfig } = useApi(getAppConfig, { cacheKey: 'app-config', refetchInterval: 120_000 })
+  const queryClient = useQueryClient()
+
+  const isSyncing =
+    (queryClient.getQueryData<{ split_brain_sync_status?: string }>(['health'])
+      ?.split_brain_sync_status) === 'syncing'
+
+  const [isGlobalStreamActive, setIsGlobalStreamActive] = useState(false)
+  useEffect(() => {
+    const handler = (e: any) => setIsGlobalStreamActive(e.detail)
+    globalThis.addEventListener('stream-activity', handler)
+    return () => globalThis.removeEventListener('stream-activity', handler)
+  }, [])
+
+  // Poll faster while a sync is in progress so the banner dismisses quickly,
+  // but drop to a slow failsafe rate if an SSE stream is active to prevent network starvation.
+  const { data: health } = useApi(getHealth, {
+    cacheKey: 'health',
+    refetchInterval: isGlobalStreamActive ? 120_000 : (isSyncing ? 5_000 : 60_000),
+  })
+  const { data: appConfig } = useApi(getAppConfig, { 
+    cacheKey: 'app-config', 
+    refetchInterval: isGlobalStreamActive ? 120_000 : 60_000 
+  })
+
+  const syncStatus = health?.split_brain_sync_status
+
+  // P2-1: Refresh auth status when Tauri window regains focus.
+  // This handles the case where user completes Google OAuth in system browser and returns.
+  useEffect(() => {
+    let cleanup: (() => void) | undefined
+    // Only wire Tauri focus listener in the actual desktop app
+    if (typeof globalThis.window !== 'undefined' && (globalThis.window as any).__TAURI_INTERNALS__) {
+      import('@tauri-apps/api/window').then(({ getCurrentWindow }) => {
+        getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+          if (focused) {
+            queryClient.invalidateQueries({ queryKey: ['authStatus'] })
+            queryClient.invalidateQueries({ queryKey: ['health'] })
+          }
+        }).then(unlisten => { cleanup = unlisten })
+      })
+    }
+    return () => cleanup?.()
+  }, [queryClient])
 
   useEffect(() => {
     if (!localStorage.getItem('pma_setup_complete') && location.pathname !== '/setup') {
@@ -72,6 +114,23 @@ export function AppShell() {
 
       {/* ── Main Content ──────────────────────────────────── */}
       <main className="flex-1 ml-20 h-screen overflow-hidden flex flex-col">
+
+        {/* Split-Brain sync banner — only visible while the boot-time back-fill is running */}
+        {syncStatus === 'syncing' && (
+          <div className="flex items-center gap-3 px-5 py-2.5 bg-warning/10 border-b border-warning/20 text-warning text-sm animate-fade-in-up">
+            <RefreshCw className="w-4 h-4 shrink-0 animate-spin" />
+            <span>
+              <strong>Rebuilding vector index</strong> — PMA is migrating your embeddings into the local cache.
+              Semantic search will be available once this completes.
+            </span>
+          </div>
+        )}
+        {syncStatus === 'error' && (
+          <div className="flex items-center gap-3 px-5 py-2.5 bg-error/10 border-b border-error/20 text-error text-sm">
+            <span>⚠ Vector index sync failed — check backend logs. Semantic search may return incomplete results.</span>
+          </div>
+        )}
+
         <Outlet />
       </main>
     </div>

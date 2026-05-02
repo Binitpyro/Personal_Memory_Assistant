@@ -7,11 +7,12 @@ import logging
 import os
 import zlib
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import aiosqlite
 
 logger = logging.getLogger(__name__)
+
 
 def _zlib_decompress_fn(blob: Any) -> str:
     """Safe SQLite function to decompress zlib blobs, falling back to string if uncompressed."""
@@ -24,35 +25,38 @@ def _zlib_decompress_fn(blob: Any) -> str:
     except Exception:
         return str(blob)
 
+
 class DatabaseManager:
     """Manages the SQLite database connection and operations."""
 
     def __init__(self, db_path: str = "pma_metadata.db"):
         """Initializes the DatabaseManager."""
         self.db_path = db_path
-        self.conn: Optional[aiosqlite.Connection] = None
+        self.conn: aiosqlite.Connection | None = None
 
     async def connect(self) -> None:
         """Establish connection to the SQLite database."""
         if not self.conn:
             self.conn = await aiosqlite.connect(self.db_path)
             self.conn.row_factory = aiosqlite.Row
-            
+
             # Register Zlib Decompression for FTS5 queries and triggers
             await self.conn.create_function("zlib_decompress", 1, _zlib_decompress_fn)
-            
+
             await self.conn.execute("PRAGMA journal_mode = WAL;")
             await self.conn.execute("PRAGMA foreign_keys = ON;")
             await self.conn.execute("PRAGMA synchronous = NORMAL;")
             await self.conn.execute("PRAGMA busy_timeout = 5000;")
             # ── Performance PRAGMAs ──────────────────────────────────
-            await self.conn.execute("PRAGMA cache_size = -2000000;")   # 2 GB page cache
-            await self.conn.execute("PRAGMA mmap_size = 30000000000;") # 30 GB memory-mapped I/O
-            await self.conn.execute("PRAGMA temp_store = MEMORY;")   # temp tables in RAM
-            await self.conn.execute("PRAGMA page_size = 32768;")     # maximum page size for deep trees
-            await self.conn.execute("PRAGMA threads = 4;")           # allow background sorting threads
-            await self.conn.execute("PRAGMA read_uncommitted = ON;") # readers skip WAL frames
-            await self.conn.execute("PRAGMA wal_autocheckpoint = 1000;") # explicit WAL checkpoint control
+            await self.conn.execute("PRAGMA cache_size = -2000000;")  # 2 GB page cache
+            await self.conn.execute("PRAGMA mmap_size = 30000000000;")  # 30 GB memory-mapped I/O
+            await self.conn.execute("PRAGMA temp_store = MEMORY;")  # temp tables in RAM
+            await self.conn.execute("PRAGMA page_size = 32768;")  # maximum page size for deep trees
+            await self.conn.execute("PRAGMA threads = 4;")  # allow background sorting threads
+            await self.conn.execute("PRAGMA read_uncommitted = ON;")  # readers skip WAL frames
+            await self.conn.execute(
+                "PRAGMA wal_autocheckpoint = 1000;"
+            )  # explicit WAL checkpoint control
 
     def _get_conn(self) -> aiosqlite.Connection:
         """Return the active connection, raising if not connected."""
@@ -80,18 +84,7 @@ class DatabaseManager:
             raise
         await self._migrate(conn)
 
-    async def _migrate(self, conn: "aiosqlite.Connection") -> None:
-        """Apply safe, idempotent schema migrations with audit tracking."""
-        # ── Migration tracking table (5.3) ──────────────────────────────
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS schema_migrations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                migration_name TEXT UNIQUE NOT NULL,
-                applied_at TEXT NOT NULL DEFAULT (datetime('now'))
-            )
-        """)
-        await conn.commit()
-
+    async def _apply_column_migrations(self, conn: "aiosqlite.Connection") -> None:
         async def _already_applied(name: str) -> bool:
             async with conn.execute(
                 "SELECT 1 FROM schema_migrations WHERE migration_name = ?", (name,)
@@ -107,14 +100,17 @@ class DatabaseManager:
         migrations = [
             ("summary", "ALTER TABLE files ADD COLUMN summary TEXT DEFAULT ''"),
             ("sha256", "ALTER TABLE files ADD COLUMN sha256 TEXT DEFAULT ''"),
-            ("files_created_at",
-             "ALTER TABLE files ADD COLUMN created_at TEXT NOT NULL DEFAULT ''"),
-            ("chunks_created_at",
-             "ALTER TABLE chunks ADD COLUMN created_at TEXT NOT NULL DEFAULT ''"),
+            (
+                "files_created_at",
+                "ALTER TABLE files ADD COLUMN created_at TEXT NOT NULL DEFAULT ''",
+            ),
+            (
+                "chunks_created_at",
+                "ALTER TABLE chunks ADD COLUMN created_at TEXT NOT NULL DEFAULT ''",
+            ),
         ]
         for col_name, ddl in migrations:
             if await _already_applied(col_name):
-                logger.debug("Migration '%s' already recorded — skipping.", col_name)
                 continue
             try:
                 await conn.execute(ddl)
@@ -123,12 +119,24 @@ class DatabaseManager:
                 logger.info("Migration applied: '%s'.", col_name)
             except Exception as exc:
                 if "duplicate column" in str(exc).lower():
-                    await _mark_applied(col_name)  # backfill tracking for pre-existing columns
-                    logger.debug("Column '%s' already exists — backfilling migration record.", col_name)
+                    await _mark_applied(col_name)
                 else:
                     logger.error("Migration failed for '%s': %s", col_name, exc)
                     raise
 
+    async def _migrate(self, conn: "aiosqlite.Connection") -> None:
+        """Apply safe, idempotent schema migrations with audit tracking."""
+        # ── Migration tracking table (5.3) ──────────────────────────────
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                migration_name TEXT UNIQUE NOT NULL,
+                applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+        await conn.commit()
+
+        await self._apply_column_migrations(conn)
 
         # Phase 6.2: Covering index for change detection (depends on sha256 column above)
         try:
@@ -136,9 +144,23 @@ class DatabaseManager:
                 "CREATE INDEX IF NOT EXISTS idx_files_change_detection "
                 "ON files(path, modified_at, sha256)"
             )
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_files_size ON files(size)")
             await conn.commit()
         except Exception:
-            pass  # Silently skip if sha256 column doesn't exist yet
+            pass  # Silently skip if column doesn't exist yet
+
+        try:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS chunk_embeddings (
+                    chunk_id INTEGER PRIMARY KEY,
+                    embedding BLOB NOT NULL,
+                    FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
+                )
+            """)
+            await conn.commit()
+            logger.debug("chunk_embeddings table ensured.")
+        except Exception as exc:
+            logger.debug("chunk_embeddings migration note: %s", exc)
 
         # Table-level migration: folder_profiles
         try:
@@ -157,8 +179,7 @@ class DatabaseManager:
                 )
             """)
             await conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_folder_profiles_tag "
-                "ON folder_profiles(folder_tag)"
+                "CREATE INDEX IF NOT EXISTS idx_folder_profiles_tag ON folder_profiles(folder_tag)"
             )
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_folder_profiles_type "
@@ -207,7 +228,9 @@ class DatabaseManager:
 
         # Phase 9.2: Rebuild chunk_fts with detail=column to save ~40% space
         try:
-            cur = await conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='chunk_fts'")
+            cur = await conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='chunk_fts'"
+            )
             row = await cur.fetchone()
             if row and "detail=column" not in row[0]:
                 # We use content="" (contentless) because the actual text is compressed
@@ -227,12 +250,15 @@ class DatabaseManager:
                     END;
                     
                     CREATE TRIGGER chunks_ad AFTER DELETE ON chunks BEGIN
-                      INSERT INTO chunk_fts(chunk_fts, rowid, chunks_text) VALUES('delete', old.id, zlib_decompress(old.text_preview));
+                      INSERT INTO chunk_fts(chunk_fts, rowid, chunks_text) 
+                      VALUES('delete', old.id, zlib_decompress(old.text_preview));
                     END;
                     
                     CREATE TRIGGER chunks_au AFTER UPDATE ON chunks BEGIN
-                      INSERT INTO chunk_fts(chunk_fts, rowid, chunks_text) VALUES('delete', old.id, zlib_decompress(old.text_preview));
-                      INSERT INTO chunk_fts(rowid, chunks_text) VALUES (new.id, zlib_decompress(new.text_preview));
+                      INSERT INTO chunk_fts(chunk_fts, rowid, chunks_text) 
+                      VALUES('delete', old.id, zlib_decompress(old.text_preview));
+                      INSERT INTO chunk_fts(rowid, chunks_text) 
+                      VALUES (new.id, zlib_decompress(new.text_preview));
                     END;
                     
                     INSERT INTO chunk_fts(rowid, chunks_text)
@@ -258,17 +284,17 @@ class DatabaseManager:
         """Compacts the database and optimizes search indexes."""
         conn = self._get_conn()
         logger.info("Starting database maintenance (FTS optimize + VACUUM)...")
-        
+
         # Optimize FTS before vacuuming to reclaim maximum space
         await self.fts_optimize()
-        
+
         await conn.execute("VACUUM")
         await conn.commit()
         logger.info("Database maintenance completed.")
 
     async def wal_checkpoint(self) -> None:
         """Force a WAL checkpoint to truncate the WAL file back to zero size.
-        
+
         Call this after a large indexing run to reclaim disk space.
         Uses TRUNCATE mode which is safe and doesn't block readers.
         """
@@ -280,34 +306,9 @@ class DatabaseManager:
         except Exception as e:
             logger.warning("WAL checkpoint failed: %s", e)
 
-    async def cleanup_stale_files(self) -> int:
-        """Remove DB records for files that no longer exist on disk.
-        
-        Returns the number of records removed.
-        This is safe to run as a background task on startup.
-        """
-        conn = self._get_conn()
-        removed = 0
-        try:
-            cur = await conn.execute("SELECT id, path FROM files")
-            rows = await cur.fetchall()
-            stale_ids = [row[0] for row in rows if not Path(row[1]).exists()]
-            if stale_ids:
-                placeholders = ",".join("?" for _ in stale_ids)
-                await conn.execute(f"DELETE FROM files WHERE id IN ({placeholders})", stale_ids)
-                await conn.execute(f"DELETE FROM chunks WHERE file_id IN ({placeholders})", stale_ids)
-                await conn.commit()
-                removed = len(stale_ids)
-                logger.info("Startup cleanup: removed %d stale file records.", removed)
-            else:
-                logger.debug("Startup cleanup: no stale files found.")
-        except Exception as e:
-            logger.warning("Stale file cleanup failed: %s", e)
-        return removed
-
     async def insert_file(
         self,
-        file_data: Dict[str, Any],
+        file_data: dict[str, Any],
         *,
         auto_commit: bool = True,
     ) -> int:
@@ -318,6 +319,8 @@ class DatabaseManager:
         conn = self._get_conn()
         file_data.setdefault("summary", "")
         file_data.setdefault("sha256", "")
+        if "type" in file_data:
+            file_data["type"] = file_data["type"].lower()
         query = """
         INSERT INTO files (path, size, modified_at, type, folder_tag, summary, sha256)
         VALUES (:path, :size, :modified_at, :type, :folder_tag, :summary, :sha256)
@@ -339,10 +342,53 @@ class DatabaseManager:
                 await conn.commit()
             return file_id
 
-    async def insert_chunk(self, chunk_data: Dict[str, Any]) -> int:
+    async def batch_insert_files(self, files_data: list[dict[str, Any]]) -> list[int]:
+        """Inserts multiple file metadata records in a single transaction."""
+        if not files_data:
+            return []
+
+        conn = self._get_conn()
+        query = """
+        INSERT INTO files (path, size, modified_at, type, folder_tag, summary, sha256)
+        VALUES (:path, :size, :modified_at, :type, :folder_tag, :summary, :sha256)
+        ON CONFLICT(path) DO UPDATE SET
+            size=excluded.size,
+            modified_at=excluded.modified_at,
+            type=excluded.type,
+            folder_tag=excluded.folder_tag,
+            summary=excluded.summary,
+            sha256=excluded.sha256
+        RETURNING id;
+        """
+        file_ids = []
+        # Normalise types to lowercase for all batch entries
+        for fd in files_data:
+            fd.setdefault("summary", "")
+            fd.setdefault("sha256", "")
+            if "type" in fd:
+                fd["type"] = fd["type"].lower()
+
+        await conn.execute("BEGIN")
+        try:
+            for fd in files_data:
+                async with conn.execute(query, fd) as cursor:
+                    row = await cursor.fetchone()
+                    if row:
+                        file_ids.append(row[0])
+            await conn.commit()
+        except Exception:
+            await conn.rollback()
+            raise
+        return file_ids
+
+    async def insert_chunk(self, chunk_data: dict[str, Any]) -> int:
         """Inserts a chunk and returns the new chunk id."""
         conn = self._get_conn()
-        compressed_text = zlib.compress(chunk_data["text_preview"].encode("utf-8")) if isinstance(chunk_data["text_preview"], str) else chunk_data["text_preview"]
+        compressed_text = (
+            zlib.compress(chunk_data["text_preview"].encode("utf-8"))
+            if isinstance(chunk_data["text_preview"], str)
+            else chunk_data["text_preview"]
+        )
         query = """
         INSERT INTO chunks (file_id, start_offset, end_offset, text_preview)
         VALUES (:file_id, :start_offset, :end_offset, :text_preview)
@@ -355,7 +401,7 @@ class DatabaseManager:
             chunk_id: int = row[0]
             return chunk_id
 
-    async def insert_chunks_bulk(self, chunks: List[Dict[str, Any]]) -> List[int]:
+    async def insert_chunks_bulk(self, chunks: list[dict[str, Any]]) -> list[int]:
         """Insert multiple chunks efficiently in a single transaction.
 
         Uses a batch INSERT approach: inserts all rows first,
@@ -372,13 +418,16 @@ class DatabaseManager:
                 "file_id": c["file_id"],
                 "start_offset": c["start_offset"],
                 "end_offset": c["end_offset"],
-                "text_preview": zlib.compress(c["text_preview"].encode("utf-8")) if isinstance(c["text_preview"], str) else c["text_preview"]
-            } for c in chunks
+                "text_preview": zlib.compress(c["text_preview"].encode("utf-8"))
+                if isinstance(c["text_preview"], str)
+                else c["text_preview"],
+            }
+            for c in chunks
         ]
 
         # For small batches, the per-row RETURNING approach is fine
         if len(insert_data) <= 20:
-            ids: List[int] = []
+            ids: list[int] = []
             for chunk in insert_data:
                 async with conn.execute(
                     "INSERT INTO chunks (file_id, start_offset, end_offset, text_preview) "
@@ -403,7 +452,7 @@ class DatabaseManager:
             # Prevent SQLITE_MAX_VARIABLE_NUMBER crashes by slicing insert_data
             MAX_ROWS_PER_QUERY = 5000
             for i in range(0, len(insert_data), MAX_ROWS_PER_QUERY):
-                batch = insert_data[i:i + MAX_ROWS_PER_QUERY]
+                batch = insert_data[i : i + MAX_ROWS_PER_QUERY]
                 await conn.executemany(
                     "INSERT INTO chunks (file_id, start_offset, end_offset, text_preview) "
                     "VALUES (:file_id, :start_offset, :end_offset, :text_preview);",
@@ -423,6 +472,55 @@ class DatabaseManager:
             await conn.rollback()
             raise
 
+    async def insert_chunk_embeddings_bulk(self, data: list[tuple[int, bytes]]) -> None:
+        """Insert multiple chunk embeddings in a single transaction."""
+        if not data:
+            return
+        conn = self._get_conn()
+        await conn.executemany(
+            "INSERT INTO chunk_embeddings (chunk_id, embedding) VALUES (?, ?) "
+            "ON CONFLICT(chunk_id) DO UPDATE SET embedding=excluded.embedding",
+            data,
+        )
+        await conn.commit()
+
+    async def get_chunk_embeddings(self, chunk_ids: list[int]) -> dict[int, bytes]:
+        """Fetch embeddings for a list of chunk IDs."""
+        if not chunk_ids:
+            return {}
+        conn = self._get_conn()
+        result = {}
+        batch_size = 900
+        for i in range(0, len(chunk_ids), batch_size):
+            batch = chunk_ids[i : i + batch_size]
+            placeholders = ",".join("?" for _ in batch)
+            query = f"SELECT chunk_id, embedding FROM chunk_embeddings WHERE chunk_id IN ({placeholders})"  # noqa: S608
+            async with conn.execute(query, batch) as cursor:
+                async for row in cursor:
+                    result[row[0]] = row[1]
+        return result
+
+    async def get_all_chunk_data_for_sync(
+        self, limit: int = 5000, last_id: int = 0
+    ) -> list[dict[str, Any]]:
+        """Fetch a batch of chunk data required to rebuild LanceDB vector cache using cursor-based pagination."""
+        conn = self._get_conn()
+        query = """
+            SELECT ce.chunk_id, ce.embedding, f.path as file_path, f.folder_tag
+            FROM chunk_embeddings ce
+            JOIN chunks c ON ce.chunk_id = c.id
+            JOIN files f ON c.file_id = f.id
+            WHERE ce.chunk_id > ?
+            ORDER BY ce.chunk_id ASC
+            LIMIT ?
+        """
+        async with conn.execute(query, (last_id, limit)) as cursor:
+            rows = await cursor.fetchall()
+            return [
+                {"chunk_id": str(r[0]), "embedding": r[1], "file_path": r[2], "folder_tag": r[3]}
+                for r in rows
+            ]
+
     async def commit(self) -> None:
         """Explicitly commits the current transaction."""
         if self.conn:
@@ -438,72 +536,73 @@ class DatabaseManager:
         if auto_commit:
             await conn.commit()
 
-    async def get_file_chunks(self, file_id: int) -> List[aiosqlite.Row]:
+    async def get_file_chunks(self, file_id: int) -> list[aiosqlite.Row]:
         """Returns all chunks for a given file id, decompressing text_preview."""
         conn = self._get_conn()
-        async with conn.execute("SELECT id, file_id, start_offset, end_offset, created_at, zlib_decompress(text_preview) as text_preview FROM chunks WHERE file_id = ?", (file_id,)) as cursor:
+        async with conn.execute(
+            "SELECT id, file_id, start_offset, end_offset, created_at, zlib_decompress(text_preview) as text_preview FROM chunks WHERE file_id = ?",
+            (file_id,),
+        ) as cursor:
             return list(await cursor.fetchall())
 
-    async def get_file_by_path(self, path: str) -> Optional[aiosqlite.Row]:
+    async def get_file_by_path(self, path: str) -> aiosqlite.Row | None:
         """Returns file metadata by path."""
         conn = self._get_conn()
         async with conn.execute("SELECT * FROM files WHERE path = ?", (path,)) as cursor:
             return await cursor.fetchone()
 
-    async def get_existing_file_ids(self, paths: List[str]) -> Dict[str, int]:
+    async def get_existing_file_ids(self, paths: list[str]) -> dict[str, int]:
         """Return {path: file_id} for every path that already exists in the DB.
 
         Used by the indexing pipeline to avoid per-file existence lookups.
         """
-        result: Dict[str, int] = {}
+        result: dict[str, int] = {}
         conn = self._get_conn()
         batch_size = 900
         for i in range(0, len(paths), batch_size):
             batch = paths[i : i + batch_size]
             placeholders = ",".join("?" for _ in batch)
-            query = f"SELECT path, id FROM files WHERE path IN ({placeholders})"
+            query = f"SELECT path, id FROM files WHERE path IN ({placeholders})"  # noqa: S608
             async with conn.execute(query, batch) as cursor:
                 async for row in cursor:
                     result[row[0]] = row[1]
         return result
 
-    async def get_files_modified_map(self, paths: List[str]) -> Dict[str, str]:
+    async def get_files_modified_map(self, paths: list[str]) -> dict[str, str]:
         """Return {path: modified_at} for every path that already exists in the DB."""
-        result: Dict[str, str] = {}
+        result: dict[str, str] = {}
         conn = self._get_conn()
         batch_size = 900
         for i in range(0, len(paths), batch_size):
             batch = paths[i : i + batch_size]
             placeholders = ",".join("?" for _ in batch)
-            query = f"SELECT path, modified_at FROM files WHERE path IN ({placeholders})"
+            query = f"SELECT path, id FROM files WHERE path IN ({placeholders})"  # noqa: S608
             async with conn.execute(query, batch) as cursor:
                 async for row in cursor:
                     result[row[0]] = row[1]
         return result
 
-    async def get_files_sha256_map(self, paths: List[str]) -> Dict[str, str]:
+    async def get_files_sha256_map(self, paths: list[str]) -> dict[str, str]:
         """Return {path: sha256} for every path that already exists in the DB."""
-        result: Dict[str, str] = {}
+        result: dict[str, str] = {}
         conn = self._get_conn()
         batch_size = 900
         for i in range(0, len(paths), batch_size):
             batch = paths[i : i + batch_size]
             placeholders = ",".join("?" for _ in batch)
-            query = f"SELECT path, sha256 FROM files WHERE path IN ({placeholders})"
+            query = f"SELECT path, id FROM files WHERE path IN ({placeholders})"  # noqa: S608
             async with conn.execute(query, batch) as cursor:
                 async for row in cursor:
                     result[row[0]] = row[1]
         return result
 
-    async def get_files_change_map(
-        self, paths: List[str]
-    ) -> Dict[str, Tuple[str, str]]:
+    async def get_files_change_map(self, paths: list[str]) -> dict[str, tuple[str, str]]:
         """Return {path: (modified_at, sha256)} in a SINGLE query.
 
         Replaces separate calls to get_files_modified_map + get_files_sha256_map
         to halve the number of DB round-trips during change detection.
         """
-        result: Dict[str, Tuple[str, str]] = {}
+        result: dict[str, tuple[str, str]] = {}
         conn = self._get_conn()
         batch_size = 900
         for i in range(0, len(paths), batch_size):
@@ -524,17 +623,17 @@ class DatabaseManager:
         )
         await conn.commit()
 
-    async def batch_increment_usage(self, file_paths: List[str]) -> None:
+    async def batch_increment_usage(self, file_paths: list[str]) -> None:
         """Increment usage_count for multiple file paths in a single transaction."""
         if not file_paths:
             return
         conn = self._get_conn()
-        counts: Dict[str, int] = {}
+        counts: dict[str, int] = {}
         for path in file_paths:
             counts[path] = counts.get(path, 0) + 1
 
         when_clauses = []
-        case_params: List[Any] = []
+        case_params: list[Any] = []
         for path, increment in counts.items():
             when_clauses.append("WHEN ? THEN usage_count + ?")
             case_params.extend([path, increment])
@@ -551,12 +650,11 @@ class DatabaseManager:
         await conn.execute(sql, tuple(case_params + in_params))
         await conn.commit()
 
-    async def get_all_files(self) -> List[aiosqlite.Row]:
+    async def get_all_files(self) -> list[aiosqlite.Row]:
         """Returns all indexed files ordered by folder and path."""
         conn = self._get_conn()
         async with conn.execute(
-            "SELECT path, size, type, folder_tag, usage_count "
-            "FROM files ORDER BY folder_tag, path"
+            "SELECT path, size, type, folder_tag, usage_count FROM files ORDER BY folder_tag, path"
         ) as cursor:
             return list(await cursor.fetchall())
 
@@ -573,23 +671,21 @@ class DatabaseManager:
                     "path": row["folder_path"],
                     "project_type": row["project_type"],
                     "file_count": row["file_count"],
-                    "size": row["total_size_bytes"]
+                    "size": row["total_size_bytes"],
                 }
-        
+
         # Then stream all files
-        async with conn.execute(
-            "SELECT path, size, type, folder_tag FROM files"
-        ) as cursor:
+        async with conn.execute("SELECT path, size, type, folder_tag FROM files") as cursor:
             async for row in cursor:
                 yield {
                     "is_folder": False,
                     "path": row["path"],
                     "size": row["size"],
                     "type": row["type"],
-                    "folder_tag": row["folder_tag"]
+                    "folder_tag": row["folder_tag"],
                 }
 
-    async def get_file_stats_summary(self) -> Dict[str, Any]:
+    async def get_file_stats_summary(self) -> dict[str, Any]:
         """Return aggregate file statistics grouped by type and folder_tag.
 
         Uses a single-pass CTE to avoid scanning the files table twice.
@@ -615,8 +711,8 @@ class DatabaseManager:
             )
         ).fetchall()
 
-        type_rows = [(r[1], r[2], r[3]) for r in rows if r[0] == 'T']
-        folder_rows = [(r[1], r[2]) for r in rows if r[0] == 'F']
+        type_rows = [(r[1], r[2], r[3]) for r in rows if r[0] == "T"]
+        folder_rows = [(r[1], r[2]) for r in rows if r[0] == "F"]
 
         total_files = sum(r[1] for r in type_rows)
         total_bytes = sum(r[2] or 0 for r in type_rows)
@@ -628,14 +724,13 @@ class DatabaseManager:
                 {"ext": r[0], "count": r[1], "size_mb": round((r[2] or 0) / (1024 * 1024), 2)}
                 for r in type_rows
             ],
-            "by_folder": [
-                {"folder": r[0] or "Unknown", "count": r[1]}
-                for r in folder_rows
-            ],
-            "database_size_bytes": os.path.getsize(self.db_path) if os.path.exists(self.db_path) else 0,
+            "by_folder": [{"folder": r[0] or "Unknown", "count": r[1]} for r in folder_rows],
+            "database_size_bytes": os.path.getsize(self.db_path)
+            if os.path.exists(self.db_path)
+            else 0,
         }
 
-    async def get_counts(self) -> Tuple[int, int]:
+    async def get_counts(self) -> tuple[int, int]:
         """Return (file_count, chunk_count) in a single public call."""
         conn = self._get_conn()
         async with conn.execute(
@@ -648,7 +743,7 @@ class DatabaseManager:
                 return 0, 0
             return row[0], row[1]
 
-    async def execute_query(self, sql: str, params: tuple = ()) -> List[Any]:
+    async def execute_query(self, sql: str, params: tuple = ()) -> list[Any]:
         """Execute a read-only SQL query and return all rows."""
         conn = self._get_conn()
         async with conn.execute(sql, params) as cursor:
@@ -674,7 +769,7 @@ class DatabaseManager:
             await conn.commit()
             return row[0] if row else 0
 
-    async def get_query_history(self, limit: int = 20) -> List[Dict[str, Any]]:
+    async def get_query_history(self, limit: int = 20) -> list[dict[str, Any]]:
         """Return recent queries from history."""
         conn = self._get_conn()
         async with conn.execute(
@@ -695,21 +790,21 @@ class DatabaseManager:
                 for r in rows
             ]
 
-    async def clear_query_history(self) -> Dict[str, str]:
+    async def clear_query_history(self) -> dict[str, str]:
         """Delete all entries from the query_history table."""
         conn = self._get_conn()
         await conn.execute("DELETE FROM query_history")
         await conn.commit()
         return {"message": "Query history cleared successfully."}
 
-    async def cleanup_stale_files(self) -> List[str]:
+    async def cleanup_stale_files(self) -> list[str]:
         """Remove index entries for files that no longer exist on disk.
 
         Returns list of paths that were cleaned up.
         """
         conn = self._get_conn()
-        cleaned: List[str] = []
-        stale_ids: List[int] = []
+        cleaned: list[str] = []
+        stale_ids: list[int] = []
         async with conn.execute("SELECT id, path FROM files") as cursor:
             rows = list(await cursor.fetchall())
         for row in rows:
@@ -727,7 +822,7 @@ class DatabaseManager:
             await conn.commit()
         return cleaned
 
-    async def clear_all(self) -> Dict[str, int]:
+    async def clear_all(self) -> dict[str, int]:
         """Delete ALL indexed data: files, chunks, FTS, and query history.
 
         Returns counts of removed files and chunks.
@@ -783,13 +878,13 @@ class DatabaseManager:
 
     async def get_files_by_filter(
         self,
-        file_type: Optional[str] = None,
-        folder_tag: Optional[str] = None,
-    ) -> List[aiosqlite.Row]:
+        file_type: str | None = None,
+        folder_tag: str | None = None,
+    ) -> list[aiosqlite.Row]:
         """Return files matching optional type/folder filters."""
         conn = self._get_conn()
-        conditions: List[str] = []
-        params: List[Any] = []
+        conditions: list[str] = []
+        params: list[Any] = []
         if file_type:
             conditions.append("type = ?")
             params.append(file_type)
@@ -820,7 +915,7 @@ class DatabaseManager:
         except Exception:
             return False
 
-    async def get_all_summaries(self) -> List[Dict[str, Any]]:
+    async def get_all_summaries(self) -> list[dict[str, Any]]:
         """Return (id, path, summary) for every file that has a non-empty summary."""
         conn = self._get_conn()
         async with conn.execute(
@@ -832,7 +927,7 @@ class DatabaseManager:
     # ── Folder profiles ───────────────────────────────────────────────
 
     async def upsert_folder_profile(
-        self, profile: Dict[str, Any], *, auto_commit: bool = True
+        self, profile: dict[str, Any], *, auto_commit: bool = True
     ) -> None:
         """Insert or update a folder profile.
 
@@ -870,7 +965,7 @@ class DatabaseManager:
         if auto_commit:
             await conn.commit()
 
-    async def get_all_folder_profiles(self) -> List[Dict[str, Any]]:
+    async def get_all_folder_profiles(self) -> list[dict[str, Any]]:
         """Return every stored folder profile."""
         conn = self._get_conn()
         async with conn.execute(
@@ -912,7 +1007,7 @@ class DatabaseManager:
         lines.append("=" * 50)
         return "\n".join(lines)
 
-    async def upsert_unreal_project_facts(self, facts: Dict[str, Any]) -> None:
+    async def upsert_unreal_project_facts(self, facts: dict[str, Any]) -> None:
         """Insert or update structured Unreal project facts."""
         conn = self._get_conn()
         await conn.execute(
@@ -956,7 +1051,7 @@ class DatabaseManager:
         )
         await conn.commit()
 
-    async def get_all_unreal_project_facts(self) -> List[Dict[str, Any]]:
+    async def get_all_unreal_project_facts(self) -> list[dict[str, Any]]:
         """Return all imported Unreal project facts."""
         conn = self._get_conn()
         async with conn.execute(

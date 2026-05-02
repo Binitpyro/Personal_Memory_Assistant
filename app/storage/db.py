@@ -147,6 +147,7 @@ class DatabaseManager:
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_files_size ON files(size)")
             await conn.commit()
         except Exception:
+            logger.debug("Failed to create covering index.", exc_info=True)
             pass  # Silently skip if column doesn't exist yet
 
         try:
@@ -240,27 +241,28 @@ class DatabaseManager:
                     DROP TRIGGER IF EXISTS chunks_ad;
                     DROP TRIGGER IF EXISTS chunks_au;
                     DROP TABLE IF EXISTS chunk_fts;
-                    
+
                     CREATE VIRTUAL TABLE chunk_fts USING fts5(
                         chunks_text, content='', detail=column
                     );
-                    
+
                     CREATE TRIGGER chunks_ai AFTER INSERT ON chunks BEGIN
-                      INSERT INTO chunk_fts(rowid, chunks_text) VALUES (new.id, zlib_decompress(new.text_preview));
-                    END;
-                    
-                    CREATE TRIGGER chunks_ad AFTER DELETE ON chunks BEGIN
-                      INSERT INTO chunk_fts(chunk_fts, rowid, chunks_text) 
-                      VALUES('delete', old.id, zlib_decompress(old.text_preview));
-                    END;
-                    
-                    CREATE TRIGGER chunks_au AFTER UPDATE ON chunks BEGIN
-                      INSERT INTO chunk_fts(chunk_fts, rowid, chunks_text) 
-                      VALUES('delete', old.id, zlib_decompress(old.text_preview));
-                      INSERT INTO chunk_fts(rowid, chunks_text) 
+                      INSERT INTO chunk_fts(rowid, chunks_text)
                       VALUES (new.id, zlib_decompress(new.text_preview));
                     END;
-                    
+
+                    CREATE TRIGGER chunks_ad AFTER DELETE ON chunks BEGIN
+                      INSERT INTO chunk_fts(chunk_fts, rowid, chunks_text)
+                      VALUES('delete', old.id, zlib_decompress(old.text_preview));
+                    END;
+
+                    CREATE TRIGGER chunks_au AFTER UPDATE ON chunks BEGIN
+                      INSERT INTO chunk_fts(chunk_fts, rowid, chunks_text)
+                      VALUES('delete', old.id, zlib_decompress(old.text_preview));
+                      INSERT INTO chunk_fts(rowid, chunks_text)
+                      VALUES (new.id, zlib_decompress(new.text_preview));
+                    END;
+
                     INSERT INTO chunk_fts(rowid, chunks_text)
                     SELECT id, zlib_decompress(text_preview) FROM chunks;
                 """)
@@ -302,7 +304,7 @@ class DatabaseManager:
         try:
             await conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             await conn.commit()
-            logger.info("WAL checkpoint completed — WAL file truncated.")
+            logger.info("WAL checkpoint completed - WAL file truncated.")
         except Exception as e:
             logger.warning("WAL checkpoint failed: %s", e)
 
@@ -450,10 +452,10 @@ class DatabaseManager:
                 start_id = (row[0] if row else 0) + 1
 
             # Prevent SQLITE_MAX_VARIABLE_NUMBER crashes by slicing insert_data
-            MAX_ROWS_PER_QUERY = 5000
-            for i in range(0, len(insert_data), MAX_ROWS_PER_QUERY):
-                batch = insert_data[i : i + MAX_ROWS_PER_QUERY]
-                await conn.executemany(
+            max_rows_per_query = 5000
+            for i in range(0, len(insert_data), max_rows_per_query):
+                batch = insert_data[i : i + max_rows_per_query]
+                await conn.execucemany(
                     "INSERT INTO chunks (file_id, start_offset, end_offset, text_preview) "
                     "VALUES (:file_id, :start_offset, :end_offset, :text_preview);",
                     batch,
@@ -494,7 +496,10 @@ class DatabaseManager:
         for i in range(0, len(chunk_ids), batch_size):
             batch = chunk_ids[i : i + batch_size]
             placeholders = ",".join("?" for _ in batch)
-            query = f"SELECT chunk_id, embedding FROM chunk_embeddings WHERE chunk_id IN ({placeholders})"  # noqa: S608
+            query = (
+                "SELECT chunk_id, embedding FROM chunk_embeddings "  # noqa: S608
+                f"WHERE chunk_id IN ({placeholders})"
+            )
             async with conn.execute(query, batch) as cursor:
                 async for row in cursor:
                     result[row[0]] = row[1]
@@ -503,7 +508,7 @@ class DatabaseManager:
     async def get_all_chunk_data_for_sync(
         self, limit: int = 5000, last_id: int = 0
     ) -> list[dict[str, Any]]:
-        """Fetch a batch of chunk data required to rebuild LanceDB vector cache using cursor-based pagination."""
+        """Fetch a batch of chunk data required to rebuild LanceDB vector cache."""
         conn = self._get_conn()
         query = """
             SELECT ce.chunk_id, ce.embedding, f.path as file_path, f.folder_tag
@@ -540,7 +545,8 @@ class DatabaseManager:
         """Returns all chunks for a given file id, decompressing text_preview."""
         conn = self._get_conn()
         async with conn.execute(
-            "SELECT id, file_id, start_offset, end_offset, created_at, zlib_decompress(text_preview) as text_preview FROM chunks WHERE file_id = ?",
+            "SELECT id, file_id, start_offset, end_offset, created_at, "
+            "zlib_decompress(text_preview) as text_preview FROM chunks WHERE file_id = ?",
             (file_id,),
         ) as cursor:
             return list(await cursor.fetchall())
@@ -608,7 +614,10 @@ class DatabaseManager:
         for i in range(0, len(paths), batch_size):
             batch = paths[i : i + batch_size]
             placeholders = ",".join("?" for _ in batch)
-            query = f"SELECT path, modified_at, COALESCE(sha256, '') FROM files WHERE path IN ({placeholders})"
+            query = (
+                f"SELECT path, modified_at, COALESCE(sha256, '') FROM files "  # noqa: S608
+                f"WHERE path IN ({placeholders})"
+            )
             async with conn.execute(query, batch) as cursor:
                 async for row in cursor:
                     result[row[0]] = (row[1], row[2])
@@ -641,7 +650,7 @@ class DatabaseManager:
         in_params = list(counts.keys())
         placeholders = ",".join("?" for _ in in_params)
         sql = (
-            "UPDATE files SET usage_count = CASE path "
+            "UPDATE files SET usage_count = CASE path "  # noqa: S608
             + " ".join(when_clauses)
             + " ELSE usage_count END WHERE path IN ("
             + placeholders
@@ -816,7 +825,7 @@ class DatabaseManager:
         if stale_ids:
             placeholders = ",".join("?" for _ in stale_ids)
             await conn.execute(
-                f"DELETE FROM files WHERE id IN ({placeholders})",
+                f"DELETE FROM files WHERE id IN ({placeholders})",  # noqa: S608
                 tuple(stale_ids),
             )
             await conn.commit()
@@ -865,10 +874,12 @@ class DatabaseManager:
               INSERT INTO chunk_fts(rowid, chunks_text) VALUES (new.id, new.text_preview);
             END;
             CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
-              INSERT INTO chunk_fts(chunk_fts, rowid, chunks_text) VALUES('delete', old.id, old.text_preview);
+              INSERT INTO chunk_fts(chunk_fts, rowid, chunks_text)
+              VALUES('delete', old.id, old.text_preview);
             END;
             CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
-              INSERT INTO chunk_fts(chunk_fts, rowid, chunks_text) VALUES('delete', old.id, old.text_preview);
+              INSERT INTO chunk_fts(chunk_fts, rowid, chunks_text)
+              VALUES('delete', old.id, old.text_preview);
               INSERT INTO chunk_fts(rowid, chunks_text) VALUES (new.id, new.text_preview);
             END;
         """)
@@ -892,7 +903,10 @@ class DatabaseManager:
             conditions.append("folder_tag = ?")
             params.append(folder_tag)
         where = " WHERE " + " AND ".join(conditions) if conditions else ""
-        sql = f"SELECT path, size, type, folder_tag, usage_count FROM files{where} ORDER BY path"
+        sql = (
+            "SELECT path, size, type, folder_tag, usage_count "  # noqa: S608
+            f"FROM files{where} ORDER BY path"
+        )
         async with conn.execute(sql, params) as cursor:
             return list(await cursor.fetchall())
 
@@ -906,7 +920,7 @@ class DatabaseManager:
         await conn.commit()
 
     async def is_healthy(self) -> bool:
-        """Quick DB health check – runs a trivial query."""
+        """Quick DB health check - runs a trivial query."""
         try:
             conn = self._get_conn()
             async with conn.execute("SELECT 1") as cursor:

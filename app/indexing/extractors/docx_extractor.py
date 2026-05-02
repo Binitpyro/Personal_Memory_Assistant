@@ -1,6 +1,6 @@
 import logging
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,10 @@ class DocxExtractor:
         except Exception as e:
             err_msg = str(e).lower()
             if "encrypted" in err_msg or "password" in err_msg:
-                yield f"[ENCRYPTED DOCX: {path.name}] Cannot extract text from password-protected file."
+                yield (
+                    f"[ENCRYPTED DOCX: {path.name}] "
+                    "Cannot extract text from password-protected file."
+                )
                 return
             logger.warning("Failed to extract DOCX %s: %s", path, e)
 

@@ -3,14 +3,13 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-# Override settings to ensure we don't accidentally write to real disk
-from app.config import settings
-
-settings.db_path = ":memory:"
-
 from app.api.deps import get_db, get_emb, get_lancedb, get_llm
+from app.config import settings
 from app.main import app
 from app.storage.db import DatabaseManager
+
+# Override settings to ensure we don't accidentally write to real disk
+settings.db_path = ":memory:"
 
 
 @pytest.fixture(scope="session")

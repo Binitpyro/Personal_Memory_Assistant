@@ -1,8 +1,6 @@
 import asyncio
-import concurrent.futures
 import hashlib
 import logging
-import os
 import threading
 from collections.abc import Iterator
 from datetime import datetime
@@ -105,13 +103,15 @@ class StreamChunker:
             raw_end = self.chunk_size
             # Use simple sentence snapping for streaming
             end = self._find_boundary(self.buffer, raw_end)
-            
+
             chunk_text = self.buffer[:end]
-            chunks.append({
-                "start_offset": self.total_offset,
-                "end_offset": self.total_offset + end,
-                "text_preview": self.prefix + chunk_text
-            })
+            chunks.append(
+                {
+                    "start_offset": self.total_offset,
+                    "end_offset": self.total_offset + end,
+                    "text_preview": self.prefix + chunk_text,
+                }
+            )
 
             # Advance
             overlap_start = max(0, end - self.chunk_overlap)
@@ -124,11 +124,13 @@ class StreamChunker:
         """Process any remaining text in the buffer."""
         chunks = []
         if self.buffer.strip():
-            chunks.append({
-                "start_offset": self.total_offset,
-                "end_offset": self.total_offset + len(self.buffer),
-                "text_preview": self.prefix + self.buffer
-            })
+            chunks.append(
+                {
+                    "start_offset": self.total_offset,
+                    "end_offset": self.total_offset + len(self.buffer),
+                    "text_preview": self.prefix + self.buffer,
+                }
+            )
         self.buffer = ""
         return chunks
 
@@ -201,21 +203,24 @@ class IndexingService:
                 progress.complete()
                 return
 
-            BATCH_SIZE = 1500
-            for i in range(0, len(files_to_index), BATCH_SIZE):
-                batch = files_to_index[i : i + BATCH_SIZE]
+            batch_size = 1500
+            for i in range(0, len(files_to_index), batch_size):
+                batch = files_to_index[i : i + batch_size]
                 await self._batch_index_pipeline(
                     batch, offset=i, total_to_index=len(files_to_index)
                 )
                 import gc
+
                 gc.collect()
 
             await self._generate_folder_profiles(all_files, unique_folders)
             from app.search.retrieval import clear_retrieval_cache
+
             clear_retrieval_cache()
 
             task = asyncio.create_task(self.db.wal_checkpoint())
             from app import state
+
             state.bg_tasks.add(task)
             task.add_done_callback(state.bg_tasks.discard)
 
@@ -297,7 +302,7 @@ class IndexingService:
         try:
             stat = await loop.run_in_executor(None, path.stat)
             sha256 = await loop.run_in_executor(None, self._calculate_sha256, path)
-            
+
             header = {
                 "type": "header",
                 "path": path,
@@ -309,19 +314,19 @@ class IndexingService:
                     "type": path.suffix.lower(),
                     "folder_tag": folder_tag,
                     "sha256": sha256,
-                }
+                },
             }
             await queue.put(header)
 
             prefix = self._build_context_prefix(str(path))
             is_structured = any(ex.can_handle(path) for ex in EXTRACTORS)
             is_large_log = path.suffix.lower() == ".log" and stat.st_size > 5 * 1024 * 1024
-            
+
             full_text_for_summary = ""
 
             if is_structured or is_large_log:
                 chunker = StreamChunker(self.chunk_size, self.chunk_overlap, prefix)
-                
+
                 def _get_stream():
                     for ex in EXTRACTORS:
                         if ex.can_handle(path):
@@ -338,7 +343,11 @@ class IndexingService:
                 for c in chunker.finalize():
                     await queue.put({"type": "chunk", "path": path, "chunk": c})
             else:
-                text = pre_text if pre_text is not None else await loop.run_in_executor(None, self._extract_text_monolithic, path)
+                text = (
+                    pre_text
+                    if pre_text is not None
+                    else await loop.run_in_executor(None, self._extract_text_monolithic, path)
+                )
                 chunks = self._create_chunks(text, file_path=str(path))
                 for c in chunks:
                     await queue.put({"type": "chunk", "path": path, "chunk": c})
@@ -368,7 +377,8 @@ class IndexingService:
             if item is None:
                 if chunk_batch:
                     await self._process_embed_stream_batch(chunk_batch)
-                    for c in chunk_batch: await store_queue.put(c)
+                    for c in chunk_batch:
+                        await store_queue.put(c)
                 await store_queue.put(None)
                 break
 
@@ -376,31 +386,36 @@ class IndexingService:
                 chunk_batch.append(item)
                 if len(chunk_batch) >= 100:
                     await self._process_embed_stream_batch(chunk_batch)
-                    for c in chunk_batch: await store_queue.put(c)
+                    for c in chunk_batch:
+                        await store_queue.put(c)
                     chunk_batch.clear()
             else:
                 # Header/Footer: Flush batch first to preserve order
                 if chunk_batch:
                     await self._process_embed_stream_batch(chunk_batch)
-                    for c in chunk_batch: await store_queue.put(c)
+                    for c in chunk_batch:
+                        await store_queue.put(c)
                     chunk_batch.clear()
                 await store_queue.put(item)
 
     async def _process_embed_stream_batch(self, batch_items: list[dict[str, Any]]):
         texts = [item["chunk"]["text_preview"] for item in batch_items]
-        if not texts: return
+        if not texts:
+            return
 
         def report_progress(batch_num, total_batches):
             progress.set_current_file(f"Phase 2/3: Embedding chunks ({batch_num}/{total_batches})…")
 
-        all_embeddings = await self.embedding_service.embed_texts(texts, progress_callback=report_progress)
+        all_embeddings = await self.embedding_service.embed_texts(
+            texts, progress_callback=report_progress
+        )
         for idx, item in enumerate(batch_items):
             item["chunk"]["_embedding"] = all_embeddings[idx]
 
     async def _storer_worker(self, store_queue: asyncio.Queue):
         active_files: dict[str, dict[str, Any]] = {}
         pending_chunks = []
-        
+
         while True:
             item = await store_queue.get()
             if item is None:
@@ -412,7 +427,11 @@ class IndexingService:
 
             if ptype == "header":
                 file_id = await self.db.batch_insert_files([item["file_data"]])
-                active_files[path_str] = {"id": file_id[0], "data": item["file_data"], "chunk_count": 0}
+                active_files[path_str] = {
+                    "id": file_id[0],
+                    "data": item["file_data"],
+                    "chunk_count": 0,
+                }
                 await self._delete_existing_chunks(file_id[0])
             elif ptype == "chunk":
                 file_info = active_files.get(path_str)
@@ -426,11 +445,15 @@ class IndexingService:
             elif ptype == "footer":
                 file_info = active_files.pop(path_str, None)
                 if file_info:
-                    await self.db.execute_write("UPDATE files SET summary = ? WHERE id = ?", (item["summary"], file_info["id"]))
+                    await self.db.execute_write(
+                        "UPDATE files SET summary = ? WHERE id = ?",
+                        (item["summary"], file_info["id"]),
+                    )
                     progress.update(file_info["chunk_count"], current_file=item["path"].name)
 
     async def _flush_pending_chunks(self, chunks: list[dict[str, Any]], active_files: dict):
-        if not chunks: return
+        if not chunks:
+            return
         import numpy as np
 
         chunk_rows = []
@@ -438,20 +461,26 @@ class IndexingService:
             row = {k: v for k, v in item["chunk"].items() if k != "_embedding"}
             row["file_id"] = item["file_id"]
             chunk_rows.append(row)
-        
+
         chunk_ids_int = await self.db.insert_chunks_bulk(chunk_rows)
 
         l_ids, l_embs, l_metas, emb_blobs = [], [], [], []
-        for chunk_id, item in zip(chunk_ids_int, chunks):
+        for chunk_id, item in zip(chunk_ids_int, chunks, strict=False):
             cid_str = str(chunk_id)
             l_ids.append(cid_str)
             l_embs.append(item["chunk"]["_embedding"])
-            l_metas.append({
-                "chunk_id": cid_str,
-                "file_path": item["path"].absolute().as_posix(),
-                "folder_tag": active_files.get(str(item["path"].absolute()), {}).get("data", {}).get("folder_tag", "")
-            })
-            emb_blobs.append((chunk_id, np.array(item["chunk"]["_embedding"], dtype=np.float16).tobytes()))
+            l_metas.append(
+                {
+                    "chunk_id": cid_str,
+                    "file_path": item["path"].absolute().as_posix(),
+                    "folder_tag": active_files.get(str(item["path"].absolute()), {})
+                    .get("data", {})
+                    .get("folder_tag", ""),
+                }
+            )
+            emb_blobs.append(
+                (chunk_id, np.array(item["chunk"]["_embedding"], dtype=np.float16).tobytes())
+            )
 
         await self.db.insert_chunk_embeddings_bulk(emb_blobs)
         await self.lancedb_client.add_documents(l_ids, l_embs, l_metas)
@@ -460,39 +489,66 @@ class IndexingService:
     async def _delete_existing_chunks(self, file_id: int) -> None:
         old_chunks = await self.db.get_file_chunks(file_id)
         old_ids = [str(chunk["id"]) for chunk in old_chunks]
-        if old_ids: await self.lancedb_client.delete_documents(old_ids)
+        if old_ids:
+            await self.lancedb_client.delete_documents(old_ids)
         await self.db.delete_file_chunks(file_id, auto_commit=False)
 
     async def _generate_folder_profiles(self, all_files, folders) -> None:
         profiles = await generate_folder_profiles_async(all_files, folders)
-        for p in profiles: await self.db.upsert_folder_profile(p, auto_commit=False)
+        for p in profiles:
+            await self.db.upsert_folder_profile(p, auto_commit=False)
         await self.db.commit()
         profile_texts = [p["profile_text"] for p in profiles]
         if profile_texts:
             embs = await self.embedding_service.embed_texts(profile_texts)
-            summaries = [{"doc_id": f"folder_profile_{p['folder_tag']}", "embedding": e, "metadata": {"file_path": p["folder_path"], "folder_tag": p["folder_tag"], "is_folder_profile": "true"}} for p, e in zip(profiles, embs)]
+            summaries = [
+                {
+                    "doc_id": f"folder_profile_{p['folder_tag']}",
+                    "embedding": e,
+                    "metadata": {
+                        "file_path": p["folder_path"],
+                        "folder_tag": p["folder_tag"],
+                        "is_folder_profile": "true",
+                    },
+                }
+                for p, e in zip(profiles, embs, strict=False)
+            ]
             await self.lancedb_client.add_summaries_batch(summaries)
 
     def _extract_text_monolithic(self, path: Path) -> str:
         ext = path.suffix.lower()
         if ext in TEXT_EXTENSIONS or ext in UNREAL_PROJECT_EXTENSIONS:
-            if self._is_binary(path): return f"[BINARY: {path.name}] content not indexed."
+            if self._is_binary(path):
+                return f"[BINARY: {path.name}] content not indexed."
             return self._extract_plain_text(path)
-        if ext in UNREAL_BINARY_EXTENSIONS: return self._extract_unreal_asset_stub(path)
+        if ext in UNREAL_BINARY_EXTENSIONS:
+            return self._extract_unreal_asset_stub(path)
         return self._extract_plain_text(path)
 
     def _extract_plain_text(self, path: Path) -> str:
-        limit = 5 * 1024 * 1024 if path.suffix.lower() in {".py", ".ts", ".js", ".rs", ".go"} else self.max_file_size
+        limit = (
+            5 * 1024 * 1024
+            if path.suffix.lower() in {".py", ".ts", ".js", ".rs", ".go"}
+            else self.max_file_size
+        )
         try:
-            with open(path, encoding="utf-8", errors="replace") as f: return f.read(limit)
-        except Exception: return ""
+            with open(path, encoding="utf-8", errors="replace") as f:
+                return f.read(limit)
+        except Exception:
+            return ""
 
-    def _scan_all_folders(self, unique_folders: list[Path]) -> tuple[list[tuple[Path, str]], str, float]:
-        if RUST_CORE_AVAILABLE: return self._scan_all_folders_rust(unique_folders)
+    def _scan_all_folders(
+        self, unique_folders: list[Path]
+    ) -> tuple[list[tuple[Path, str]], str, float]:
+        if RUST_CORE_AVAILABLE:
+            return self._scan_all_folders_rust(unique_folders)
         return self._scan_all_folders_python(unique_folders)
 
-    def _scan_all_folders_rust(self, unique_folders: list[Path]) -> tuple[list[tuple[Path, str]], str, float]:
+    def _scan_all_folders_rust(
+        self, unique_folders: list[Path]
+    ) -> tuple[list[tuple[Path, str]], str, float]:
         import time
+
         t0 = time.perf_counter()
         folder_strs = [str(f) for f in unique_folders]
         resolved_folders = [(f.resolve(), f.name) for f in unique_folders]
@@ -507,12 +563,16 @@ class IndexingService:
                         p_obj.relative_to(f_res)
                         tag = f_name
                         break
-                    except ValueError: pass
+                    except ValueError:
+                        pass
                 all_files.append((p_obj, tag))
             return all_files, "rust_jwalk", (time.perf_counter() - t0) * 1000
-        except Exception: return self._scan_all_folders_python(unique_folders)
+        except Exception:
+            return self._scan_all_folders_python(unique_folders)
 
-    def _scan_all_folders_python(self, unique_folders: list[Path]) -> tuple[list[tuple[Path, str]], str, float]:
+    def _scan_all_folders_python(
+        self, unique_folders: list[Path]
+    ) -> tuple[list[tuple[Path, str]], str, float]:
         all_files, seen_paths = [], set()
         scan_dur = 0.0
         for f in unique_folders:
@@ -525,7 +585,9 @@ class IndexingService:
                     all_files.append((fp, f.name))
         return all_files, "scandir", scan_dur
 
-    async def _detect_changes(self, all_files: list[tuple[Path, str]]) -> tuple[list[tuple[Path, str]], int, int, int]:
+    async def _detect_changes(
+        self, all_files: list[tuple[Path, str]]
+    ) -> tuple[list[tuple[Path, str]], int, int, int]:
         file_paths = [str(fp.absolute()) for fp, _ in all_files]
         change_map = await self.db.get_files_change_map(file_paths)
         to_index, skipped, new_c, changed_c = [], 0, 0, 0
@@ -534,32 +596,38 @@ class IndexingService:
                 stat = fp.stat()
                 mtime = datetime.fromtimestamp(stat.st_mtime).isoformat()
                 stored = change_map.get(str(fp.absolute()))
-                if stored and stored[0] == mtime: skipped += 1
-                elif stored: 
+                if stored and stored[0] == mtime:
+                    skipped += 1
+                elif stored:
                     changed_c += 1
                     to_index.append((fp, tag))
-                else: 
+                else:
                     new_c += 1
                     to_index.append((fp, tag))
-            except OSError: skipped += 1
+            except OSError:
+                skipped += 1
         return to_index, skipped, new_c, changed_c
 
     def _calculate_sha256(self, path: Path) -> str:
         try:
             stat = path.stat()
-            if stat.st_size > 100 * 1024 * 1024: return f"sampled_{stat.st_size}"
+            if stat.st_size > 100 * 1024 * 1024:
+                return f"sampled_{stat.st_size}"
             hasher = hashlib.sha256()
             with open(path, "rb") as f:
-                for chunk in iter(lambda: f.read(1048576), b""): hasher.update(chunk)
+                for chunk in iter(lambda: f.read(1048576), b""):
+                    hasher.update(chunk)
             return hasher.hexdigest()
-        except Exception: return ""
+        except Exception:
+            return ""
 
     def _is_binary(self, path: Path) -> bool:
         try:
             with open(path, "rb") as f:
                 chunk = f.read(8192)
                 return b"\x00" in chunk
-        except Exception: return True
+        except Exception:
+            return True
 
     @staticmethod
     def _extract_unreal_asset_stub(path: Path) -> str:
@@ -569,7 +637,8 @@ class IndexingService:
         return generate_deep_summary(text, path, max_chars)
 
     def _create_chunks(self, text: str, file_path: str = "") -> list[dict[str, Any]]:
-        if not text: return []
+        if not text:
+            return []
         prefix = self._build_context_prefix(file_path)
         return self._split_text(text, prefix, 0)
 
@@ -582,8 +651,16 @@ class IndexingService:
         chunks, start, text_len = [], 0, len(text)
         while start < text_len:
             end = min(start + self.chunk_size, text_len)
-            chunks.append({"start_offset": base_offset + start, "end_offset": base_offset + end, "text_preview": prefix + text[start:end]})
+            chunks.append(
+                {
+                    "start_offset": base_offset + start,
+                    "end_offset": base_offset + end,
+                    "text_preview": prefix + text[start:end],
+                }
+            )
             start = end - self.chunk_overlap if end < text_len else text_len
-            if start < 0: start = 0
-            if end >= text_len: break
+            if start < 0:
+                start = 0
+            if end >= text_len:
+                break
         return chunks

@@ -40,12 +40,12 @@ async def _stream_visualizer_binary_impl(extension: str | None, db: DatabaseMana
 
             for i, row in enumerate(rows):
                 # Using dict-style access since db uses Row factory
-                path = row["path"]
                 f_type = row["type"] or ".txt"
                 size = row["size"] or 0
 
                 # Deterministic spatial position (Spiral/Spherical)
-                # P10-3: Use zlib.adler32 for stable, high-speed coordinate generation (replaces MD5)
+                # P10-3: Use zlib.adler32 for stable, high-speed coordinate generation
+                # (replaces MD5)
                 # h = zlib.adler32(path.encode()) & 0xffffffff
 
                 # Golden angle spiral on a sphere-ish volume

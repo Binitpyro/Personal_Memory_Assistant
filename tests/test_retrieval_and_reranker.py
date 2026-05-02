@@ -70,10 +70,12 @@ async def test_load_query_metadata_and_gather_full_inputs(monkeypatch):
         return [{"file_path": "a.py", "text": "x", "folder_tag": "A"}]
 
     class FakeEmb:
-        async def embed_query(self, q): return [0.1] * 384
+        async def embed_query(self, q):
+            return [0.1] * 384
 
     class FakeLanceDB:
-        async def search_summaries(self, *args, **kwargs): return {"metadatas": [[]]}
+        async def search_summaries(self, *args, **kwargs):
+            return {"metadatas": [[]]}
 
     monkeypatch.setattr(retrieval, "hybrid_retrieve", fake_hybrid_retrieve)
     retrieved, out_stats, profiles_text = await retrieval._gather_full_rag_inputs(

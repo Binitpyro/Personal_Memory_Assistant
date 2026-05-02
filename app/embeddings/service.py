@@ -2,7 +2,8 @@ import asyncio
 import logging
 import threading
 from collections import OrderedDict
-from typing import TYPE_CHECKING, Callable
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -44,23 +45,24 @@ class EmbeddingService:
 
             device = "cuda" if torch.cuda.is_available() else "cpu"
 
-            # Phase 2.1: Prefer ONNX backend on CPU for ~2-3x faster inference
-            backend = "torch"  # default
             if device == "cpu":
                 try:
-                    import onnxruntime
-                    import optimum.onnxruntime
+                    # Phase 2.1: Prefer ONNX backend on CPU for ~2-3x faster inference
+                    import onnxruntime as _ort  # noqa: F401
+                    import optimum.onnxruntime as _opt_ort  # noqa: F401
 
                     backend = "onnx"
                     logger.info(
-                        "ONNX Runtime and Optimum verified — using ONNX backend for faster CPU inference."
+                        "ONNX Runtime and Optimum verified - "
+                        "using ONNX backend for faster CPU inference."
                     )
                 except ImportError as e:
                     logger.info(
-                        "ONNX backend unavailable (missing %s) — falling back to PyTorch.", str(e)
+                        "ONNX backend unavailable (missing %s) - falling back to PyTorch.",
+                        str(e),
                     )
                 except Exception as e:
-                    logger.info("ONNX initialization failed: %s — falling back to PyTorch.", str(e))
+                    logger.info("ONNX initialization failed: %s - falling back to PyTorch.", str(e))
 
             logger.info(
                 "Loading embedding model: %s on device: %s (backend: %s)",
@@ -203,9 +205,8 @@ class EmbeddingService:
         is unavailable, e.g. the split-brain back-fill path.  Uses the same
         deduplication and batching logic as the async version.
         """
-        if self.model is None:
-            if not self.wait_until_ready(timeout=60):
-                raise RuntimeError("Embedding model not ready within timeout.")
+        if self.model is None and not self.wait_until_ready(timeout=60):
+            raise RuntimeError("Embedding model not ready within timeout.")
         if self.model is None:
             raise RuntimeError("Embedding model failed to load.")
 

@@ -64,7 +64,8 @@ async def get_files_tree(db: DatabaseManager = Depends(get_db)):
         folders = {}
         total_size = 0
         for f in files:
-            # Use .get() for O(1) attribute lookup instead of 'in f.keys()' which is O(N) in some contexts.
+            # Use .get() for O(1) attribute lookup instead of 'in f.keys()'
+            # which is O(N) in some contexts.
             tag = f.get("folder_tag", "Unknown")
             if tag not in folders:
                 folders[tag] = []

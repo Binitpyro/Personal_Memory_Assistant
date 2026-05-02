@@ -32,7 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="pma",
-        description="Personal Memory Assistant – local-first RAG for your files",
+        description="Personal Memory Assistant - local-first RAG for your files",
     )
     p.add_argument("--host", default=None, help="Bind address (default: from config)")
     p.add_argument("--port", type=int, default=None, help="Port (default: from config)")

@@ -1,11 +1,14 @@
 import asyncio
+import contextlib
 import os
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi.testclient import TestClient
 
 from app.indexing.service import IndexingService
+from app.main import app
 from app.search import context_builder, retrieval
 from app.search.llm_client import LLMClient
 from app.storage.db import DatabaseManager
@@ -79,10 +82,8 @@ async def real_db():
     yield db
     await db.close()
     if os.path.exists(db_path):
-        try:
+        with contextlib.suppress(BaseException):
             os.remove(db_path)
-        except:
-            pass
 
 
 @pytest.mark.asyncio
@@ -130,14 +131,14 @@ async def test_indexing_pipeline_deep(real_db):
     try:
         q = asyncio.Queue()
         await svc._stream_extract_and_prepare(test_file, "tag", None, q)
-        
+
         header = await q.get()
         assert header["type"] == "header"
-        
+
         chunk = await q.get()
         assert chunk["type"] == "chunk"
         assert "Hello" in chunk["chunk"]["text_preview"]
-        
+
         footer = await q.get()
         assert footer["type"] == "footer"
 
@@ -170,11 +171,6 @@ async def test_indexing_folder_walking(real_db):
     ):
         await svc.index_folders(["."])
         assert mock_proc.called
-
-
-from fastapi.testclient import TestClient
-
-from app.main import app
 
 
 @pytest.fixture
@@ -216,7 +212,10 @@ async def test_full_rag_logic():
         "INSERT INTO files (path, type, size, modified_at) VALUES (?,?,?,?)",
         ("a.py", ".py", 100, "now"),
     )
-    long_text = b"This is a reasonably long chunk of text that exceeds the fifty character minimum requirement for the hybrid retriever to consider it valid."
+    long_text = (
+        b"This is a reasonably long chunk of text that exceeds the fifty character "
+        b"minimum requirement for the hybrid retriever to consider it valid."
+    )
     await db.execute_write(
         "INSERT INTO chunks (file_id, text_preview, start_offset, end_offset) VALUES (?,?,?,?)",
         (1, long_text, 0, 100),

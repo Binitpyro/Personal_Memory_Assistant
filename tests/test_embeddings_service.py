@@ -44,7 +44,7 @@ class TestIsReady:
 class TestLoadModelBackground:
     def test_starts_thread(self):
         svc = EmbeddingService("model")
-        with patch.object(svc, "load_model") as mock_load:
+        with patch.object(svc, "load_model") as _mock_load:
             svc.load_model_background()
             # Allow thread to start
             import time
@@ -55,16 +55,16 @@ class TestLoadModelBackground:
     def test_no_double_load(self):
         svc = EmbeddingService("model")
         svc._loading = True
-        with patch.object(svc, "load_model") as mock_load:
+        with patch.object(svc, "load_model") as _mock_load:
             svc.load_model_background()
-        mock_load.assert_not_called()
+        _mock_load.assert_not_called()
 
     def test_no_load_if_model_exists(self):
         svc = EmbeddingService("model")
         svc.model = MagicMock()
-        with patch.object(svc, "load_model") as mock_load:
+        with patch.object(svc, "load_model") as _mock_load:
             svc.load_model_background()
-        mock_load.assert_not_called()
+        _mock_load.assert_not_called()
 
 
 class TestEmbedQuery:

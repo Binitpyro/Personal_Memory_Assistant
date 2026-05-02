@@ -10,6 +10,7 @@ Responsibilities:
 
 import asyncio
 import concurrent.futures
+import contextlib
 import logging
 import os
 from collections import Counter
@@ -133,10 +134,8 @@ def build_folder_profile(
             key_files_list.append(fp.name)
 
     for fp, _ in folder_files:
-        try:
+        with contextlib.suppress(OSError):
             total_size += fp.stat().st_size
-        except OSError:
-            pass
 
     project_type, description = detect_project_type(folder_files, folder)
 
@@ -177,7 +176,7 @@ async def generate_folder_profiles_async(
         ]
         results = await asyncio.gather(*futs, return_exceptions=True)
 
-    for folder, res in zip(folders, results):
+    for folder, res in zip(folders, results, strict=False):
         if isinstance(res, Exception):
             logger.warning("Folder profile failed for %s: %s", folder, res)
             continue
@@ -209,7 +208,7 @@ def resolve_folder_overlaps(folders: list[str]) -> list[Path]:
                 candidate.relative_to(parent)
                 dominated = True
                 logger.info(
-                    "Folder overlap detected: '%s' is inside already-queued '%s' — skipping.",
+                    "Folder overlap detected: '%s' is inside already-queued '%s' - skipping.",
                     candidate,
                     parent,
                 )

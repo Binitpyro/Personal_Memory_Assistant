@@ -49,7 +49,8 @@ async def test_react_assets_served_correctly(client: AsyncClient):
     """Verify that assets serve files, not index.html."""
     # Just test that some asset path doesn't return 200 index.html if it doesn't exist
     response = await client.get("/static/pma.css")
-    # Even if file doesn't exist in test env, it should NOT be text/html from catch-all if it's a file path
+    # Even if file doesn't exist in test env, it should NOT be text/html
+    # from catch-all if it's a file path
     if response.status_code == 200:
         assert "text/css" in response.headers.get("content-type", "")
 

@@ -1,42 +1,18 @@
 import asyncio
+import contextlib
 import json
 import os
-import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
-
-@pytest.fixture
-def test_env_mocks(monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "fake_key")
-    monkeypatch.setitem(sys.modules, "sentence_transformers", MagicMock())
-    monkeypatch.setitem(sys.modules, "torch", MagicMock())
-    monkeypatch.setitem(sys.modules, "pdfplumber", MagicMock())
-    monkeypatch.setitem(sys.modules, "docx", MagicMock())
-
-
-@pytest.fixture
-def app_with_mocks(test_env_mocks, monkeypatch):
-    from unittest.mock import patch
-
-    with (
-        patch("app.main.lifespan", AsyncMock()),
-        patch("app.main.get_emb"),
-        patch("app.main.get_lancedb"),
-        patch("app.main.get_llm"),
-        patch("app.main.DatabaseManager"),
-    ):
-        from app.main import app, get_db
-
-        return app, get_db
-
+from fastapi.testclient import TestClient
 
 from app.embeddings.service import EmbeddingService
 from app.insights.service import InsightsService
 from app.insights.unreal_import import parse_unreal_metadata
+from app.main import app, get_db
 from app.search import retrieval
 from app.storage.db import DatabaseManager
 from app.utils.metrics import Timer
@@ -52,10 +28,8 @@ async def real_db():
     await db.init_db()
     yield db
     await db.close()
-    try:
+    with contextlib.suppress(BaseException):
         os.remove(path)
-    except:
-        pass
 
 
 @pytest.fixture
@@ -212,9 +186,6 @@ def test_unreal_and_metrics():
 
 
 # --- API ---
-from fastapi.testclient import TestClient
-
-from app.main import app, get_db
 
 
 def test_api_exhaustive(real_db, mock_emb, mock_lancedb):
@@ -239,7 +210,5 @@ async def cleanup():
     for task in asyncio.all_tasks():
         if task not in existing_tasks and task is not asyncio.current_task():
             task.cancel()
-            try:
+            with contextlib.suppress(BaseException):
                 await task
-            except:
-                pass

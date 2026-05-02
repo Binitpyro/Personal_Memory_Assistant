@@ -45,7 +45,7 @@ def _summarize_python(text: str, max_limit: int) -> str:
         functions = [
             n.name
             for n in ast.iter_child_nodes(tree)
-            if isinstance(n, ast.FunctionDef) or isinstance(n, ast.AsyncFunctionDef)
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
         ]
 
         summary_parts = []
@@ -61,7 +61,8 @@ def _summarize_python(text: str, max_limit: int) -> str:
             for node in ast.walk(tree):
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                     doc = ast.get_docstring(node)
-                    if doc: break
+                    if doc:
+                        break
 
         if doc:
             main_info += f" — {doc.splitlines()[0]}"
@@ -76,7 +77,10 @@ def _summarize_code_regex(text: str, ext: str, max_limit: int) -> str:
     patterns = {
         ".rs": r"(?:pub\s+)?(?:fn|struct|enum|trait)\s+([a-zA-Z_][a-zA-Z0-9_]*)",
         ".go": r"(?:func|type|interface)\s+([a-zA-Z_][a-zA-Z0-9_]*)",
-        ".java": r"(?:public|protected|private)?\s+(?:class|interface|enum|@interface)\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+        ".java": (
+            r"(?:public|protected|private)?\s+(?:class|interface|enum|@interface)\s+"
+            r"([a-zA-Z_][a-zA-Z0-9_]*)"
+        ),
         ".js": r"(?:export\s+)?(?:function|class)\s+([a-zA-Z_][a-zA-Z0-9_]*)",
         ".ts": r"(?:export\s+)?(?:function|class|interface|type|enum)\s+([a-zA-Z_][a-zA-Z0-9_]*)",
         ".tsx": r"(?:export\s+)?(?:function|class|interface|type|enum)\s+([a-zA-Z_][a-zA-Z0-9_]*)",
@@ -104,25 +108,24 @@ def _summarize_markdown(text: str, max_limit: int) -> str:
 
 
 def _summarize_data_format(text: str, ext: str, max_limit: int) -> str:
-    # Attempt to find top-level keys without full parse if possible, 
+    # Attempt to find top-level keys without full parse if possible,
     # but for summaries we only do small fragments anyway.
     try:
         import json
+
         import yaml
-        
-        if ext == ".json":
-            data = json.loads(text[:100000])
-        else: # yaml / toml
-            data = yaml.safe_load(text[:50000])
-            
+
+        data = json.loads(text[:100000]) if ext == ".json" else yaml.safe_load(text[:50000])
+
         if isinstance(data, dict):
             keys = list(data.keys())
             return f"Keys: {', '.join(keys[:15])} (Total {len(keys)})"
         elif isinstance(data, list):
             return f"Array: contains {len(data)} items"
     except Exception:
+        logger.debug("Data format summary failed for %s", ext, exc_info=True)
         pass
-    
+
     return text[:max_limit].replace("\n", " ").strip()
 
 
@@ -130,13 +133,14 @@ def _summarize_spreadsheet_text(text: str, max_limit: int) -> str:
     # Our XLSX extractor adds "--- Sheet: Name ---" markers
     sheets = re.findall(r"--- Sheet: (.*) ---", text)
     if sheets:
-        return f"Sheets: {', '.join(sheets[:5])}; Contents: {text[:max_limit].replace('---', '').strip()}"[:max_limit]
-    
+        content_preview = text[:max_limit].replace("---", "").strip()
+        return f"Sheets: {', '.join(sheets[:5])}; Contents: {content_preview}"[:max_limit]
+
     # For CSV, the first line is headers
     lines = text.splitlines()
     if lines:
         return f"Headers: {lines[0]}"[:max_limit]
-    
+
     return text[:max_limit].strip()
 
 
@@ -147,7 +151,7 @@ def _summarize_doc_text(text: str, max_limit: int) -> str:
         # Extract the text immediately following the slide marker as the title
         titles = []
         parts = re.split(r"--- Slide \d+ ---", text)
-        for p in parts[1:10]: # Check first 10 slides
+        for p in parts[1:10]:  # Check first 10 slides
             clean = p.strip().splitlines()
             if clean:
                 titles.append(clean[0])

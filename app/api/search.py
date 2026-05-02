@@ -78,7 +78,14 @@ async def query_stream(
     async def stream_results():
         try:
             async for chunk in stream_rag(
-                q, db, emb, lancedb_client, llm, request.file_type, request.folder_tag, history
+                query=q,
+                db=db,
+                embedding_service=emb,
+                lancedb_client=lancedb_client,
+                llm_client=llm,
+                file_type=request.file_type,
+                folder_tag=request.folder_tag,
+                history=history,
             ):
                 yield json.dumps(chunk) + "\n"
         except Exception as e:

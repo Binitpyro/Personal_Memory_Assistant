@@ -39,8 +39,13 @@ class CodeChunker:
             tree = ast.parse(text)
             lines = text.split("\n")
 
+            from typing import cast
             # Gather top level imports and assignments to prepend to chunks if possible
-            imports = [node for node in tree.body if isinstance(node, (ast.Import, ast.ImportFrom))]
+            imports = [
+                cast(ast.Import | ast.ImportFrom, node)
+                for node in tree.body
+                if isinstance(node, (ast.Import, ast.ImportFrom))
+            ]
             import_text = ""
             for node in imports:
                 start, end = getattr(node, "lineno", 1) - 1, getattr(node, "end_lineno", 1)

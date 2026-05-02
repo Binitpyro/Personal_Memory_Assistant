@@ -177,10 +177,10 @@ async def generate_folder_profiles_async(
         results = await asyncio.gather(*futs, return_exceptions=True)
 
     for folder, res in zip(folders, results, strict=False):
-        if isinstance(res, Exception):
+        if isinstance(res, (dict)):
+            profiles.append(res)
+        elif isinstance(res, Exception):
             logger.warning("Folder profile failed for %s: %s", folder, res)
-            continue
-        profiles.append(res)
 
     return profiles
 

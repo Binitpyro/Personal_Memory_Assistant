@@ -1,5 +1,6 @@
 import logging
 import time
+from typing import Any
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
@@ -61,7 +62,7 @@ async def get_files_tree(db: DatabaseManager = Depends(get_db)):
         return _file_tree_cache["data"]
     try:
         files = await db.get_all_files()
-        folders = {}
+        folders: dict[str, list[dict[str, Any]]] = {}
         total_size = 0
         for f in files:
             # Row object does not have .get()

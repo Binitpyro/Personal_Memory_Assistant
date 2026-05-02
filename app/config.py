@@ -1,3 +1,4 @@
+from pydantic import model_validator
 from pydantic_settings import BaseSettings
 
 # P1-3: Module-level cache for extensions_set to avoid repeated split/strip on each file
@@ -21,8 +22,6 @@ class Settings(BaseSettings):
 
     lancedb_mode: str = "portable"  # "portable" or "split_brain"
     lancedb_persist_dir: str = "data/lancedb"
-
-    from pydantic import model_validator
 
     @model_validator(mode="after")
     def compute_lancedb_dir(self):

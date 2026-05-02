@@ -12,7 +12,7 @@ class PptxExtractor:
     def extract_stream(self, path: Path, max_file_size: int) -> Iterator[str]:
         """Yield text from slides in a PPTX document."""
         try:
-            from pptx import Presentation
+            from pptx import Presentation  # type: ignore
 
             prs = Presentation(str(path))
             total = 0

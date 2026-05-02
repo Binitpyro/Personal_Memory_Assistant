@@ -12,7 +12,7 @@ except Exception:  # pragma: no cover - optional dependency
 _ENCODING = None
 
 
-def _get_encoding():
+def _get_encoding() -> Any:
     """Lazily initialize tokenizer encoding for token-accurate budgeting."""
     global _ENCODING
     if _ENCODING is not None:
@@ -46,7 +46,7 @@ def _truncate_to_tokens(text: str, max_tokens: int) -> str:
     token_ids = enc.encode(text)
     if len(token_ids) <= max_tokens:
         return text
-    return enc.decode(token_ids[:max_tokens]).rstrip() + "…"
+    return str(enc.decode(token_ids[:max_tokens])).rstrip() + "…"
 
 
 def _compress_text(text: str) -> str:

@@ -3,7 +3,7 @@ import logging
 import threading
 from collections import OrderedDict
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 
@@ -45,11 +45,13 @@ class EmbeddingService:
 
             device = "cuda" if torch.cuda.is_available() else "cpu"
 
+            # Phase 2.1: Prefer ONNX backend on CPU for ~2-3x faster inference
+            backend: Literal["torch", "onnx", "openvino"] = "torch"
             if device == "cpu":
                 try:
-                    # Phase 2.1: Prefer ONNX backend on CPU for ~2-3x faster inference
-                    import onnxruntime as _ort  # noqa: F401
-                    import optimum.onnxruntime as _opt_ort  # noqa: F401
+                    # Verify that the package is actually usable to prevent deferred ImportErrors
+                    import onnxruntime as _ort  # type: ignore # noqa: F401
+                    import optimum.onnxruntime as _opt_ort  # type: ignore # noqa: F401
 
                     backend = "onnx"
                     logger.info(

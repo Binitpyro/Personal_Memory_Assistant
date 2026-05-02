@@ -36,7 +36,8 @@ class InsightsService:
                 self.db.execute_query("SELECT SUM(size), COUNT(*) FROM files"),
                 self.db.execute_query("SELECT path, size FROM files ORDER BY size DESC LIMIT 10"),
                 self.db.execute_query(
-                    "SELECT path, size, usage_count FROM files ORDER BY usage_count ASC, size DESC LIMIT 15"
+                    "SELECT path, size, usage_count FROM files "
+                    "ORDER BY usage_count ASC, size DESC LIMIT 15"
                 ),
                 self.db.execute_query("SELECT type, COUNT(*), SUM(size) FROM files GROUP BY type"),
             )

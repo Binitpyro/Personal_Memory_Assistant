@@ -83,7 +83,8 @@ def _build_profile_text(facts: dict[str, Any]) -> str:
         f"Project {facts['project_name']} uses Unreal Engine {facts['engine_version']}. "
         f"Detected {facts['total_assets']} assets including {facts['map_count']} maps, "
         f"{facts['environment_assets']} environment-related assets, "
-        f"{facts['character_blueprints']} character blueprints, {facts['pawn_blueprints']} pawn blueprints, "
+        f"{facts['character_blueprints']} character blueprints, "
+        f"{facts['pawn_blueprints']} pawn blueprints, "
         f"{facts['skeletal_meshes']} skeletal meshes, {facts['material_count']} materials, "
         f"and {facts['niagara_systems']} Niagara systems."
     )

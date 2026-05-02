@@ -58,7 +58,6 @@ class TestCsvExtractor:
         assert len(result) <= 50
 
     def test_corrupt_file_returns_empty(self, tmp_path):
-        f = tmp_path / "bad.csv"
         # File that doesn't exist
         result = self.ext.extract(tmp_path / "nonexistent.csv", MAX_SIZE)
         assert result == ""
@@ -192,7 +191,8 @@ class TestXlsxExtractor:
         fake_path = tmp_path / "test.xlsx"
         fake_path.touch()
         # openpyxl is imported via `import openpyxl` inside extract().
-        # XlsxExtractor uses: import openpyxl; openpyxl.load_workbook(...); sheet.iter_rows(values_only=True)
+        # XlsxExtractor uses: import openpyxl; openpyxl.load_workbook(...);
+        # sheet.iter_rows(values_only=True)
         with patch("openpyxl.load_workbook") as mock_load:
             mock_ws = MagicMock()
             mock_ws.title = "Sheet1"

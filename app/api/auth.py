@@ -114,7 +114,8 @@ def _oauth_status_page(title: str, message: str, *, success: bool) -> HTMLRespon
       <div class="badge">{symbol}</div>
       <h1>{title}</h1>
       <p>{message}</p>
-      <p class="muted">Return to Personal Memory Assistant. The app refreshes your Google connection status when it regains focus.</p>
+      <p class="muted">Return to Personal Memory Assistant.
+         The app refreshes your Google connection status when it regains focus.</p>
       <button onclick="window.close()">Close This Tab</button>
     </main>
   </body>
@@ -124,6 +125,7 @@ def _oauth_status_page(title: str, message: str, *, success: bool) -> HTMLRespon
 
 async def get_client_config():
     """Load OAuth client config from file or env vars without blocking the event loop."""
+
     def _read():
         if CLIENT_SECRETS_FILE.exists():
             with open(CLIENT_SECRETS_FILE) as f:
@@ -159,7 +161,9 @@ async def start_oauth(request: Request):
     if not client_config:
         return _oauth_status_page(
             "Google Sign-In Unavailable",
-            "OAuth client credentials are not configured for this build. Add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET, or provide secrets/client_secret.json, then try again.",
+            "OAuth client credentials are not configured for this build. "
+            "Add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET, or provide "
+            "secrets/client_secret.json, then try again.",
             success=False,
         )
 
@@ -184,7 +188,8 @@ async def oauth_callback(request: Request):
     if not code:
         return _oauth_status_page(
             "Google Sign-In Failed",
-            "The callback did not include an authorization code. Please restart Google sign-in from PMA and try again.",
+            "The callback did not include an authorization code. "
+            "Please restart Google sign-in from PMA and try again.",
             success=False,
         )
 
@@ -224,7 +229,8 @@ async def oauth_callback(request: Request):
         logger.info("Successfully connected Google Account.")
         return _oauth_status_page(
             "Google Account Connected",
-            "Your Google account is now connected to PMA. You can close this tab and return to the app.",
+            "Your Google account is now connected to PMA. "
+            "You can close this tab and return to the app.",
             success=True,
         )
 

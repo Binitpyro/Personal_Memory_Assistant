@@ -50,13 +50,13 @@ class TestIndicatorMatches:
 class TestCollectProjectMarkers:
     def test_collects_extensions(self, tmp_path):
         files = [(tmp_path / "app.py", ".py"), (tmp_path / "README.md", ".md")]
-        exts, names, dirs = _collect_project_markers(files, tmp_path)
+        exts, _names, _dirs = _collect_project_markers(files, tmp_path)
         assert ".py" in exts
         assert ".md" in exts
 
     def test_collects_filenames(self, tmp_path):
         files = [(tmp_path / "setup.py", ".py")]
-        exts, names, dirs = _collect_project_markers(files, tmp_path)
+        _exts, names, _dirs = _collect_project_markers(files, tmp_path)
         assert "setup.py" in names
 
     def test_collects_directory(self, tmp_path):
@@ -64,7 +64,7 @@ class TestCollectProjectMarkers:
         sub.mkdir()
         (sub / "main.rs").touch()
         files = [(sub / "main.rs", ".rs")]
-        exts, names, dirs = _collect_project_markers(files, tmp_path)
+        _exts, _names, dirs = _collect_project_markers(files, tmp_path)
         assert "src" in dirs
 
 
@@ -103,11 +103,11 @@ class TestDetectProjectType:
 
     def test_unknown_project(self, tmp_path):
         files = [(tmp_path / "data.dat", ".dat")]
-        proj_type, desc = detect_project_type(files, tmp_path)
+        proj_type, _desc = detect_project_type(files, tmp_path)
         assert isinstance(proj_type, str)
 
     def test_empty_folder(self, tmp_path):
-        proj_type, desc = detect_project_type([], tmp_path)
+        proj_type, _desc = detect_project_type([], tmp_path)
         assert proj_type == "unknown"
 
 
@@ -206,7 +206,7 @@ async def test_generate_folder_profiles_async(tmp_path):
 async def test_generate_folder_profiles_async_handles_error(tmp_path):
     folder = tmp_path / "broken"
     folder.mkdir()
-    # Pass a non-existent file – profile should still be produced or skipped gracefully
+    # Pass a non-existent file - profile should still be produced or skipped gracefully
     files = [(folder / "ghost.py", ".py")]
     profiles = await generate_folder_profiles_async(files, [folder])
     assert isinstance(profiles, list)

@@ -115,15 +115,17 @@ class NTFSScanner:
 
     def _open_volume(self, volume: str) -> int:
         """Open a raw volume handle (requires admin)."""
-        return int(self._k32.CreateFileW(
-            f"\\\\.\\{volume}",
-            GENERIC_READ,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            None,
-            OPEN_EXISTING,
-            0,
-            None,
-        ))
+        return int(
+            self._k32.CreateFileW(
+                f"\\\\.\\{volume}",
+                GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                0,
+                None,
+            )
+        )
 
     def _enumerate_mft(self, handle: int) -> None:
         """

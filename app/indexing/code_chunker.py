@@ -40,6 +40,7 @@ class CodeChunker:
             lines = text.split("\n")
 
             from typing import cast
+
             # Gather top level imports and assignments to prepend to chunks if possible
             imports = [
                 cast(ast.Import | ast.ImportFrom, node)

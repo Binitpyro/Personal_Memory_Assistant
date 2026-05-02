@@ -29,7 +29,8 @@ def _read_settings() -> dict[str, Any]:
         return {}
     try:
         with open(SETTINGS_PATH, encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
     except Exception:
         return {}
 

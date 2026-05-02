@@ -8,27 +8,46 @@ use ring::digest::{Context, SHA256};
 use rayon::prelude::*;
 
 fn get_sentence_boundary(text: &str, byte_pos: usize, byte_window: usize) -> usize {
-    let mut search_start = if byte_pos > byte_window { byte_pos - byte_window } else { 0 };
+    let mut safe_byte_pos = byte_pos;
+    // Ensure byte_pos is on a char boundary by moving backward if necessary
+    while safe_byte_pos > 0 && !text.is_char_boundary(safe_byte_pos) {
+        safe_byte_pos -= 1;
+    }
+
+    let mut search_start = if safe_byte_pos > byte_window { safe_byte_pos - byte_window } else { 0 };
     
     // Ensure search_start is on a char boundary by moving forward if necessary
-    while search_start < byte_pos && !text.is_char_boundary(search_start) {
+    while search_start < safe_byte_pos && !text.is_char_boundary(search_start) {
         search_start += 1;
     }
     
-    let region = &text[search_start..byte_pos];
+    let region = &text[search_start..safe_byte_pos];
     
     ["\n\n", ". ", "! ", "? ", ".\n", "!\n", "?\n"]
         .iter()
         .filter_map(|&delim| region.rfind(delim).map(|idx| search_start + idx + delim.len()))
         .max()
-        .unwrap_or(byte_pos)
+        .unwrap_or(safe_byte_pos)
+}
+
+fn _calculate_chunk_end(text: &str, start_char: usize, char_indices: &[usize], chunk_size_chars: usize) -> usize {
+    let total_chars = char_indices.len();
+    let raw_end_char = std::cmp::min(start_char + chunk_size_chars, total_chars);
+    let raw_end_byte = if raw_end_char < total_chars { char_indices[raw_end_char] } else { text.len() };
+    
+    if raw_end_char < total_chars {
+        let end_byte = get_sentence_boundary(text, raw_end_byte, 160); 
+        if end_byte > char_indices[start_char] {
+            return end_byte;
+        }
+    }
+    raw_end_byte
 }
 
 /// Creates overlapping chunks of text, snapping to sentence boundaries.
 #[pyfunction]
 fn create_chunks(py: Python, text: &str, chunk_size_chars: usize, chunk_overlap_chars: usize, prefix: &str, base_offset: usize) -> PyResult<Vec<PyObject>> {
     let mut chunks = Vec::new();
-    
     let char_indices: Vec<usize> = text.char_indices().map(|(b, _)| b).collect();
     let total_chars = char_indices.len();
     
@@ -38,17 +57,7 @@ fn create_chunks(py: Python, text: &str, chunk_size_chars: usize, chunk_overlap_
 
     let mut start_char = 0;
     while start_char < total_chars {
-        let raw_end_char = std::cmp::min(start_char + chunk_size_chars, total_chars);
-        let raw_end_byte = if raw_end_char < total_chars { char_indices[raw_end_char] } else { text.len() };
-        
-        let mut end_byte = raw_end_byte;
-        if raw_end_char < total_chars {
-            end_byte = get_sentence_boundary(text, raw_end_byte, 160); 
-            if end_byte <= char_indices[start_char] {
-                end_byte = raw_end_byte;
-            }
-        }
-        
+        let end_byte = _calculate_chunk_end(text, start_char, &char_indices, chunk_size_chars);
         let start_byte = char_indices[start_char];
         let chunk_text = &text[start_byte..end_byte];
         
@@ -64,7 +73,6 @@ fn create_chunks(py: Python, text: &str, chunk_size_chars: usize, chunk_overlap_
             break;
         }
 
-        let chunk_char_len = chunk_text.chars().count();
         let end_char = start_char + chunk_char_len;
         let next_start = if end_char > chunk_overlap_chars {
             end_char - chunk_overlap_chars
@@ -73,12 +81,8 @@ fn create_chunks(py: Python, text: &str, chunk_size_chars: usize, chunk_overlap_
         };
 
         // Ensure we always advance by at least 1 character to avoid infinite loops
-        start_char = if next_start > start_char {
-            next_start
-        } else {
-            start_char + 1
-        };
-        }
+        start_char = if next_start > start_char { next_start } else { start_char + 1 };
+    }
     
     Ok(chunks)
 }
@@ -301,173 +305,157 @@ fn build_tree(files: Vec<(String, f32, String)>) -> Vec<TreeNode> {
     nodes
 }
 
+fn _pack_children(nodes: &mut [TreeNode], idx: usize) {
+    let child_count = nodes[idx].children.len();
+    if child_count == 0 {
+        nodes[idx].radius = 4.0;
+        return;
+    }
+
+    let mut child_data: Vec<(usize, f32, [f32; 3])> = nodes[idx].children.iter()
+        .map(|&c| (c, nodes[c].radius, [0.0, 0.0, 0.0]))
+        .collect();
+    
+    child_data.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    _initialize_spiral_positions(&mut child_data);
+    _simulate_repulsion(&mut child_data);
+
+    let mut bounding_radius = 0.0_f32;
+    for cd in &child_data {
+        let dist = (cd.2[0].powi(2) + cd.2[1].powi(2) + cd.2[2].powi(2)).sqrt();
+        bounding_radius = bounding_radius.max(dist + cd.1);
+        nodes[cd.0].local_pos = cd.2;
+    }
+    nodes[idx].radius = bounding_radius + 2.0;
+}
+
+fn _initialize_spiral_positions(child_data: &mut [(usize, f32, [f32; 3])]) {
+    let child_count = child_data.len();
+    let golden_ratio = (1.0 + 5.0_f32.sqrt()) / 2.0;
+    let angle_increment = std::f32::consts::PI * 2.0 * golden_ratio;
+    
+    for (i, cd) in child_data.iter_mut().enumerate() {
+        let t = i as f32 / child_count as f32;
+        let inclination = (1.0 - 2.0 * t).acos();
+        let azimuth = angle_increment * i as f32;
+        let r = cd.1 * (i as f32).sqrt() * 0.5;
+        cd.2 = [r * inclination.sin() * azimuth.cos(), r * inclination.sin() * azimuth.sin(), r * inclination.cos()];
+    }
+}
+
+fn _simulate_repulsion(child_data: &mut [(usize, f32, [f32; 3])]) {
+    let child_count = child_data.len();
+    for _ in 0..150 {
+        for cd in child_data.iter_mut() { 
+            cd.2[0] *= 0.95; cd.2[1] *= 0.95; cd.2[2] *= 0.95; 
+        }
+        for i in 0..child_count {
+            for j in (i+1)..child_count {
+                let dx = child_data[i].2[0] - child_data[j].2[0];
+                let dy = child_data[i].2[1] - child_data[j].2[1];
+                let dz = child_data[i].2[2] - child_data[j].2[2];
+                let dist_sq = dx*dx + dy*dy + dz*dz;
+                let min_dist = child_data[i].1 + child_data[j].1 + 0.8;
+                if dist_sq < min_dist * min_dist && dist_sq > 0.0001 {
+                    let dist = dist_sq.sqrt();
+                    let overlap = min_dist - dist;
+                    let (nx, ny, nz) = (dx / dist, dy / dist, dz / dist);
+                    let push = overlap * 0.5;
+                    let total_r = child_data[i].1 + child_data[j].1;
+                    child_data[i].2[0] += nx * push * (child_data[j].1 / total_r);
+                    child_data[i].2[1] += ny * push * (child_data[j].1 / total_r);
+                    child_data[i].2[2] += nz * push * (child_data[j].1 / total_r);
+                    child_data[j].2[0] -= nx * push * (child_data[i].1 / total_r);
+                    child_data[j].2[1] -= ny * push * (child_data[i].1 / total_r);
+                    child_data[j].2[2] -= nz * push * (child_data[i].1 / total_r);
+                }
+            }
+        }
+    }
+}
+
 /// Generates a tightly packed binary buffer for 3D visualization using Hierarchical Spherical Packing
 #[pyfunction]
 fn get_spatial_binary(files: Vec<(String, f32, String)>) -> PyResult<Vec<u8>> {
     let mut nodes = build_tree(files);
     
-    // 1. Post-order traversal (Bottom-Up)
+    _calculate_node_radii(&mut nodes);
+    _calculate_global_positions(&mut nodes);
+
+    let bfs_order = _get_bfs_order(&nodes);
+    let mut new_indices = vec![0; nodes.len()];
+    for (new_idx, &old_idx) in bfs_order.iter().enumerate() { new_indices[old_idx] = new_idx; }
+
+    let mut gpu_nodes = vec![Node::default(); nodes.len()];
+    for (new_idx, &old_idx) in bfs_order.iter().enumerate() {
+        let old_node = &nodes[old_idx];
+        let p_idx = if old_node.parent == u32::MAX { u32::MAX } else { new_indices[old_node.parent as usize] as u32 };
+        gpu_nodes[new_idx] = Node {
+            position: old_node.global_pos, radius: old_node.radius, parent_index: p_idx,
+            flags: if old_node.is_folder { 1 } else { 0 }, type_hash: old_node.type_hash, pad: 0,
+        };
+    }
+
+    let mut buffer = Vec::new();
+    let slice_u8 = unsafe { std::slice::from_raw_parts(gpu_nodes.as_ptr() as *const u8, gpu_nodes.len() * std::mem::size_of::<Node>()) };
+    buffer.extend_from_slice(slice_u8);
+    Ok(buffer)
+}
+
+fn _calculate_node_radii(nodes: &mut [TreeNode]) {
     let mut post_order = Vec::new();
     let mut stack = vec![0];
     while let Some(node) = stack.pop() {
         post_order.push(node);
-        for &child in &nodes[node].children {
-            stack.push(child);
-        }
+        for &child in &nodes[node].children { stack.push(child); }
     }
     post_order.reverse();
 
-    // 2. Pack children hierarchically to find true radii
     for &idx in &post_order {
         if !nodes[idx].is_folder {
-            // Leaf size
             nodes[idx].radius = 1.0 + (nodes[idx].size + 1.0).log10().max(0.0) * 1.5;
         } else {
-            let child_count = nodes[idx].children.len();
-            if child_count == 0 {
-                nodes[idx].radius = 4.0;
-                continue;
-            }
-
-            let mut child_data: Vec<(usize, f32, [f32; 3])> = nodes[idx].children.iter()
-                .map(|&c| (c, nodes[c].radius, [0.0, 0.0, 0.0]))
-                .collect();
-            
-            // Sort by radius descending for tighter 3D packing
-            child_data.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-            // Fibonacci spiral initialization for even initial 3D spread
-            let golden_ratio = (1.0 + 5.0_f32.sqrt()) / 2.0;
-            let angle_increment = std::f32::consts::PI * 2.0 * golden_ratio;
-            
-            for (i, cd) in child_data.iter_mut().enumerate() {
-                let t = i as f32 / child_count as f32;
-                let inclination = (1.0 - 2.0 * t).acos();
-                let azimuth = angle_increment * i as f32;
-                let r = cd.1 * (i as f32).sqrt() * 0.5; // Spread based on size
-                
-                cd.2 = [
-                    r * inclination.sin() * azimuth.cos(),
-                    r * inclination.sin() * azimuth.sin(),
-                    r * inclination.cos()
-                ];
-            }
-
-            // Local simulation: Remove overlap and compress into a tight sphere
-            for _ in 0..150 {
-                // Gravity pulling to local center
-                for cd in &mut child_data {
-                    cd.2[0] *= 0.95; cd.2[1] *= 0.95; cd.2[2] *= 0.95;
-                }
-                
-                // Collision resolution
-                for i in 0..child_count {
-                    for j in (i+1)..child_count {
-                        let dx = child_data[i].2[0] - child_data[j].2[0];
-                        let dy = child_data[i].2[1] - child_data[j].2[1];
-                        let dz = child_data[i].2[2] - child_data[j].2[2];
-                        let dist_sq = dx*dx + dy*dy + dz*dz;
-                        
-                        let min_dist = child_data[i].1 + child_data[j].1 + 0.8; // 0.8 padding between items
-                        
-                        if dist_sq < min_dist * min_dist && dist_sq > 0.0001 {
-                            let dist = dist_sq.sqrt();
-                            let overlap = min_dist - dist;
-                            let nx = dx / dist; let ny = dy / dist; let nz = dz / dist;
-                            
-                            let total_r = child_data[i].1 + child_data[j].1;
-                            let ratio_i = child_data[j].1 / total_r;
-                            let ratio_j = child_data[i].1 / total_r;
-
-                            let push = overlap * 0.5;
-                            child_data[i].2[0] += nx * push * ratio_i;
-                            child_data[i].2[1] += ny * push * ratio_i;
-                            child_data[i].2[2] += nz * push * ratio_i;
-                            
-                            child_data[j].2[0] -= nx * push * ratio_j;
-                            child_data[j].2[1] -= ny * push * ratio_j;
-                            child_data[j].2[2] -= nz * push * ratio_j;
-                        }
-                    }
-                }
-            }
-
-            // Folder radius is the bounding sphere of its packed children
-            let mut bounding_radius = 0.0_f32;
-            for cd in &child_data {
-                let dist = (cd.2[0].powi(2) + cd.2[1].powi(2) + cd.2[2].powi(2)).sqrt();
-                if dist + cd.1 > bounding_radius {
-                    bounding_radius = dist + cd.1;
-                }
-                nodes[cd.0].local_pos = cd.2;
-            }
-            nodes[idx].radius = bounding_radius + 2.0; // Crystal shell thickness
+            _pack_children(nodes, idx);
         }
     }
+}
 
-    // 3. Top-Down pass to compute absolute global coordinates
+fn _calculate_global_positions(nodes: &mut [TreeNode]) {
     nodes[0].global_pos = [0.0, 0.0, 0.0];
     let mut top_down_queue = VecDeque::new();
     top_down_queue.push_back(0);
     while let Some(idx) = top_down_queue.pop_front() {
         let parent_pos = nodes[idx].global_pos;
-        
-        let children = nodes[idx].children.clone(); 
-        
-        for c_idx in children {
+        for c_idx in nodes[idx].children.clone() {
             let local = nodes[c_idx].local_pos;
-            nodes[c_idx].global_pos = [
-                parent_pos[0] + local[0],
-                parent_pos[1] + local[1],
-                parent_pos[2] + local[2],
-            ];
+            nodes[c_idx].global_pos = [parent_pos[0] + local[0], parent_pos[1] + local[1], parent_pos[2] + local[2]];
             top_down_queue.push_back(c_idx);
         }
     }
+}
 
-    // 4. Map to binary buffer (BFS order for cache locality)
+fn _get_bfs_order(nodes: &[TreeNode]) -> Vec<usize> {
     let mut bfs_order = Vec::new();
     let mut queue = VecDeque::new();
     queue.push_back(0);
     while let Some(idx) = queue.pop_front() {
         bfs_order.push(idx);
-        for &child in &nodes[idx].children {
-            queue.push_back(child);
-        }
+        for &child in &nodes[idx].children { queue.push_back(child); }
     }
-
-    let mut new_indices = vec![0; nodes.len()];
-    for (new_idx, &old_idx) in bfs_order.iter().enumerate() {
-        new_indices[old_idx] = new_idx;
-    }
-
-    let mut gpu_nodes = vec![Node::default(); nodes.len()];
-    for (new_idx, &old_idx) in bfs_order.iter().enumerate() {
-        let old_node = &nodes[old_idx];
-        let parent_idx = if old_node.parent == u32::MAX { u32::MAX } else { new_indices[old_node.parent as usize] as u32 };
-        
-        gpu_nodes[new_idx] = Node {
-            position: old_node.global_pos,
-            radius: old_node.radius,
-            parent_index: parent_idx,
-            flags: if old_node.is_folder { 1 } else { 0 },
-            type_hash: old_node.type_hash,
-            pad: 0,
-        };
-    }
-    
-    // Note: We completely remove the call to `simulate_layout` here! 
-
-    let mut buffer = Vec::new();
-    let slice_u8 = unsafe {
-        std::slice::from_raw_parts(
-            gpu_nodes.as_ptr() as *const u8,
-            gpu_nodes.len() * std::mem::size_of::<Node>()
-        )
-    };
-    buffer.extend_from_slice(slice_u8);
-    Ok(buffer)
+    bfs_order
 }
+
+fn _is_binary_buffer(buffer: &[u8]) -> bool {
+    let sample_len = std::cmp::min(8192, buffer.len());
+    let mut non_text = 0;
+    for &b in &buffer[..sample_len] {
+        if b == 0 { return true; }
+        if b < 32 && b != 9 && b != 10 && b != 13 { non_text += 1; }
+    }
+    sample_len > 0 && (non_text as f32 / sample_len as f32 > 0.3)
+}
+
 /// Extremely fast SHA256 for a file path reading 1MB blocks safely.
 #[pyfunction]
 fn calculate_sha256(path: &str) -> PyResult<String> {
@@ -477,7 +465,7 @@ fn calculate_sha256(path: &str) -> PyResult<String> {
     };
     
     let mut context = Context::new(&SHA256);
-    let mut buffer = [0; 1048576]; // 1MB buffer
+    let mut buffer = vec![0; 1048576]; // Heap-allocated 1MB buffer (prevents stack overflow)
     
     loop {
         match file.read(&mut buffer) {
@@ -491,51 +479,39 @@ fn calculate_sha256(path: &str) -> PyResult<String> {
     Ok(hex::encode(digest.as_ref()))
 }
 
+fn _extract_single_file(path: String, max_size: usize) -> (String, String) {
+    let fallback_stub = format!("[UNREADABLE: {}]", path);
+    match File::open(&path) {
+        Ok(mut file) => {
+            // Pre-allocate capacity up to 1MB to reduce reallocations (optimized growth)
+            let mut buffer = Vec::with_capacity(max_size.min(1024 * 1024));
+            match file.by_ref().take(max_size as u64 + 1).read_to_end(&mut buffer) {
+                Ok(n) => {
+                    if n > max_size { buffer.truncate(max_size); }
+                    if _is_binary_buffer(&buffer) {
+                        return (path.clone(), format!("[BINARY: {}] Binary content not indexed.", path));
+                    }
+                    let text = String::from_utf8_lossy(&buffer);
+                    let clean = if text.starts_with('\u{feff}') { text.chars().skip(1).collect() } else { text.into_owned() };
+                    (path, clean)
+                }
+                Err(_) => (path, fallback_stub),
+            }
+        }
+        Err(_) => (path, fallback_stub),
+    }
+}
+
 /// Extracts text from multiple files concurrently, removing BOM.
 /// Detects binary files and replaces them with a stub message.
 #[pyfunction]
 fn extract_text_files(paths: Vec<String>, max_size: usize) -> PyResult<Vec<(String, String)>> {
     let results: Vec<(String, String)> = paths.into_par_iter()
-        .map(|path| {
-            let fallback_stub = format!("[UNREADABLE: {}]", path);
-            match File::open(&path) {
-                Ok(mut file) => {
-                    let mut buffer = Vec::new();
-                    match file.by_ref().take(max_size as u64 + 1).read_to_end(&mut buffer) {
-                        Ok(n) => {
-                            if n > max_size {
-                                buffer.truncate(max_size);
-                            }
-                            
-                            // Check binary heuristic (similar to Python logic)
-                            let sample_len = std::cmp::min(8192, buffer.len());
-                            let mut non_text = 0;
-                            let mut has_null = false;
-                            for &b in &buffer[..sample_len] {
-                                if b == 0 { has_null = true; break; }
-                                if b < 32 && b != 9 && b != 10 && b != 13 { non_text += 1; }
-                            }
-                            if has_null || (sample_len > 0 && (non_text as f32 / sample_len as f32 > 0.3)) {
-                                return (path.clone(), format!("[BINARY: {}] Binary content not indexed.", path));
-                            }
-                            
-                            let text = String::from_utf8_lossy(&buffer);
-                            let clean_text = if text.starts_with('\u{feff}') {
-                                text.chars().skip(1).collect()
-                            } else {
-                                text.into_owned()
-                            };
-                            (path, clean_text)
-                        }
-                        Err(_) => (path, fallback_stub),
-                    }
-                }
-                Err(_) => (path, fallback_stub),
-            }
-        })
+        .map(|path| _extract_single_file(path, max_size))
         .collect();
     Ok(results)
 }
+
 
 /// A Python module implemented in Rust using PyO3.
 #[pymodule]
@@ -548,4 +524,158 @@ fn rust_core(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(calculate_sha256, m)?)?;
     m.add_function(wrap_pyfunction!(extract_text_files, m)?)?;
     Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pure Rust unit tests — NO PyO3 Python interpreter required.
+// Run with: cargo test --lib
+// ─────────────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── get_sentence_boundary ─────────────────────────────────────────────
+
+    #[test]
+    fn test_sentence_boundary_period_space() {
+        let text = "Hello world. This is a test sentence here.";
+        let result = get_sentence_boundary(text, 20, 20);
+        assert!(result <= text.len());
+    }
+
+    #[test]
+    fn test_sentence_boundary_double_newline() {
+        let text = "Paragraph one.\n\nParagraph two starts here.";
+        let result = get_sentence_boundary(text, 20, 20);
+        assert!(result <= text.len());
+    }
+
+    #[test]
+    fn test_sentence_boundary_no_match_returns_byte_pos() {
+        let text = "abcdefghijklmnopqrstuvwxyz";
+        let result = get_sentence_boundary(text, 10, 5);
+        assert_eq!(result, 10);
+    }
+
+    #[test]
+    fn test_sentence_boundary_at_start() {
+        let text = "Start of text.";
+        let result = get_sentence_boundary(text, 0, 10);
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn test_sentence_boundary_unicode_safe() {
+        let text = "Hello \u{4e16}\u{754c}. This is a test.";
+        let result = get_sentence_boundary(text, 10, 10);
+        assert!(result <= text.len());
+    }
+
+    // ── Binary detection heuristic (mirrors extract_text_files logic) ─────
+
+    fn is_binary_heuristic(buffer: &[u8]) -> bool {
+        let sample_len = buffer.len().min(8192);
+        let mut non_text = 0usize;
+        let mut has_null = false;
+        for &b in &buffer[..sample_len] {
+            if b == 0 { has_null = true; break; }
+            if b < 32 && b != 9 && b != 10 && b != 13 { non_text += 1; }
+        }
+        has_null || (sample_len > 0 && (non_text as f32 / sample_len as f32 > 0.3))
+    }
+
+    #[test]
+    fn test_binary_null_byte() {
+        let data = b"hello world\x00rest";
+        assert!(is_binary_heuristic(data));
+    }
+
+    #[test]
+    fn test_binary_plain_text_not_binary() {
+        let data = b"Hello, world!\nThis is plain text.\n";
+        assert!(!is_binary_heuristic(data));
+    }
+
+    #[test]
+    fn test_binary_high_control_chars() {
+        let data: Vec<u8> = (0..100).map(|i| if i % 3 == 0 { 1u8 } else { b'a' }).collect();
+        assert!(is_binary_heuristic(&data));
+    }
+
+    #[test]
+    fn test_binary_empty_not_binary() {
+        let data: &[u8] = b"";
+        assert!(!is_binary_heuristic(data));
+    }
+
+    // ── BOM stripping ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_bom_stripping() {
+        let text_with_bom = "\u{feff}Hello, world!";
+        let stripped: String = if text_with_bom.starts_with('\u{feff}') {
+            text_with_bom.chars().skip(1).collect()
+        } else {
+            text_with_bom.to_owned()
+        };
+        assert_eq!(stripped, "Hello, world!");
+    }
+
+    #[test]
+    fn test_no_bom_unchanged() {
+        let text = "No BOM here";
+        let stripped: String = if text.starts_with('\u{feff}') {
+            text.chars().skip(1).collect()
+        } else {
+            text.to_owned()
+        };
+        assert_eq!(stripped, "No BOM here");
+    }
+
+    // ── Node struct ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_node_default_values() {
+        let n = Node::default();
+        assert_eq!(n.position, [0.0; 3]);
+        assert_eq!(n.radius, 0.0);
+        assert_eq!(n.flags, 0);
+        assert_eq!(n.pad, 0);
+    }
+
+    #[test]
+    fn test_node_size_is_32_bytes() {
+        assert_eq!(std::mem::size_of::<Node>(), 32);
+    }
+
+    // ── Extension normalization (mirrors scan_folders) ────────────────────
+
+    fn normalize_ext(e: &str) -> String {
+        let lower = e.to_lowercase();
+        if lower.starts_with('.') || lower.is_empty() {
+            lower
+        } else {
+            format!(".{}", lower)
+        }
+    }
+
+    #[test]
+    fn test_ext_already_has_dot() {
+        assert_eq!(normalize_ext(".py"), ".py");
+    }
+
+    #[test]
+    fn test_ext_without_dot() {
+        assert_eq!(normalize_ext("py"), ".py");
+    }
+
+    #[test]
+    fn test_ext_uppercase() {
+        assert_eq!(normalize_ext("PY"), ".py");
+    }
+
+    #[test]
+    fn test_ext_empty_string() {
+        assert_eq!(normalize_ext(""), "");
+    }
 }

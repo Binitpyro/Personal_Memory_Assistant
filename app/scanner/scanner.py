@@ -9,20 +9,21 @@ import platform
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Set
 
 logger = logging.getLogger(__name__)
+
 
 @dataclass
 class ScanResult:
     """Outcome of a folder scan."""
 
-    files: List[Path] = field(default_factory=list)
-    method: str = "scandir"          # "ntfs_mft" | "scandir"
+    files: list[Path] = field(default_factory=list)
+    method: str = "scandir"  # "ntfs_mft" | "scandir"
     duration_ms: float = 0.0
-    total_mft_entries: int = 0       # only set for MFT scans
+    total_mft_entries: int = 0  # only set for MFT scans
 
-def scan_folder(folder: Path, extensions: Set[str]) -> ScanResult:
+
+def scan_folder(folder: Path, extensions: set[str]) -> ScanResult:
     """
     Scan *folder* for files matching *extensions*.
 
@@ -40,8 +41,7 @@ def scan_folder(folder: Path, extensions: Set[str]) -> ScanResult:
             if paths is not None:
                 elapsed_ms = (time.perf_counter() - t0) * 1000
                 logger.info(
-                    "NTFS MFT scan: %d files in %.0f ms "
-                    "(%s total MFT entries)",
+                    "NTFS MFT scan: %d files in %.0f ms (%s total MFT entries)",
                     len(paths),
                     elapsed_ms,
                     f"{scanner.entry_count:,}",
@@ -60,14 +60,15 @@ def scan_folder(folder: Path, extensions: Set[str]) -> ScanResult:
     logger.info("scandir walk: %d files in %.0f ms", len(files), elapsed_ms)
     return ScanResult(files=files, method="scandir", duration_ms=elapsed_ms)
 
-def _scandir_walk(folder: Path, extensions: Set[str]) -> List[Path]:
+
+def _scandir_walk(folder: Path, extensions: set[str]) -> list[Path]:
     """Recursive file enumeration using ``os.scandir`` (faster than rglob).
-    
+
     Uses an iterative stack instead of recursion to avoid hitting
     Python's default recursion limit on deeply nested directories.
     """
-    results: List[Path] = []
-    stack: List[str] = [str(folder)]
+    results: list[Path] = []
+    stack: list[str] = [str(folder)]
     while stack:
         current = stack.pop()
         try:
@@ -82,15 +83,13 @@ def _scandir_walk(folder: Path, extensions: Set[str]) -> List[Path]:
     return results
 
 
-def _list_dir_entries(
-    directory: str, extensions: Set[str]
-) -> List[tuple]:
+def _list_dir_entries(directory: str, extensions: set[str]) -> list[tuple]:
     """List directory entries as (is_file, path) tuples.
 
     Returns files matching *extensions* and sub-directories for further
     traversal.  Each entry that raises ``OSError`` is silently skipped.
     """
-    entries: List[tuple] = []
+    entries: list[tuple] = []
     with os.scandir(directory) as it:
         for entry in it:
             try:

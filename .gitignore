@@ -229,3 +229,4 @@ build/
 
 # SonarQube
 .scannerwork/
+/.agent

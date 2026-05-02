@@ -1,31 +1,42 @@
-from pathlib import Path
-import logging
 import csv
+import logging
+from pathlib import Path
+from typing import Iterator
 
 logger = logging.getLogger(__name__)
+
 
 class CsvExtractor:
     def can_handle(self, path: Path) -> bool:
         return path.suffix.lower() == ".csv"
 
-    def extract(self, path: Path, max_file_size: int) -> str:
+    def extract_stream(self, path: Path, max_file_size: int) -> Iterator[str]:
+        """Yield formatted rows from the CSV."""
         try:
-            rows = []
             with open(path, encoding="utf-8", errors="replace", newline="") as f:
                 reader = csv.reader(f)
                 # Read headers
                 try:
                     headers = next(reader)
                 except StopIteration:
-                    return ""
-                
+                    return
+
+                total = 0
                 for i, row in enumerate(reader):
-                    if i > 5000: break
+                    if i > 5000:
+                        break
                     # Convert to key: value format
-                    formatted_row = ", ".join(f"{h}: {v}" for h, v in zip(headers, row) if v.strip())
+                    formatted_row = ", ".join(
+                        f"{h}: {v}" for h, v in zip(headers, row) if v.strip()
+                    )
                     if formatted_row:
-                        rows.append(formatted_row)
-            return "\n".join(rows)[:max_file_size]
+                        yield formatted_row
+                        total += len(formatted_row)
+                        if total > max_file_size:
+                            break
         except Exception as e:
             logger.warning("Failed to extract CSV %s: %s", path, e)
-            return ""
+
+    def extract(self, path: Path, max_file_size: int) -> str:
+        """Legacy extraction for backward compatibility."""
+        return "\n".join(self.extract_stream(path, max_file_size))[:max_file_size]

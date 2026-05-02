@@ -154,7 +154,7 @@ export class WebGPURenderer {
                         attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x2' }]
                     },
                     {
-                        arrayStride: 32, // matches the Rust Node layout
+                        arrayStride: 32, 
                         stepMode: 'instance',
                         attributes: [
                             { shaderLocation: 1, offset: 0, format: 'float32x3' }, // position
@@ -332,7 +332,7 @@ export class WebGPURenderer {
     }
 
     public handleZoom(delta: number) {
-        let speed = Math.max(10, this.zoom * 0.05);
+        const speed = Math.max(10, this.zoom * 0.05);
         this.zoom = Math.max(5, this.zoom + (delta > 0 ? speed : -speed));
     }
 
@@ -340,7 +340,7 @@ export class WebGPURenderer {
         const aspect = this.canvas.width / this.canvas.height;
         const projection = this.perspective(45 * Math.PI / 180, aspect, 0.1, 100000);
 
-        let target = this.focusPosition || [0, 0, 0];
+        const target = this.focusPosition || [0, 0, 0];
 
         const eyeX = target[0] + this.zoom * Math.cos(this.rotationX) * Math.sin(this.rotationY);
         const eyeY = target[1] + this.zoom * Math.sin(this.rotationX);

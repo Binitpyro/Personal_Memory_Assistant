@@ -169,7 +169,7 @@ async def generate_folder_profiles_async(
     """Run build_folder_profile concurrently for all folders."""
     loop = asyncio.get_running_loop()
     max_workers = min(len(folders), (os.cpu_count() or 4) + 2)
-    profiles = []
+    profiles: list[dict[str, Any]] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
         futs = [
             loop.run_in_executor(pool, build_folder_profile, f, f.name, all_files) for f in folders

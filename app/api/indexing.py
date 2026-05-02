@@ -252,7 +252,7 @@ async def unreal_import(
         tag = request.folder_tag or "unreal_import"
         stats = await asyncio.to_thread(parse_unreal_metadata, jpath)
         if stats:
-            await db.upsert_unreal_facts(
+            await db.upsert_unreal_project_facts(
                 {
                     "folder_path": jpath,
                     "folder_tag": tag,

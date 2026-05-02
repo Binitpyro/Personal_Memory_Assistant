@@ -24,7 +24,7 @@ _MFT_BUF_SIZE = 128 * 1024  # 128 KB
 _ERROR_HANDLE_EOF = 38  # Win32 ERROR_HANDLE_EOF
 
 if _platform.system() == "Windows":
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
 else:
     kernel32 = None  # type: ignore[assignment]
 
@@ -76,7 +76,7 @@ class NTFSScanner:
 
         handle = self._open_volume(volume)
         if handle == INVALID_HANDLE_VALUE:
-            err = ctypes.get_last_error()
+            err = ctypes.get_last_error()  # type: ignore[attr-defined]
             logger.info(
                 "Cannot open volume %s (Win32 error %d). "
                 "Run as Administrator for NTFS-accelerated scanning.",
@@ -158,7 +158,7 @@ class NTFSScanner:
                 None,
             )
             if not ok:
-                err = ctypes.get_last_error()
+                err = ctypes.get_last_error()  # type: ignore[attr-defined]
                 if err == _ERROR_HANDLE_EOF or err != 0:
                     logger.debug("DeviceIoControl ended (Win32 error %d)", err)
                 break

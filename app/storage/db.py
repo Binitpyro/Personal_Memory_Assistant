@@ -455,7 +455,7 @@ class DatabaseManager:
             max_rows_per_query = 5000
             for i in range(0, len(insert_data), max_rows_per_query):
                 batch = insert_data[i : i + max_rows_per_query]
-                await conn.execucemany(
+                await conn.executemany(
                     "INSERT INTO chunks (file_id, start_offset, end_offset, text_preview) "
                     "VALUES (:file_id, :start_offset, :end_offset, :text_preview);",
                     batch,

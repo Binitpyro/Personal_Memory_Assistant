@@ -1,8 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
-import { useLocation } from 'react-router-dom'
 import { Search, Send, Sparkles, Loader2, FileText, Clock, Trash2, User, Bot, RotateCcw, Filter } from 'lucide-react'
 import { useApi, invalidateCache } from '../useApi'
-import { getQueryHistory, clearQueryHistory, subscribeQuery, getFileTree, type QuerySource, type QueryStreamChunk } from '../api'
+import { getQueryHistory, clearQueryHistory, subscribeQuery, getFileTree, getAppConfig, type QuerySource, type QueryStreamChunk } from '../api'
 
 interface Message {
   role: 'user' | 'assistant'
@@ -14,7 +13,6 @@ interface Message {
 }
 
 export function SearchPage() {
-  const location = useLocation()
   const [question, setQuestion] = useState('')
   const [messages, setMessages] = useState<Message[]>([])
   const [searching, setSearching] = useState(false)
@@ -23,19 +21,25 @@ export function SearchPage() {
   const [selectedFileType, setSelectedFileType] = useState('')
   const [selectedFolderTag, setSelectedFolderTag] = useState('')
 
+  // P10-1: SSE Throttling Buffer to prevent render thrashing
+  const streamBufferRef = useRef('')
+  const lastUpdateRef = useRef(0)
+  const throttleTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
   const { data: historyData, refetch: refetchHistory } = useApi(getQueryHistory, { cacheKey: 'query-history' })
-  const { data: fileTree } = useApi(getFileTree, { cacheKey: 'files-tree', refetchInterval: 15000 })
+  // P2-0: Disable fileTree polling while query SSE is active (searching=true) to avoid
+  // redundant network calls competing with the live stream.
+  const { data: fileTree } = useApi(getFileTree, { cacheKey: 'files-tree', refetchInterval: searching ? 0 : 15_000 })
+  const { data: appConfig } = useApi(getAppConfig, { cacheKey: 'app-config' })
 
   const inputRef = useRef<HTMLInputElement>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    if (location.state?.query) {
-      setQuestion(location.state.query)
-      // Clear state so it doesn't persist on refresh
-      window.history.replaceState({}, document.title)
+    return () => {
+      if (throttleTimeoutRef.current) clearTimeout(throttleTimeoutRef.current)
     }
-  }, [location])
+  }, [])
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
@@ -45,6 +49,23 @@ export function SearchPage() {
     scrollToBottom()
   }, [messages])
 
+  const flushStreamBuffer = useCallback(() => {
+    const text = streamBufferRef.current
+    if (!text) return
+
+    setMessages(prev => {
+      const last = prev.at(-1)
+      if (last?.role === 'assistant') {
+        return [
+          ...prev.slice(0, -1),
+          { ...last, content: text, mode: 'full_rag' }
+        ]
+      }
+      return prev
+    })
+    lastUpdateRef.current = Date.now()
+  }, [])
+
   const handleSearch = useCallback(async () => {
     if (!question.trim() || searching) return
 
@@ -52,6 +73,8 @@ export function SearchPage() {
     setQuestion('')
     setError(null)
     setSearching(true)
+    streamBufferRef.current = ''
+    lastUpdateRef.current = 0
 
     // Add user message
     const newMessages: Message[] = [...messages, { role: 'user', content: userMsg }]
@@ -61,10 +84,8 @@ export function SearchPage() {
 
     const historyForApi = messages.map(m => ({ role: m.role, content: m.content }))
 
-    let fullText = ''
     let sources: QuerySource[] = []
     let latency = 0
-    let mode: 'fast_path' | 'full_rag' = 'full_rag'
 
     const unsubscribe = subscribeQuery({
       question: userMsg,
@@ -75,7 +96,6 @@ export function SearchPage() {
       if (chunk.type === 'error') {
         setError(chunk.text || 'Search failed')
         setSearching(false)
-        // Remove the empty assistant message on error
         setMessages(newMessages)
         return
       }
@@ -83,38 +103,47 @@ export function SearchPage() {
       if (chunk.type === 'sources') {
         sources = chunk.sources || []
         latency = chunk.latency_ms || chunk.retrieval_ms || 0
-      }
-
-      if (chunk.type === 'fast_path') {
-        // Fast-path answer: text comes in a single chunk
-        mode = 'fast_path'
-        fullText = chunk.answer || chunk.text || ''
-        sources = chunk.sources || []
-        latency = chunk.latency_ms || 0
         setMessages(prev => {
           const last = prev.at(-1)
           if (last?.role === 'assistant') {
-            return [...prev.slice(0, -1), { ...last, content: fullText, sources, latency_ms: latency, mode }]
+            return [...prev.slice(0, -1), { ...last, sources, latency_ms: latency }]
+          }
+          return prev
+        })
+      }
+
+      if (chunk.type === 'fast_path') {
+        const fullText = chunk.answer || chunk.text || ''
+        setMessages(prev => {
+          const last = prev.at(-1)
+          if (last?.role === 'assistant') {
+            return [...prev.slice(0, -1), { ...last, content: fullText, sources: chunk.sources || sources, latency_ms: chunk.latency_ms || latency, mode: 'fast_path' }]
           }
           return prev
         })
       }
 
       if (chunk.type === 'content' && chunk.text) {
-        fullText += chunk.text
-        setMessages(prev => {
-          const last = prev.at(-1)
-          if (last?.role === 'assistant') {
-            return [
-              ...prev.slice(0, -1),
-              { ...last, content: fullText, sources, latency_ms: latency, mode: 'full_rag' }
-            ]
-          }
-          return prev
-        })
+        streamBufferRef.current += chunk.text
+        
+        // Throttle updates to ~50ms
+        const now = Date.now()
+        if (now - lastUpdateRef.current > 50) {
+          flushStreamBuffer()
+        } else if (!throttleTimeoutRef.current) {
+          throttleTimeoutRef.current = setTimeout(() => {
+            throttleTimeoutRef.current = null
+            flushStreamBuffer()
+          }, 50)
+        }
       }
 
       if (chunk.type === 'done') {
+        if (throttleTimeoutRef.current) {
+          clearTimeout(throttleTimeoutRef.current)
+          throttleTimeoutRef.current = null
+        }
+        flushStreamBuffer()
         setSearching(false)
         setMessages(prev => {
           const last = prev.at(-1)
@@ -128,7 +157,7 @@ export function SearchPage() {
     })
 
     return unsubscribe
-  }, [question, searching, messages, refetchHistory, selectedFileType, selectedFolderTag])
+  }, [question, searching, messages, refetchHistory, selectedFileType, selectedFolderTag, flushStreamBuffer])
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -155,7 +184,7 @@ export function SearchPage() {
     setError(null)
   }
 
-  const folderOptions = Object.keys(fileTree?.folders ?? {}).sort()
+  const folderOptions = Object.keys(fileTree?.folders ?? {}).sort((a, b) => a.localeCompare(b))
   const fileTypeOptions = Array.from(
     new Set(
       Object.values(fileTree?.folders ?? {})
@@ -163,7 +192,7 @@ export function SearchPage() {
         .map(entry => entry.type)
         .filter(Boolean)
     )
-  ).sort()
+  ).sort((a, b) => a.localeCompare(b))
 
   return (
     <div className="flex-1 flex flex-col h-full overflow-hidden animate-fade-in-up">
@@ -197,7 +226,7 @@ export function SearchPage() {
         ) : (
           <div className="max-w-4xl mx-auto space-y-8">
             {messages.map((msg, idx) => (
-              <div key={`msg-${idx}-${msg.content.substring(0, 10)}`} className={`flex gap-4 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+              <div key={`${msg.role}-${idx}-${msg.content.substring(0, 20)}`} className={`flex gap-4 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                 {msg.role === 'assistant' && (
                   <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center shrink-0 border border-primary/30 shadow-lg">
                     <Bot className="w-4 h-4 text-primary-light" />
@@ -236,8 +265,8 @@ export function SearchPage() {
 
                   {msg.role === 'assistant' && msg.sources && msg.sources.length > 0 && (
                     <div className="flex flex-wrap gap-2 mt-1">
-                      {msg.sources.slice(0, 3).map((src, sidx) => (
-                        <div key={`src-${sidx}-${src.file_path}`} className="flex items-center gap-1.5 px-2 py-1 bg-white/5 rounded-lg text-[10px] text-text-secondary border border-white/5">
+                      {msg.sources.slice(0, 3).map((src) => (
+                        <div key={`${src.file_path}-${src.score || 0}`} className="flex items-center gap-1.5 px-2 py-1 bg-white/5 rounded-lg text-[10px] text-text-secondary border border-white/5">
                           <FileText className="w-3 h-3 text-primary-light" />
                           <span className="max-w-[150px] truncate">{src.file_path.split(/[\\/]/).pop()}</span>
                         </div>
@@ -274,9 +303,9 @@ export function SearchPage() {
             <div className="absolute bottom-full mb-2 left-0 right-0 glass rounded-2xl border border-primary/10 shadow-2xl overflow-hidden z-20">
               <div className="px-4 py-2 text-[10px] font-black text-text-secondary border-b border-white/5 uppercase tracking-widest">Recent Searches</div>
               <div className="max-h-48 overflow-y-auto custom-scrollbar">
-                {historyData.history.slice(0, 10).map((h: any, i: number) => (
+                {historyData.history.slice(0, 10).map((h: any) => (
                   <button
-                    key={i}
+                    key={`${h.created_at}-${h.question}`}
                     className="w-full text-left px-4 py-2.5 text-sm text-text-primary hover:bg-primary/10 transition-colors flex items-center gap-3 border-b border-white/5 last:border-none"
                     onClick={() => {
                       setQuestion(h.question)
@@ -354,7 +383,7 @@ export function SearchPage() {
           </div>
           <div className="flex items-center justify-between px-2">
             <div className="flex gap-4 text-[10px] text-text-secondary font-bold uppercase tracking-widest">
-              <span className="flex items-center gap-1"><Sparkles className="w-3 h-3 text-primary" /> Gemini 2.5 Flash Lite</span>
+              <span className="flex items-center gap-1"><Sparkles className="w-3 h-3 text-primary" /> {appConfig?.gemini_model ?? 'AI Model'}</span>
               <button
                 onClick={() => setShowHistory(v => !v)}
                 className={`flex items-center gap-1 hover:text-text-primary transition-colors ${showHistory ? 'text-primary' : ''}`}

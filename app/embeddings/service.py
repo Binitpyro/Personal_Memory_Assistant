@@ -1,9 +1,11 @@
-import logging
 import asyncio
+import logging
 import threading
 from collections import OrderedDict
-from typing import List, Optional, TYPE_CHECKING, Dict
-from functools import lru_cache
+from typing import TYPE_CHECKING, Callable
+
+import numpy as np
+
 from app.config import settings
 
 if TYPE_CHECKING:
@@ -11,16 +13,18 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
 class EmbeddingService:
     def __init__(self, model_name: str = ""):
         self.model_name = model_name or settings.embedding_model
-        self.model: Optional["SentenceTransformer"] = None
+        self.model: SentenceTransformer | None = None
         self._loading = False
+        self._load_lock = threading.Lock()
         self._ready = threading.Event()
         self.optimal_batch_size = settings.embedding_batch_size
-        
+
         # LRU cache for query embeddings to avoid redundant computation
-        self._query_cache: OrderedDict[str, List[float]] = OrderedDict()
+        self._query_cache: OrderedDict[str, list[float]] = OrderedDict()
         self._cache_lock = threading.Lock()
         self._max_cache_size = 2000  # Increased from 1000
 
@@ -33,11 +37,11 @@ class EmbeddingService:
         if self.model:
             self._ready.set()
             return
-        
+
         try:
-            from sentence_transformers import SentenceTransformer
             import torch
-            
+            from sentence_transformers import SentenceTransformer
+
             device = "cuda" if torch.cuda.is_available() else "cpu"
 
             # Phase 2.1: Prefer ONNX backend on CPU for ~2-3x faster inference
@@ -46,34 +50,57 @@ class EmbeddingService:
                 try:
                     import onnxruntime
                     import optimum.onnxruntime
+
                     backend = "onnx"
-                    logger.info("ONNX Runtime and Optimum verified — using ONNX backend for faster CPU inference.")
+                    logger.info(
+                        "ONNX Runtime and Optimum verified — using ONNX backend for faster CPU inference."
+                    )
                 except ImportError as e:
-                    logger.info("ONNX backend unavailable (missing %s) — falling back to PyTorch.", str(e))
+                    logger.info(
+                        "ONNX backend unavailable (missing %s) — falling back to PyTorch.", str(e)
+                    )
                 except Exception as e:
                     logger.info("ONNX initialization failed: %s — falling back to PyTorch.", str(e))
 
-            logger.info("Loading embedding model: %s on device: %s (backend: %s)", self.model_name, device, backend)
-            
+            logger.info(
+                "Loading embedding model: %s on device: %s (backend: %s)",
+                self.model_name,
+                device,
+                backend,
+            )
+
             if backend == "onnx":
-                self.model = SentenceTransformer(
-                    self.model_name, 
-                    device=device, 
-                    backend=backend,
-                    model_kwargs={"file_name": "onnx/model_O4.onnx"}
-                )
+                try:
+                    self.model = SentenceTransformer(
+                        self.model_name,
+                        device=device,
+                        backend=backend,
+                        model_kwargs={"file_name": "onnx/model.onnx"},  # Use standard name
+                    )
+                except Exception as ex:
+                    logger.warning(
+                        "ONNX initialization failed for model %s: %s. Falling back to PyTorch.",
+                        self.model_name,
+                        ex,
+                    )
+                    backend = "torch"
+                    self.model = SentenceTransformer(self.model_name, device=device)
             else:
                 self.model = SentenceTransformer(self.model_name, device=device)
-            
+
             if device == "cuda":
-                self.model.half() # Use FP16 on GPU
+                self.model.half()  # Use FP16 on GPU
                 self.optimal_batch_size = 512
             elif backend == "onnx":
                 self.optimal_batch_size = 64
             else:
                 self.optimal_batch_size = 32
-                
-            logger.info("Model loaded successfully (backend=%s, optimal_batch_size=%d).", backend, self.optimal_batch_size)
+
+            logger.info(
+                "Model loaded successfully (backend=%s, optimal_batch_size=%d).",
+                backend,
+                self.optimal_batch_size,
+            )
         except Exception as e:
             logger.exception("Failed to load embedding model: %s", e)
         finally:
@@ -82,9 +109,10 @@ class EmbeddingService:
 
     def load_model_background(self) -> None:
         """Starts model loading in a background thread (non-blocking)."""
-        if self.model or self._loading:
-            return
-        self._loading = True
+        with self._load_lock:
+            if self.model or self._loading:
+                return
+            self._loading = True
         thread = threading.Thread(target=self.load_model, daemon=True, name="emb-loader")
         thread.start()
 
@@ -96,7 +124,12 @@ class EmbeddingService:
     def is_ready(self) -> bool:
         return self._ready.is_set()
 
-    async def embed_texts(self, texts: List[str], batch_size: Optional[int] = None) -> List[List[float]]:
+    async def embed_texts(
+        self,
+        texts: list[str],
+        batch_size: int | None = None,
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> list[list[float]]:
         """Generates embeddings for a list of texts asynchronously.
 
         Optimisation: deduplicates identical texts so the model only encodes
@@ -104,20 +137,16 @@ class EmbeddingService:
         """
         if not self.model:
             if self._loading:
-                await asyncio.get_running_loop().run_in_executor(
-                    None, self.wait_until_ready
-                )
+                await asyncio.get_running_loop().run_in_executor(None, self.wait_until_ready)
             else:
-                await asyncio.get_running_loop().run_in_executor(
-                    None, self.load_model
-                )
+                await asyncio.get_running_loop().run_in_executor(None, self.load_model)
         if self.model is None:
             raise RuntimeError("Embedding model failed to load. Cannot generate embeddings.")
 
         # ── Deduplicate texts ──────────────────────────────────────────
-        unique_texts: List[str] = []
-        text_to_idx: Dict[str, int] = {}
-        original_map: List[int] = []  # maps original index to deduplicated text index
+        unique_texts: list[str] = []
+        text_to_idx: dict[str, int] = {}
+        original_map: list[int] = []  # maps original index to deduplicated text index
 
         for text in texts:
             if text not in text_to_idx:
@@ -132,16 +161,15 @@ class EmbeddingService:
 
         loop = asyncio.get_running_loop()
         model = self.model  # capture for closure
-        
-        # Internal progress reporting
-        from app.indexing.service import progress
-        
+
         def encode_with_progress():
             num_batches = (len(unique_texts) + effective_batch_size - 1) // effective_batch_size
             results = []
             for i in range(0, len(unique_texts), effective_batch_size):
                 batch_num = i // effective_batch_size + 1
-                progress.set_current_file(f"Phase 2/3: Embedding batch {batch_num}/{num_batches}…")
+                if progress_callback:
+                    progress_callback(batch_num, num_batches)
+
                 batch = unique_texts[i : i + effective_batch_size]
                 batch_embeddings = model.encode(
                     batch,
@@ -150,8 +178,8 @@ class EmbeddingService:
                     normalize_embeddings=True,
                 )
                 results.append(batch_embeddings)
-            import numpy as np
-            return np.vstack(results).tolist()
+
+            return np.vstack(results).tolist() if results else []
 
         unique_embeddings = await loop.run_in_executor(None, encode_with_progress)
 
@@ -160,11 +188,54 @@ class EmbeddingService:
         if len(unique_texts) < len(texts):
             logger.debug(
                 "Embedding dedup: %d texts → %d unique (saved %d encodes)",
-                len(texts), len(unique_texts), len(texts) - len(unique_texts),
+                len(texts),
+                len(unique_texts),
+                len(texts) - len(unique_texts),
             )
         return embeddings
 
-    async def embed_query(self, query: str) -> List[float]:
+    def embed_texts_sync(
+        self, texts: list[str], batch_size: int | None = None
+    ) -> list[list[float]]:
+        """Blocking (synchronous) variant of embed_texts.
+
+        Intended for use inside ``loop.run_in_executor()`` calls where ``await``
+        is unavailable, e.g. the split-brain back-fill path.  Uses the same
+        deduplication and batching logic as the async version.
+        """
+        if self.model is None:
+            if not self.wait_until_ready(timeout=60):
+                raise RuntimeError("Embedding model not ready within timeout.")
+        if self.model is None:
+            raise RuntimeError("Embedding model failed to load.")
+
+        effective_batch_size = batch_size or self.optimal_batch_size
+
+        # Deduplicate
+        unique_texts: list[str] = []
+        text_to_idx: dict[str, int] = {}
+        original_map: list[int] = []
+        for text in texts:
+            if text not in text_to_idx:
+                text_to_idx[text] = len(unique_texts)
+                unique_texts.append(text)
+            original_map.append(text_to_idx[text])
+
+        results = []
+        for i in range(0, len(unique_texts), effective_batch_size):
+            batch = unique_texts[i : i + effective_batch_size]
+            batch_emb = self.model.encode(
+                batch,
+                show_progress_bar=False,
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+            )
+            results.append(batch_emb)
+
+        unique_embeddings = np.vstack(results).tolist() if results else []
+        return [unique_embeddings[original_map[i]] for i in range(len(texts))]
+
+    async def embed_query(self, query: str) -> list[float]:
         """Generates embedding for a single query string with LRU caching."""
         # Optimization: Check LRU cache first
         with self._cache_lock:
@@ -180,5 +251,5 @@ class EmbeddingService:
             if len(self._query_cache) >= self._max_cache_size:
                 self._query_cache.popitem(last=False)  # Evict least-recently-used
             self._query_cache[query] = result
-            
+
         return result

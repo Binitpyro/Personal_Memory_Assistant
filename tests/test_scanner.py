@@ -1,8 +1,9 @@
-import pytest
 import os
 import tempfile
 from pathlib import Path
-from app.scanner.scanner import scan_folder, ScanResult
+
+from app.scanner.scanner import ScanResult, scan_folder
+
 
 def test_fast_scan():
     with tempfile.TemporaryDirectory() as tmpdir:

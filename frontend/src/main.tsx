@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import './index.css'
 import { AppShell } from './components/AppShell'
+import { initTauriConnection } from './api';
 
 import { QueryClientProvider } from '@tanstack/react-query'
 import { queryClient } from './queryClient'
@@ -22,6 +23,8 @@ function PageLoader() {
     </div>
   )
 }
+
+await initTauriConnection();
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

@@ -3,17 +3,11 @@ from pathlib import Path
 
 import pytest
 
+from app.api.indexing import IndexRequest, UnrealImportRequest, cleanup_stale, export_index
+from app.api.insights import get_files_tree
+from app.api.search import QueryRequest, query_history
+from app.api.system import get_system_info
 from app.insights.service import InsightsService
-from app.main import (
-    IndexRequest,
-    QueryRequest,
-    UnrealImportRequest,
-    cleanup_stale,
-    export_index,
-    get_files_tree,
-    get_system_info,
-    query_history,
-)
 from app.search.context_builder import _format_file_stats, build_context
 
 
@@ -47,7 +41,7 @@ class FakeDB:
     async def get_query_history(self, limit=20):
         if self.raise_on_history:
             raise RuntimeError("history error")
-        return [{"question": "q", "answer": "a", "limit": limit}]
+        return [{"id": 1, "question": "q", "answer": "a", "limit": limit, "created_at": "now"}]
 
     async def cleanup_stale_files(self):
         if self.raise_on_cleanup:
@@ -67,17 +61,20 @@ async def test_get_files_tree_groups_and_totals():
     assert result["total_files"] == 2
     assert result["total_size"] == 150
     assert "ProjectA" in result["folders"]
-    assert "Unknown" in result["folders"]
+    assert "" in result["folders"]
 
 
 @pytest.mark.asyncio
 async def test_get_files_tree_db_failure_returns_empty():
-    from app.main import _file_tree_cache
+    from app.state import file_tree_cache as _file_tree_cache
+
     _file_tree_cache["data"] = None  # Clear cache from prior test
     db = FakeDB()
     db.raise_on_files = True
     result = await get_files_tree(db=db)
-    assert result == {"folders": {}, "total_files": 0, "total_size": 0}
+    assert result.status_code == 500
+    payload = json.loads(result.body)
+    assert payload["error"] == "db error"
 
 
 @pytest.mark.asyncio
@@ -85,11 +82,13 @@ async def test_query_history_success_and_error():
     db = FakeDB()
     ok = await query_history(limit=5, db=db)
     assert len(ok["history"]) == 1
-    assert ok["history"][0]["limit"] == 5
+    assert ok["history"][0]["id"] == 1
 
     db.raise_on_history = True
     err = await query_history(limit=5, db=db)
-    assert err == {"history": []}
+    assert err.status_code == 500
+    payload = json.loads(err.body)
+    assert payload["error"] == "history error"
 
 
 @pytest.mark.asyncio
@@ -122,11 +121,11 @@ async def test_export_index_success_and_error():
 
 @pytest.mark.asyncio
 async def test_get_system_info_non_windows(monkeypatch):
-    monkeypatch.setattr("app.main.plat.system", lambda: "Linux")
+    monkeypatch.setattr("app.api.system.plat.system", lambda: "Linux")
     info = await get_system_info()
-    assert info["os"] == "Linux"
+    assert info["os"].startswith("Linux")
     assert info["scan_method"] == "scandir"
-    assert info["volumes"] == []
+    assert len(info["volumes"]) == 1
 
 
 def test_request_validation_helpers(tmp_path: Path):
@@ -170,11 +169,13 @@ def test_context_builder_empty_and_truncation():
     assert build_context([], max_tokens=10) == "No relevant context found."
 
     long_text = "x" * 5000
+    # Increase tokens to allow room for the headers
     context = build_context(
         [{"file_path": "big.txt", "text": long_text}],
-        max_tokens=10,
+        max_tokens=200,
     )
-    assert "Snippet" not in context
+    assert "Snippet 1 [big.txt]" in context
+    assert len(context) < len(long_text)
 
 
 class FakeInsightsDB:
@@ -191,14 +192,14 @@ class FakeInsightsDB:
         if self.calls == 2:
             return [("a.py", 100)]
         if self.calls == 3:
-            return [("b.py", 40, 0)] # Added usage_count
+            return [("b.py", 40, 0)]  # Added usage_count
         return [(".py", 2, 140), (".md", 1, 10)]
 
 
 @pytest.mark.asyncio
 async def test_insights_service_success_and_error():
     svc = InsightsService(FakeInsightsDB())
-    stats = await svc.get_stats()
+    stats = await svc.get_dashboard_insights()
     assert stats["total_size_bytes"] == 150
     assert stats["file_count"] == 3
     assert stats["top_files"][0]["path"] == "a.py"
@@ -206,5 +207,5 @@ async def test_insights_service_success_and_error():
     assert stats["error"] is None
 
     failing = InsightsService(FakeInsightsDB(fail=True))
-    err_stats = await failing.get_stats()
+    err_stats = await failing.get_dashboard_insights()
     assert err_stats["error"] is not None

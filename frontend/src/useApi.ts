@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { queryClient } from './queryClient'
+import { useId } from 'react'
 
 interface UseApiOptions {
   /** Cache key — if same key is used, cached data is reused within TTL */
@@ -21,21 +22,28 @@ export function useApi<T>(
 ) {
   const { cacheKey, enabled = true, refetchInterval = 0 } = opts
 
-  // If there's no cacheKey, we generate a unique one so it never caches
-  const qKey = cacheKey ? [cacheKey] : ['nocache', Math.random().toString()]
+  // If there's no cacheKey, we generate a unique one so it never caches.
+  // We use useId to ensure it stays STABLE and PURE across renders.
+  const stableId = useId()
+  const qKey = cacheKey ? [cacheKey] : ['nocache', stableId]
 
   const query = useQuery({
     queryKey: qKey,
-    queryFn: fetcher,
+    queryFn: () => fetcher(),
     enabled: enabled,
     refetchInterval: refetchInterval > 0 ? refetchInterval : false,
     staleTime: cacheKey ? 8000 : 0 // Match legacy 8-second TTL
   })
 
+  let errorMsg = null
+  if (query.error) {
+    errorMsg = query.error instanceof Error ? query.error.message : 'Unknown error'
+  }
+
   return {
-    data: query.data as T | null | undefined,
+    data: query.data as T | undefined,
     loading: query.isLoading || query.isFetching,
-    error: query.error ? (query.error instanceof Error ? query.error.message : 'Unknown error') : null,
+    error: errorMsg,
     refetch: query.refetch
   }
 }

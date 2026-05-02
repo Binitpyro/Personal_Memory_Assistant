@@ -4,18 +4,55 @@
  * base URL resolution, and easy-to-mock endpoints for tests.
  */
 
-const BASE = '/api'; export const ENDPOINT = (import.meta as any).env.VITE_API_URL || "http://127.0.0.1:8000"
+const BASE = '/api'; 
+export let ENDPOINT = (import.meta as any).env.VITE_API_URL || "http://127.0.0.1:8000";
 
 // ── Security Token Injection ──────────────────────────────────────────
 
-const params = new URLSearchParams(window.location.search);
+const params = new URLSearchParams(globalThis.location.search);
 const tokenFromUrl = params.get('token');
-export const localToken = tokenFromUrl || sessionStorage.getItem('pma_token') || '';
+export let localToken = tokenFromUrl || sessionStorage.getItem('pma_token') || '';
 
 if (tokenFromUrl) {
   sessionStorage.setItem('pma_token', tokenFromUrl);
   // Clean up URL so the token isn't sitting in the address bar
-  window.history.replaceState({}, document.title, window.location.pathname);
+  globalThis.history.replaceState({}, document.title, globalThis.location.pathname);
+}
+
+const isTauri = typeof globalThis !== 'undefined' && '__TAURI_INTERNALS__' in globalThis;
+
+export async function initTauriConnection() {
+  if (isTauri) {
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const [port, token] = await invoke<[number, string]>('get_backend_info');
+      ENDPOINT = `http://127.0.0.1:${port}`;
+      localToken = token;
+      sessionStorage.setItem('pma_token', token);
+      console.log(`[Tauri] Connected to backend on port ${port}`);
+    } catch (e) {
+      console.error("[Tauri] Failed to get backend info from shell:", e);
+    }
+  }
+}
+
+export function getGoogleAuthStartUrl(): string {
+  return `${ENDPOINT}/api/auth/google/start`;
+}
+
+export async function launchGoogleAuth(): Promise<void> {
+  const url = getGoogleAuthStartUrl();
+
+  if (isTauri) {
+    const { open } = await import('@tauri-apps/plugin-shell');
+    await open(url);
+    return;
+  }
+
+  const popup = globalThis.open(url, '_blank', 'noopener,noreferrer');
+  if (!popup) {
+    globalThis.location.assign(url);
+  }
 }
 
 // ── API Wrappers ──────────────────────────────────────────────────────
@@ -28,7 +65,7 @@ export async function json<T>(endpoint: string, options: RequestInit = {}): Prom
   };
   if (localToken) headers['X-Local-Access-Token'] = localToken;
 
-  const res = await fetch(`/api${endpoint}`, { ...options, headers });
+  const res = await fetch(`${ENDPOINT}/api${endpoint}`, { ...options, headers });
   if (!res.ok) {
     const body = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error(body.error || `HTTP ${res.status}`);
@@ -44,6 +81,8 @@ export interface HealthResponse {
   db: string;
   model_ready: boolean;
   indexing: string;
+  /** Boot-time sync status for Split-Brain mode: idle | syncing | done | error */
+  split_brain_sync_status?: 'idle' | 'syncing' | 'done' | 'error';
 }
 
 export const getHealth = () => json<HealthResponse>('/health');
@@ -83,7 +122,7 @@ export async function* streamGenerator(endpoint: string, payload: any, signal?: 
   };
   if (localToken) headers['X-Local-Access-Token'] = localToken;
 
-  const response = await fetch(`/api${endpoint}`, {
+  const response = await fetch(`${ENDPOINT}/api${endpoint}`, {
     method: 'POST',
     headers,
     body: JSON.stringify(payload),
@@ -155,9 +194,33 @@ export interface SystemInfo {
 
 export const getSystemInfo = () => json<SystemInfo>('/system/info');
 
+export interface DriveInfo {
+  drive: string;
+  fs_type: string;
+  is_portable_fs: boolean;
+  lancedb_mode: string;
+}
+
+export const getDriveInfo = () => json<DriveInfo>('/system/drive_info');
+
+export const purgeHostCache = () =>
+  json<{ message: string }>('/system/purge-host-cache', { method: 'POST' });
+
 // ── Folder picker ─────────────────────────────────────────────────────
 
-export const pickFolder = () => json<{ path: string }>('/pick/folder');
+// P2-2: Use native Tauri dialog when running inside the desktop shell,
+// fall back to legacy HTTP endpoint for browser-based dev mode.
+export async function pickFolder(): Promise<{ path: string }> {
+  if (isTauri) {
+    const { open } = await import('@tauri-apps/plugin-dialog');
+    const selected = await open({ directory: true, multiple: false, title: 'Select a folder to index' });
+    if (typeof selected === 'string') return { path: selected };
+    if (Array.isArray(selected) && (selected as string[]).length > 0) return { path: selected[0] };
+    return { path: '' };
+  }
+  // Browser dev mode: use backend tkinter fallback
+  return json<{ path: string }>('/pick/folder');
+}
 
 // ── Query ─────────────────────────────────────────────────────────────
 
@@ -236,10 +299,13 @@ export const getInsights = () => json<InsightsResponse>('/insights');
 
 export const getVisualizerStream = async (filter?: string | null): Promise<ArrayBuffer> => {
   const url = filter
-    ? `${BASE}/visualizer/stream?extension=${encodeURIComponent(filter)}`
-    : `${BASE}/visualizer/stream`;
+    ? `${ENDPOINT}${BASE}/visualizer/stream?extension=${encodeURIComponent(filter)}`
+    : `${ENDPOINT}${BASE}/visualizer/stream`;
 
-  const res = await fetch(url);
+  const headers: Record<string, string> = {};
+  if (localToken) headers['X-Local-Access-Token'] = localToken;
+
+  const res = await fetch(url, { headers });
   if (!res.ok) {
     throw new Error(`Failed to fetch visualizer stream: HTTP ${res.status}`);
   }
@@ -266,6 +332,36 @@ export const getInsightsByType = (typeFilter: string) =>
 export const seedDemo = () =>
   json<{ message: string; folder: string }>('/demo/seed', { method: 'POST' });
 
+// ── Stream Tracking ───────────────────────────────────────────────────
+
+export let activeStreamCount = 0;
+const activeControllers = new Set<AbortController>();
+
+function updateStreamCount(delta: number, controller?: AbortController) {
+  if (controller) {
+    if (delta > 0) activeControllers.add(controller);
+    else activeControllers.delete(controller);
+  }
+  activeStreamCount = Math.max(0, Array.from(activeControllers).filter(c => !c.signal.aborted).length);
+  globalThis.dispatchEvent(new CustomEvent('stream-activity', { detail: activeStreamCount > 0 }));
+}
+
+/** Failsafe: reset stream count if all known controllers are aborted */
+export function checkStreamFailsafe() {
+  const liveCount = Array.from(activeControllers).filter(c => !c.signal.aborted).length;
+  if (liveCount === 0 && activeStreamCount > 0) {
+    console.warn("[API] Stream failsafe triggered: resetting activeStreamCount");
+    activeStreamCount = 0;
+    activeControllers.clear();
+    globalThis.dispatchEvent(new CustomEvent('stream-activity', { detail: false }));
+  }
+}
+
+// Run failsafe check periodically
+if (typeof globalThis !== 'undefined' && 'setInterval' in globalThis) {
+  setInterval(checkStreamFailsafe, 30_000);
+}
+
 // ── SSE Progress Stream ───────────────────────────────────────────────
 
 export function subscribeProgress(onData: (data: IndexStatus & { current_file: string }) => void): () => void {
@@ -273,17 +369,31 @@ export function subscribeProgress(onData: (data: IndexStatus & { current_file: s
   let closed = false;
   let retries = 0;
   const MAX_RETRIES = 10;
+  let streamCounted = false;
+  const controller = new AbortController();
 
   function connect() {
     if (closed) return;
-    es = new EventSource(`${BASE}/index/progress-stream`);
+    const tokenQuery = localToken ? `?token=${encodeURIComponent(localToken)}` : '';
+    es = new EventSource(`${ENDPOINT}${BASE}/index/progress-stream${tokenQuery}`);
+    es.onopen = () => {
+      // Connection established, but wait for first message to count as active as per plan
+    };
     es.addEventListener('progress', (e) => {
+      if (!streamCounted) {
+        streamCounted = true;
+        updateStreamCount(1, controller);
+      }
       retries = 0; // reset on success
       try {
         onData(JSON.parse(e.data));
       } catch { /* ignore malformed */ }
     });
     es.onerror = () => {
+      if (streamCounted) {
+        updateStreamCount(-1, controller);
+        streamCounted = false;
+      }
       es?.close();
       if (!closed && retries < MAX_RETRIES) {
         retries++;
@@ -294,7 +404,15 @@ export function subscribeProgress(onData: (data: IndexStatus & { current_file: s
 
   // Small delay to allow backend SSE to be ready
   setTimeout(connect, 300);
-  return () => { closed = true; es?.close(); };
+  return () => { 
+    closed = true; 
+    controller.abort();
+    if (streamCounted) {
+      updateStreamCount(-1, controller);
+      streamCounted = false;
+    }
+    es?.close(); 
+  };
 }
 
 // ── SSE Query Stream ──────────────────────────────────────────────────
@@ -314,13 +432,15 @@ export function subscribeQuery(
   onChunk: (chunk: QueryStreamChunk) => void
 ): () => void {
   const controller = new AbortController()
+  let streamCounted = true;
+  updateStreamCount(1, controller); // Increment immediately since fetch starts
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   }
   if (localToken) headers['X-Local-Access-Token'] = localToken
 
-  fetch('/api/query/stream', {
+  fetch(`${ENDPOINT}/api/query/stream`, {
     method: 'POST',
     headers,
     body: JSON.stringify(payload),
@@ -348,15 +468,27 @@ export function subscribeQuery(
     if (err.name !== 'AbortError') {
       onChunk({ type: 'error', text: err.message });
     }
+  }).finally(() => {
+    if (streamCounted) {
+      updateStreamCount(-1, controller);
+      streamCounted = false;
+    }
   });
 
-  return () => controller.abort();
+  return () => {
+    controller.abort();
+    if (streamCounted) {
+      updateStreamCount(-1, controller);
+      streamCounted = false;
+    }
+  };
 }
 
 // ── Auth ──────────────────────────────────────────────────────────────
 
 export interface AuthStatus {
   connected: boolean;
+  method?: 'oauth' | 'env';
 }
 
 export const getAuthStatus = () => json<AuthStatus>('/auth/google/status');

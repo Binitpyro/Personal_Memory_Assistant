@@ -21,9 +21,11 @@ def _try_init_onnx(device: str) -> tuple[str, dict | None]:
     if device == "cpu":
         try:
             # Verify that the package is actually usable to prevent deferred ImportErrors
-            import onnxruntime as _ort  # noqa: F401
-            import optimum.onnxruntime as _opt_ort  # noqa: F401
-            from optimum.onnxruntime import ORTModelForFeatureExtraction as _ORTModel  # noqa: F401
+            import onnxruntime as _ort  # type: ignore # noqa: F401
+            import optimum.onnxruntime as _opt_ort  # type: ignore # noqa: F401
+            from optimum.onnxruntime import (
+                ORTModelForFeatureExtraction as _ORTModel,  # type: ignore # noqa: F401
+            )
 
             backend = "onnx"
             # Reranker typically uses onnx/model.onnx if O4 is missing,

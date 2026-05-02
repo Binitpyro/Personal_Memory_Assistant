@@ -12,7 +12,7 @@ class PdfExtractor:
     def extract_stream(self, path: Path, max_file_size: int) -> Iterator[str]:
         """Yield text page-by-page from the PDF."""
         try:
-            from pypdf import PdfReader
+            from pypdf import PdfReader  # type: ignore
 
             reader = PdfReader(str(path))
             total = 0

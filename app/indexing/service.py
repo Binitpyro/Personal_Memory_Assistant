@@ -27,7 +27,7 @@ from app.scanner.scanner import scan_folder as fast_scan
 from app.storage.db import DatabaseManager
 
 try:
-    import rust_core
+    import rust_core  # type: ignore
 
     RUST_CORE_AVAILABLE = True
 except ImportError:

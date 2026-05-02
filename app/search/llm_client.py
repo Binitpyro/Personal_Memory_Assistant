@@ -50,7 +50,7 @@ class LLMClient:
             creds = Credentials.from_authorized_user_info(token_data)
             self._refresh_token_if_expired(creds, token_data, token_path)
             if creds.valid:
-                return creds.token
+                return str(creds.token)
         except Exception as e:
             logger.warning("Failed to load OAuth token: %s", e)
         return None
@@ -167,7 +167,7 @@ Answer:
         if provider in {"lm_studio", "auto"} and await self._check_lm_studio_health():
             return await self._call_lm_studio(prompt, history=history)
         if provider in {"ollama", "auto"} and await self._check_ollama_health():
-            return await self._call_ollama(prompt)
+            return await self._call_ollama(prompt, history=history)
         return "LLM unavailable. Please provide a GEMINI_API_KEY or ensure Ollama is running."
 
     async def stream_answer(
@@ -185,7 +185,7 @@ Answer:
                 yield chunk
             return
         if provider in {"ollama", "auto"} and await self._check_ollama_health():
-            async for chunk in self._stream_ollama(prompt):
+            async for chunk in self._stream_ollama(prompt, history=history):
                 yield chunk
             return
         yield "LLM unavailable."
@@ -248,7 +248,7 @@ Answer:
                 return f"Gemini API error {response.status_code}: {response.text[:100]}"
 
             data = response.json()
-            return data["candidates"][0]["content"]["parts"][0]["text"]
+            return str(data["candidates"][0]["content"]["parts"][0]["text"])
         except Exception as e:
             logger.error("Gemini request failed: %s", str(e), exc_info=True)
             raise
@@ -303,26 +303,41 @@ Answer:
                 break
         return buffer, new_texts
 
-    async def _call_ollama(self, prompt: str) -> str:
-        try:
-            from ollama import AsyncClient
+    def _build_messages(
+        self, prompt: str, history: list[dict[str, str]] | None
+    ) -> list[dict[str, str]]:
+        messages = []
+        if history:
+            messages.extend(history)
+        messages.append({"role": "user", "content": prompt})
+        return messages
 
-            client = AsyncClient(host=self.ollama_url)
-            resp = await client.generate(model=self.ollama_model, prompt=prompt, stream=False)
-            return resp.get("response", "No response.")
+    async def _call_ollama(self, prompt: str, history: list[dict[str, str]] | None = None) -> str:
+        try:
+            import ollama  # type: ignore
+
+            response = await ollama.chat(
+                model=self.ollama_model,
+                messages=self._build_messages(prompt, history),
+            )
+            return str(response["message"]["content"])
         except Exception as e:
             logger.error("Ollama failed: %s", e)
             return "Ollama failed."
 
-    async def _stream_ollama(self, prompt: str) -> AsyncGenerator[str, None]:
+    async def _stream_ollama(
+        self, prompt: str, history: list[dict[str, str]] | None = None
+    ) -> AsyncGenerator[str, None]:
         try:
-            from ollama import AsyncClient
+            import ollama  # type: ignore
 
-            client = AsyncClient(host=self.ollama_url)
-            async for chunk in await client.generate(
-                model=self.ollama_model, prompt=prompt, stream=True
-            ):
-                yield chunk.get("response", "")
+            stream = await ollama.chat(
+                model=self.ollama_model,
+                messages=self._build_messages(prompt, history),
+                stream=True,
+            )
+            async for chunk in stream:
+                yield chunk["message"]["content"]
         except Exception as e:
             logger.error("Ollama stream failed: %s", e)
             yield "Ollama stream failed."
@@ -332,8 +347,7 @@ Answer:
     ) -> str:
         try:
             client = self._get_lm_studio_client()
-            messages = history[:] if history else []
-            messages.append({"role": "user", "content": prompt})
+            messages = self._build_messages(prompt, history)
             model_name = self.lm_studio_model or "local-model"
             resp = await client.post(
                 f"{self.lm_studio_url}/chat/completions",
@@ -347,7 +361,9 @@ Answer:
             if resp.status_code != 200:
                 return f"LM Studio error {resp.status_code}"
             data = resp.json()
-            return data.get("choices", [{}])[0].get("message", {}).get("content", "No response.")
+            return str(
+                data.get("choices", [{}])[0].get("message", {}).get("content", "No response.")
+            )
         except Exception:
             return "LM Studio failed."
 
@@ -356,8 +372,7 @@ Answer:
     ) -> AsyncGenerator[str, None]:
         try:
             client = self._get_lm_studio_client()
-            messages = history[:] if history else []
-            messages.append({"role": "user", "content": prompt})
+            messages = self._build_messages(prompt, history)
             model_name = self.lm_studio_model or "local-model"
             async with client.stream(
                 "POST",

@@ -93,7 +93,8 @@ def _log_admin_status():
     """Helper to log Windows Administrator status for NTFS MFT scanning."""
     if plat.system() == "Windows":
         try:
-            is_admin = bool(ctypes.windll.shell32.IsUserAnAdmin())
+            # type: ignore[attr-defined]
+            is_admin = bool(ctypes.windll.shell32.IsUserAnAdmin())  # type: ignore[attr-defined]
         except Exception:
             is_admin = False
 
@@ -240,9 +241,11 @@ async def _split_brain_sync(db_manager, lancedb_client, emb_svc):
                     break
                 ids_batch = [r[0] for r in rows]
                 texts_batch = [r[1] or "" for r in rows]
-                embeddings = await loop.run_in_executor(
-                    None, lambda t=texts_batch: emb_svc.embed_texts_sync(t)
-                )
+
+                def _embed_task(t=texts_batch):
+                    return emb_svc.embed_texts_sync(t)
+
+                embeddings = await loop.run_in_executor(None, _embed_task)
                 blob_data = [
                     (chunk_id, np.array(emb, dtype=np.float16).tobytes())
                     for chunk_id, emb in zip(ids_batch, embeddings, strict=False)
@@ -331,7 +334,7 @@ app.add_middleware(GZipMiddleware, minimum_size=500)
 app.mount("/static", StaticFiles(directory=str(_BASE_DIR / "static")), name="static")
 
 app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
 
 app.add_middleware(
     CORSMiddleware,
@@ -357,7 +360,9 @@ async def security_and_telemetry_middleware(request: Request, call_next):
             provided_token = request.query_params.get("token")
 
         if not provided_token or not secrets.compare_digest(provided_token, expected_token):
-            return JSONResponse(status_code=401, content={"error": "Unauthorized local access."})
+            return JSONResponse(
+                status_code=401, content={"error": "Unauthorized local access."}
+            )
 
     # 2. Telemetry and Security Headers
     request_id = str(uuid.uuid4())[:8]

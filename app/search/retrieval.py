@@ -43,9 +43,10 @@ _cache_lock = threading.Lock()
 # Full-RAG response cache (caches LLM answers for repeat queries)
 # Keys are (query, file_type, folder_tag, index_gen)
 # Values are Dict[str, Any] (full response)
-_rag_response_cache: OrderedDict[tuple[str, str | None, str | None, int], dict[str, Any]] = (
-    OrderedDict()
-)
+_rag_response_cache: OrderedDict[
+    tuple[str, str | None, str | None, tuple[tuple[str, str], ...] | None, int],
+    dict[str, Any],
+] = OrderedDict()
 _rag_cache_lock = threading.Lock()
 
 # Index generation counter — incremented on each cache clear (after re-indexing)
@@ -182,7 +183,7 @@ async def _fts_search(
     """FTS5 keyword search with optional metadata push-down filters."""
     try:
         fts_match = _sanitize_fts_query(query)
-        params = [fts_match]
+        params: list[Any] = [fts_match]
         where_clauses = ["cf.chunks_text MATCH ?"]
 
         if folder_tag:

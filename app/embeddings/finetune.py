@@ -85,7 +85,7 @@ def finetune(
     logger.info("Loaded %d training pairs.", len(pairs))
 
     examples = [InputExample(texts=[a, b]) for a, b in pairs]
-    loader = DataLoader(examples, shuffle=True, batch_size=batch_size, num_workers=0)  # type: ignore[arg-type]
+    loader: DataLoader = DataLoader(examples, shuffle=True, batch_size=batch_size, num_workers=0)  # type: ignore[arg-type]
 
     model = SentenceTransformer(base_model)
 

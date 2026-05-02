@@ -64,21 +64,20 @@ async def get_files_tree(db: DatabaseManager = Depends(get_db)):
         folders = {}
         total_size = 0
         for f in files:
-            # Use .get() for O(1) attribute lookup instead of 'in f.keys()'
-            # which is O(N) in some contexts.
-            tag = f.get("folder_tag", "Unknown")
+            # Row object does not have .get()
+            tag = f["folder_tag"] if f["folder_tag"] else "Unknown"
             if tag not in folders:
                 folders[tag] = []
             folders[tag].append(
                 {
-                    "id": f.get("id"),
-                    "path": f.get("path"),
-                    "size": f.get("size", 0),
-                    "type": f.get("type"),
-                    "usage_count": f.get("usage_count", 0),
+                    "id": f["id"],
+                    "path": f["path"],
+                    "size": f["size"] or 0,
+                    "type": f["type"],
+                    "usage_count": f["usage_count"] or 0,
                 }
             )
-            total_size += f.get("size", 0)
+            total_size += f["size"] or 0
 
         data = {"folders": folders, "total_files": len(files), "total_size": total_size}
         _file_tree_cache["data"] = data

@@ -47,7 +47,7 @@ def get_drive_fs_type(drive_letter: str) -> str:
     try:
         volume_name_buffer = ctypes.create_unicode_buffer(1024)
         file_system_name_buffer = ctypes.create_unicode_buffer(1024)
-        result = ctypes.windll.kernel32.GetVolumeInformationW(
+        result = ctypes.windll.kernel32.GetVolumeInformationW(  # type: ignore[attr-defined]
             ctypes.c_wchar_p(drive_letter + "\\"),
             volume_name_buffer,
             len(volume_name_buffer),
@@ -159,7 +159,7 @@ async def get_system_info():
     is_admin = False
     if plat.system() == "Windows":
         try:
-            is_admin = bool(ctypes.windll.shell32.IsUserAnAdmin())
+            is_admin = bool(ctypes.windll.shell32.IsUserAnAdmin())  # type: ignore[attr-defined]
         except Exception:
             is_admin = False
 

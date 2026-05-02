@@ -19,7 +19,9 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv sync --frozen --all-extras
+        run: |
+          uv sync --frozen --all-extras
+          uv pip install types-PyYAML types-openpyxl types-requests
 
       - name: Run Ruff (Lint & Format Check)
         run: |

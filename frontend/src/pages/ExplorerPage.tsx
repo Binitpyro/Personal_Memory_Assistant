@@ -1,5 +1,6 @@
 import { useState, useMemo } from 'react'
-import { FolderTree, File, Folder, ChevronRight, ChevronDown, Loader2, LayoutGrid, List, Trash2 } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
+import { FolderTree, File, Folder, ChevronRight, ChevronDown, Loader2, LayoutGrid, List, Trash2, Search, Download, Bot } from 'lucide-react'
 import { useApi, invalidateCache } from '../useApi'
 import { getFileTree, removeFolderIndex, type FileEntry } from '../api'
 import { FileTypeTreemap } from '../components/FileTypeTreemap'
@@ -20,6 +21,8 @@ interface TreeNode {
 
 /* ── Recursive Node Component ───────────────────────────── */
 
+const MAX_VISIBLE_FILES = 100;
+
 interface FolderNodeProps {
   readonly node: TreeNode
   readonly depth: number
@@ -38,12 +41,13 @@ function FolderNode({ node, depth, onSelect, selectedPath, onDeleteFolder }: Fol
     }
   }
 
+  const sortedFiles = useMemo(() => [...node.files].sort((a, b) => b.size - a.size), [node.files]);
+  const visibleFiles = sortedFiles.slice(0, MAX_VISIBLE_FILES);
+  const remainingFiles = sortedFiles.length - MAX_VISIBLE_FILES;
+
   return (
     <div className="select-none">
-      <div
-        role="button"
-        tabIndex={0}
-        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setOpen(!open); }}
+      <button
         className={`group flex items-center gap-2 w-full px-2 py-1 rounded-lg transition-colors cursor-pointer text-left ${open ? 'bg-black/5' : 'hover:bg-black/5'}`}
         onClick={() => setOpen(!open)}
       >
@@ -62,7 +66,7 @@ function FolderNode({ node, depth, onSelect, selectedPath, onDeleteFolder }: Fol
         >
           <Trash2 className="w-3.5 h-3.5" />
         </button>
-      </div>
+      </button>
 
       {
         open && (
@@ -81,17 +85,12 @@ function FolderNode({ node, depth, onSelect, selectedPath, onDeleteFolder }: Fol
               ))
             }
 
-            {[...node.files]
-              .sort((a, b) => b.size - a.size)
-              .map((f) => {
+            {visibleFiles.map((f) => {
                 const fileName = f.path.split(/[\\/]/).pop() ?? f.path
                 const isSelected = f.path === selectedPath
                 return (
-                  <div
+                  <button
                     key={f.path}
-                    role="button"
-                    tabIndex={0}
-                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') onSelect(f); }}
                     onClick={() => onSelect(f)}
                     className={`flex items-center gap-2 w-full px-6 py-1 rounded-lg text-left text-sm transition-colors cursor-pointer ${isSelected ? 'bg-primary/20 text-primary-light' : 'hover:bg-white/5 text-text-secondary'
                       }`}
@@ -99,10 +98,17 @@ function FolderNode({ node, depth, onSelect, selectedPath, onDeleteFolder }: Fol
                     <File className="w-3.5 h-3.5 shrink-0 opacity-60" />
                     <span className="truncate flex-1">{fileName}</span>
                     <span className="text-[10px] opacity-40 tabular-nums">{formatSize(f.size)}</span>
-                  </div>
+                  </button>
                 )
               })
             }
+
+            {remainingFiles > 0 && (
+              <div className="px-6 py-2 text-[10px] italic text-text-secondary opacity-50 flex items-center gap-2">
+                <span className="w-1 h-1 rounded-full bg-text-secondary"></span>
+                {remainingFiles} more files in this folder
+              </div>
+            )}
           </div>
         )
       }
@@ -117,6 +123,31 @@ export function ExplorerPage() {
   const [selectedFile, setSelectedFile] = useState<FileEntry | null>(null)
   const [viewMode, setViewMode] = useState<'tree' | 'treemap'>('tree')
   const [activeExtension, setActiveExtension] = useState<string | null>(null)
+  const [searchQuery, setSearchQuery] = useState('')
+  const navigate = useNavigate()
+
+  const handleExportCSV = () => {
+    if (!tree?.folders) return
+    const flat = Object.values(tree.folders).flat()
+    const filtered = flat.filter(f => {
+      const extMatch = activeExtension ? ('.' + f.path.split('.').pop()?.toLowerCase()) === activeExtension.toLowerCase() : true
+      const searchMatch = searchQuery ? f.path.toLowerCase().includes(searchQuery.toLowerCase()) : true
+      return extMatch && searchMatch
+    })
+
+    const lines = ['Path,Size_Bytes,Usage_Count,Type']
+    filtered.forEach(f => {
+      lines.push(`"${f.path}",${f.size},${f.usage_count || 0},"${f.type}"`)
+    })
+
+    const blob = new Blob([lines.join('\n')], { type: 'text/csv' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'pma_explorer_export.csv'
+    a.click()
+    URL.revokeObjectURL(url)
+  }
 
   const handleDeleteFolder = async (path: string) => {
     try {
@@ -143,9 +174,11 @@ export function ExplorerPage() {
       const partsTag = tag.split(/[\\/]/).filter(Boolean);
       const tagName = partsTag.at(-1) || tag;
 
-      const filteredFiles = activeExtension
-        ? files.filter(f => ('.' + f.path.split('.').pop()?.toLowerCase()) === activeExtension.toLowerCase())
-        : files;
+      const filteredFiles = files.filter(f => {
+        const extMatch = activeExtension ? ('.' + f.path.split('.').pop()?.toLowerCase()) === activeExtension.toLowerCase() : true;
+        const searchMatch = searchQuery ? f.path.toLowerCase().includes(searchQuery.toLowerCase()) : true;
+        return extMatch && searchMatch;
+      });
 
       if (filteredFiles.length === 0 && activeExtension) return;
 
@@ -158,6 +191,7 @@ export function ExplorerPage() {
         let relative = normPath
         if (normPathLower.startsWith(normTag)) {
           // Robustly remove the tag prefix
+          relative = normPath.slice(normTag.length);
           while (relative.startsWith('/')) { relative = relative.slice(1); }
         }
 
@@ -196,20 +230,74 @@ export function ExplorerPage() {
   const largestFiles = useMemo(() => {
     if (!tree?.folders) return []
     const flat = Object.values(tree.folders).flat()
-    const filtered = activeExtension
-      ? flat.filter(f => ('.' + f.path.split('.').pop()?.toLowerCase()) === activeExtension.toLowerCase())
-      : flat
+    const filtered = flat.filter(f => {
+      const extMatch = activeExtension ? ('.' + f.path.split('.').pop()?.toLowerCase()) === activeExtension.toLowerCase() : true;
+      const searchMatch = searchQuery ? f.path.toLowerCase().includes(searchQuery.toLowerCase()) : true;
+      return extMatch && searchMatch;
+    })
     return [...filtered].sort((a, b) => b.size - a.size).slice(0, 15)
-  }, [tree, activeExtension])
+  }, [tree, activeExtension, searchQuery])
 
   const coldFiles = useMemo(() => {
     if (!tree?.folders) return []
     const flat = Object.values(tree.folders).flat()
-    const filtered = activeExtension
-      ? flat.filter(f => ('.' + f.path.split('.').pop()?.toLowerCase()) === activeExtension.toLowerCase())
-      : flat
+    const filtered = flat.filter(f => {
+      const extMatch = activeExtension ? ('.' + f.path.split('.').pop()?.toLowerCase()) === activeExtension.toLowerCase() : true;
+      const searchMatch = searchQuery ? f.path.toLowerCase().includes(searchQuery.toLowerCase()) : true;
+      return extMatch && searchMatch;
+    })
     return [...filtered].sort((a, b) => (a.usage_count || 0) - (b.usage_count || 0)).slice(0, 15)
-  }, [tree, activeExtension])
+  }, [tree, activeExtension, searchQuery])
+
+  const isEmptyTree = !hierarchicalTree || hierarchicalTree.length === 0;
+
+  const renderMainContent = () => {
+    if (loading) {
+      return (
+        <div className="flex-1 flex items-center justify-center">
+          <Loader2 className="w-12 h-12 text-primary animate-spin" />
+        </div>
+      )
+    }
+
+    if (isEmptyTree) {
+      return (
+        <div className="flex-1 flex items-center justify-center text-text-secondary text-lg">
+          No indexed data. Go to Library to add folders.
+        </div>
+      )
+    }
+
+    return (
+      <div className="flex-1 flex flex-col overflow-hidden">
+        {viewMode === 'tree' ? (
+          <div className="p-4 space-y-1 overflow-y-auto flex-1 custom-scrollbar">
+            {hierarchicalTree.map((root) => (
+              <FolderNode
+                key={root.fullPath}
+                node={root}
+                depth={0}
+                onSelect={setSelectedFile}
+                selectedPath={selectedFile?.path ?? null}
+                onDeleteFolder={handleDeleteFolder}
+              />
+            ))}
+          </div>
+        ) : (
+          <div className="flex-1 p-2 flex flex-col min-h-0">
+            <FileTypeTreemap
+              allFiles={tree!.folders}
+              onFileSelect={setSelectedFile}
+              onDeleteFolder={handleDeleteFolder}
+              activeFilter={activeExtension}
+              onFilterChange={setActiveExtension}
+              initialMode="folder"
+            />
+          </div>
+        )}
+      </div>
+    )
+  }
 
   return (
     <div className="flex flex-col h-full p-6 animate-fade-in-up overflow-hidden">
@@ -230,69 +318,49 @@ export function ExplorerPage() {
           </p>
         </div>
 
-        <div className="flex bg-black/5 p-1 rounded-xl border border-black/5 shadow-inner">
+        <div className="flex items-center gap-4">
+          <div className="relative">
+            <Search className="w-4 h-4 text-text-secondary absolute left-3 top-1/2 -translate-y-1/2 opacity-50" />
+            <input
+              type="text"
+              aria-label="Filter indexed files by path or name"
+              placeholder="Filter files..."
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+              className="pl-9 pr-4 py-2 bg-black/5 rounded-xl border border-black/5 text-sm text-text-primary placeholder:text-text-secondary focus:outline-none focus:ring-2 focus:ring-primary/40 shadow-inner w-56"
+            />
+          </div>
           <button
-            onClick={() => setViewMode('tree')}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${viewMode === 'tree' ? 'bg-primary text-white shadow-lg' : 'text-text-secondary hover:text-text-primary'
-              }`}
+            onClick={handleExportCSV}
+            aria-label="Export file list to CSV format"
+            className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold text-text-secondary hover:text-text-primary hover:bg-black/5 border border-black/5 transition-all shadow-sm"
           >
-            <List className="w-4 h-4" /> TREE
+            <Download className="w-4 h-4" /> CSV
           </button>
-          <button
-            onClick={() => setViewMode('treemap')}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${viewMode === 'treemap' ? 'bg-primary text-white shadow-lg' : 'text-text-secondary hover:text-text-primary'
-              }`}
-          >
-            <LayoutGrid className="w-4 h-4" /> TREEMAP
-          </button>
+
+          <div className="flex bg-black/5 p-1 rounded-xl border border-black/5 shadow-inner ml-2">
+            <button
+              onClick={() => setViewMode('tree')}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${viewMode === 'tree' ? 'bg-primary text-white shadow-lg' : 'text-text-secondary hover:text-text-primary'
+                }`}
+            >
+              <List className="w-4 h-4" /> TREE
+            </button>
+            <button
+              onClick={() => setViewMode('treemap')}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${viewMode === 'treemap' ? 'bg-primary text-white shadow-lg' : 'text-text-secondary hover:text-text-primary'
+                }`}
+            >
+              <LayoutGrid className="w-4 h-4" /> TREEMAP
+            </button>
+          </div>
         </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 flex-1 min-h-0">
         {/* Main View Area */}
         <div className="glass-card lg:col-span-8 flex flex-col overflow-hidden p-0">
-          {loading ? (
-            <div className="flex-1 flex items-center justify-center">
-              <Loader2 className="w-12 h-12 text-primary animate-spin" />
-            </div>
-          ) : !hierarchicalTree || hierarchicalTree.length === 0 ? (
-            <div className="flex-1 flex items-center justify-center text-text-secondary text-lg">
-              No indexed data. Go to Library to add folders.
-            </div>
-          ) : (
-            <div className="flex-1 flex flex-col overflow-hidden">
-              {(() => {
-                if (viewMode === 'tree') {
-                  return (
-                    <div className="p-4 space-y-1 overflow-y-auto flex-1 custom-scrollbar">
-                      {hierarchicalTree.map((root) => (
-                        <FolderNode
-                          key={root.fullPath}
-                          node={root}
-                          depth={0}
-                          onSelect={setSelectedFile}
-                          selectedPath={selectedFile?.path ?? null}
-                          onDeleteFolder={handleDeleteFolder}
-                        />
-                      ))}
-                    </div>
-                  )
-                }
-                return (
-                  <div className="flex-1 p-2 flex flex-col min-h-0">
-                    <FileTypeTreemap
-                      allFiles={tree!.folders}
-                      onFileSelect={setSelectedFile}
-                      onDeleteFolder={handleDeleteFolder}
-                      activeFilter={activeExtension}
-                      onFilterChange={setActiveExtension}
-                      initialMode="folder"
-                    />
-                  </div>
-                )
-              })()}
-            </div>
-          )}
+          {renderMainContent()}
         </div>
 
         {/* Sidebar */}
@@ -345,6 +413,13 @@ export function ExplorerPage() {
                     <dd className="text-sm font-black text-text-primary">{selectedFile.usage_count ?? 0}</dd>
                   </div>
                 </dl>
+                <button
+                  onClick={() => navigate('/search', { state: { query: `Summarize or explain this file: ${selectedFile.path}` } })}
+                  className="w-full mt-2 flex items-center justify-center gap-2 py-2.5 bg-primary/10 hover:bg-primary/20 text-primary rounded-xl text-sm font-bold transition-all border border-primary/20"
+                >
+                  <Bot className="w-4 h-4" />
+                  Ask AI about this file
+                </button>
               </div>
             ) : (
               <div className="text-center py-4 opacity-30">
@@ -361,11 +436,8 @@ export function ExplorerPage() {
             </h3>
             <div className="space-y-1.5 overflow-y-auto custom-scrollbar pr-2 flex-1">
               {largestFiles.map(f => (
-                <div
+                <button
                   key={f.path}
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setSelectedFile(f); }}
                   onClick={() => setSelectedFile(f)}
                   className="w-full text-left group flex items-center gap-3 p-2 rounded-xl bg-black/[0.02] hover:bg-primary/10 cursor-pointer transition-all border border-black/5 hover:border-primary/20"
                 >
@@ -377,7 +449,7 @@ export function ExplorerPage() {
                     <div className="text-[9px] text-text-secondary font-bold uppercase tracking-tight">{formatSize(f.size)}</div>
                   </div>
                   <ChevronRight className="w-3.5 h-3.5 text-text-secondary/20 group-hover:text-primary transition-all" />
-                </div>
+                </button>
               ))}
             </div>
           </div>
@@ -389,11 +461,8 @@ export function ExplorerPage() {
             </h3>
             <div className="space-y-1.5 overflow-y-auto custom-scrollbar pr-2 flex-1">
               {coldFiles.map(f => (
-                <div
+                <button
                   key={f.path}
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setSelectedFile(f); }}
                   onClick={() => setSelectedFile(f)}
                   className="w-full text-left group flex items-center gap-3 p-2 rounded-xl bg-black/[0.02] hover:bg-accent/10 cursor-pointer transition-all border border-black/5 hover:border-accent/20"
                 >
@@ -405,7 +474,7 @@ export function ExplorerPage() {
                     <div className="text-[9px] text-text-secondary font-bold">{f.usage_count || 0} hits</div>
                   </div>
                   <ChevronRight className="w-3.5 h-3.5 text-text-secondary/20 group-hover:text-accent transition-all" />
-                </div>
+                </button>
               ))}
             </div>
           </div>

@@ -1,9 +1,10 @@
-import { useMemo, useState, useCallback, useEffect } from 'react'
+import { useMemo, useState, useCallback, useEffect, Suspense, lazy } from 'react'
 import { BarChart3, PieChart, TrendingUp, FileType, Loader2, Flame, Snowflake, HardDrive, Box, LayoutGrid } from 'lucide-react'
 import { useApi } from '../useApi'
 import { getInsights, getInsightsByType, getFileTree } from '../api'
-import { WebGPUFallback } from '../components/WebGPUFallback'
-import { FileTypeTreemap } from '../components/FileTypeTreemap'
+
+const WebGPUFallback = lazy(() => import('../components/WebGPUFallback').then(m => ({ default: m.WebGPUFallback })))
+const FileTypeTreemap = lazy(() => import('../components/FileTypeTreemap').then(m => ({ default: m.FileTypeTreemap })))
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
@@ -19,6 +20,7 @@ export function InsightsPage() {
   const [filteredTopFiles, setFilteredTopFiles] = useState<{ path: string; size: number }[]>([])
   const [filteredColdFiles, setFilteredColdFiles] = useState<{ path: string; usage_count?: number; size?: number }[]>([])
   const [filterLoading, setFilterLoading] = useState(false)
+  const [filterError, setFilterError] = useState<string | null>(null)
   const [vizMode, setVizMode] = useState<'3d' | '2d'>('3d')
 
   const handleFilterChange = useCallback((ext: string | null) => {
@@ -31,21 +33,25 @@ export function InsightsPage() {
       // No filter — show the default top/cold files from insights
       setFilteredTopFiles(insights?.top_files ?? [])
       setFilteredColdFiles(insights?.cold_files ?? [])
+      setFilterError(null)
       return
     }
 
     let cancelled = false
     setFilterLoading(true)
+    setFilterError(null)
+
     getInsightsByType(typeFilter)
       .then((res) => {
         if (cancelled) return
         setFilteredTopFiles(res.top_files ?? [])
         setFilteredColdFiles(res.cold_files ?? [])
       })
-      .catch(() => {
+      .catch((err) => {
         if (cancelled) return
         setFilteredTopFiles([])
         setFilteredColdFiles([])
+        setFilterError(err instanceof Error ? err.message : String(err))
       })
       .finally(() => {
         if (!cancelled) setFilterLoading(false)
@@ -110,7 +116,7 @@ export function InsightsPage() {
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 flex-1">
             {/* File Type Distribution — 3D Crystal / Treemap fallback (spans 2 cols) */}
             {/* FIX: Increased min-h and added h-full so the WebGPU canvas doesn't collapse */}
-            <div className="glass-card lg:col-span-2 flex flex-col min-h-[600px] h-full overflow-hidden">
+            <div className="glass-card lg:col-span-2 flex flex-col min-h-[400px] h-full overflow-hidden">
               <div className="flex items-center justify-between mb-4 shrink-0">
                 <h2 className="text-lg font-bold text-primary flex items-center gap-2">
                   <PieChart className="w-5 h-5" />
@@ -131,25 +137,32 @@ export function InsightsPage() {
                   </button>
                 </div>
               </div>
-              
+
               {/* Fix: Explicitly check if folders object has keys before rendering visualizations */}
               {tree?.folders && Object.keys(tree.folders).length > 0 ? (
                 <div className="flex-1 min-h-0 flex flex-col relative">
-                  {vizMode === '3d' ? (
-                    <WebGPUFallback
-                      allFiles={tree.folders}
-                      activeFilter={typeFilter}
-                      onFilterChange={handleFilterChange}
-                      initialMode="type"
-                    />
-                  ) : (
-                    <FileTypeTreemap
-                      allFiles={tree.folders}
-                      activeFilter={typeFilter}
-                      onFilterChange={handleFilterChange}
-                      initialMode="type"
-                    />
-                  )}
+                  <Suspense fallback={
+                    <div className="flex-1 flex flex-col items-center justify-center">
+                      <Loader2 className="w-8 h-8 text-primary animate-spin mb-3" />
+                      <p className="text-text-secondary text-sm">Loading visualization engine...</p>
+                    </div>
+                  }>
+                    {vizMode === '3d' ? (
+                      <WebGPUFallback
+                        allFiles={tree.folders}
+                        activeFilter={typeFilter}
+                        onFilterChange={handleFilterChange}
+                        initialMode="type"
+                      />
+                    ) : (
+                      <FileTypeTreemap
+                        allFiles={tree.folders}
+                        activeFilter={typeFilter}
+                        onFilterChange={handleFilterChange}
+                        initialMode="type"
+                      />
+                    )}
+                  </Suspense>
                 </div>
               ) : (
                 <div className="flex-1 flex flex-col items-center justify-center text-text-secondary text-sm bg-white/5 rounded-2xl border border-white/5">
@@ -200,6 +213,13 @@ export function InsightsPage() {
                       </div>
                     )
                   }
+                  if (filterError) {
+                    return (
+                      <div className="text-center py-8">
+                        <p className="text-error text-sm font-medium">{filterError}</p>
+                      </div>
+                    )
+                  }
                   if (filteredTopFiles.length > 0) {
                     return (
                       <div className="space-y-2">
@@ -234,7 +254,7 @@ export function InsightsPage() {
                       <div key={f.path} className="group flex items-center justify-between text-sm bg-white/5 hover:bg-white/10 rounded-xl px-4 py-3 transition-all border border-white/5">
                         <span className="truncate text-text-primary font-medium">{f.path.split(/[\\/]/).pop()}</span>
                         <span className="text-accent text-xs font-bold shrink-0 ml-2">
-                          {f.usage_count !== undefined ? `${f.usage_count} hits` : formatBytes(f.size || 0)}
+                          {f.usage_count === undefined ? formatBytes(f.size || 0) : `${f.usage_count} hits`}
                         </span>
                       </div>
                     ))}

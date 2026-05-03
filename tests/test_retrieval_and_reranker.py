@@ -5,9 +5,11 @@ from app.search.reranker import rerank
 
 
 def test_query_heuristics_and_fts_sanitization():
-    # Test new heuristics logic via regexes
-    assert retrieval._LATEST_RE.search("show me the latest files")
-    assert retrieval._LARGEST_RE.search("what is the biggest file")
+    # Test new heuristics logic via intent determination
+    from app.project_constants import determine_query_intent
+
+    assert determine_query_intent("show me the latest files")["latest"]
+    assert determine_query_intent("what is the biggest file")["largest"]
 
     sanitized = retrieval._sanitize_fts_query('hello AND "world" * test')
     assert sanitized == '"hello" "world" "test"'
@@ -67,12 +69,20 @@ async def test_load_query_metadata_and_gather_full_inputs(monkeypatch):
     async def fake_hybrid_retrieve(**_kwargs):
         return [{"file_path": "a.py", "text": "x", "folder_tag": "A"}]
 
+    class FakeEmb:
+        async def embed_query(self, q):
+            return [0.1] * 384
+
+    class FakeLanceDB:
+        async def search_summaries(self, *args, **kwargs):
+            return {"metadatas": [[]]}
+
     monkeypatch.setattr(retrieval, "hybrid_retrieve", fake_hybrid_retrieve)
     retrieved, out_stats, profiles_text = await retrieval._gather_full_rag_inputs(
         query="q",
         db=db,
-        embedding_service=object(),
-        chroma_client=object(),
+        embedding_service=FakeEmb(),
+        lancedb_client=FakeLanceDB(),
         k=3,
         inventory=True,
         project=True,
@@ -118,3 +128,56 @@ async def test_rerank_with_mock_model(monkeypatch):
     assert len(ranked) == 1
     assert ranked[0]["file_path"] == "b.py"
     assert ranked[0]["rerank_score"] == 0.9
+
+
+def test_build_candidate_results_deduplication(monkeypatch):
+    # Setup data with overlapping snippets
+    # The signature is extracted from max(0, mid-100) : mid+100
+
+    base = "prefix" * 20  # 120 chars
+    middle1 = " This is the target signature content that should match. " * 3  # ~150 chars
+    suffix1 = " suffix1" * 10
+    suffix2 = " suffix2" * 10
+
+    text1 = base + middle1 + suffix1
+    text2 = base + middle1 + suffix2  # same middle, should be deduplicated
+    text3 = "different" * 50  # completely different
+
+    row_map = {
+        1: (1, text1, "file1.txt", "tag1"),
+        2: (2, text2, "file2.txt", "tag2"),
+        3: (3, text3, "file3.txt", "tag3"),
+    }
+    chunk_ids_ordered = [1, 2, 3]
+    score_map = {1: 1.0, 2: 0.9, 3: 0.8}
+    relevant_doc_paths = set()
+
+    monkeypatch.setattr(retrieval.settings, "rrf_score_scale", 1.0)
+
+    results = retrieval._build_candidate_results(
+        chunk_ids_ordered, row_map, score_map, relevant_doc_paths
+    )
+
+    # Expected: chunk 1 and chunk 3. Chunk 2 is a duplicate signature.
+    assert len(results) == 2
+    assert results[0]["chunk_id"] == 1
+    assert results[1]["chunk_id"] == 3
+
+    # Verify scores
+    assert results[0]["score"] == 1.0
+    assert results[1]["score"] == 0.8
+
+
+def test_build_candidate_results_short_text():
+    # Chunks < 50 chars should be skipped
+    row_map = {
+        1: (1, "too short", "file1.txt", "tag1"),
+        2: (2, "A" * 60, "file2.txt", "tag2"),
+    }
+    chunk_ids_ordered = [1, 2]
+    score_map = {1: 1.0, 2: 0.9}
+
+    results = retrieval._build_candidate_results(chunk_ids_ordered, row_map, score_map, set())
+
+    assert len(results) == 1
+    assert results[0]["chunk_id"] == 2

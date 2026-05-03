@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS files (
 CREATE INDEX IF NOT EXISTS idx_files_folder_tag ON files(folder_tag);
 CREATE INDEX IF NOT EXISTS idx_files_modified_at ON files(modified_at);
 CREATE INDEX IF NOT EXISTS idx_files_type ON files(type);
+CREATE INDEX IF NOT EXISTS idx_files_size ON files(size);
 CREATE INDEX IF NOT EXISTS idx_files_change_detection ON files(path, modified_at, sha256);
 
 -- Chunks table for storing text segments
@@ -36,6 +37,14 @@ CREATE TABLE IF NOT EXISTS chunks (
 -- FK index for efficient joins / cascading deletes
 CREATE INDEX IF NOT EXISTS idx_chunks_file_id ON chunks(file_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_text_lookup ON chunks(id, text_preview);
+
+-- Chunk embeddings table for storing vector math as binary BLOBs
+-- This strictly isolates heavy binary data from normal metadata queries
+CREATE TABLE IF NOT EXISTS chunk_embeddings (
+    chunk_id INTEGER PRIMARY KEY,
+    embedding BLOB NOT NULL,
+    FOREIGN KEY(chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
+);
 
 -- FTS5 virtual table for keyword search
 -- Note: SQLite FTS5 should be enabled in the environment

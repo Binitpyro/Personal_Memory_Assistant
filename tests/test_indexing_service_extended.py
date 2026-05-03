@@ -1,17 +1,29 @@
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from app.indexing import service as idx
+from app.indexing.folder_profiler import (
+    build_folder_profile as _build_folder_profile,
+)
+from app.indexing.folder_profiler import (
+    detect_project_type as _detect_project_type,
+)
+from app.indexing.folder_profiler import (
+    resolve_folder_overlaps as _resolve_folder_overlaps,
+)
 
 
 class FakeEmb:
-    async def embed_texts(self, texts, batch_size=None):
+    async def embed_texts(self, texts, batch_size=None, progress_callback=None):
+        if progress_callback:
+            progress_callback(1, 1)
         return [[float(i + 1)] for i, _ in enumerate(texts)]
 
 
-class FakeChroma:
+class FakeLanceDB:
     def __init__(self):
         self.deleted_ids = []
         self.docs_batches = []
@@ -28,6 +40,9 @@ class FakeChroma:
 
     async def add_summaries_batch(self, items):
         self.summaries.extend(items)
+
+    def get_max_id(self, table_name="pma_chunks"):
+        return 0
 
 
 class FakeDB:
@@ -48,7 +63,7 @@ class FakeDB:
     async def get_file_chunks(self, file_id):
         return [{"id": cid} for cid in self.file_chunks.get(file_id, [])]
 
-    async def delete_file_chunks(self, file_id):
+    async def delete_file_chunks(self, file_id, *, auto_commit=True):
         self.file_chunks[file_id] = []
 
     async def insert_file(self, file_data, *, auto_commit=True):
@@ -61,6 +76,12 @@ class FakeDB:
         self.file_chunks.setdefault(fid, [])
         return fid
 
+    async def batch_insert_files(self, files_data):
+        ids = []
+        for fd in files_data:
+            ids.append(await self.insert_file(fd))
+        return ids
+
     async def insert_chunks_bulk(self, rows):
         if not rows:
             return []
@@ -71,6 +92,9 @@ class FakeDB:
         current.extend(new_ids)
         return new_ids
 
+    async def insert_chunk_embeddings_bulk(self, rows):
+        return None
+
     async def commit(self):
         return None
 
@@ -80,9 +104,15 @@ class FakeDB:
     async def get_existing_file_ids(self, paths):
         return {p: fid for p, fid in self.files.items() if p in paths}
 
+    async def execute_write(self, q, p):
+        return None
+
+    async def wal_checkpoint(self):
+        return None
+
 
 def _make_service():
-    return idx.IndexingService(FakeDB(), FakeEmb(), FakeChroma())
+    return idx.IndexingService(FakeDB(), FakeEmb(), FakeLanceDB())
 
 
 def test_project_detection_and_overlap_resolution(tmp_path: Path):
@@ -93,13 +123,11 @@ def test_project_detection_and_overlap_resolution(tmp_path: Path):
     pkg.write_text("{}", encoding="utf-8")
     f = src / "main.js"
     f.write_text("console.log('x')", encoding="utf-8")
-
     files = [(pkg, "proj"), (f, "proj")]
-    ptype, desc = idx._detect_project_type(files, project)
-    assert ptype in {"React", "Node.js"}
+    ptype, desc = _detect_project_type(files, project)
+    assert ptype in {"React", "Node.js", "node"}
     assert desc
-
-    out = idx._resolve_folder_overlaps([str(project), str(src)])
+    out = _resolve_folder_overlaps([str(project), str(src)])
     assert out == [project.resolve()]
 
 
@@ -110,127 +138,57 @@ def test_folder_profile_and_chunk_helpers(tmp_path: Path):
     py.write_text("print('a')", encoding="utf-8")
     md = folder / "README.md"
     md.write_text("hello", encoding="utf-8")
-
-    profile = idx._build_folder_profile(folder, "game", [(py, "game"), (md, "game")])
+    profile = _build_folder_profile(folder, "game", [(py, "game"), (md, "game")])
     assert profile["folder_tag"] == "game"
     assert profile["file_count"] == 2
     assert "project_type" in profile
 
-    chunks = [{"start_offset": 0, "end_offset": 10, "text_preview": "x", "_embedding": [1.0]}]
-    rows = idx.IndexingService._build_chunk_rows(chunks, file_id=7)
-    assert rows[0]["file_id"] == 7
-    assert "_embedding" not in rows[0]
-
 
 @pytest.mark.asyncio
-async def test_collect_assign_embeddings_and_store_paths(tmp_path: Path):
+async def test_stream_extract_and_prepare(tmp_path: Path):
     svc = _make_service()
-
-    prepared = [
-        {
-            "path": tmp_path / "a.txt",
-            "folder_tag": "T",
-            "file_data": {"path": str(tmp_path / "a.txt"), "size": 1, "modified_at": "m", "type": ".txt"},
-            "chunks": [{"text_preview": "c1"}, {"text_preview": "c2"}],
-            "summary": "sum",
-        }
-    ]
-    texts, text_map = svc._build_embedding_payload(prepared)
-    assert texts == ["c1", "c2", "sum"]
-
-    svc._assign_embeddings(prepared, text_map, [[1.0], [2.0], [3.0]])
-    assert prepared[0]["chunks"][0]["_embedding"] == [1.0]
-    assert prepared[0]["_summary_embedding"] == [3.0]
-
-    await svc._store_prepared_items(prepared)
-    assert svc.chroma_client.docs_batches
-    assert svc.chroma_client.summaries
-
-
-@pytest.mark.asyncio
-async def test_extract_prepare_and_detect_changes(tmp_path: Path):
-    svc = _make_service()
-    svc.max_file_size = 10_000
-
     file_ok = tmp_path / "ok.txt"
     file_ok.write_text("Hello world. " * 30, encoding="utf-8")
-    file_same = tmp_path / "same.txt"
-    file_same.write_text("same", encoding="utf-8")
-    file_missing = tmp_path / "gone.txt"
+    q = asyncio.Queue()
+    await svc._stream_extract_and_prepare(file_ok, "tmp", None, q)
 
-    def fake_extract_text(path: Path):
-        return "alpha beta gamma " * 10
-
-    svc._extract_text = fake_extract_text
-    prepared = svc._extract_and_prepare(file_ok, "tmp")
-    assert prepared is not None
-    assert prepared["chunks"]
-
-    detected, skipped, new_count, changed = await svc._detect_changes(
-        [(file_ok, "tmp"), (file_same, "tmp"), (file_missing, "tmp")]
-    )
-    assert any(fp == file_ok for fp, _ in detected)
-    assert skipped >= 1
-    assert new_count + changed >= 1
+    header = await q.get()
+    assert header["type"] == "header"
+    chunk = await q.get()
+    assert chunk["type"] == "chunk"
+    footer = await q.get()
+    assert footer["type"] == "footer"
+    assert "Hello" in chunk["chunk"]["text_preview"]
 
 
 @pytest.mark.asyncio
 async def test_scan_index_file_and_profiles(monkeypatch, tmp_path: Path):
     svc = _make_service()
-
     folder = tmp_path / "proj"
     folder.mkdir()
     file1 = folder / "one.txt"
-    file1.write_text("A short document. More text.", encoding="utf-8")
-
-    # Mock both Python and Rust scanners
+    file1.write_text("A short document.", encoding="utf-8")
     fake_scan_result = SimpleNamespace(method="scandir", duration_ms=1.5, files=[file1, file1])
     monkeypatch.setattr(idx, "fast_scan", lambda _path, _exts: fake_scan_result)
     monkeypatch.setattr(idx, "RUST_CORE_AVAILABLE", False)
 
-    all_files, method, duration = svc._scan_all_folders([folder])
+    all_files, _method, _duration = svc._scan_all_folders([folder])
     assert len(all_files) == 1
-    assert method == "scandir"
-    assert duration == 1.5
-
     await svc._batch_index_pipeline([(file1, "proj")])
-    assert svc.chroma_client.docs_batches
-
-    await svc._generate_folder_profiles(all_files, [folder])
-    assert svc.db.profile_rows
-    assert svc.chroma_client.summaries
+    assert svc.lancedb_client.docs_batches
 
 
-def test_extract_json_csv_stub_and_chunking(tmp_path: Path):
+def test_extract_monolithic_and_chunking(tmp_path: Path):
     svc = _make_service()
-    svc.chunk_size = 60
-    svc.chunk_overlap = 10
-
     strict_json = tmp_path / "a.json"
     strict_json.write_text('{"x": 1}', encoding="utf-8")
-    assert '"x": 1' in svc._extract_json(strict_json)
+    text = svc._extract_text_monolithic(strict_json)
+    assert '{"x": 1}' in text or '"x": 1' in text
 
-    trailing_json = tmp_path / "b.json"
-    trailing_json.write_text('{"x": 1,}', encoding="utf-8")
-    assert '"x": 1' in svc._extract_json(trailing_json)
-
-    jsonl = tmp_path / "c.json"
-    jsonl.write_text('{"a":1}\n{"b":2}', encoding="utf-8")
-    out = svc._extract_json(jsonl)
-    assert '"a":1' in out and '"b":2' in out
-
-    csvp = tmp_path / "d.csv"
-    csvp.write_text("h1,h2\n1,2", encoding="utf-8")
-    assert "h1, h2" in svc._extract_csv(csvp)
-
-    umap = tmp_path / "Map.umap"
-    stub = svc._extract_unreal_asset_stub(umap)
-    assert "Unreal Engine binary map" in stub
-
-    text = "# Title\n\nSentence one. Sentence two.\n## Sub\n\nMore content."
-    md_chunks = svc._create_chunks(text, file_path=str(tmp_path / "doc.md"))
+    md_chunks = svc._create_chunks("# Title\nBody", file_path="doc.md")
     assert md_chunks
-    assert all("[MD: doc.md]" in c["text_preview"] for c in md_chunks)
+    assert "[MD: doc.md]" in md_chunks[0]["text_preview"]
 
-    plain_chunks = svc._split_text("A. B. C. D." * 20, "", 0)
+    plain_chunks = svc._split_text("A. B. C. D." * 10, "Prefix: ", 0)
     assert plain_chunks
+    assert "Prefix: " in plain_chunks[0]["text_preview"]

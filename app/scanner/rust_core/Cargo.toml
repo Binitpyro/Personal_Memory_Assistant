@@ -1,6 +1,6 @@
 [package]
 name = "rust_core"
-version = "0.1.0"
+version = "0.0.69"
 edition = "2021"
 
 [lib]
@@ -14,3 +14,4 @@ rayon = "1.8"
 ring = "0.17.8"
 hex = "0.4"
 byteorder = "1.5"
+regex = "1.12.3"

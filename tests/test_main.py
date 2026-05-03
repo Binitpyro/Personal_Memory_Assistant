@@ -1,12 +1,13 @@
 import pytest
 from httpx import AsyncClient
-import asyncio
+
 
 @pytest.mark.asyncio
 async def test_read_root(client: AsyncClient):
     response = await client.get("/")
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
+
 
 @pytest.mark.asyncio
 async def test_health_check(client: AsyncClient):
@@ -19,6 +20,7 @@ async def test_health_check(client: AsyncClient):
     data = response_api.json()
     assert data["status"] in ["ok", "degraded"]
 
+
 @pytest.mark.asyncio
 async def test_index_status(client: AsyncClient):
     response = await client.get("/api/index/status")
@@ -27,11 +29,13 @@ async def test_index_status(client: AsyncClient):
     assert "status" in data
     assert "progress_percent" in data
 
+
 @pytest.mark.asyncio
 async def test_query_validation_error(client: AsyncClient):
     response = await client.post("/api/query", json={})
     assert response.status_code == 422
     assert "Validation error" in response.json().get("error", "")
+
 
 @pytest.mark.asyncio
 async def test_index_start_validation_error(client: AsyncClient):
@@ -39,15 +43,17 @@ async def test_index_start_validation_error(client: AsyncClient):
     assert response.status_code == 400
     assert "No valid folder paths provided." in response.json().get("error", "")
 
+
 @pytest.mark.asyncio
 async def test_react_assets_served_correctly(client: AsyncClient):
     """Verify that assets serve files, not index.html."""
-    from pathlib import Path
     # Just test that some asset path doesn't return 200 index.html if it doesn't exist
     response = await client.get("/static/pma.css")
-    # Even if file doesn't exist in test env, it should NOT be text/html from catch-all if it's a file path
+    # Even if file doesn't exist in test env, it should NOT be text/html
+    # from catch-all if it's a file path
     if response.status_code == 200:
         assert "text/css" in response.headers.get("content-type", "")
+
 
 @pytest.mark.asyncio
 async def test_spa_catchall_returns_html_for_unknown_routes(client: AsyncClient):
@@ -56,6 +62,7 @@ async def test_spa_catchall_returns_html_for_unknown_routes(client: AsyncClient)
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
 
+
 @pytest.mark.asyncio
 async def test_system_info_endpoint(client: AsyncClient):
     response = await client.get("/api/system/info")
@@ -63,11 +70,13 @@ async def test_system_info_endpoint(client: AsyncClient):
     data = response.json()
     assert "os" in data
 
+
 @pytest.mark.asyncio
 async def test_query_history_endpoint(client: AsyncClient):
     response = await client.get("/api/query/history?limit=5")
     assert response.status_code == 200
     assert "history" in response.json()
+
 
 @pytest.mark.asyncio
 async def test_files_tree_endpoint(client: AsyncClient):

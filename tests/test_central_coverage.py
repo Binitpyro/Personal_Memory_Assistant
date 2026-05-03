@@ -154,23 +154,31 @@ async def test_indexing_pipeline_deep(real_db):
 @pytest.mark.asyncio
 async def test_indexing_folder_walking(real_db):
     svc = IndexingService(real_db, MockEmbeddingService(), MockLanceDBClient())
-    mock_entry = MagicMock()
-    mock_entry.is_file.return_value = True
-    mock_entry.is_dir.return_value = False
-    mock_entry.name = "test.txt"
-    mock_entry.path = "test.txt"
-    mock_entry.stat.return_value.st_size = 100
-    mock_entry.stat.return_value.st_mtime = 123456789
+    test_file = Path("test_walk.txt")
+    test_file.write_text("dummy")
+    try:
+        mock_entry = MagicMock()
+        mock_entry.is_file.return_value = True
+        mock_entry.is_dir.return_value = False
+        mock_entry.name = "test_walk.txt"
+        mock_entry.path = str(test_file)
 
-    with (
-        patch("os.scandir", return_value=[mock_entry]),
-        patch("app.indexing.service._resolve_folder_overlaps", return_value=[Path(".")]),
-        patch(
-            "app.indexing.service.IndexingService._batch_index_pipeline", AsyncMock()
-        ) as mock_proc,
-    ):
-        await svc.index_folders(["."])
-        assert mock_proc.called
+        mock_it = MagicMock()
+        mock_it.__enter__.return_value = [mock_entry]
+        mock_it.__exit__.return_value = None
+
+        with (
+            patch("os.scandir", return_value=mock_it),
+            patch("app.indexing.service._resolve_folder_overlaps", return_value=[Path(".")]),
+            patch(
+                "app.indexing.service.IndexingService._batch_index_pipeline", AsyncMock()
+            ) as mock_proc,
+        ):
+            await svc.index_folders(["."])
+            assert mock_proc.called
+    finally:
+        if test_file.exists():
+            test_file.unlink()
 
 
 @pytest.fixture

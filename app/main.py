@@ -138,7 +138,7 @@ async def lifespan(fastapi_app: FastAPI):
     from app.indexing.service import IndexingService, progress
     from app.insights.service import InsightsService
     from app.search.retrieval import full_rag
-    from app.vector_store.lancedb_client import LanceDBClient
+    from app.vector_store.lancedb_client import LanceDBClient  # type: ignore
 
     state.indexing_service_cls = IndexingService
     state.progress_obj = progress

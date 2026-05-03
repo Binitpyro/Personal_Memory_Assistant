@@ -12,7 +12,7 @@ class XlsxExtractor:
     def extract_stream(self, path: Path, max_file_size: int) -> Iterator[str]:
         """Yield text from sheets and rows in an XLSX document."""
         try:
-            import openpyxl
+            import openpyxl  # type: ignore
 
             wb = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
             try:

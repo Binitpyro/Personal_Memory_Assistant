@@ -113,7 +113,7 @@ def _summarize_data_format(text: str, ext: str, max_limit: int) -> str:
     try:
         import json
 
-        import yaml
+        import yaml  # type: ignore
 
         data = json.loads(text[:100000]) if ext == ".json" else yaml.safe_load(text[:50000])
 

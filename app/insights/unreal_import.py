@@ -1,16 +1,16 @@
 import json
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 
 
-def _first(data: Dict[str, Any], keys: List[str], default: Any = None) -> Any:
+def _first(data: dict[str, Any], keys: list[str], default: Any = None) -> Any:
     for key in keys:
         if key in data and data[key] is not None:
             return data[key]
     return default
 
 
-def _extract_assets(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _extract_assets(payload: dict[str, Any]) -> list[dict[str, Any]]:
     candidates = [
         payload.get("Assets"),
         payload.get("assets"),
@@ -19,22 +19,24 @@ def _extract_assets(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     ]
     registry = payload.get("AssetRegistry")
     if isinstance(registry, dict):
-        candidates.extend([
-            registry.get("Assets"),
-            registry.get("AssetData"),
-        ])
+        candidates.extend(
+            [
+                registry.get("Assets"),
+                registry.get("AssetData"),
+            ]
+        )
     for value in candidates:
         if isinstance(value, list):
             return [item for item in value if isinstance(item, dict)]
     return []
 
 
-def _looks_character(asset_class: str, object_path: str, tags: Dict[str, Any]) -> bool:
+def _looks_character(asset_class: str, object_path: str, tags: dict[str, Any]) -> bool:
     needle = f"{asset_class} {object_path} {json.dumps(tags)}".lower()
     return any(word in needle for word in ["character", "hero", "enemy", "npc", "pawn"])
 
 
-def _empty_unreal_counters() -> Dict[str, int]:
+def _empty_unreal_counters() -> dict[str, int]:
     return {
         "map_count": 0,
         "character_blueprints": 0,
@@ -46,16 +48,16 @@ def _empty_unreal_counters() -> Dict[str, int]:
     }
 
 
-def _normalized_tags(asset: Dict[str, Any]) -> Dict[str, Any]:
+def _normalized_tags(asset: dict[str, Any]) -> dict[str, Any]:
     tags = _first(asset, ["TagsAndValues", "tags", "tags_and_values"], {})
     return tags if isinstance(tags, dict) else {}
 
 
 def _increment_asset_counters(
-    counters: Dict[str, int],
+    counters: dict[str, int],
     asset_class: str,
     object_path: str,
-    tags: Dict[str, Any],
+    tags: dict[str, Any],
 ) -> None:
     lower_class = asset_class.lower()
     lower_path = object_path.lower()
@@ -76,18 +78,19 @@ def _increment_asset_counters(
         counters["environment_assets"] += 1
 
 
-def _build_profile_text(facts: Dict[str, Any]) -> str:
+def _build_profile_text(facts: dict[str, Any]) -> str:
     return (
         f"Project {facts['project_name']} uses Unreal Engine {facts['engine_version']}. "
         f"Detected {facts['total_assets']} assets including {facts['map_count']} maps, "
         f"{facts['environment_assets']} environment-related assets, "
-        f"{facts['character_blueprints']} character blueprints, {facts['pawn_blueprints']} pawn blueprints, "
+        f"{facts['character_blueprints']} character blueprints, "
+        f"{facts['pawn_blueprints']} pawn blueprints, "
         f"{facts['skeletal_meshes']} skeletal meshes, {facts['material_count']} materials, "
         f"and {facts['niagara_systems']} Niagara systems."
     )
 
 
-def parse_unreal_metadata(json_path: str, folder_tag: str = "") -> Dict[str, Any]:
+def parse_unreal_metadata(json_path: str, folder_tag: str = "") -> dict[str, Any]:
     path = Path(json_path)
     payload = json.loads(path.read_text(encoding="utf-8"))
 
@@ -107,7 +110,9 @@ def parse_unreal_metadata(json_path: str, folder_tag: str = "") -> Dict[str, Any
 
     for asset in assets:
         asset_class = str(_first(asset, ["AssetClass", "Class", "asset_class"], ""))
-        object_path = str(_first(asset, ["ObjectPath", "PackagePath", "PackageName", "object_path"], ""))
+        object_path = str(
+            _first(asset, ["ObjectPath", "PackagePath", "PackageName", "object_path"], "")
+        )
         tags = _normalized_tags(asset)
         _increment_asset_counters(counters, asset_class, object_path, tags)
 

@@ -1,41 +1,43 @@
 import ctypes
 import ctypes.wintypes as wintypes
-import struct
 import logging
+import platform as _platform
+import struct
 import time
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
 
-GENERIC_READ            = 0x80000000
-FILE_SHARE_READ         = 0x00000001
-FILE_SHARE_WRITE        = 0x00000002
-OPEN_EXISTING           = 3
-INVALID_HANDLE_VALUE    = ctypes.c_void_p(-1).value
-FSCTL_ENUM_USN_DATA     = 0x000900B3
+GENERIC_READ = 0x80000000
+FILE_SHARE_READ = 0x00000001
+FILE_SHARE_WRITE = 0x00000002
+OPEN_EXISTING = 3
+INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+FSCTL_ENUM_USN_DATA = 0x000900B3
 FILE_ATTRIBUTE_DIRECTORY = 0x00000010
 
 NTFS_ROOT_REF = 5
 
 _MFT_BUF_SIZE = 128 * 1024  # 128 KB
-_ERROR_HANDLE_EOF = 38       # Win32 ERROR_HANDLE_EOF
+_ERROR_HANDLE_EOF = 38  # Win32 ERROR_HANDLE_EOF
 
-import platform as _platform
 if _platform.system() == "Windows":
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
 else:
     kernel32 = None  # type: ignore[assignment]
+
 
 @dataclass
 class MFTEntry:
     """A single Master File Table entry (file or directory)."""
+
     file_ref: int
     parent_ref: int
     name: str
     is_dir: bool
+
 
 class NTFSScanner:
     """
@@ -52,15 +54,15 @@ class NTFSScanner:
         if kernel32 is None:
             raise RuntimeError("NTFSScanner requires Windows (kernel32 not available)")
         self._k32 = kernel32
-        self.entries: Dict[int, MFTEntry] = {}
-        self.children_map: Dict[int, List[MFTEntry]] = defaultdict(list)
+        self.entries: dict[int, MFTEntry] = {}
+        self.children_map: dict[int, list[MFTEntry]] = defaultdict(list)
         self.entry_count: int = 0
 
     def scan_folder(
         self,
         folder: Path,
-        extensions: Set[str],
-    ) -> Optional[List[Path]]:
+        extensions: set[str],
+    ) -> list[Path] | None:
         """
         Enumerate files under *folder* whose suffix is in *extensions*.
 
@@ -74,7 +76,7 @@ class NTFSScanner:
 
         handle = self._open_volume(volume)
         if handle == INVALID_HANDLE_VALUE:
-            err = ctypes.get_last_error()
+            err = ctypes.get_last_error()  # type: ignore[attr-defined]
             logger.info(
                 "Cannot open volume %s (Win32 error %d). "
                 "Run as Administrator for NTFS-accelerated scanning.",
@@ -113,14 +115,16 @@ class NTFSScanner:
 
     def _open_volume(self, volume: str) -> int:
         """Open a raw volume handle (requires admin)."""
-        return self._k32.CreateFileW(
-            f"\\\\.\\{volume}",
-            GENERIC_READ,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            None,
-            OPEN_EXISTING,
-            0,
-            None,
+        return int(
+            self._k32.CreateFileW(
+                f"\\\\.\\{volume}",
+                GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                0,
+                None,
+            )
         )
 
     def _enumerate_mft(self, handle: int) -> None:
@@ -156,7 +160,7 @@ class NTFSScanner:
                 None,
             )
             if not ok:
-                err = ctypes.get_last_error()
+                err = ctypes.get_last_error()  # type: ignore[attr-defined]
                 if err == _ERROR_HANDLE_EOF or err != 0:
                     logger.debug("DeviceIoControl ended (Win32 error %d)", err)
                 break
@@ -184,18 +188,10 @@ class NTFSScanner:
             offset += rec_len
 
     @staticmethod
-    def _parse_single_record(
-        raw: bytes, offset: int, returned: int
-    ) -> Optional[MFTEntry]:
+    def _parse_single_record(raw: bytes, offset: int, returned: int) -> MFTEntry | None:
         """Decode a single USN_RECORD_V2 at *offset*. Returns None if unreadable."""
-        file_ref = (
-            struct.unpack_from("<Q", raw, offset + 8)[0]
-            & 0x0000FFFFFFFFFFFF
-        )
-        parent_ref = (
-            struct.unpack_from("<Q", raw, offset + 16)[0]
-            & 0x0000FFFFFFFFFFFF
-        )
+        file_ref = struct.unpack_from("<Q", raw, offset + 8)[0] & 0x0000FFFFFFFFFFFF
+        parent_ref = struct.unpack_from("<Q", raw, offset + 16)[0] & 0x0000FFFFFFFFFFFF
         attrs = struct.unpack_from("<I", raw, offset + 52)[0]
         name_len = struct.unpack_from("<H", raw, offset + 56)[0]
         name_off = struct.unpack_from("<H", raw, offset + 58)[0]
@@ -220,7 +216,7 @@ class NTFSScanner:
         for entry in self.entries.values():
             self.children_map[entry.parent_ref].append(entry)
 
-    def _find_folder_ref(self, folder: Path) -> Optional[int]:
+    def _find_folder_ref(self, folder: Path) -> int | None:
         """
         Walk from the NTFS root (ref 5) down the path components
         to find the target folder's MFT reference number.
@@ -244,15 +240,15 @@ class NTFSScanner:
     def _collect_files(
         self,
         folder_ref: int,
-        extensions: Set[str],
+        extensions: set[str],
         base_path: Path,
-    ) -> List[Path]:
+    ) -> list[Path]:
         """
         BFS from *folder_ref*, building full paths top-down.
 
         Only files whose extension is in *extensions* are returned.
         """
-        results: List[Path] = []
+        results: list[Path] = []
         stack = [(folder_ref, base_path)]
 
         while stack:

@@ -1,7 +1,6 @@
-import { LinearBVH } from "../spatial/LinearBVH";
-
 import bubbleShaderCode from './shaders/bubble_mboit.wgsl?raw';
 import resolveShaderCode from './shaders/oit_resolve.wgsl?raw';
+import pickingShaderCode from './shaders/picking.wgsl?raw';
 
 export class WebGPURenderer {
     private readonly canvas: HTMLCanvasElement;
@@ -12,22 +11,31 @@ export class WebGPURenderer {
     private momentTexture!: GPUTexture;
     private colorTexture!: GPUTexture;
     private depthTexture!: GPUTexture;
+    private pickingTexture!: GPUTexture;
 
     private cameraBuffer!: GPUBuffer;
     private geometryBuffer!: GPUBuffer;
+    private pickBuffer!: GPUBuffer;
+
+    private nodeBuffer?: GPUBuffer;
 
     private bubblePipeline!: GPURenderPipeline;
     private resolvePipeline!: GPURenderPipeline;
+    private pickingPipeline!: GPURenderPipeline;
 
     private renderBindGroup!: GPUBindGroup;
     private resolveBindGroup!: GPUBindGroup;
+    private pickingBindGroup?: GPUBindGroup;
 
-    private bvh!: LinearBVH;
+    private nodeCount = 0;
 
     private rotationX = 0.5;
     private rotationY = 0.5;
     private zoom = 550;
 
+    public focusPosition: number[] | null = null;
+    public cameraPosition: number[] = [0, 0, 0];
+    private isFirstFrame = true;
     constructor(canvas: HTMLCanvasElement) {
         this.canvas = canvas;
     }
@@ -37,7 +45,6 @@ export class WebGPURenderer {
             throw new Error("WebGPU not supported on this browser.");
         }
 
-        // Fix: Removed powerPreference to silence the Chrome/Windows warning
         const adapter = await navigator.gpu.requestAdapter();
         if (!adapter) {
             throw new Error("No appropriate GPUAdapter found.");
@@ -60,24 +67,25 @@ export class WebGPURenderer {
             alphaMode: 'premultiplied',
         });
 
-        this.bvh = new LinearBVH(this.device);
+        this.pickBuffer = this.device.createBuffer({
+            size: 256,
+            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+        });
 
         await this.createGeometryBuffer();
-        
-        // Force initial size to at least 1x1 to prevent WebGPU crashes
+
         this.canvas.width = Math.max(1, this.canvas.clientWidth);
         this.canvas.height = Math.max(1, this.canvas.clientHeight);
-        
-        this.setupTextures(); // Made synchronous
+
         await this.setupPipelines();
+        this.setupTextures();
+
     }
 
     private async createGeometryBuffer() {
-        // IMPOSTOR MAGIC: We no longer pass heavy 3D positions.
-        // Just a flat 2D square (Quad) from -1.0 to 1.0. (6 vertices, X and Y)
         const v = new Float32Array([
-            -1.0, -1.0,   1.0, -1.0,  -1.0,  1.0,  // Triangle 1
-            -1.0,  1.0,   1.0, -1.0,   1.0,  1.0,  // Triangle 2
+            -1, -1, 1, -1, -1, 1,
+            -1, 1, 1, -1, 1, 1,
         ]);
 
         this.geometryBuffer = this.device.createBuffer({
@@ -103,83 +111,114 @@ export class WebGPURenderer {
             size, format: 'depth32float',
             usage: GPUTextureUsage.RENDER_ATTACHMENT
         });
+        this.pickingTexture = this.device.createTexture({
+            size, format: 'r32uint',
+            usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC
+        });
+        this.resolveBindGroup = this.device.createBindGroup({
+            layout: this.resolvePipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: this.momentTexture.createView() },
+                { binding: 1, resource: this.colorTexture.createView() }
+            ]
+        });
     }
 
-    // FIX: Core resizing logic tied to the React ResizeObserver
     public resize(width: number, height: number) {
         const w = Math.max(1, width);
         const h = Math.max(1, height);
-        
+
         if (this.canvas.width === w && this.canvas.height === h) return;
-        
+
         this.canvas.width = w;
         this.canvas.height = h;
 
         if (this.momentTexture) this.momentTexture.destroy();
         if (this.colorTexture) this.colorTexture.destroy();
         if (this.depthTexture) this.depthTexture.destroy();
+        if (this.pickingTexture) this.pickingTexture.destroy();
 
         this.setupTextures();
-
-        // Must rebind the new textures so the shader can see them
-        if (this.resolvePipeline) {
-            this.resolveBindGroup = this.device.createBindGroup({
-                layout: this.resolvePipeline.getBindGroupLayout(0),
-                entries: [
-                    { binding: 0, resource: this.momentTexture.createView() }, 
-                    { binding: 1, resource: this.colorTexture.createView() }
-                ]
-            });
-        }
     }
 
     private async setupPipelines() {
-        await this.bvh.initializePipelines();
-        
         const bubbleModule = this.device.createShaderModule({ code: bubbleShaderCode });
         this.bubblePipeline = this.device.createRenderPipeline({
             layout: 'auto',
             vertex: {
-                module: bubbleModule, 
+                module: bubbleModule,
                 entryPoint: "vs_main",
                 buffers: [
-                    { 
-                        arrayStride: 8, 
-                        attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x2' }] 
+                    {
+                        arrayStride: 8,
+                        attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x2' }]
                     },
-                    { 
-                        arrayStride: 20, 
-                        stepMode: 'instance', 
+                    {
+                        arrayStride: 32, 
+                        stepMode: 'instance',
                         attributes: [
-                            { shaderLocation: 1, offset: 0, format: 'float32x3' },
-                            { shaderLocation: 2, offset: 12, format: 'float32' },
-                            { shaderLocation: 3, offset: 16, format: 'uint32' }
-                        ] 
-                    },
+                            { shaderLocation: 1, offset: 0, format: 'float32x3' }, // position
+                            { shaderLocation: 2, offset: 12, format: 'float32' },  // radius
+                            { shaderLocation: 3, offset: 20, format: 'uint32' },   // flags
+                            { shaderLocation: 4, offset: 24, format: 'uint32' }    // type_hash
+                        ]
+                    }
                 ]
             },
             fragment: {
-                module: bubbleModule, 
+                module: bubbleModule,
                 entryPoint: "fs_main",
                 targets: [
-                    { 
-                        format: 'rgba16float', 
-                        blend: { 
-                            color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' }, 
-                            alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' } 
-                        } 
+                    {
+                        format: 'rgba16float',
+                        blend: {
+                            color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+                            alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' }
+                        }
                     },
-                    { 
-                        format: 'rgba16float', 
-                        blend: { 
-                            color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' }, 
-                            alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' } 
-                        } 
+                    {
+                        format: 'rgba16float',
+                        blend: {
+                            color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+                            alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' }
+                        }
                     }
                 ]
             },
             primitive: { topology: 'triangle-list' },
-            depthStencil: { depthWriteEnabled: false, depthCompare: 'less-equal', format: 'depth32float' },
+            depthStencil: { depthWriteEnabled: false, depthCompare: 'less', format: 'depth32float' },
+        });
+
+        const pickingModule = this.device.createShaderModule({ code: pickingShaderCode });
+        this.pickingPipeline = this.device.createRenderPipeline({
+            layout: 'auto',
+            vertex: {
+                module: pickingModule,
+                entryPoint: "vs_main",
+                buffers: [
+                    {
+                        arrayStride: 8,
+                        attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x2' }]
+                    },
+                    {
+                        arrayStride: 32,
+                        stepMode: 'instance',
+                        attributes: [
+                            { shaderLocation: 1, offset: 0, format: 'float32x3' }, // position
+                            { shaderLocation: 2, offset: 12, format: 'float32' },  // radius
+                            { shaderLocation: 3, offset: 20, format: 'uint32' },   // flags
+                            { shaderLocation: 4, offset: 24, format: 'uint32' }    // type_hash
+                        ]
+                    }
+                ]
+            },
+            fragment: {
+                module: pickingModule,
+                entryPoint: "fs_main",
+                targets: [{ format: 'r32uint' }]
+            },
+            primitive: { topology: 'triangle-list' },
+            depthStencil: { depthWriteEnabled: true, depthCompare: 'less-equal', format: 'depth32float' }, // picking needs depth!
         });
 
         const resolveModule = this.device.createShaderModule({ code: resolveShaderCode });
@@ -187,59 +226,148 @@ export class WebGPURenderer {
             layout: 'auto',
             vertex: { module: resolveModule, entryPoint: "vs_main" },
             fragment: {
-                module: resolveModule, 
+                module: resolveModule,
                 entryPoint: "fs_main",
-                targets: [{ 
-                    format: this.format, 
-                    blend: { 
-                        color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' }, 
-                        alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' } 
-                    } 
+                targets: [{
+                    format: this.format,
+                    blend: {
+                        color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+                        alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' }
+                    }
                 }]
             }
         });
     }
 
     public async loadData(data: ArrayBuffer) {
-        await this.bvh.uploadData(data);
-        this.bvh.build();
-        
-        this.cameraBuffer = this.device.createBuffer({ size: 256, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-        this.updateCamera();
-        
-        this.renderBindGroup = this.device.createBindGroup({ layout: this.bubblePipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: this.cameraBuffer } }] });
-        
-        this.resolveBindGroup = this.device.createBindGroup({
-            layout: this.resolvePipeline.getBindGroupLayout(0),
-            entries: [{ binding: 0, resource: this.momentTexture.createView() }, { binding: 1, resource: this.colorTexture.createView() }]
+        this.nodeCount = Math.floor(data.byteLength / 32);
+        if (this.nodeCount === 0) return;
+
+        if (this.nodeBuffer) this.nodeBuffer.destroy();
+
+        this.nodeBuffer = this.device.createBuffer({
+            size: Math.max(32, data.byteLength),
+            usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
         });
+        if (data.byteLength > 0) {
+            this.device.queue.writeBuffer(this.nodeBuffer, 0, data);
+        }
+
+        if (!this.cameraBuffer) {
+            this.cameraBuffer = this.device.createBuffer({ size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        }
+        this.updateCamera();
+
+        this.renderBindGroup = this.device.createBindGroup({
+            layout: this.bubblePipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: this.cameraBuffer } }
+            ]
+        });
+
+        this.pickingBindGroup = this.device.createBindGroup({
+            layout: this.pickingPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: this.cameraBuffer } }
+            ]
+        });
+
+        // Texture recreation was causing unnecessary GPU memory pressure, removed.
+    }
+
+    public async pick(x: number, y: number): Promise<number | null> {
+        if (this.nodeCount === 0 || !this.cameraBuffer || !this.pickingTexture) return null;
+
+        const px = Math.max(0, Math.min(Math.floor(x), this.canvas.width - 1));
+        const py = Math.max(0, Math.min(Math.floor(y), this.canvas.height - 1));
+
+        this.updateCamera();
+
+        const commandEncoder = this.device.createCommandEncoder();
+
+
+
+        const renderPass = commandEncoder.beginRenderPass({
+            colorAttachments: [{
+                view: this.pickingTexture.createView(),
+                loadOp: 'clear',
+                clearValue: { r: 0xFFFFFFFF, g: 0, b: 0, a: 0 },
+                storeOp: 'store'
+            }],
+            depthStencilAttachment: { view: this.depthTexture.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' }
+        });
+
+        renderPass.setPipeline(this.pickingPipeline);
+        renderPass.setScissorRect(px, py, 1, 1);
+        if (this.pickingBindGroup) renderPass.setBindGroup(0, this.pickingBindGroup);
+        if (this.geometryBuffer) renderPass.setVertexBuffer(0, this.geometryBuffer);
+        if (this.nodeBuffer) renderPass.setVertexBuffer(1, this.nodeBuffer);
+
+        renderPass.draw(6, this.nodeCount, 0, 0);
+        renderPass.end();
+
+        commandEncoder.copyTextureToBuffer(
+            { texture: this.pickingTexture, origin: [px, py, 0] },
+            { buffer: this.pickBuffer, bytesPerRow: 256 },
+            [1, 1, 1]
+        );
+
+        this.device.queue.submit([commandEncoder.finish()]);
+
+        await this.pickBuffer.mapAsync(GPUMapMode.READ);
+        const arrayBuffer = this.pickBuffer.getMappedRange();
+        const data = new Uint32Array(arrayBuffer);
+        const hash = data[0];
+
+        const result = hash === 0xFFFFFFFF ? null : hash;
+        this.pickBuffer.unmap();
+
+        return result;
     }
 
     public handleMouseMove(dx: number, dy: number) {
-        this.rotationY -= dx * 0.01;
-        this.rotationX -= dy * 0.01;
+        this.rotationY -= dx * 0.005;
+        this.rotationX += dy * 0.005;
         this.rotationX = Math.max(-Math.PI / 2 + 0.1, Math.min(Math.PI / 2 - 0.1, this.rotationX));
     }
 
     public handleZoom(delta: number) {
-        this.zoom = Math.max(10, Math.min(500, this.zoom + delta * 0.05));
+        const speed = Math.max(10, this.zoom * 0.05);
+        this.zoom = Math.max(5, this.zoom + (delta > 0 ? speed : -speed));
     }
 
     private updateCamera() {
         const aspect = this.canvas.width / this.canvas.height;
-        const projection = this.perspective(45 * Math.PI / 180, aspect, 0.1, 5000);
-        const eyeX = this.zoom * Math.cos(this.rotationX) * Math.sin(this.rotationY);
-        const eyeY = this.zoom * Math.sin(this.rotationX);
-        const eyeZ = this.zoom * Math.cos(this.rotationX) * Math.cos(this.rotationY);
-        const view = this.lookAt([eyeX, eyeY, eyeZ], [0, 0, 0], [0, 1, 0]);
+        const projection = this.perspective(45 * Math.PI / 180, aspect, 0.1, 100000);
+
+        const target = this.focusPosition || [0, 0, 0];
+
+        const eyeX = target[0] + this.zoom * Math.cos(this.rotationX) * Math.sin(this.rotationY);
+        const eyeY = target[1] + this.zoom * Math.sin(this.rotationX);
+        const eyeZ = target[2] + this.zoom * Math.cos(this.rotationX) * Math.cos(this.rotationY);
+
+        if (this.isFirstFrame) {
+            this.cameraPosition = [eyeX, eyeY, eyeZ];
+            this.isFirstFrame = false;
+        } else {
+            this.cameraPosition[0] += (eyeX - this.cameraPosition[0]) * 0.1;
+            this.cameraPosition[1] += (eyeY - this.cameraPosition[1]) * 0.1;
+            this.cameraPosition[2] += (eyeZ - this.cameraPosition[2]) * 0.1;
+        }
+
+        const view = this.lookAt(this.cameraPosition, target, [0, 1, 0]);
         const vpMatrix = this.multiply(projection, view);
-        this.device.queue.writeBuffer(this.cameraBuffer, 0, vpMatrix);
-        this.device.queue.writeBuffer(this.cameraBuffer, 64, new Float32Array(24)); 
-        this.device.queue.writeBuffer(this.cameraBuffer, 160, new Float32Array([eyeX, eyeY, eyeZ]));
+
+        if (this.cameraBuffer) {
+            const uniformData = new Float32Array(20);
+            uniformData.set(vpMatrix, 0);
+            uniformData.set([this.cameraPosition[0], this.cameraPosition[1], this.cameraPosition[2], 0], 16);
+            this.device.queue.writeBuffer(this.cameraBuffer, 0, uniformData);
+        }
     }
 
     private perspective(fovy: number, aspect: number, near: number, far: number) {
-        const f = 1.0 / Math.tan(fovy / 2);
+        const f = 1 / Math.tan(fovy / 2);
         const out = new Float32Array(16);
         out[0] = f / aspect; out[5] = f; out[10] = far / (near - far); out[11] = -1; out[14] = (near * far) / (near - far);
         return out;
@@ -273,7 +401,8 @@ export class WebGPURenderer {
 
     private subtract(a: number[], b: number[]) { return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]; }
     private normalize(a: number[]) {
-        const len = Math.sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
+        const len = Math.hypot(a[0], a[1], a[2]);
+        if (len === 0) return [0, 0, 1];
         return [a[0] / len, a[1] / len, a[2] / len];
     }
     private cross(a: number[], b: number[]) {
@@ -282,14 +411,14 @@ export class WebGPURenderer {
     private dot(a: number[], b: number[]) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
 
     public render() {
-        if (!this.bvh.getElementCount() || !this.cameraBuffer) {
+        if (this.nodeCount === 0 || !this.cameraBuffer) {
             const commandEncoder = this.device.createCommandEncoder();
             const clearPass = commandEncoder.beginRenderPass({
-                colorAttachments: [{ 
-                    view: this.context.getCurrentTexture().createView(), 
-                    loadOp: 'clear', 
-                    clearValue: [0.945, 0.96, 0.878, 1], 
-                    storeOp: 'store' 
+                colorAttachments: [{
+                    view: this.context.getCurrentTexture().createView(),
+                    loadOp: 'clear',
+                    clearValue: [0.945, 0.96, 0.878, 1],
+                    storeOp: 'store'
                 }]
             });
             clearPass.end();
@@ -298,48 +427,46 @@ export class WebGPURenderer {
         }
 
         this.updateCamera();
-        
+
         const commandEncoder = this.device.createCommandEncoder();
 
         const renderPass = commandEncoder.beginRenderPass({
             colorAttachments: [{ view: this.momentTexture.createView(), loadOp: 'clear', clearValue: [0, 0, 0, 0], storeOp: 'store' },
-                              { view: this.colorTexture.createView(), loadOp: 'clear', clearValue: [0, 0, 0, 0], storeOp: 'store' }],
-            depthStencilAttachment: { view: this.depthTexture.createView(), depthClearValue: 1.0, depthLoadOp: 'clear', depthStoreOp: 'store' }
+            { view: this.colorTexture.createView(), loadOp: 'clear', clearValue: [0, 0, 0, 0], storeOp: 'store' }],
+            depthStencilAttachment: { view: this.depthTexture.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' }
         });
-        
+
         renderPass.setPipeline(this.bubblePipeline);
-        renderPass.setBindGroup(0, this.renderBindGroup);
-        renderPass.setVertexBuffer(0, this.geometryBuffer);
-        renderPass.setVertexBuffer(1, this.bvh.getElementBuffer());
-        
-        // FIX 1: Change 36 to 6 (We are drawing 6-vertex squares now, not 36-vertex cubes!)
-        renderPass.draw(6, this.bvh.getElementCount(), 0, 0);
+        if (this.renderBindGroup) renderPass.setBindGroup(0, this.renderBindGroup);
+        if (this.geometryBuffer) renderPass.setVertexBuffer(0, this.geometryBuffer);
+        if (this.nodeBuffer) renderPass.setVertexBuffer(1, this.nodeBuffer);
+
+        renderPass.draw(6, this.nodeCount, 0, 0);
         renderPass.end();
 
         const resolvePass = commandEncoder.beginRenderPass({
             colorAttachments: [{ view: this.context.getCurrentTexture().createView(), loadOp: 'clear', clearValue: [0.945, 0.96, 0.878, 1], storeOp: 'store' }]
         });
         resolvePass.setPipeline(this.resolvePipeline);
-        resolvePass.setBindGroup(0, this.resolveBindGroup);
-        
-        // FIX 2: Change 6 to 3 (The Giant Triangle trick uses exactly 3 vertices)
+        if (this.resolveBindGroup) resolvePass.setBindGroup(0, this.resolveBindGroup);
         resolvePass.draw(3);
         resolvePass.end();
-        
+
         this.device.queue.submit([commandEncoder.finish()]);
     }
+
     public destroy() {
         if (this.momentTexture) this.momentTexture.destroy();
         if (this.colorTexture) this.colorTexture.destroy();
         if (this.depthTexture) this.depthTexture.destroy();
-        
+        if (this.pickingTexture) this.pickingTexture.destroy();
+
         if (this.cameraBuffer) this.cameraBuffer.destroy();
         if (this.geometryBuffer) this.geometryBuffer.destroy();
-        
-        if (this.bvh && typeof this.bvh.destroy === 'function') {
-            this.bvh.destroy();
-        }
+        if (this.pickBuffer) this.pickBuffer.destroy();
+        if (this.nodeBuffer) this.nodeBuffer.destroy();
 
         if (this.device) this.device.destroy();
+        if (this.context) this.context.unconfigure();
     }
 }

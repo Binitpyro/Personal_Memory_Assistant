@@ -1,8 +1,8 @@
 [project]
 name = "personal-memory-assistant"
-version = "0.0.36"
+version = "0.0.69"
 description = "A local-first Personal Memory Assistant with hybrid RAG search"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = {text = "MIT"}
 
 dependencies = [
@@ -15,13 +15,20 @@ dependencies = [
     "httpx>=0.27.0",
     "sentence-transformers>=3.0.0",
     "torch>=2.0.0",
-    "chromadb>=0.5.0",
+    "lancedb>=0.10.0",
+    "pyarrow>=14.0.0",
     "python-dotenv>=1.0.0",
-    "pywebview>=5.0.0",
-    "pdfplumber>=0.11.0",
+    # Desktop app: Tauri v2 native shell (see frontend/src-tauri)
+    # pdfplumber removed: pypdf (BSD-3) covers all PDF extraction needs
     "python-docx>=1.1.0",
+    "pypdf>=4.0.0",
+    "openpyxl>=3.1.0",
+    "python-pptx>=0.6.0",
     "tenacity>=8.2.0",
     "sse-starlette>=1.6.0",
+    "slowapi>=0.1.0",
+    "google-auth>=2.0.0",
+    "google-auth-oauthlib>=1.0.0",
 ]
 
 [project.scripts]
@@ -35,11 +42,15 @@ dev = [
     "httpx",
     "ruff>=0.4.0",
     "mypy>=1.10.0",
+    "types-PyYAML",
+    "types-openpyxl",
+    "types-requests",
 ]
 
 [tool.ruff]
-target-version = "py311"
+target-version = "py312"
 line-length = 100
+extend-exclude = [".pytest_temp"]
 
 [tool.ruff.lint]
 select = [
@@ -64,11 +75,24 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "S106"]
 
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = [
+    "Depends",
+    "Query",
+    "Path",
+    "BackgroundTasks",
+    "fastapi.Depends",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.BackgroundTasks",
+]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 python_files = "test_*.py"
 python_functions = "test_*"
+addopts = "--basetemp=.pytest_temp"
 
 [tool.coverage.run]
 source = ["app"]
@@ -82,12 +106,16 @@ fail_under = 0
 output = "coverage.xml"
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false
 check_untyped_defs = true
+exclude = ['^\.pytest_temp/']
 
 [build-system]
-requires = ["setuptools>=68.0"]
-build-backend = "setuptools.backends._legacy:_Backend"
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["app"]

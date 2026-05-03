@@ -1,16 +1,42 @@
 import asyncio
 import logging
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from sentence_transformers import CrossEncoder  # ships with sentence-transformers
 
 logger = logging.getLogger(__name__)
 
-_reranker: Optional[CrossEncoder] = None
+_reranker: CrossEncoder | None = None
 _reranker_lock = threading.Lock()
 _MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-_MAX_RERANKER_INPUT_LEN = 256  # Phase 3.2: reduced from 384 for faster inference (<1% relevance impact)
+_MAX_RERANKER_INPUT_LEN = (
+    256  # Phase 3.2: reduced from 384 for faster inference (<1% relevance impact)
+)
+
+
+def _try_init_onnx(device: str) -> tuple[str, dict | None]:
+    backend = "torch"
+    model_kwargs = None
+    if device == "cpu":
+        try:
+            # Verify that the package is actually usable to prevent deferred ImportErrors
+            import onnxruntime as _ort  # type: ignore # noqa: F401
+            import optimum.onnxruntime as _opt_ort  # type: ignore # noqa: F401
+            from optimum.onnxruntime import (
+                ORTModelForFeatureExtraction as _ORTModel,  # type: ignore # noqa: F401
+            )
+
+            backend = "onnx"
+            # Reranker typically uses onnx/model.onnx if O4 is missing,
+            # but we check if we can specify a file.
+            model_kwargs = {"file_name": "onnx/model.onnx"}
+            logger.info("ONNX verified for Reranker - accelerating CPU inference.")
+        except (ImportError, AttributeError, Exception) as e:
+            logger.debug("ONNX initialization skipped (backend fallback to torch): %s", e)
+            pass
+    return backend, model_kwargs
+
 
 def _get_model() -> CrossEncoder:
     """Lazily load the cross-encoder (≈ 80 MB, ~120 ms on CPU). Thread-safe."""
@@ -19,54 +45,51 @@ def _get_model() -> CrossEncoder:
         with _reranker_lock:
             if _reranker is None:  # double-checked locking
                 import torch
+
                 device = "cuda" if torch.cuda.is_available() else "cpu"
-                
-                backend = "torch"
-                model_kwargs = None
-                if device == "cpu":
-                    try:
-                        import onnxruntime
-                        import optimum.onnxruntime
-                        backend = "onnx"
-                        # Reranker typically uses onnx/model.onnx if O4 is missing, 
-                        # but we check if we can specify a file.
-                        model_kwargs = {"file_name": "onnx/model.onnx"} 
-                        logger.info("ONNX verified for Reranker — accelerating CPU inference.")
-                    except ImportError:
-                        pass
+
+                backend, model_kwargs = _try_init_onnx(device)
 
                 logger.info("Loading reranker model: %s (backend: %s)", _MODEL_NAME, backend)
-                
+
                 if backend == "onnx":
-                    _reranker = CrossEncoder(
-                        _MODEL_NAME, 
-                        max_length=512, 
-                        device=device, 
-                        backend=backend,
-                        model_kwargs=model_kwargs
-                    )
+                    try:
+                        _reranker = CrossEncoder(
+                            _MODEL_NAME,
+                            max_length=512,
+                            device=device,
+                            backend=backend,
+                            model_kwargs=model_kwargs,
+                        )
+                    except TypeError:
+                        logger.warning(
+                            "ONNX backend not supported by this sentence-transformers "
+                            "version. Falling back."
+                        )
+                        _reranker = CrossEncoder(_MODEL_NAME, max_length=512, device=device)
                 else:
                     _reranker = CrossEncoder(_MODEL_NAME, max_length=512, device=device)
-                
+
                 logger.info("Reranker model loaded.")
     return _reranker
 
+
 def preload_reranker() -> None:
-    """Pre-load the reranker model in a background thread at startup.
-    
+    """Pre-load the reranker model.
+
     Avoids cold-start latency on the first user query.
+    Expected to be called within a thread-pool or background task by the app lifespan.
     """
-    def _load():
-        _get_model()
-    threading.Thread(target=_load, daemon=True, name="reranker-preload").start()
+    _get_model()
+
 
 async def rerank(
     query: str,
-    results: List[Dict[str, Any]],
+    results: list[dict[str, Any]],
     top_k: int = 10,
     text_key: str = "text",
     time_budget_ms: float = 500.0,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Re-score *results* against *query* and return the top-k by relevance.
 
     Performance optimisations:
@@ -101,6 +124,7 @@ async def rerank(
         return []
 
     import time
+
     t0 = time.perf_counter()
 
     # Cap candidates to limit compute
@@ -119,7 +143,7 @@ async def rerank(
         lambda: model.predict(pairs, show_progress_bar=False).tolist(),
     )
 
-    for item, score in zip(candidates, scores):
+    for item, score in zip(candidates, scores, strict=False):
         item["rerank_score"] = round(float(score), 6)
 
     ranked = sorted(candidates, key=lambda x: x["rerank_score"], reverse=True)
@@ -129,7 +153,9 @@ async def rerank(
     if elapsed_ms > time_budget_ms:
         logger.warning(
             "Reranker exceeded budget: %.0f ms > %.0f ms budget (%d candidates)",
-            elapsed_ms, time_budget_ms, len(candidates),
+            elapsed_ms,
+            time_budget_ms,
+            len(candidates),
         )
 
     logger.debug(

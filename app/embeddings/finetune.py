@@ -3,9 +3,6 @@ import asyncio
 import logging
 import os
 import random
-import secrets
-from pathlib import Path
-from typing import List, Tuple
 
 from sentence_transformers import InputExample, SentenceTransformer, losses
 from torch.utils.data import DataLoader
@@ -14,7 +11,8 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_DB_PATH = "pma_metadata.db"
 
-async def _load_training_pairs(db_path: str = _DEFAULT_DB_PATH) -> List[Tuple[str, str]]:
+
+async def _load_training_pairs(db_path: str = _DEFAULT_DB_PATH) -> list[tuple[str, str]]:
     """Build (anchor, positive) pairs from co-located chunks.
 
     Strategy: for every file with ≥ 2 chunks, pair each chunk with the
@@ -23,17 +21,14 @@ async def _load_training_pairs(db_path: str = _DEFAULT_DB_PATH) -> List[Tuple[st
     """
     import aiosqlite
 
-    pairs: List[Tuple[str, str]] = []
+    pairs: list[tuple[str, str]] = []
     async with aiosqlite.connect(db_path) as conn:
-        async with conn.execute(
-            "SELECT DISTINCT file_id FROM chunks ORDER BY file_id"
-        ) as cursor:
+        async with conn.execute("SELECT DISTINCT file_id FROM chunks ORDER BY file_id") as cursor:
             file_ids = [row[0] for row in await cursor.fetchall()]
 
         for fid in file_ids:
             async with conn.execute(
-                "SELECT text_preview FROM chunks WHERE file_id = ? "
-                "ORDER BY start_offset",
+                "SELECT text_preview FROM chunks WHERE file_id = ? ORDER BY start_offset",
                 (fid,),
             ) as cursor:
                 texts = [row[0] for row in await cursor.fetchall()]
@@ -44,6 +39,7 @@ async def _load_training_pairs(db_path: str = _DEFAULT_DB_PATH) -> List[Tuple[st
     secure_rng = random.SystemRandom()
     secure_rng.shuffle(pairs)
     return pairs
+
 
 def finetune(
     base_model: str = "all-MiniLM-L6-v2",
@@ -89,7 +85,7 @@ def finetune(
     logger.info("Loaded %d training pairs.", len(pairs))
 
     examples = [InputExample(texts=[a, b]) for a, b in pairs]
-    loader = DataLoader(examples, shuffle=True, batch_size=batch_size, num_workers=0)  # type: ignore[arg-type]
+    loader: DataLoader = DataLoader(examples, shuffle=True, batch_size=batch_size, num_workers=0)  # type: ignore[arg-type]
 
     model = SentenceTransformer(base_model)
 
@@ -116,6 +112,7 @@ def finetune(
     logger.info("Fine-tuned model saved to: %s", output_dir)
     return output_dir
 
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
 
@@ -132,15 +129,9 @@ def main() -> None:
         default="models/finetuned-embedding",
         help="Output directory for fine-tuned model",
     )
-    parser.add_argument(
-        "--db", default=_DEFAULT_DB_PATH, help="Path to metadata database"
-    )
-    parser.add_argument(
-        "--epochs", type=int, default=2, help="Training epochs"
-    )
-    parser.add_argument(
-        "--batch-size", type=int, default=16, help="Training batch size"
-    )
+    parser.add_argument("--db", default=_DEFAULT_DB_PATH, help="Path to metadata database")
+    parser.add_argument("--epochs", type=int, default=2, help="Training epochs")
+    parser.add_argument("--batch-size", type=int, default=16, help="Training batch size")
     args = parser.parse_args()
 
     result = finetune(
@@ -152,12 +143,10 @@ def main() -> None:
     )
     if result:
         print(f"\nDone! Fine-tuned model saved to: {result}")
-        print(
-            "To use it, set:  EMBEDDING_MODEL={} or pass the path to "
-            "EmbeddingService().".format(result)
-        )
+        print(f"To use it, set:  EMBEDDING_MODEL={result} or pass the path to EmbeddingService().")
     else:
         print("\nFine-tuning skipped — not enough training data.")
+
 
 if __name__ == "__main__":
     main()

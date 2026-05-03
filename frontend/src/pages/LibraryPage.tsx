@@ -5,6 +5,7 @@ import {
   getHealth,
   getIndexStatus,
   getSystemInfo,
+  getAppConfig,
   pickFolder,
   startIndexing,
   clearIndex,
@@ -15,24 +16,33 @@ import {
 } from '../api'
 
 export function LibraryPage() {
-  const { data: health, refetch: refetchHealth } = useApi(getHealth, { cacheKey: 'health', refetchInterval: 10_000 })
-  const { data: status, refetch: refetchStatus } = useApi(getIndexStatus, { cacheKey: 'index-status' })
-  const { data: sysInfo } = useApi(getSystemInfo, { cacheKey: 'system-info' })
-
   const [folderPath, setFolderPath] = useState('')
   const [indexing, setIndexing] = useState(false)
   const [liveProgress, setLiveProgress] = useState<(IndexStatus & { current_file: string }) | null>(null)
   const [message, setMessage] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
 
+  // Pause /index/status polling while local "indexing" is true; SSE drives live progress.
+  const { data: status, refetch: refetchStatus } = useApi(getIndexStatus, {
+    cacheKey: 'index-status',
+    refetchInterval: indexing ? 0 : 10_000,
+  })
+  const { data: sysInfo } = useApi(getSystemInfo, { cacheKey: 'system-info' })
+  const { data: config } = useApi(getAppConfig, { cacheKey: 'app-config' })
+
   // Derive running state from BOTH local flag and polled backend status
   const isRunning = indexing || status?.status === 'running'
 
+  // Pause background polling while SSE stream is active
+  const { data: health, refetch: refetchHealth } = useApi(getHealth, {
+    cacheKey: 'health',
+    refetchInterval: isRunning ? 0 : 10_000
+  })
+
   // Sync local indexing flag from backend status on page load/poll
   useEffect(() => {
-    if (status?.status === 'running' && !indexing) {
-      setIndexing(true)
-    }
-  }, [status?.status, indexing])
+    if (!status?.status) return
+    setIndexing(status.status === 'running')
+  }, [status?.status])
 
   // SSE progress stream while indexing (driven by isRunning, survives reload)
   useEffect(() => {
@@ -72,6 +82,7 @@ export function LibraryPage() {
   }, [folderPath])
 
   const handleClear = useCallback(async () => {
+    if (isRunning) return
     if (!confirm('This will permanently delete ALL indexed data. Continue?')) return
     try {
       await clearIndex()
@@ -82,11 +93,12 @@ export function LibraryPage() {
     } catch (e) {
       setMessage({ type: 'err', text: e instanceof Error ? e.message : 'Clear failed' })
     }
-  }, [refetchHealth, refetchStatus])
+  }, [refetchHealth, refetchStatus, isRunning])
 
 
 
   const handleDemo = useCallback(async () => {
+    if (isRunning) return
     try {
       const res = await seedDemo()
       setIndexing(true)
@@ -94,7 +106,7 @@ export function LibraryPage() {
     } catch (e) {
       setMessage({ type: 'err', text: e instanceof Error ? e.message : 'Demo seed failed' })
     }
-  }, [])
+  }, [isRunning])
 
   const handleRefresh = useCallback(async () => {
     try {
@@ -152,11 +164,11 @@ export function LibraryPage() {
           { label: 'Total Files', value: filesIndexed.toLocaleString(), color: 'text-primary-light' },
           { label: 'Chunks Indexed', value: chunksIndexed.toLocaleString(), color: 'text-accent' },
           { label: 'Scan Status', value: scanStatus, color: scanStatus === 'Idle' ? 'text-success' : 'text-warning' },
-          { label: 'Model', value: health?.model_ready ? 'Ready' : 'Loading…', color: health?.model_ready ? 'text-success' : 'text-warning' },
+          { label: 'Model', value: health?.model_ready ? (config?.gemini_model || 'Ready') : 'Loading…', color: health?.model_ready ? 'text-success' : 'text-warning' },
         ].map(({ label, value, color }) => (
           <div key={label} className="glass-card flex flex-col items-center justify-center py-6 px-4">
-            <span className={`text-3xl font-bold ${color}`}>{value}</span>
-            <span className="text-text-secondary text-xs mt-1 uppercase tracking-wider font-semibold">{label}</span>
+            <span className={`text-xl md:text-2xl lg:text-3xl font-bold ${color} text-center break-words w-full px-2`}>{value}</span>
+            <span className="text-text-secondary text-xs mt-1 uppercase tracking-wider font-semibold text-center">{label}</span>
           </div>
         ))}
       </div>
@@ -180,7 +192,22 @@ export function LibraryPage() {
       )}
 
       {/* Add to Memory */}
-      <div className="glass-card">
+      <div
+        className="glass-card transition-all duration-200 border-2 border-transparent hover:border-primary/30"
+        onDragOver={(e) => { e.preventDefault(); e.stopPropagation() }}
+        onDrop={(e) => {
+          e.preventDefault()
+          e.stopPropagation()
+          const file = e.dataTransfer.files?.[0] as File & { path?: string }
+          if (file?.path) {
+            // Electron/Tauri exposes absolute paths via the non-standard .path property
+            setFolderPath(file.path)
+          } else {
+            // Web fallback: alert user since browsers hide absolute paths for security
+            alert("Drag-and-drop folder paths are only fully supported in the desktop app. Please use the 'Browse' button.")
+          }
+        }}
+      >
         <h2 className="text-lg font-semibold mb-4 flex items-center gap-2 text-text-primary">
           <FolderPlus className="w-5 h-5 text-primary" />
           Add to Memory
@@ -190,7 +217,7 @@ export function LibraryPage() {
             type="text"
             value={folderPath}
             onChange={(e) => setFolderPath(e.target.value)}
-            placeholder="Select or type a folder path to index..."
+            placeholder="Select or drag a folder here..."
             className="flex-1 bg-white/40 border border-primary/20 rounded-xl px-4 py-3 text-text-primary placeholder:text-text-secondary/50 focus:outline-none focus:ring-2 focus:ring-primary/40 shadow-inner"
           />
           <button onClick={handleBrowse} className="glass-button flex items-center gap-2">
@@ -212,6 +239,10 @@ export function LibraryPage() {
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {sysInfo.volumes.map((vol) => {
             const usedPct = vol.total_gb > 0 ? Math.round((vol.used_gb / vol.total_gb) * 100) : 0
+            let colorClass = 'bg-primary'
+            if (usedPct > 90) colorClass = 'bg-error'
+            else if (usedPct > 70) colorClass = 'bg-warning'
+
             return (
               <div key={vol.letter} className="glass-card flex items-center gap-4">
                 <div className="bg-primary/10 p-3 rounded-2xl border border-primary/20">
@@ -224,7 +255,7 @@ export function LibraryPage() {
                   </p>
                   <div className="w-full bg-white/40 border border-white/60 rounded-full h-1.5 mt-2 shadow-inner">
                     <div
-                      className={`h-1.5 rounded-full ${usedPct > 90 ? 'bg-error' : (usedPct > 70 ? 'bg-warning' : 'bg-primary')}`}
+                      className={`h-1.5 rounded-full ${colorClass}`}
                       style={{ width: `${usedPct}%` }}
                     />
                   </div>
@@ -260,16 +291,18 @@ export function LibraryPage() {
           </span>
         </div>
         <div className="flex gap-2 pl-4 ml-auto border-l border-white/20">
-          <button 
-            onClick={handleDemo} 
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 border border-emerald-500/20 transition-all font-black text-[10px] uppercase tracking-widest shadow-sm"
+          <button
+            onClick={handleDemo}
+            disabled={isRunning}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 border border-emerald-500/20 transition-all font-black text-[10px] uppercase tracking-widest shadow-sm disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <Play className="w-3 h-3" />
             Seed Demo
           </button>
-          <button 
-            onClick={handleClear} 
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-600 border border-red-500/20 transition-all font-black text-[10px] uppercase tracking-widest shadow-sm"
+          <button
+            onClick={handleClear}
+            disabled={isRunning}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-600 border border-red-500/20 transition-all font-black text-[10px] uppercase tracking-widest shadow-sm disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <Trash2 className="w-3 h-3" />
             Clear Index

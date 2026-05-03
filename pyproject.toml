@@ -21,6 +21,9 @@ dependencies = [
     # Desktop app: Tauri v2 native shell (see frontend/src-tauri)
     # pdfplumber removed: pypdf (BSD-3) covers all PDF extraction needs
     "python-docx>=1.1.0",
+    "pypdf>=4.0.0",
+    "openpyxl>=3.1.0",
+    "python-pptx>=0.6.0",
     "tenacity>=8.2.0",
     "sse-starlette>=1.6.0",
     "slowapi>=0.1.0",

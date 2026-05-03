@@ -21,7 +21,6 @@ jobs:
       - name: Install dependencies
         run: |
           uv sync --frozen --all-extras
-          uv pip install types-PyYAML types-openpyxl types-requests
 
       - name: Run Ruff (Lint & Format Check)
         run: |
@@ -35,4 +34,4 @@ jobs:
       - name: Run Fast-Path Golden Tests
         run: |
           # Requires tests/test_fast_path.py (task 7.1)
-          uv run pytest tests/ -v
+          uv run pytest tests/ -v --basetemp=.pytest_temp

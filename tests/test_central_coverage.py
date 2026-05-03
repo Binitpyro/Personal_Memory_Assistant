@@ -183,13 +183,13 @@ async def test_indexing_folder_walking(real_db):
 
 @pytest.fixture
 def client(real_db):
-    from app.main import get_db
     from app.api.deps import get_emb, get_lancedb, get_llm
+    from app.main import get_db
 
     app.dependency_overrides[get_db] = lambda: real_db
     app.dependency_overrides[get_emb] = lambda: MockEmbeddingService()
     app.dependency_overrides[get_lancedb] = lambda: MockLanceDBClient()
-    
+
     mock_llm = MagicMock()
     mock_llm.generate_response = AsyncMock(return_value="Mock")
     app.dependency_overrides[get_llm] = lambda: mock_llm

@@ -120,24 +120,25 @@ class TestPdfExtractor:
     def test_extract_success(self, tmp_path):
         fake_path = tmp_path / "test.pdf"
         fake_path.touch()
-        # PdfReader is a lazy import inside extract() — patch at pypdf module level
-        with patch("pypdf.PdfReader") as mock_reader_cls:
-            mock_page = MagicMock()
-            mock_page.extract_text.return_value = "Hello world from PDF"
-            mock_reader = MagicMock()
-            mock_reader.is_encrypted = False
-            mock_reader.pages = [mock_page]
-            mock_reader_cls.return_value = mock_reader
+        mock_pypdf = MagicMock()
+        mock_page = MagicMock()
+        mock_page.extract_text.return_value = "Hello world from PDF"
+        mock_reader = MagicMock()
+        mock_reader.is_encrypted = False
+        mock_reader.pages = [mock_page]
+        mock_pypdf.PdfReader.return_value = mock_reader
+        with patch.dict("sys.modules", {"pypdf": mock_pypdf}):
             result = self.ext.extract(fake_path, MAX_SIZE)
         assert "Hello world" in result
 
     def test_encrypted_pdf(self, tmp_path):
         fake_path = tmp_path / "encrypted.pdf"
         fake_path.touch()
-        with patch("pypdf.PdfReader") as mock_reader_cls:
-            mock_reader = MagicMock()
-            mock_reader.is_encrypted = True
-            mock_reader_cls.return_value = mock_reader
+        mock_pypdf = MagicMock()
+        mock_reader = MagicMock()
+        mock_reader.is_encrypted = True
+        mock_pypdf.PdfReader.return_value = mock_reader
+        with patch.dict("sys.modules", {"pypdf": mock_pypdf}):
             result = self.ext.extract(fake_path, MAX_SIZE)
         assert "ENCRYPTED" in result.upper()
 
@@ -160,14 +161,14 @@ class TestDocxExtractor:
     def test_extract_success(self, tmp_path):
         fake_path = tmp_path / "test.docx"
         fake_path.touch()
-        # Document is a lazy import inside extract() — patch at docx module level
-        with patch("docx.Document") as mock_doc_cls:
-            mock_para = MagicMock()
-            mock_para.text = "Paragraph text content"
-            mock_doc = MagicMock()
-            mock_doc.paragraphs = [mock_para]
-            mock_doc.tables = []
-            mock_doc_cls.return_value = mock_doc
+        mock_docx = MagicMock()
+        mock_para = MagicMock()
+        mock_para.text = "Paragraph text content"
+        mock_doc = MagicMock()
+        mock_doc.paragraphs = [mock_para]
+        mock_doc.tables = []
+        mock_docx.Document.return_value = mock_doc
+        with patch.dict("sys.modules", {"docx": mock_docx}):
             result = self.ext.extract(fake_path, MAX_SIZE)
         assert "Paragraph" in result
 
@@ -190,21 +191,19 @@ class TestXlsxExtractor:
     def test_extract_success(self, tmp_path):
         fake_path = tmp_path / "test.xlsx"
         fake_path.touch()
-        # openpyxl is imported via `import openpyxl` inside extract().
-        # XlsxExtractor uses: import openpyxl; openpyxl.load_workbook(...);
-        # sheet.iter_rows(values_only=True)
-        with patch("openpyxl.load_workbook") as mock_load:
-            mock_ws = MagicMock()
-            mock_ws.title = "Sheet1"
-            mock_ws.iter_rows.return_value = iter(
-                [
-                    ("Header", "Value"),
-                    ("Row1", 42),
-                ]
-            )
-            mock_wb = MagicMock()
-            mock_wb.worksheets = [mock_ws]
-            mock_load.return_value = mock_wb
+        mock_openpyxl = MagicMock()
+        mock_ws = MagicMock()
+        mock_ws.title = "Sheet1"
+        mock_ws.iter_rows.return_value = iter(
+            [
+                ("Header", "Value"),
+                ("Row1", 42),
+            ]
+        )
+        mock_wb = MagicMock()
+        mock_wb.worksheets = [mock_ws]
+        mock_openpyxl.load_workbook.return_value = mock_wb
+        with patch.dict("sys.modules", {"openpyxl": mock_openpyxl}):
             result = self.ext.extract(fake_path, MAX_SIZE)
         assert isinstance(result, str)
 
@@ -227,16 +226,16 @@ class TestPptxExtractor:
     def test_extract_success(self, tmp_path):
         fake_path = tmp_path / "test.pptx"
         fake_path.touch()
-        # Presentation is a lazy import inside extract() — patch at pptx module level
-        with patch("pptx.Presentation") as mock_prs_cls:
-            mock_shape = MagicMock()
-            mock_shape.has_text_frame = False  # use .text attribute path
-            mock_shape.text = "Slide text content"
-            mock_slide = MagicMock()
-            mock_slide.shapes = [mock_shape]
-            mock_prs = MagicMock()
-            mock_prs.slides = [mock_slide]
-            mock_prs_cls.return_value = mock_prs
+        mock_pptx = MagicMock()
+        mock_shape = MagicMock()
+        mock_shape.has_text_frame = False  # use .text attribute path
+        mock_shape.text = "Slide text content"
+        mock_slide = MagicMock()
+        mock_slide.shapes = [mock_shape]
+        mock_prs = MagicMock()
+        mock_prs.slides = [mock_slide]
+        mock_pptx.Presentation.return_value = mock_prs
+        with patch.dict("sys.modules", {"pptx": mock_pptx}):
             result = self.ext.extract(fake_path, MAX_SIZE)
         assert isinstance(result, str)
 

@@ -23,6 +23,7 @@ class FakeDB:
             raise RuntimeError("db error")
         return [
             {
+                "id": 1,
                 "folder_tag": "ProjectA",
                 "path": "C:/proj/a.py",
                 "size": 100,
@@ -30,6 +31,7 @@ class FakeDB:
                 "usage_count": 2,
             },
             {
+                "id": 2,
                 "folder_tag": "",
                 "path": "C:/proj/readme.md",
                 "size": 50,
@@ -58,10 +60,11 @@ class FakeDB:
 async def test_get_files_tree_groups_and_totals():
     db = FakeDB()
     result = await get_files_tree(db=db)
+    # result is a dict when successful
     assert result["total_files"] == 2
     assert result["total_size"] == 150
     assert "ProjectA" in result["folders"]
-    assert "" in result["folders"]
+    assert "Unknown" in result["folders"]
 
 
 @pytest.mark.asyncio

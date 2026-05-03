@@ -198,8 +198,8 @@ logs/
 # Chroma / vector store data (adjust if you use a different path)
 chroma/
 .chroma/
-vector_store/
-vector_store/chroma_db/
+data/lancedb/
+app/vector_store/lancedb_data/
 
 # Jupyter etc (if you use them)
 .ipynb_checkpoints/

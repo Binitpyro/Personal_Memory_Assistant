@@ -6,7 +6,7 @@ import time
 from collections import OrderedDict
 from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from app import state
 from app.config import settings
@@ -28,7 +28,7 @@ from app.search.llm_client import LLMClient
 from app.search.planner import PlanMode, QueryPlanner
 from app.search.reranker import rerank
 from app.storage.db import DatabaseManager
-from app.vector_store.lancedb_client import LanceDBClient
+from app.vector_store.lancedb_client import LanceDBClient  # type: ignore  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -508,7 +508,7 @@ async def full_rag(
 
     cached_res = _check_rag_response_cache(query, file_type, folder_tag, history, t_start)
     if cached_res:
-        return cached_res
+        return cast(dict[str, Any], cached_res)
 
     query_emb = None
     if not history:
@@ -516,7 +516,7 @@ async def full_rag(
             query, embedding_service, lancedb_client, t_start
         )
         if cache_res:
-            return cache_res
+            return cast(dict[str, Any], cache_res)
 
     planner = QueryPlanner()
     plan = planner.plan(query)
@@ -628,9 +628,11 @@ async def full_rag(
 
         # Phase 7: Add to persistent semantic cache
         if not history and query_emb is not None:
+            import numpy as np
+
             task = asyncio.create_task(
                 lancedb_client.add_query_cache(
-                    query_emb=query_emb,
+                    query_emb=np.array(query_emb),
                     query_text=query,
                     response_text=answer,
                     timestamp=time.time(),
@@ -765,9 +767,11 @@ async def stream_rag(
 
         # Phase 7: Add to persistent semantic cache
         if not history and query_emb is not None:
+            import numpy as np
+
             task = asyncio.create_task(
                 lancedb_client.add_query_cache(
-                    query_emb=query_emb,
+                    query_emb=np.array(query_emb),
                     query_text=query,
                     response_text=full_answer,
                     timestamp=time.time(),

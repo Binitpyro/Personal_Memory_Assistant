@@ -36,7 +36,7 @@ def get_emb():
 def get_lancedb():
     global lancedb_client
     if lancedb_client is None:
-        from app.vector_store.lancedb_client import LanceDBClient
+        from app.vector_store.lancedb_client import LanceDBClient  # type: ignore
 
         lancedb_client = LanceDBClient(persist_directory=settings.lancedb_persist_dir)
     return lancedb_client

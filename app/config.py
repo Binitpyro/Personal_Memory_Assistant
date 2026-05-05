@@ -37,7 +37,7 @@ class Settings(BaseSettings):
                 )
             else:
                 persist_base = os.path.expanduser("~/.cache/personal_memory_assistant")
-            
+
             # Update paths to use the persistent base
             self.db_path = os.path.join(persist_base, "pma_metadata.db")
             self.lancedb_persist_dir = os.path.join(persist_base, "lancedb_cache")
@@ -47,7 +47,7 @@ class Settings(BaseSettings):
                 self.lancedb_persist_dir = "data/lancedb"
             if not self.db_path:
                 self.db_path = "data/pma_metadata.db"
-        
+
         return self
 
     embedding_model: str = "BAAI/bge-small-en-v1.5"

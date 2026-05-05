@@ -1,7 +1,7 @@
 # Personal Memory Assistant (PMA)
 ### Local-First Semantic Search & Intelligence Engine
 
-[![Version](https://img.shields.io/badge/Version-0.0.69-blue?style=flat-square)](https://github.com/Binitpyro/Personal_Memory_Assistant)
+[![Version](https://img.shields.io/badge/Version-0.0.70-blue?style=flat-square)](https://github.com/Binitpyro/Personal_Memory_Assistant)
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![Rust](https://img.shields.io/badge/Rust-1.75+-brown?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![React](https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react&logoColor=black)](https://react.dev/)

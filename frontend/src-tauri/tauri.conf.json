@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "personal-memory-assistant",
-  "version": "0.0.71",
+  "version": "0.0.72",
   "identifier": "com.pma.app",
   "build": {
     "frontendDist": "../../static/react",

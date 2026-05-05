@@ -51,8 +51,8 @@ jobs:
       - name: Build PyInstaller Sidecar
         run: scripts\Build-Exe.bat
 
-      - name: Setup WiX Toolset
-        uses: wixtoolset/setup-wix@v1
+      - name: Install WiX Toolset
+        run: choco install wixtoolset -y
 
       - name: Build Tauri MSI
         working-directory: ./frontend

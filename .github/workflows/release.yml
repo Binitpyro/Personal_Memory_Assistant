@@ -51,16 +51,36 @@ jobs:
       - name: Build PyInstaller Sidecar
         run: scripts\Build-Exe.bat
 
+      - name: Setup WiX Toolset
+        uses: wixtoolset/setup-wix@v1
+
       - name: Build Tauri MSI
         working-directory: ./frontend
         run: npm run tauri build
+
+      - name: Verify Build Artifacts
+        shell: pwsh
+        run: |
+          echo "Checking sidecar output..."
+          dir dist
+          echo "Checking Tauri output..."
+          dir frontend\src-tauri\target\release\bundle\msi
 
       - name: Prepare Release Artifacts
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
-          Copy-Item "dist\PMA-sidecar.zip" -Destination "PMA-$tag-sidecar.zip"
-          Copy-Item "frontend\src-tauri\target\release\bundle\msi\*.msi" -Destination "PMA-$tag-windows-x64.msi"
+          # Ensure destination files are unique
+          if (Test-Path "dist\PMA-sidecar.zip") {
+            Copy-Item "dist\PMA-sidecar.zip" -Destination "PMA-$tag-sidecar.zip"
+          }
+          $msi = Get-ChildItem "frontend\src-tauri\target\release\bundle\msi\*.msi" | Select-Object -First 1
+          if ($msi) {
+            Copy-Item $msi.FullName -Destination "PMA-$tag-windows-x64.msi"
+          } else {
+            echo "::error::MSI artifact not found!"
+            exit 1
+          }
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

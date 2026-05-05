@@ -24,9 +24,21 @@ Environment variables (via .env or PMA_ prefix) override defaults.
 import argparse
 import os
 import sys
+import webbrowser
+from threading import Timer
 
 # Ensure project root on path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+
+def _get_resource_path(relative_path: str) -> str:
+    """Get absolute path to resource, works for dev and for PyInstaller"""
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS  # type: ignore[attr-defined]
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
 
 
 def parse_args() -> argparse.Namespace:
@@ -60,6 +72,11 @@ def run_server(args: argparse.Namespace) -> None:
         "port": port,
         "log_level": settings.log_level.lower(),
     }
+
+    # If running as a frozen PyInstaller bundle AND not spawned by Tauri, open browser
+    # Tauri sets X_LOCAL_ACCESS_TOKEN. If it's missing, handle standalone opening.
+    if getattr(sys, "frozen", False) and not os.getenv("X_LOCAL_ACCESS_TOKEN"):
+        Timer(2.0, lambda: webbrowser.open(f"http://{host}:{port}")).start()
 
     if reload:
         # Dev mode: single process with hot-reload

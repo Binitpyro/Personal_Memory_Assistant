@@ -43,9 +43,8 @@ pub fn run() {
           } else {
               // Prod mode: use bundled standalone Python sidecar
               let res_dir = app_handle.path().resource_dir().unwrap();
-              let python_path = res_dir.join("python").join("python.exe");
-              let script_path = res_dir.join("app").join("main.py");
-              (python_path.to_string_lossy().to_string(), vec![script_path.to_string_lossy().to_string()])
+              let sidecar_path = res_dir.join("python").join("PMA.exe");
+              (sidecar_path.to_string_lossy().to_string(), vec![])
           };
 
           let mut child = Command::new(&cmd_str)

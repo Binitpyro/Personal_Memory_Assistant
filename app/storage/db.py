@@ -3,8 +3,10 @@ Database manager module for Personal Memory Assistant.
 Handles interactions with SQLite using aiosqlite for metadata storage.
 """
 
+import contextlib
 import logging
 import os
+import sys
 import zlib
 from pathlib import Path
 from typing import Any
@@ -75,7 +77,15 @@ class DatabaseManager:
         await self.connect()
         conn = self._get_conn()
         try:
-            schema = Path(schema_path).read_text(encoding="utf-8")
+            # Support PyInstaller frozen path resolution
+            if getattr(sys, "frozen", False):
+                import __main__
+
+                resolved_schema = __main__._get_resource_path(schema_path)
+            else:
+                resolved_schema = schema_path
+
+            schema = Path(resolved_schema).read_text(encoding="utf-8")
             await conn.executescript(schema)
             await conn.commit()
             logger.info("Database initialized successfully.")
@@ -370,16 +380,37 @@ class DatabaseManager:
             if "type" in fd:
                 fd["type"] = fd["type"].lower()
 
-        await conn.execute("BEGIN")
+        savepoint_name = None
         try:
+            # Try explicit transaction; if already in one, use savepoint
+            try:
+                await conn.execute("BEGIN")
+            except Exception as e:
+                if "cannot start a transaction within a transaction" in str(e):
+                    savepoint_name = f"sp_{id(self)}"
+                    await conn.execute(f"SAVEPOINT {savepoint_name}")
+                else:
+                    raise
+
             for fd in files_data:
                 async with conn.execute(query, fd) as cursor:
                     row = await cursor.fetchone()
                     if row:
                         file_ids.append(row[0])
-            await conn.commit()
+
+            # Commit or release savepoint
+            if savepoint_name:
+                await conn.execute(f"RELEASE {savepoint_name}")
+            else:
+                await conn.commit()
         except Exception:
-            await conn.rollback()
+            # Rollback or rollback to savepoint
+            if savepoint_name:
+                with contextlib.suppress(Exception):
+                    await conn.execute(f"ROLLBACK TO {savepoint_name}")
+            else:
+                with contextlib.suppress(Exception):
+                    await conn.rollback()
             raise
         return file_ids
 
@@ -445,8 +476,19 @@ class DatabaseManager:
         # For larger batches, use executemany + read back IDs
         # Wrap in an explicit transaction to prevent race conditions
         # with concurrent inserts between MAX(id) and the bulk insert.
-        await conn.execute("BEGIN IMMEDIATE")
+        # Use savepoint to handle case where transaction already exists
+        savepoint_name = None
         try:
+            # Try explicit transaction; if already in one, use savepoint
+            try:
+                await conn.execute("BEGIN IMMEDIATE")
+            except Exception as e:
+                if "cannot start a transaction within a transaction" in str(e):
+                    savepoint_name = f"sp_{id(self)}"
+                    await conn.execute(f"SAVEPOINT {savepoint_name}")
+                else:
+                    raise
+
             async with conn.execute("SELECT COALESCE(MAX(id), 0) FROM chunks") as cur:
                 row = await cur.fetchone()
                 start_id = (row[0] if row else 0) + 1
@@ -468,10 +510,20 @@ class DatabaseManager:
                 rows = await cursor.fetchall()
                 ids = [r[0] for r in rows]
 
-            await conn.commit()
+            # Commit or release savepoint
+            if savepoint_name:
+                await conn.execute(f"RELEASE {savepoint_name}")
+            else:
+                await conn.commit()
             return ids
         except Exception:
-            await conn.rollback()
+            # Rollback or rollback to savepoint
+            if savepoint_name:
+                with contextlib.suppress(Exception):
+                    await conn.execute(f"ROLLBACK TO {savepoint_name}")
+            else:
+                with contextlib.suppress(Exception):
+                    await conn.rollback()
             raise
 
     async def insert_chunk_embeddings_bulk(self, data: list[tuple[int, bytes]]) -> None:

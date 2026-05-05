@@ -134,11 +134,9 @@ async def lifespan(fastapi_app: FastAPI):
     _log_admin_status()
 
     # 2. Centralize Service Resolution (Modular Setup)
-    from app.embeddings.service import EmbeddingService
     from app.indexing.service import IndexingService, progress
     from app.insights.service import InsightsService
     from app.search.retrieval import full_rag
-    from app.vector_store.lancedb_client import LanceDBClient  # type: ignore
 
     state.indexing_service_cls = IndexingService
     state.progress_obj = progress
@@ -146,11 +144,13 @@ async def lifespan(fastapi_app: FastAPI):
     state.insights_service_cls = InsightsService
 
     # 3. Model & Cache readiness
-    emb = EmbeddingService()
+    from app.api.deps import get_emb, get_lancedb
+
+    emb = get_emb()
     logger.info("Starting background model load...")
     emb.load_model_background()
 
-    lancedb_client = LanceDBClient(persist_directory=settings.lancedb_persist_dir)
+    lancedb_client = get_lancedb()
     logger.info("Initializing LanceDB...")
     await loop.run_in_executor(None, lancedb_client.connect)
 
@@ -338,12 +338,7 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # ty
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:*",
-        "https://localhost:*",
-        "tauri://localhost",
-        "https://tauri.localhost",
-    ],
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$|^tauri://localhost$|^https://tauri\.localhost$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

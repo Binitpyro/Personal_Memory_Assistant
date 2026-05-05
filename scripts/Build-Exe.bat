@@ -8,29 +8,37 @@ for %%I in ("%SCRIPT_DIR%..") do set "PROJECT_DIR=%%~fI"
 cd /d "%PROJECT_DIR%"
 echo [INFO] Working directory: %CD%
 
+:: Detect CI environment
+set "IS_CI=0"
+if defined GITHUB_ACTIONS set "IS_CI=1"
+
 :: ── Verify virtual environment ────────────────────────────────────────────
 if not exist ".venv\Scripts\activate.bat" (
     echo [ERROR] .venv not found. Run StartPMA.bat or 'uv sync' first.
-    pause
+    if "%IS_CI%"=="0" pause
     exit /b 1
 )
 call ".venv\Scripts\activate.bat"
 
 :: ── Build React frontend (sidecar needs static assets) ────────────────────
-if exist "frontend\package.json" (
-    echo [1/3] Building React frontend...
-    pushd frontend
-    call npm run build
-    if %ERRORLEVEL% neq 0 (
-        echo [ERROR] Frontend build failed.
-        popd
-        pause
-        exit /b 1
-    )
-    popd
-    echo [OK] Frontend built.
+if "%IS_CI%"=="1" (
+    echo [INFO] CI detected — skipping redundant frontend build in batch script.
 ) else (
-    echo [WARN] No frontend/package.json found — skipping frontend build.
+    if exist "frontend\package.json" (
+        echo [1/3] Building React frontend...
+        pushd frontend
+        call npm run build
+        if %ERRORLEVEL% neq 0 (
+            echo [ERROR] Frontend build failed.
+            popd
+            pause
+            exit /b 1
+        )
+        popd
+        echo [OK] Frontend built.
+    ) else (
+        echo [WARN] No frontend/package.json found — skipping frontend build.
+    )
 )
 
 :: ── Install / upgrade PyInstaller ─────────────────────────────────────────
@@ -80,7 +88,7 @@ pyinstaller ^
 if %ERRORLEVEL% neq 0 (
     echo.
     echo [ERROR] PyInstaller build failed.
-    pause
+    if "%IS_CI%"=="0" pause
     exit /b 1
 )
 
@@ -96,5 +104,7 @@ if exist "dist_readme.txt" copy "dist_readme.txt" "dist\sidecar\PMA\README.txt"
 powershell -Command "Compress-Archive -Path 'dist\sidecar\PMA\*' -DestinationPath 'dist\PMA-sidecar.zip' -Force"
 
 :: Detect if run interactively (double-click) vs headless
-echo %CMDCMDLINE% | findstr /i "/c" >nul 2>&1
-if %ERRORLEVEL% == 0 pause
+if "%IS_CI%"=="0" (
+    echo %CMDCMDLINE% | findstr /i "/c" >nul 2>&1
+    if %ERRORLEVEL% == 0 pause
+)

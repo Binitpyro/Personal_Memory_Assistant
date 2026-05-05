@@ -24,23 +24,30 @@ class Settings(BaseSettings):
     lancedb_persist_dir: str = "data/lancedb"
 
     @model_validator(mode="after")
-    def compute_lancedb_dir(self):
-        if self.lancedb_mode == "split_brain":
-            import os
-            import sys
+    def compute_paths(self):
+        import os
+        import sys
 
+        # Determine the base directory for persistent data
+        if self.lancedb_mode == "split_brain":
             if sys.platform == "win32":
-                self.lancedb_persist_dir = os.path.join(
+                persist_base = os.path.join(
                     os.environ.get("LOCALAPPDATA", os.path.expanduser("~\\AppData\\Local")),
                     "PersonalMemoryAssistant",
-                    "lancedb_cache",
                 )
             else:
-                self.lancedb_persist_dir = os.path.expanduser(
-                    "~/.cache/personal_memory_assistant/lancedb_cache"
-                )
-        elif not self.lancedb_persist_dir:
-            self.lancedb_persist_dir = "data/lancedb"
+                persist_base = os.path.expanduser("~/.cache/personal_memory_assistant")
+            
+            # Update paths to use the persistent base
+            self.db_path = os.path.join(persist_base, "pma_metadata.db")
+            self.lancedb_persist_dir = os.path.join(persist_base, "lancedb_cache")
+        else:
+            # Portable mode or default - ensure directories exist or are relative to CWD
+            if not self.lancedb_persist_dir:
+                self.lancedb_persist_dir = "data/lancedb"
+            if not self.db_path:
+                self.db_path = "data/pma_metadata.db"
+        
         return self
 
     embedding_model: str = "BAAI/bge-small-en-v1.5"

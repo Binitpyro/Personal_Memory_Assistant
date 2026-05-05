@@ -4,7 +4,7 @@
   "version": "0.0.70",
   "identifier": "com.pma.app",
   "build": {
-    "frontendDist": "../dist",
+    "frontendDist": "../../static/react",
     "devUrl": "http://localhost:5173",
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build"

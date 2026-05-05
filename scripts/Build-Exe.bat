@@ -40,6 +40,11 @@ uv pip install pyinstaller --quiet 2>nul || pip install pyinstaller --quiet
 :: ── Run PyInstaller ───────────────────────────────────────────────────────
 echo [3/3] Building PMA.exe with PyInstaller...
 
+set "OPTIONAL_ENV="
+if exist ".env" (
+    set "OPTIONAL_ENV=--add-data .env;."
+)
+
 pyinstaller ^
     --onedir ^
     --distpath dist\sidecar ^
@@ -69,7 +74,7 @@ pyinstaller ^
     --collect-data=transformers ^
     --add-data "app;app" ^
     --add-data "static;static" ^
-    --add-data ".env;." ^
+    %OPTIONAL_ENV% ^
     __main__.py
 
 if %ERRORLEVEL% neq 0 (

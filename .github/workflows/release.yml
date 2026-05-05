@@ -29,8 +29,9 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen --all-extras
 
-      - name: Build rust_core.pyd (Maturin)
-        run: uv run maturin build --release
+      - name: Build Rust Core Extension
+        working-directory: app/scanner/rust_core
+        run: uv run maturin develop --release
 
       - name: Install Node.js
         uses: actions/setup-node@v4

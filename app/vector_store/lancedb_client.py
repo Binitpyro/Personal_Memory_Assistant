@@ -74,10 +74,10 @@ class LanceDBClient:
         self._write_lock = threading.Lock()
 
     def connect(self) -> None:
-        if self.db:
+        if self.db is not None:
             return
         with self._connect_lock:
-            if not self.db:
+            if self.db is None:
                 logger.info("Connecting to LanceDB at: %s", self.persist_directory)
                 self.db = lancedb.connect(self.persist_directory)
                 logger.info("LanceDB connection established.")
@@ -85,7 +85,7 @@ class LanceDBClient:
     def _get_table(self, name: str):
         self.connect()
         assert self.db is not None
-        if name in self.db.table_names():
+        if name in self.db.list_tables():
             return self.db.open_table(name)
         return None
 
@@ -93,7 +93,7 @@ class LanceDBClient:
         self.connect()
         assert self.db is not None
         with self._write_lock:
-            if name in self.db.table_names():
+            if name in self.db.list_tables():
                 tbl = self.db.open_table(name)
                 tbl.add(data)
                 return tbl
@@ -103,7 +103,7 @@ class LanceDBClient:
         self.connect()
         assert self.db is not None
         try:
-            if table_name in self.db.table_names():
+            if table_name in self.db.list_tables():
                 tbl = self.db.open_table(table_name)
                 # We can grab just the id column
                 arrow_col = tbl.to_arrow(columns=["id"]).column("id")
@@ -117,7 +117,7 @@ class LanceDBClient:
         self.connect()
         assert self.db is not None
         try:
-            if table_name in self.db.table_names():
+            if table_name in self.db.list_tables():
                 tbl = self.db.open_table(table_name)
                 # Select only ID, convert to python list, and find max.
                 # Still slightly more than O(1) time but prevents huge string sets in Python.
@@ -302,11 +302,11 @@ class LanceDBClient:
 
         def _drop():
             with self._write_lock:
-                if "pma_chunks" in self.db.table_names():
+                if "pma_chunks" in self.db.list_tables():
                     self.db.drop_table("pma_chunks")
-                if "pma_summaries" in self.db.table_names():
+                if "pma_summaries" in self.db.list_tables():
                     self.db.drop_table("pma_summaries")
-                if "query_cache" in self.db.table_names():
+                if "query_cache" in self.db.list_tables():
                     self.db.drop_table("query_cache")
 
         await loop.run_in_executor(None, _drop)

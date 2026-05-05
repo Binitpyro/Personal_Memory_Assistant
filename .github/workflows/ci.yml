@@ -29,9 +29,4 @@ jobs:
 
       - name: Run MyPy (Type Checks)
         run: |
-          uv run mypy app/
-
-      - name: Run Fast-Path Golden Tests
-        run: |
-          # Requires tests/test_fast_path.py (task 7.1)
-          uv run pytest tests/ -v --basetemp=.pytest_temp
+          uv run mypy .

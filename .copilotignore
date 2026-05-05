@@ -1,0 +1,18 @@
+PMA Obsidian/
+static/
+demo_data/
+logs/
+data/
+tests/
+*.exe
+*.msi
+*.spec
+dist/
+build/
+*.log
+*.xml
+pylint_results.txt
+.scannerwork/
+sonar-project.properties
+.env*
+! .env.example

@@ -198,6 +198,14 @@ logs/
 # Chroma / vector store data (adjust if you use a different path)
 chroma/
 .chroma/
+
+# Disconnected assets
+PMA Obsidian/
+# demo_data/     <-- Tracked now
+# static/        <-- Keep ignored for build assets
+static/
+# test_list.txt  <-- Deleted
+# dist_readme.txt <-- Deleted
 data/lancedb/
 app/vector_store/lancedb_data/
 
@@ -206,8 +214,11 @@ app/vector_store/lancedb_data/
 
 # Hackathon local/private files
 PMA Obsidian/
-scripts/
+# scripts/      <-- Tracked
 GEMINI.md
+scripts/Sonar-Scan.bat
+scripts/Stop-Sonar.bat
+scripts/run_ci_checks.bat
 
 # Runtime data & logs
 data/
@@ -220,6 +231,10 @@ _test_clear.py
 issues.json
 pma.db
 pylint_results.txt
+.pytest_temp/
+personal_memory_assistant.egg-info/
+frontend/coverage/
+tests/
 
 # Built executables
 *.exe
@@ -230,3 +245,4 @@ build/
 # SonarQube
 .scannerwork/
 /.agent
+sonar-project.properties

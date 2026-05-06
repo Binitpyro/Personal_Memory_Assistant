@@ -106,5 +106,8 @@ powershell -Command "Compress-Archive -Path 'dist\sidecar\PMA\*' -DestinationPat
 :: Detect if run interactively (double-click) vs headless
 if "%IS_CI%"=="0" (
     echo %CMDCMDLINE% | findstr /i "/c" >nul 2>&1
-    if %ERRORLEVEL% == 0 pause
+    if %ERRORLEVEL% == 0 (
+        echo Closing in 30 seconds. Press any key to close now.
+        timeout /t 30
+    )
 )

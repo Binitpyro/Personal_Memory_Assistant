@@ -38,25 +38,52 @@ jobs:
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
           cache: 'npm'
           cache-dependency-path: 'frontend/package-lock.json'
 
       - name: Build React Frontend
         working-directory: ./frontend
         run: |
-          npm install
+          npm ci
           npm run build
 
       - name: Build PyInstaller Sidecar
         run: scripts\Build-Exe.bat
+
+      - name: Verify PyInstaller Sidecar Package
+        shell: pwsh
+        run: |
+          if (!(Test-Path "dist\PMA-sidecar.zip")) {
+            echo "::error::dist\PMA-sidecar.zip was not created."
+            exit 1
+          }
+          Get-Item "dist\PMA-sidecar.zip" | Format-List FullName,Length,LastWriteTime
 
       - name: Install WiX Toolset
         run: choco install wixtoolset -y
 
       - name: Build Tauri MSI
         working-directory: ./frontend
-        run: npm run tauri build
+        shell: pwsh
+        run: |
+          npx tauri build --bundles msi --verbose 2>&1 | Tee-Object -FilePath ..\tauri-msi-build.log
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Upload build diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-build-diagnostics
+          if-no-files-found: ignore
+          path: |
+            tauri-msi-build.log
+            build\PMA\warn-PMA.txt
+            build\PMA\xref-PMA.html
+            frontend\src-tauri\target\release\wix\**
+            frontend\src-tauri\target\release\bundle\**
 
       - name: Verify Build Artifacts
         shell: pwsh

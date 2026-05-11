@@ -13,8 +13,8 @@ dependencies = [
     "jinja2>=3.1.0",
     "aiosqlite>=0.20.0",
     "httpx>=0.27.0",
-    "sentence-transformers>=3.0.0",
-    "torch>=2.0.0",
+    "onnxruntime>=1.17.0",
+    "tokenizers>=0.15.0",
     "lancedb>=0.10.0",
     "pyarrow>=14.0.0",
     "python-dotenv>=1.0.0",
@@ -33,6 +33,7 @@ dependencies = [
 
 [project.scripts]
 pma = "__main__:main"
+pma-reindex = "scripts.reindex_embeddings:cli_main"
 
 [project.optional-dependencies]
 dev = [
@@ -99,6 +100,7 @@ addopts = "--basetemp=.pytest_temp"
 [tool.coverage.run]
 source = ["app"]
 omit = ["tests/*", "*/__pycache__/*"]
+relative_files = true
 
 [tool.coverage.report]
 show_missing = true
@@ -120,4 +122,4 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["app"]
+packages = ["app", "scripts"]

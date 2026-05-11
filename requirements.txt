@@ -1384,3 +1384,6 @@ wrapt==2.1.2 \
     --hash=sha256:ff2aad9c4cda28a8f0653fc2d487596458c2a3f475e56ba02909e950a9efa6a9 \
     --hash=sha256:ff95d4264e55839be37bafe1536db2ab2de19da6b65f9244f01f332b5286cfbf
     # via deprecated
+p l a y w r i g h t > = 1 . 4 0 . 0  
+ d a t a s k e t c h > = 1 . 6 . 0  
+ 

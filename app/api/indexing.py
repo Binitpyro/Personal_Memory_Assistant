@@ -100,10 +100,11 @@ async def index_start(
     async def _index_then_compact():
         await service.index_folders(folders)
         try:
-            await db.vacuum()
-            logger.info("Auto-compact completed after indexing.")
+            # FTS optimize via aiosqlite (non-blocking)
+            await db.fts_optimize()
+            logger.info("FTS optimization completed after indexing.")
         except Exception as e:
-            logger.warning("Auto-compact after indexing failed: %s", e)
+            logger.warning("FTS optimization after indexing failed: %s", e)
 
     background_tasks.add_task(_index_then_compact)
     return {"message": "Indexing started"}
@@ -134,8 +135,13 @@ async def progress_stream(db: DatabaseManager = Depends(get_db)):
     _, progress = ensure_indexing()
 
     async def event_generator():
+        tick = 0
+        chunk_count = 0
         while True:
-            _, chunk_count = await db.get_counts()
+            # Debounce DB round-trips: only re-query counts every 5 ticks (~2.5s)
+            if tick % 5 == 0:
+                _, chunk_count = await db.get_counts()
+            tick += 1
             pct = (
                 int((progress.processed_files / progress.total_files) * 100)
                 if progress.total_files > 0
@@ -202,7 +208,7 @@ async def export_index(db: DatabaseManager = Depends(get_db)):
         return JSONResponse(status_code=500, content={"error": "Export failed."})
 
 
-@router.post("/remove-folder")
+@router.post("/folder/remove")
 async def remove_folder_index(
     request: IndexRequest,
     db: DatabaseManager = Depends(get_db),
@@ -275,8 +281,17 @@ async def unreal_import(
         from sentence_transformers import SentenceTransformer
 
         model: SentenceTransformer = emb.model
-        doc = f"Unreal Engine Metadata Import: {stats}"
-        embedding = model.encode(doc).tolist()
+        # M-13: Summarize key fields to stay within model token limits (truncation avoidance).
+        doc = (
+            f"Unreal Project: {stats.get('ProjectName', 'Unknown')} "
+            f"Engine: {stats.get('EngineVersion', 'Unknown')} "
+            f"Assets: {stats.get('AssetCount', 0)} "
+            f"Maps: {stats.get('MapCount', 0)} "
+            f"Materials: {stats.get('MaterialCount', 0)} "
+            f"Characters: {stats.get('CharacterBPCount', 0)}"
+        )
+        embedding_array = await asyncio.to_thread(model.encode, doc)
+        embedding = embedding_array.tolist()
         batch_ids = [f"unreal_{os.path.basename(jpath)}"]
         batch_metas = [{"source": jpath, "text": doc}]
         batch_embs = [embedding]

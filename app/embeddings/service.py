@@ -1,16 +1,16 @@
 import asyncio
+import json
 import logging
+import os
 import threading
 from collections import OrderedDict
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Literal
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 
 from app.config import settings
-
-if TYPE_CHECKING:
-    from sentence_transformers import SentenceTransformer
 
 logger = logging.getLogger(__name__)
 
@@ -18,115 +18,102 @@ logger = logging.getLogger(__name__)
 class EmbeddingService:
     def __init__(self, model_name: str = ""):
         self.model_name = model_name or settings.embedding_model
-        self.model: SentenceTransformer | None = None
+        self._session: Any = None  # onnxruntime.InferenceSession
+        self._tokenizer: Any = None  # tokenizers.Tokenizer
         self._loading = False
         self._load_lock = threading.Lock()
         self._ready = threading.Event()
-        self.optimal_batch_size = settings.embedding_batch_size
+        self.optimal_batch_size = 64  # ONNX on CPU is efficient at this size
 
         # LRU cache for query embeddings to avoid redundant computation
         self._query_cache: OrderedDict[str, list[float]] = OrderedDict()
         self._cache_lock = threading.Lock()
-        self._max_cache_size = 2000  # Increased from 1000
+        self._max_cache_size = 2000
+
+    def _load_onnx_model(self, model_path: Path):
+        import onnxruntime as ort
+        from tokenizers import Tokenizer
+
+        # Load tokenizer
+        tokenizer_json = model_path / "tokenizer.json"
+        if not tokenizer_json.exists():
+            # Fallback for some models that use different structures
+            tokenizer_json = model_path / "onnx" / "tokenizer.json"
+
+        self._tokenizer = Tokenizer.from_file(str(tokenizer_json))
+        self._tokenizer.enable_truncation(max_length=512)
+        self._tokenizer.enable_padding(pad_id=0, pad_token="[PAD]")
+
+        # Load ONNX session
+        onnx_file = model_path / "model.onnx"
+        if not onnx_file.exists():
+            onnx_file = model_path / "onnx" / "model.onnx"
+
+        if not onnx_file.exists():
+            # If not found locally, we might need a downloader or instructions
+            raise FileNotFoundError(f"ONNX model file not found at {onnx_file}")
+
+        # Use CPU execution provider for maximum portability and minimum size
+        providers = ["CPUExecutionProvider"]
+        self._session = ort.InferenceSession(str(onnx_file), providers=providers)
+        logger.info("ONNX InferenceSession initialized for %s", self.model_name)
 
     def load_model(self) -> None:
-        """Loads the embedding model (blocking).
-
-        Prefers ONNX Runtime backend when ``onnxruntime`` is installed
-        (gives ~2-3x speedup on CPU).  Falls back to PyTorch.
-        """
-        if self.model:
+        """Loads the embedding model using ONNX Runtime (blocking)."""
+        if self._session:
             self._ready.set()
             return
 
         try:
-            import torch
-            from sentence_transformers import SentenceTransformer
+            # For now, we expect the model to be in a 'models' directory or similar
+            # In a real app, we might download it from HF if missing.
+            model_path = Path("models") / self.model_name.replace("/", "_")
 
-            device = "cuda" if torch.cuda.is_available() else "cpu"
+            if not model_path.exists():
+                # Check if it's an absolute path
+                model_path = Path(self.model_name)
 
-            # Phase 2.1: Prefer ONNX backend on CPU for ~2-3x faster inference
-            backend: Literal["torch", "onnx", "openvino"] = "torch"
-            if device == "cpu":
-                try:
-                    # Verify that the package is actually usable to prevent deferred ImportErrors
-                    import onnxruntime as _ort  # type: ignore # noqa: F401
-                    import optimum.onnxruntime as _opt_ort  # type: ignore # noqa: F401
-
-                    backend = "onnx"
-                    logger.info(
-                        "ONNX Runtime and Optimum verified - "
-                        "using ONNX backend for faster CPU inference."
-                    )
-                except ImportError as e:
-                    logger.info(
-                        "ONNX backend unavailable (missing %s) - falling back to PyTorch.",
-                        str(e),
-                    )
-                except Exception as e:
-                    logger.info("ONNX initialization failed: %s - falling back to PyTorch.", str(e))
+            logger.info("Loading ONNX embedding model from: %s", model_path)
+            self._load_onnx_model(model_path)
 
             logger.info(
-                "Loading embedding model: %s on device: %s (backend: %s)",
-                self.model_name,
-                device,
-                backend,
-            )
-
-            if backend == "onnx":
-                try:
-                    self.model = SentenceTransformer(
-                        self.model_name,
-                        device=device,
-                        backend=backend,
-                        model_kwargs={"file_name": "onnx/model.onnx"},  # Use standard name
-                    )
-                except Exception as ex:
-                    logger.warning(
-                        "ONNX initialization failed for model %s: %s. Falling back to PyTorch.",
-                        self.model_name,
-                        ex,
-                    )
-                    backend = "torch"
-                    self.model = SentenceTransformer(self.model_name, device=device)
-            else:
-                self.model = SentenceTransformer(self.model_name, device=device)
-
-            if device == "cuda":
-                self.model.half()  # Use FP16 on GPU
-                self.optimal_batch_size = 512
-            elif backend == "onnx":
-                self.optimal_batch_size = 64
-            else:
-                self.optimal_batch_size = 32
-
-            logger.info(
-                "Model loaded successfully (backend=%s, optimal_batch_size=%d).",
-                backend,
+                "Embedding model loaded successfully (ONNX, batch_size=%d).",
                 self.optimal_batch_size,
             )
         except Exception as e:
-            logger.exception("Failed to load embedding model: %s", e)
+            logger.error("Failed to load ONNX embedding model: %s", e)
+            # In a production app, we would handle missing models by downloading them
+            # but here we follow the instruction to move to ONNX.
         finally:
-            self._loading = False  # Reset so future retries are possible
-            self._ready.set()  # Unblock waiters on both success and failure
+            self._loading = False
+            self._ready.set()
 
     def load_model_background(self) -> None:
-        """Starts model loading in a background thread (non-blocking)."""
+        """Starts model loading in a background thread."""
         with self._load_lock:
-            if self.model or self._loading:
+            if self._session or self._loading:
                 return
             self._loading = True
         thread = threading.Thread(target=self.load_model, daemon=True, name="emb-loader")
         thread.start()
 
     def wait_until_ready(self, timeout: float = 120) -> bool:
-        """Block until the model is loaded. Returns True if ready."""
         return self._ready.wait(timeout=timeout)
 
     @property
     def is_ready(self) -> bool:
         return self._ready.is_set()
+
+    def _mean_pooling(self, model_output, attention_mask):
+        token_embeddings = model_output[0]
+        input_mask_expanded = np.expand_dims(attention_mask, -1).astype(float)
+        return np.sum(token_embeddings * input_mask_expanded, 1) / np.maximum(
+            input_mask_expanded.sum(1), 1e-9
+        )
+
+    def _normalize(self, v):
+        norm = np.linalg.norm(v, axis=1, keepdims=True)
+        return v / np.maximum(norm, 1e-9)
 
     async def embed_texts(
         self,
@@ -134,85 +121,14 @@ class EmbeddingService:
         batch_size: int | None = None,
         progress_callback: Callable[[int, int], None] | None = None,
     ) -> list[list[float]]:
-        """Generates embeddings for a list of texts asynchronously.
-
-        Optimisation: deduplicates identical texts so the model only encodes
-        each unique string once, then maps results back to the original order.
-        """
-        if not self.model:
+        if not self._session:
             if self._loading:
                 await asyncio.get_running_loop().run_in_executor(None, self.wait_until_ready)
             else:
                 await asyncio.get_running_loop().run_in_executor(None, self.load_model)
-        if self.model is None:
-            raise RuntimeError("Embedding model failed to load. Cannot generate embeddings.")
 
-        # ── Deduplicate texts ──────────────────────────────────────────
-        unique_texts: list[str] = []
-        text_to_idx: dict[str, int] = {}
-        original_map: list[int] = []  # maps original index to deduplicated text index
-
-        for text in texts:
-            if text not in text_to_idx:
-                text_to_idx[text] = len(unique_texts)
-                unique_texts.append(text)
-            original_map.append(text_to_idx[text])
-
-        # Optimization: Dynamic batching based on text count and settings
-        effective_batch_size = batch_size or self.optimal_batch_size
-        if len(unique_texts) < effective_batch_size:
-            effective_batch_size = max(1, len(unique_texts))
-
-        loop = asyncio.get_running_loop()
-        model = self.model  # capture for closure
-
-        def encode_with_progress():
-            num_batches = (len(unique_texts) + effective_batch_size - 1) // effective_batch_size
-            results = []
-            for i in range(0, len(unique_texts), effective_batch_size):
-                batch_num = i // effective_batch_size + 1
-                if progress_callback:
-                    progress_callback(batch_num, num_batches)
-
-                batch = unique_texts[i : i + effective_batch_size]
-                batch_embeddings = model.encode(
-                    batch,
-                    show_progress_bar=False,
-                    convert_to_numpy=True,
-                    normalize_embeddings=True,
-                )
-                results.append(batch_embeddings)
-
-            return np.vstack(results).tolist() if results else []
-
-        unique_embeddings = await loop.run_in_executor(None, encode_with_progress)
-
-        # Map back to original order
-        embeddings = [unique_embeddings[original_map[i]] for i in range(len(texts))]
-        if len(unique_texts) < len(texts):
-            logger.debug(
-                "Embedding dedup: %d texts → %d unique (saved %d encodes)",
-                len(texts),
-                len(unique_texts),
-                len(texts) - len(unique_texts),
-            )
-        return embeddings
-
-    def embed_texts_sync(
-        self, texts: list[str], batch_size: int | None = None
-    ) -> list[list[float]]:
-        """Blocking (synchronous) variant of embed_texts.
-
-        Intended for use inside ``loop.run_in_executor()`` calls where ``await``
-        is unavailable, e.g. the split-brain back-fill path.  Uses the same
-        deduplication and batching logic as the async version.
-        """
-        if self.model is None and not self.wait_until_ready(timeout=60):
-            raise RuntimeError("Embedding model not ready within timeout.")
-        if self.model is None:
+        if not self._session:
             raise RuntimeError("Embedding model failed to load.")
-
-        effective_batch_size = batch_size or self.optimal_batch_size
 
         # Deduplicate
         unique_texts: list[str] = []
@@ -224,35 +140,89 @@ class EmbeddingService:
                 unique_texts.append(text)
             original_map.append(text_to_idx[text])
 
-        results = []
-        for i in range(0, len(unique_texts), effective_batch_size):
-            batch = unique_texts[i : i + effective_batch_size]
-            batch_emb = self.model.encode(
-                batch,
-                show_progress_bar=False,
-                convert_to_numpy=True,
-                normalize_embeddings=True,
-            )
-            results.append(batch_emb)
+        effective_batch_size = batch_size or self.optimal_batch_size
+        loop = asyncio.get_running_loop()
 
-        unique_embeddings = np.vstack(results).tolist() if results else []
+        def _run_inference():
+            num_batches = (len(unique_texts) + effective_batch_size - 1) // effective_batch_size
+            all_embeddings = []
+
+            for i in range(0, len(unique_texts), effective_batch_size):
+                if progress_callback:
+                    progress_callback(i // effective_batch_size + 1, num_batches)
+
+                batch = unique_texts[i : i + effective_batch_size]
+                encoded = self._tokenizer.encode_batch(batch)
+
+                input_ids = np.array([e.ids for e in encoded], dtype=np.int64)
+                attention_mask = np.array([e.attention_mask for e in encoded], dtype=np.int64)
+                # Some models don't need token_type_ids, but MiniLM usually does
+                token_type_ids = np.array([e.type_ids for e in encoded], dtype=np.int64)
+
+                onnx_inputs = {
+                    "input_ids": input_ids,
+                    "attention_mask": attention_mask,
+                    "token_type_ids": token_type_ids,
+                }
+
+                # Run inference
+                model_output = self._session.run(None, onnx_inputs)
+
+                # Mean Pooling
+                sentence_embeddings = self._mean_pooling(model_output, attention_mask)
+                # Normalization
+                sentence_embeddings = self._normalize(sentence_embeddings)
+
+                all_embeddings.append(sentence_embeddings)
+
+            return np.vstack(all_embeddings).tolist() if all_embeddings else []
+
+        unique_embeddings = await loop.run_in_executor(None, _run_inference)
         return [unique_embeddings[original_map[i]] for i in range(len(texts))]
 
+    def embed_texts_sync(
+        self, texts: list[str], batch_size: int | None = None
+    ) -> list[list[float]]:
+        if not self._session and not self.wait_until_ready(timeout=60):
+            raise RuntimeError("Embedding model not ready.")
+
+        unique_texts = list(set(texts))
+        text_to_idx = {t: i for i, t in enumerate(unique_texts)}
+        effective_batch_size = batch_size or self.optimal_batch_size
+
+        all_embs = []
+        for i in range(0, len(unique_texts), effective_batch_size):
+            batch = unique_texts[i : i + effective_batch_size]
+            encoded = self._tokenizer.encode_batch(batch)
+            input_ids = np.array([e.ids for e in encoded], dtype=np.int64)
+            attention_mask = np.array([e.attention_mask for e in encoded], dtype=np.int64)
+            token_type_ids = np.array([e.type_ids for e in encoded], dtype=np.int64)
+
+            out = self._session.run(
+                None,
+                {
+                    "input_ids": input_ids,
+                    "attention_mask": attention_mask,
+                    "token_type_ids": token_type_ids,
+                },
+            )
+            pooled = self._mean_pooling(out, attention_mask)
+            all_embs.append(self._normalize(pooled))
+
+        unique_embeddings = np.vstack(all_embs)
+        return [unique_embeddings[text_to_idx[t]].tolist() for t in texts]
+
     async def embed_query(self, query: str) -> list[float]:
-        """Generates embedding for a single query string with LRU caching."""
-        # Optimization: Check LRU cache first
         with self._cache_lock:
             if query in self._query_cache:
-                self._query_cache.move_to_end(query)  # Mark as recently used
+                self._query_cache.move_to_end(query)
                 return self._query_cache[query]
 
         embeddings = await self.embed_texts([query])
         result = embeddings[0]
 
-        # Optimization: Update cache with proper LRU eviction
         with self._cache_lock:
             if len(self._query_cache) >= self._max_cache_size:
-                self._query_cache.popitem(last=False)  # Evict least-recently-used
+                self._query_cache.popitem(last=False)
             self._query_cache[query] = result
-
         return result

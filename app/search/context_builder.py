@@ -1,4 +1,5 @@
 import difflib
+import functools
 import re
 from typing import Any
 
@@ -29,12 +30,21 @@ def _get_encoding() -> Any:
     return _ENCODING
 
 
+@functools.lru_cache(maxsize=1024)
+def _get_tokens(text: str) -> list[int]:
+    """Tokenize text using tiktoken with caching (P-03)."""
+    enc = _get_encoding()
+    if not enc:
+        return []
+    return enc.encode(text)
+
+
 def _token_count(text: str) -> int:
     enc = _get_encoding()
     if not enc:
         # Conservative fallback when tiktoken is unavailable.
         return max(1, len(text) // 4)
-    return len(enc.encode(text))
+    return len(_get_tokens(text))
 
 
 def _truncate_to_tokens(text: str, max_tokens: int) -> str:
@@ -78,19 +88,53 @@ def _format_file_stats(stats: dict[str, Any]) -> str:
 def _semantic_deduplicate(
     results: list[dict[str, Any]], similarity_threshold: float = 0.85
 ) -> list[dict[str, Any]]:
-    """Drop snippets that are semantically (textually) >85% similar to already selected chunks."""
+    """Drop snippets that are semantically >85% similar using O(n) MinHash (P-02)."""
+    try:
+        from datasketch import MinHash, MinHashLSH
+    except ImportError:
+        # Fallback to current O(n^2) if datasketch is not installed
+        return _semantic_deduplicate_fallback(results, similarity_threshold)
+
+    lsh = MinHashLSH(threshold=similarity_threshold, num_perm=128)
     deduped: list[dict[str, Any]] = []
-    for res in results:
-        # P10-1: Added safety cap to prevent O(N²) CPU spikes on huge result sets.
+
+    for i, res in enumerate(results):
         if len(deduped) > 100:
-            deduped.append(res)
-            continue
+            break
 
         text = res.get("text", "")
         if len(text) < 50:
             deduped.append(res)
             continue
 
+        # Create MinHash for current text
+        m = MinHash(num_perm=128)
+        # Use 3-shingles for comparison
+        shingles = {text[j : j + 3] for j in range(len(text) - 2)}
+        for s in shingles:
+            m.update(s.encode("utf-8"))
+
+        # Query LSH for existing duplicates
+        matches = lsh.query(m)
+        if not matches:
+            lsh.insert(f"res_{i}", m)
+            deduped.append(res)
+
+    return deduped
+
+
+def _semantic_deduplicate_fallback(
+    results: list[dict[str, Any]], similarity_threshold: float = 0.85
+) -> list[dict[str, Any]]:
+    """O(n^2) fallback for deduplication."""
+    deduped: list[dict[str, Any]] = []
+    for res in results:
+        if len(deduped) > 100:
+            break
+        text = res.get("text", "")
+        if len(text) < 50:
+            deduped.append(res)
+            continue
         is_duplicate = False
         for saved in deduped:
             saved_text = saved.get("text", "")
@@ -100,7 +144,6 @@ def _semantic_deduplicate(
                 if sim > similarity_threshold:
                     is_duplicate = True
                     break
-
         if not is_duplicate:
             deduped.append(res)
     return deduped

@@ -234,7 +234,6 @@ pylint_results.txt
 .pytest_temp/
 personal_memory_assistant.egg-info/
 frontend/coverage/
-tests/
 
 # Built executables
 *.exe

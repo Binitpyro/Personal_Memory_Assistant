@@ -26,7 +26,7 @@ from slowapi.errors import RateLimitExceeded
 from app import state
 from app.api.auth import auth_router
 from app.api.debug import router as debug_router
-from app.api.deps import db_manager, get_db, get_emb
+from app.api.deps import get_db, get_emb
 from app.api.indexing import router as indexing_router
 from app.api.insights import router as insights_router
 from app.api.limiter import limiter
@@ -36,12 +36,16 @@ from app.api.system import router as system_router
 from app.api.telemetry import router as telemetry_router
 from app.config import settings
 from app.project_constants import APP_VERSION
-from app.storage.db import DatabaseManager
 
 _BASE_DIR = Path(__file__).parent.parent
 _REACT_DIR = _BASE_DIR / "static" / "react"
 INDEX_HTML = "index.html"
 _REACT_INDEX = _REACT_DIR / INDEX_HTML
+
+# Fail-fast security check: Ensure the local access token is set (C-08)
+if not os.environ.get("X_LOCAL_ACCESS_TOKEN"):
+    # This prevents PMA from starting in an insecure "fail-open" state.
+    raise RuntimeError("X_LOCAL_ACCESS_TOKEN must be set before starting PMA")
 
 # ── Logging Setup ─────────────────────────────────────────────────────
 logging.basicConfig(
@@ -128,7 +132,8 @@ async def lifespan(fastapi_app: FastAPI):
 
     # 1. Initialize core infrastructure
     logger.info("Initializing database...")
-    await db_manager.connect()
+    from app.api.deps import get_db
+    db_manager = await get_db()
     await db_manager.init_db(schema_path=settings.schema_path)
 
     _log_admin_status()
@@ -200,6 +205,10 @@ async def _split_brain_sync(db_manager, lancedb_client, emb_svc):
         state.split_brain_sync_status = "idle"
         return
 
+    if os.environ.get("UVICORN_WORKER_ID", "0") != "0":
+        state.split_brain_sync_status = "idle"
+        return
+
     state.split_brain_sync_status = "syncing"
     logger.info("Split-brain Mode: Starting vector sync into LanceDB host cache…")
     loop = asyncio.get_running_loop()
@@ -257,7 +266,7 @@ async def _split_brain_sync(db_manager, lancedb_client, emb_svc):
                     break
             logger.info("Split-brain back-fill complete.")
 
-        # Phase B: O(1) Memory Differential Sync
+        # Phase B: Batch-aware Differential Sync
         max_ldb_id = await loop.run_in_executor(None, lancedb_client.get_max_id, "pma_chunks")
         logger.info("Split-brain: Syncing missing chunks after ID %d...", max_ldb_id)
 
@@ -288,6 +297,19 @@ async def _split_brain_sync(db_manager, lancedb_client, emb_svc):
 
             if len(sqlite_data) < batch_size:
                 break
+
+        # Phase B.5: Clear ghost vectors
+        ldb_ids = await loop.run_in_executor(None, lancedb_client.get_all_ids, "pma_chunks")
+        if ldb_ids:
+            async with conn.execute("SELECT id FROM chunks") as cur:
+                rows = await cur.fetchall()
+                sql_ids = {str(r[0]) for r in rows}
+            
+            ghost_ids = list(ldb_ids - sql_ids)
+            if ghost_ids:
+                logger.info("Split-brain: Removing %d ghost vectors from cache...", len(ghost_ids))
+                for i in range(0, len(ghost_ids), 5000):
+                    await lancedb_client.delete_documents(ghost_ids[i:i+5000])
 
         state.split_brain_sync_status = "done"
         logger.info("Split-brain sync complete. %d new vectors cached.", total_synced)
@@ -350,12 +372,13 @@ async def security_and_telemetry_middleware(request: Request, call_next):
     # 1. Enforce Local Access Token if running in desktop mode
     expected_token = os.environ.get("X_LOCAL_ACCESS_TOKEN")
     if expected_token and request.url.path.startswith("/api/") and request.method != "OPTIONS":
-        provided_token = request.headers.get("X-Local-Access-Token")
-        if not provided_token:
-            provided_token = request.query_params.get("token")
+        if request.url.path not in ("/api/health", "/health", "/api/index/progress-stream"):
+            provided_token = request.headers.get("X-Local-Access-Token")
+            if not provided_token:
+                provided_token = request.query_params.get("token")
 
-        if not provided_token or not secrets.compare_digest(provided_token, expected_token):
-            return JSONResponse(status_code=401, content={"error": "Unauthorized local access."})
+            if not provided_token or not secrets.compare_digest(provided_token, expected_token):
+                return JSONResponse(status_code=401, content={"error": "Unauthorized local access."})
 
     # 2. Telemetry and Security Headers
     request_id = str(uuid.uuid4())[:8]

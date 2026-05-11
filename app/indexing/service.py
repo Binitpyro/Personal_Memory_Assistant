@@ -3,6 +3,7 @@ import hashlib
 import logging
 import threading
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -82,6 +83,9 @@ class IndexingProgress:
 
 progress = IndexingProgress()
 indexing_lock = asyncio.Lock()
+
+# H-18: Dedicated pool for disk-heavy operations to avoid default pool starvation.
+_DISK_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="pma-disk")
 
 
 class StreamChunker:
@@ -242,13 +246,20 @@ class IndexingService:
         embed_queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=1000)
         store_queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=1000)
 
-        await asyncio.gather(
+        # C-03: Use return_exceptions=True so one stage failure doesn't silently cancel
+        # the downstream workers, leaving queues stalled. Each worker injects its own
+        # sentinel in a finally block to guarantee the pipeline always drains.
+        results = await asyncio.gather(
             self._extractor_worker(
                 files_to_index, pre_extracted, embed_queue, total_so_far, grand_total
             ),
             self._embedder_worker(embed_queue, store_queue),
             self._storer_worker(store_queue),
+            return_exceptions=True,
         )
+        for exc in results:
+            if isinstance(exc, Exception):
+                logger.error("Pipeline stage failed: %s", exc)
 
     async def _rust_pre_extract(self, files_to_index: list[tuple[Path, str]]) -> dict[str, str]:
         pre_extracted: dict[str, str] = {}
@@ -284,24 +295,30 @@ class IndexingService:
             nonlocal extracted_count
             async with semaphore:
                 cached_text = pre_extracted.get(str(path.absolute()))
+                # M-14: format progress string *before* acquiring lock to keep
+                # lock duration minimal (pure counter increment only).
                 async with extracted_lock:
                     extracted_count += 1
                     overall = total_so_far + extracted_count
-                    progress.set_current_file(f"Extracting: {path.name} ({overall}/{grand_total})")
+                progress.set_current_file(f"Extracting: {path.name} ({overall}/{grand_total})")
 
                 await self._stream_extract_and_prepare(path, tag, cached_text, embed_queue)
 
         tasks = [_safe_stream_extract(fp, ft) for fp, ft in files_to_index]
-        await asyncio.gather(*tasks)
-        await embed_queue.put(None)
+        try:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            # C-03: Always send sentinel so _embedder_worker drains even on partial failure.
+            await embed_queue.put(None)
 
     async def _stream_extract_and_prepare(
         self, path: Path, folder_tag: str, pre_text: str | None, queue: asyncio.Queue
     ) -> None:
         loop = asyncio.get_running_loop()
         try:
-            stat = await loop.run_in_executor(None, path.stat)
-            sha256 = await loop.run_in_executor(None, self._calculate_sha256, path)
+            # H-18: Use dedicated disk executor
+            stat = await loop.run_in_executor(_DISK_EXECUTOR, path.stat)
+            sha256 = await loop.run_in_executor(_DISK_EXECUTOR, self._calculate_sha256, path)
 
             header = {
                 "type": "header",
@@ -376,31 +393,34 @@ class IndexingService:
         store_queue: asyncio.Queue[dict[str, Any] | None],
     ):
         chunk_batch: list[dict[str, Any]] = []
-        while True:
-            item = await embed_queue.get()
-            if item is None:
-                if chunk_batch:
-                    await self._process_embed_stream_batch(chunk_batch)
-                    for c in chunk_batch:
-                        await store_queue.put(c)
-                await store_queue.put(None)
-                break
+        try:
+            while True:
+                item = await embed_queue.get()
+                if item is None:
+                    if chunk_batch:
+                        await self._process_embed_stream_batch(chunk_batch)
+                        for c in chunk_batch:
+                            await store_queue.put(c)
+                    break
 
-            if item["type"] == "chunk":
-                chunk_batch.append(item)
-                if len(chunk_batch) >= 100:
-                    await self._process_embed_stream_batch(chunk_batch)
-                    for c in chunk_batch:
-                        await store_queue.put(c)
-                    chunk_batch.clear()
-            else:
-                # Header/Footer: Flush batch first to preserve order
-                if chunk_batch:
-                    await self._process_embed_stream_batch(chunk_batch)
-                    for c in chunk_batch:
-                        await store_queue.put(c)
-                    chunk_batch.clear()
-                await store_queue.put(item)
+                if item["type"] == "chunk":
+                    chunk_batch.append(item)
+                    if len(chunk_batch) >= 100:
+                        await self._process_embed_stream_batch(chunk_batch)
+                        for c in chunk_batch:
+                            await store_queue.put(c)
+                        chunk_batch.clear()
+                else:
+                    # Header/Footer: Flush batch first to preserve order
+                    if chunk_batch:
+                        await self._process_embed_stream_batch(chunk_batch)
+                        for c in chunk_batch:
+                            await store_queue.put(c)
+                        chunk_batch.clear()
+                    await store_queue.put(item)
+        finally:
+            # C-03: Always send sentinel so _storer_worker drains even on embedder failure.
+            await store_queue.put(None)
 
     async def _process_embed_stream_batch(self, batch_items: list[dict[str, Any]]):
         texts = [item["chunk"]["text_preview"] for item in batch_items]
@@ -595,21 +615,53 @@ class IndexingService:
         file_paths = [str(fp.absolute()) for fp, _ in all_files]
         change_map = await self.db.get_files_change_map(file_paths)
         to_index, skipped, new_c, changed_c = [], 0, 0, 0
-        for fp, tag in all_files:
+
+        # H-03: fp.stat() is a blocking syscall; gather all stats concurrently
+        # via dedicated disk executor to avoid serializing calls.
+        async def _stat_file(fp: Path) -> tuple[Path, str, str | None]:
             try:
-                stat = fp.stat()
+                # H-18: Use dedicated disk executor
+                stat = await loop.run_in_executor(_DISK_EXECUTOR, fp.stat)
                 mtime = datetime.fromtimestamp(stat.st_mtime).isoformat()
-                stored = change_map.get(str(fp.absolute()))
-                if stored and stored[0] == mtime:
+                return fp, mtime, None
+            except OSError:
+                return fp, "", None
+
+        loop = asyncio.get_running_loop()
+        stat_tasks = [_stat_file(fp) for fp, _ in all_files]
+        stat_results = await asyncio.gather(*stat_tasks, return_exceptions=False)
+        stat_map: dict[str, str] = {}
+        failed_paths: set[str] = set()
+        for fp, mtime, _ in stat_results:
+            key = str(fp.absolute())
+            if mtime:
+                stat_map[key] = mtime
+            else:
+                failed_paths.add(key)
+
+        for fp, tag in all_files:
+            key = str(fp.absolute())
+            if key in failed_paths:
+                skipped += 1
+                continue
+            mtime = stat_map.get(key, "")
+            stored = change_map.get(key)
+            if stored and stored[0] == mtime:
+                # H-03: Double-check with SHA256 if mtime matches
+                current_sha256 = await loop.run_in_executor(
+                    _DISK_EXECUTOR, self._calculate_sha256, fp
+                )
+                if stored[1] == current_sha256:
                     skipped += 1
-                elif stored:
+                else:
                     changed_c += 1
                     to_index.append((fp, tag))
-                else:
-                    new_c += 1
-                    to_index.append((fp, tag))
-            except OSError:
-                skipped += 1
+            elif stored:
+                changed_c += 1
+                to_index.append((fp, tag))
+            else:
+                new_c += 1
+                to_index.append((fp, tag))
         return to_index, skipped, new_c, changed_c
 
     def _calculate_sha256(self, path: Path) -> str:

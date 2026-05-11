@@ -15,10 +15,15 @@ describe('Stream Tracking Logic', () => {
     })
 
     const initialCount = api.activeStreamCount
-    const unsubscribe = api.subscribeQuery({ query: 'test' }, () => {})
-    
+    // L-03: Use the correct payload shape that matches subscribeQuery's actual
+    // backend contract: { question, history?, file_type?, folder_tag? }
+    const unsubscribe = api.subscribeQuery(
+      { question: 'test', history: [], file_type: null, folder_tag: null },
+      () => {}
+    )
+
     expect(api.activeStreamCount).toBeGreaterThan(initialCount)
-    
+
     unsubscribe()
     // Small delay for microtasks
     await new Promise(resolve => setTimeout(resolve, 0))

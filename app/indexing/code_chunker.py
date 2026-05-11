@@ -39,7 +39,9 @@ class CodeChunker:
             tree = ast.parse(text)
             lines = text.split("\n")
 
-            # Gather top level imports and assignments to prepend to chunks if possible
+            # Gather top-level imports to prepend to the FIRST chunk only.
+            # H-18: Prepending imports to every chunk inflates token usage and
+            # introduces duplicate content that degrades retrieval precision.
             imports: Any = [
                 node for node in tree.body if isinstance(node, (ast.Import, ast.ImportFrom))
             ]
@@ -57,16 +59,22 @@ class CodeChunker:
             if not boundaries:
                 return self._chunk_fallback(text, prefix)
 
-            for _i, node in enumerate(boundaries):
+            for i, node in enumerate(boundaries):
                 start = getattr(node, "lineno", 1) - 1
                 end = getattr(node, "end_lineno", len(lines))
 
                 chunk_body = "\n".join(lines[start:end])
-                full_chunk = f"{prefix}\n{import_text}\n{chunk_body}"
+                # Only prepend imports on the first chunk for context; subsequent
+                # chunks omit them to prevent duplication across the index.
+                preamble = import_text if i == 0 else ""
+                full_chunk = (
+                    f"{prefix}\n{preamble}\n{chunk_body}" if preamble else f"{prefix}\n{chunk_body}"
+                )
 
                 # If too big, split it blindly, otherwise add
                 if len(full_chunk) > self.max_chars:
-                    chunks.extend(self._chunk_fallback(chunk_body, prefix + "\n" + import_text))
+                    preamble = import_text if i == 0 else ""
+                    chunks.extend(self._chunk_fallback(chunk_body, prefix + ("\n" + preamble if preamble else "")))
                 else:
                     chunks.append({"text_preview": full_chunk})
 

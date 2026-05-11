@@ -7,7 +7,7 @@ from typing import Any
 from app.config import settings
 from app.storage.db import DatabaseManager
 
-db_manager = DatabaseManager(db_path=settings.db_path)
+_db_manager: DatabaseManager | None = None
 embedding_service = None
 lancedb_client = None
 llm_client = None
@@ -19,9 +19,12 @@ _insights_service_cls: Any = None
 
 
 async def get_db() -> DatabaseManager:
-    if not db_manager.conn:
-        await db_manager.connect()
-    return db_manager
+    global _db_manager
+    if _db_manager is None:
+        _db_manager = DatabaseManager(db_path=settings.db_path)
+    if not _db_manager.conn:
+        await _db_manager.connect()
+    return _db_manager
 
 
 def get_emb():

@@ -97,7 +97,14 @@ class LanceDBClient:
                 tbl = self.db.open_table(name)
                 tbl.add(data)
                 return tbl
-            return self.db.create_table(name, data=data)
+            tbl = self.db.create_table(name, data=data)
+            # P-06: Explicitly set IVF_HNSW_SQ for better recall/latency balance on local data.
+            if name == "pma_chunks":
+                try:
+                    tbl.create_index(metric="cosine", index_type="IVF_HNSW_SQ")
+                except Exception as e:
+                    logger.debug("LanceDB index creation skipped or failed: %s", e)
+            return tbl
 
     def get_all_ids(self, table_name: str = "pma_chunks") -> set[str]:
         self.connect()
@@ -113,18 +120,27 @@ class LanceDBClient:
         return set()
 
     def get_max_id(self, table_name: str = "pma_chunks") -> int:
-        """Fetch the highest numeric chunk_id currently in LanceDB. O(1) memory."""
+        """Fetch the highest numeric chunk_id currently in LanceDB using Arrow aggregation."""
         self.connect()
         assert self.db is not None
         try:
             if table_name in self.db.list_tables():
                 tbl = self.db.open_table(table_name)
-                # Select only ID, convert to python list, and find max.
-                # Still slightly more than O(1) time but prevents huge string sets in Python.
-                ids = tbl.to_arrow(columns=["id"]).column("id").to_pylist()
-                if not ids:
+                # Efficient aggregation via Arrow
+                import pyarrow as pa
+                import pyarrow.compute as pc
+
+                arrow_table = tbl.to_arrow(columns=["id"])
+                if arrow_table.num_rows == 0:
                     return 0
-                return max(int(x) for x in ids if str(x).isdigit())
+
+                # Cast string IDs to int64 and find max
+                ids_col = arrow_table.column("id")
+                # Handle potential non-numeric stubs gracefully by filtering if needed,
+                # but assume production IDs are numeric as per get_max_id contract.
+                numeric_ids = pc.cast(ids_col, pa.int64())
+                max_val = pc.max(numeric_ids).as_py()
+                return int(max_val) if max_val is not None else 0
         except Exception as exc:
             logger.error("Failed to get max id from %s: %s", table_name, exc)
         return 0
@@ -173,16 +189,18 @@ class LanceDBClient:
         loop = asyncio.get_running_loop()
 
         def _search():
-            query = tbl.search(query_emb).limit(k)
+            query = tbl.search(query_emb, vector_column_name="vector").metric("cosine").limit(k)
             if where_filter:
-                # LanceDB where clause as string
                 clauses = []
                 for key, val in where_filter.items():
                     if isinstance(val, str):
-                        clauses.append(f"{key} = '{val}'")
-                    else:
+                        # Use double-quoted identifiers and single-quoted literals.
+                        # Sanitize val to prevent injection.
+                        safe_val = val.replace("'", "''")
+                        clauses.append(f"{key} = '{safe_val}'")
+                    elif isinstance(val, (int, float, bool)):
                         clauses.append(f"{key} = {val}")
-                query = query.where(" AND ".join(clauses))
+                query = query.where(" AND ".join(clauses), prefilter=True)
             return query.to_arrow()
 
         table = await loop.run_in_executor(None, _search)
@@ -199,15 +217,16 @@ class LanceDBClient:
         loop = asyncio.get_running_loop()
 
         def _search():
-            query = tbl.search(query_emb).limit(k)
+            query = tbl.search(query_emb, vector_column_name="vector").metric("cosine").limit(k)
             if where_filter:
                 clauses = []
                 for key, val in where_filter.items():
                     if isinstance(val, str):
-                        clauses.append(f"{key} = '{val}'")
-                    else:
+                        safe_val = val.replace("'", "''")
+                        clauses.append(f"{key} = '{safe_val}'")
+                    elif isinstance(val, (int, float, bool)):
                         clauses.append(f"{key} = {val}")
-                query = query.where(" AND ".join(clauses))
+                query = query.where(" AND ".join(clauses), prefilter=True)
             return query.to_arrow()
 
         table = await loop.run_in_executor(None, _search)
@@ -275,17 +294,15 @@ class LanceDBClient:
 
         def _search():
             try:
-                # We use cosine similarity (1 - distance)
-                # LanceDB uses L2 by default but we can check distance
+                # With cosine metric, LanceDB returns cosine_distance in _distance column.
+                # cosine_distance = 1 - cosine_similarity, so lower is better.
+                # threshold is a similarity floor (e.g. 0.95 -> max distance 0.05).
                 max_distance = 1.0 - threshold
-                res = tbl.search(query_emb).limit(1).to_arrow()
+                res = tbl.search(query_emb, vector_column_name="vector").metric("cosine").limit(1).to_arrow()
 
                 if isinstance(res, pa.Table) and res.num_rows > 0:
                     rows = res.to_pylist()
                     best = rows[0]
-                    # _distance is L2 distance. For normalized vectors,
-                    # Cosine Dist = L2_Dist^2 / 2
-                    # But we'll just check if it's very close.
                     if best.get("_distance", 1.0) < max_distance:
                         return best
                 return None

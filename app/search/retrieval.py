@@ -28,7 +28,7 @@ from app.search.llm_client import LLMClient
 from app.search.planner import PlanMode, QueryPlanner
 from app.search.reranker import rerank
 from app.storage.db import DatabaseManager
-from app.vector_store.lancedb_client import LanceDBClient  # type: ignore  # type: ignore
+from app.vector_store.lancedb_client import LanceDBClient  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +49,7 @@ _rag_response_cache: OrderedDict[
 ] = OrderedDict()
 _rag_cache_lock = threading.Lock()
 
-# Index generation counter — incremented on each cache clear (after re-indexing)
+# Index generation counter Ã¢â‚¬â€ incremented on each cache clear (after re-indexing)
 _index_generation: int = 0
 
 
@@ -137,13 +137,12 @@ async def _get_metadata_insights(
 
 def _build_fast_answer(
     query: str,
+    plan: Any,
     file_stats: dict[str, Any] | None,
     folder_profiles: list[dict[str, Any]],
     unreal_facts: list[dict[str, Any]],
 ) -> str | None:
     """Provide immediate answers for pure metadata/inventory queries without hitting the LLM."""
-    planner = QueryPlanner()
-    plan = planner.plan(query)
     intent = plan.intents
 
     # Very specific fast paths
@@ -280,10 +279,17 @@ def _build_candidate_results(
 ) -> list[dict[str, Any]]:
     """Deduplicate and build candidate result dicts from ordered chunk IDs."""
     results: list[dict[str, Any]] = []
-    seen_texts: set[str] = set()
-    for cid in chunk_ids_ordered:
-        # P10-1: Added safety cap to prevent O(N²) matching runaway
-        if len(seen_texts) > 100:
+
+    try:
+        from datasketch import MinHash, MinHashLSH
+        lsh = MinHashLSH(threshold=0.85, num_perm=128)
+        use_minhash = True
+    except ImportError:
+        use_minhash = False
+        seen_texts: list[str] = []
+
+    for i, cid in enumerate(chunk_ids_ordered):
+        if len(results) > 100:
             break
 
         row = row_map.get(cid)
@@ -292,21 +298,36 @@ def _build_candidate_results(
         text = row[1]
         if len(text) < 50:
             continue
-        # Extract a signature from the middle of the text to bypass standard file headers
+
+        # Extract signature
         mid = len(text) // 2
         sig = text[max(0, mid - 100) : mid + 100].strip()
 
         is_duplicate = False
-        for seen_sig in seen_texts:
-            matcher = difflib.SequenceMatcher(None, sig, seen_sig)
-            if matcher.quick_ratio() > 0.85 and matcher.ratio() > 0.85:
+        if use_minhash:
+            m = MinHash(num_perm=128)
+            shingles = {sig[j : j + 3] for j in range(len(sig) - 2)}
+            for s in shingles:
+                m.update(s.encode("utf-8"))
+
+            matches = lsh.query(m)
+            if matches:
                 is_duplicate = True
-                break
+            else:
+                lsh.insert(f"res_{i}", m)
+        else:
+            # Fallback O(n^2)
+            for seen_sig in seen_texts:
+                matcher = difflib.SequenceMatcher(None, sig, seen_sig)
+                if matcher.quick_ratio() > 0.85 and matcher.ratio() > 0.85:
+                    is_duplicate = True
+                    break
+            if not is_duplicate:
+                seen_texts.append(sig)
 
         if is_duplicate:
             continue
 
-        seen_texts.add(sig)
         file_path = row[2]
         rrf_score = score_map[cid] * settings.rrf_score_scale
         if file_path in relevant_doc_paths:
@@ -332,6 +353,7 @@ async def hybrid_retrieve(
     use_reranker: bool = True,
     file_type: str | None = None,
     folder_tag: str | None = None,
+    query_emb: list[float] | None = None,
 ) -> list[dict[str, Any]]:
     """Combines FTS5 keyword + LanceDB semantic + document-summary search using RRF,
     then reranks the candidates with a cross-encoder for maximum precision.
@@ -342,6 +364,8 @@ async def hybrid_retrieve(
     - Confidence-based reranker bypass: if RRF top-1 score is well above
       the pack, skip the expensive cross-encoder pass.
     - All async I/O (FTS, embedding, semantic, summary) runs concurrently.
+    - P-02: Accepts pre-computed query_emb to avoid double embedding when called
+      from _gather_full_rag_inputs which already has the embedding.
     """
 
     # Phase 3.1: Cache Lookup
@@ -373,12 +397,14 @@ async def hybrid_retrieve(
     if file_type:
         lancedb_where["file_type"] = file_type.lower()
 
-    # Launch FTS & embedding concurrently
+    # Launch FTS & embedding concurrently (skip embed if pre-computed)
     fts_task = asyncio.create_task(
         _fts_search(db, query, recall_k, folder_tag=folder_tag, file_type=file_type)
     )
-    emb_task = asyncio.create_task(embedding_service.embed_query(query))
-    query_emb = await emb_task
+    if query_emb is None:
+        query_emb = await embedding_service.embed_query(query)
+    else:
+        await fts_task  # wait for FTS to complete while we skip re-embedding
 
     # Launch semantic & summary search concurrently
     semantic_task = asyncio.create_task(
@@ -445,12 +471,17 @@ async def _apply_reranker_if_needed(
 
     if not skip_reranker:
         try:
+            # rerank() already offloads CPU inference via loop.run_in_executor, so
+            # asyncio.wait_for can cancel it correctly - no to_thread needed.
+            # P-08: Extended timeout from 800ms to 5s for cold-start load.
             results = await asyncio.wait_for(
                 rerank(query, results, top_k=k, text_key="text"),
-                timeout=0.8,
+                timeout=5.0,
             )
         except TimeoutError:
-            logger.warning("Reranker timed out (>800ms) — falling back to RRF order.")
+            logger.warning("Reranker timed out (>5s) - falling back to RRF order.")
+            if results:
+                results[0]["_degraded"] = True
 
     return results
 
@@ -532,7 +563,7 @@ async def full_rag(
         unreal=unreal,
     )
 
-    fast_answer = _build_fast_answer(query, file_stats, folder_profiles, unreal_facts)
+    fast_answer = _build_fast_answer(query, plan, file_stats, folder_profiles, unreal_facts)
     if fast_answer and not history:  # Skip fast-path if there's history to allow follow-ups
         source_rows = [
             {
@@ -568,6 +599,7 @@ async def full_rag(
             unreal=unreal,
             cached_file_stats=file_stats,
             include_profiles_text=include_profiles_text,
+            query_emb=query_emb,  # P-03: reuse embedding from semantic cache check
         )
     retrieval_ms = round((time.perf_counter() - t_ret) * 1000, 1)
 
@@ -606,18 +638,20 @@ async def full_rag(
 
     total_ms = round((time.perf_counter() - t_start) * 1000, 1)
 
+    is_degraded = bool(retrieved) and retrieved[0].pop("_degraded", False)
+
     result = {
         "answer": answer,
         "sources": retrieved,
         "retrieved_count": len(retrieved),
         "latency_ms": total_ms,
-        "mode": "full_rag",
+        "mode": "degraded_rag" if is_degraded else "full_rag",
         "timing": {"retrieval_ms": retrieval_ms, "llm_ms": llm_ms, "total_ms": total_ms},
         "_is_error": _llm_error,
     }
 
     # Phase 1.1: Cache the full RAG response for repeat queries.
-    # P2-4: Only cache if no LLM error occurred — string matching was fragile.
+    # P2-4: Only cache if no LLM error occurred Ã¢â‚¬â€ string matching was fragile.
     if not result["_is_error"]:
         hist_key = tuple((h["role"], h["content"]) for h in history) if history else None
         rag_cache_key = (query.strip().lower(), file_type, folder_tag, hist_key, _index_generation)
@@ -672,7 +706,7 @@ async def stream_rag(
         unreal=unreal,
     )
 
-    fast_answer = _build_fast_answer(query, file_stats, folder_profiles, unreal_facts)
+    fast_answer = _build_fast_answer(query, plan, file_stats, folder_profiles, unreal_facts)
     if fast_answer and not history:
         source_rows = [
             {
@@ -731,6 +765,7 @@ async def stream_rag(
             unreal=unreal,
             cached_file_stats=file_stats,
             include_profiles_text=include_profiles_text,
+            query_emb=query_emb,  # P-03: reuse embedding from semantic cache check
         )
 
     if file_type or folder_tag:
@@ -740,12 +775,14 @@ async def stream_rag(
         yield {"type": "content", "text": "I couldn't find any relevant documents."}
         return
 
+    is_degraded = bool(retrieved) and retrieved[0].pop("_degraded", False)
     retrieval_ms = round((time.perf_counter() - t_start) * 1000, 1)
     yield {
         "type": "sources",
         "sources": retrieved,
         "latency_ms": retrieval_ms,
         "retrieval_ms": retrieval_ms,
+        "mode": "degraded_rag" if is_degraded else "full_rag",
     }
 
     context = build_context(
@@ -780,8 +817,27 @@ async def stream_rag(
             state.bg_tasks.add(task)
             task.add_done_callback(state.bg_tasks.discard)
 
-    except Exception as e:
-        logger.warning("Failed to save streamed query history: %s", e, exc_info=True)
+    except (Exception, asyncio.CancelledError) as e:
+        if not isinstance(e, asyncio.CancelledError):
+            logger.warning("Failed to save streamed query history: %s", e, exc_info=True)
+
+        # M-15: Attempt to save partial history/cache even on cancellation/error
+        try:
+            total_ms = round((time.perf_counter() - t_start) * 1000, 1)
+            if full_answer:
+                await db.save_query(query, full_answer, len(retrieved), total_ms)
+
+                if not history and query_emb is not None:
+                    import numpy as np
+
+                    await lancedb_client.add_query_cache(
+                        query_emb=np.array(query_emb),
+                        query_text=query,
+                        response_text=full_answer,
+                        timestamp=time.time(),
+                    )
+        except Exception:
+            pass
 
 
 async def _load_query_metadata(db, inventory, project, unreal):
@@ -804,13 +860,16 @@ async def _gather_full_rag_inputs(
     unreal,
     cached_file_stats,
     include_profiles_text,
+    query_emb: list[float] | None = None,
 ):
     # P0-1: Always gather named results for structural safety
     async def _noop(val):
         return val
 
-    # P10-1: Pre-calculate query embedding for parallel searches
-    query_emb = await embedding_service.embed_query(query)
+    # P-02/M-07: Accept pre-computed embedding to avoid a redundant embed_query() call.
+    # The caller (full_rag/stream_rag) already has query_emb from the semantic cache check.
+    if query_emb is None:
+        query_emb = await embedding_service.embed_query(query)
 
     retrieved, top_folder_profiles, file_stats, legacy_profiles_text = await asyncio.gather(
         hybrid_retrieve(
@@ -820,6 +879,7 @@ async def _gather_full_rag_inputs(
             lancedb_client=lancedb_client,
             k=k,
             use_reranker=not (project or inventory or unreal),
+            query_emb=query_emb,  # P-02: pass pre-computed embedding
         ),
         _get_top_relevant_profiles(lancedb_client, db, query_emb, k=2),
         _noop(cached_file_stats) if inventory else _noop(None),
@@ -874,3 +934,6 @@ def _filter_retrieved_results(retrieved, file_type, folder_tag):
             continue
         filtered.append(res)
     return filtered
+
+
+

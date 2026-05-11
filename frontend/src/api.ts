@@ -7,7 +7,7 @@
 const BASE = '/api'; 
 export let ENDPOINT = (import.meta as any).env.VITE_API_URL || "http://127.0.0.1:8000";
 
-// ── Security Token Injection ──────────────────────────────────────────
+// â”€â”€ Security Token Injection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 const params = new URLSearchParams(globalThis.location.search);
 const tokenFromUrl = params.get('token');
@@ -55,7 +55,7 @@ export async function launchGoogleAuth(): Promise<void> {
   }
 }
 
-// ── API Wrappers ──────────────────────────────────────────────────────
+// â”€â”€ API Wrappers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /** Basic fetch wrapper for JSON responses */
 export async function json<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
@@ -73,7 +73,7 @@ export async function json<T>(endpoint: string, options: RequestInit = {}): Prom
   return res.json() as Promise<T>;
 }
 
-// ── Health ────────────────────────────────────────────────────────────
+// â”€â”€ Health â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export interface HealthResponse {
   version: string;
@@ -98,7 +98,7 @@ export interface AppConfig {
 
 export const getAppConfig = () => json<AppConfig>('/system/config')
 
-// ── Indexing ──────────────────────────────────────────────────────────
+// â”€â”€ Indexing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export interface IndexStatus {
   status: string;
@@ -176,7 +176,7 @@ export const compactDatabase = () =>
 
 export const getCompactStatus = () => json<CompactStatus>('/system/compact-db/status');
 
-// ── System ────────────────────────────────────────────────────────────
+// â”€â”€ System â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export interface Volume {
   letter: string;
@@ -206,7 +206,7 @@ export const getDriveInfo = () => json<DriveInfo>('/system/drive_info');
 export const purgeHostCache = () =>
   json<{ message: string }>('/system/purge-host-cache', { method: 'POST' });
 
-// ── Folder picker ─────────────────────────────────────────────────────
+// â”€â”€ Folder picker â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 // P2-2: Use native Tauri dialog when running inside the desktop shell,
 // fall back to legacy HTTP endpoint for browser-based dev mode.
@@ -222,7 +222,7 @@ export async function pickFolder(): Promise<{ path: string }> {
   return json<{ path: string }>('/pick/folder');
 }
 
-// ── Query ─────────────────────────────────────────────────────────────
+// â”€â”€ Query â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export interface QuerySource {
   file_path: string;
@@ -266,7 +266,7 @@ export const getQueryHistory = (limit = 20) =>
 export const clearQueryHistory = () =>
   json<{ message: string }>('/query/history/clear', { method: 'POST' });
 
-// ── File tree ─────────────────────────────────────────────────────────
+// â”€â”€ File tree â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export interface FileEntry {
   path: string;
@@ -283,7 +283,7 @@ export interface FileTree {
 
 export const getFileTree = () => json<FileTree>('/files/tree');
 
-// ── Insights ──────────────────────────────────────────────────────────
+// â”€â”€ Insights â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export interface InsightsResponse {
   total_size_bytes: number;
@@ -311,12 +311,12 @@ export const getVisualizerStream = async (filter?: string | null): Promise<Array
   }
   return await res.arrayBuffer();
 };
-// ── Clear Caches ──────────────────────────────────────────────────────
+// â”€â”€ Clear Caches â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export const clearBackendCaches = () =>
   json<{ message: string }>('/system/clear-cache', { method: 'POST' });
 
-// ── Insights by type ──────────────────────────────────────────────────
+// â”€â”€ Insights by type â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export interface InsightsByTypeResponse {
   top_files: { path: string; size: number }[];
@@ -327,12 +327,12 @@ export interface InsightsByTypeResponse {
 export const getInsightsByType = (typeFilter: string) =>
   json<InsightsByTypeResponse>(`/insights/by-type?extension=${encodeURIComponent(typeFilter)}`);
 
-// ── Demo ──────────────────────────────────────────────────────────────
+// â”€â”€ Demo â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export const seedDemo = () =>
   json<{ message: string; folder: string }>('/demo/seed', { method: 'POST' });
 
-// ── Stream Tracking ───────────────────────────────────────────────────
+// â”€â”€ Stream Tracking â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export let activeStreamCount = 0;
 const activeControllers = new Set<AbortController>();
@@ -362,7 +362,7 @@ if (typeof globalThis !== 'undefined' && 'setInterval' in globalThis) {
   setInterval(checkStreamFailsafe, 30_000);
 }
 
-// ── SSE Progress Stream ───────────────────────────────────────────────
+// â”€â”€ SSE Progress Stream â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export function subscribeProgress(onData: (data: IndexStatus & { current_file: string }) => void): () => void {
   let es: EventSource | null = null;
@@ -415,10 +415,11 @@ export function subscribeProgress(onData: (data: IndexStatus & { current_file: s
   };
 }
 
-// ── SSE Query Stream ──────────────────────────────────────────────────
+// â”€â”€ SSE Query Stream â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export interface QueryStreamChunk {
-  type: 'content' | 'sources' | 'fast_path' | 'error' | 'cached_full' | 'metadata' | 'done';
+  type: 'content' | 'sources' | 'fast_path' | 'error' | 'cached_full' | 'metadata' | 'done' | 'ping';
+  mode?: string;
   text?: string;
   answer?: string;
   sources?: QuerySource[];
@@ -467,6 +468,9 @@ export function subscribeQuery(
   }).catch(err => {
     if (err.name !== 'AbortError') {
       onChunk({ type: 'error', text: err.message });
+      // M-09: Network drop won't fire 'done' from the read loop.
+      // Send 'done' explicitly so the UI spinner always clears.
+      onChunk({ type: 'done' });
     }
   }).finally(() => {
     if (streamCounted) {
@@ -484,7 +488,7 @@ export function subscribeQuery(
   };
 }
 
-// ── Auth ──────────────────────────────────────────────────────────────
+// â”€â”€ Auth â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export interface AuthStatus {
   connected: boolean;
@@ -494,7 +498,7 @@ export interface AuthStatus {
 export const getAuthStatus = () => json<AuthStatus>('/auth/google/status');
 export const disconnectAuth = () => json<{ message: string }>('/auth/google/disconnect', { method: 'POST' });
 
-// ── Models ────────────────────────────────────────────────────────────
+// â”€â”€ Models â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export interface LocalModelDetection {
   ollama: { detected: boolean; models: string[] };

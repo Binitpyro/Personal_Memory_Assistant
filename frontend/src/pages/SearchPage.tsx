@@ -9,7 +9,7 @@ interface Message {
   sources?: QuerySource[]
   latency_ms?: number
   isStreaming?: boolean
-  mode?: 'fast_path' | 'full_rag'
+  mode?: 'fast_path' | 'full_rag' | 'degraded_rag'
 }
 
 export function SearchPage() {
@@ -58,7 +58,7 @@ export function SearchPage() {
       if (last?.role === 'assistant') {
         return [
           ...prev.slice(0, -1),
-          { ...last, content: text, mode: 'full_rag' }
+          { ...last, content: text, mode: last.mode || 'full_rag' }
         ]
       }
       return prev
@@ -106,7 +106,7 @@ export function SearchPage() {
         setMessages(prev => {
           const last = prev.at(-1)
           if (last?.role === 'assistant') {
-            return [...prev.slice(0, -1), { ...last, sources, latency_ms: latency }]
+            return [...prev.slice(0, -1), { ...last, sources, latency_ms: latency, mode: chunk.mode as any || 'full_rag' }]
           }
           return prev
         })
@@ -121,6 +121,11 @@ export function SearchPage() {
           }
           return prev
         })
+      }
+
+      if (chunk.type === 'ping') {
+        // Ignore keep-alive pings silently
+        return
       }
 
       if (chunk.type === 'content' && chunk.text) {
@@ -251,11 +256,14 @@ export function SearchPage() {
                   {/* Mode Badge */}
                   {msg.role === 'assistant' && !msg.isStreaming && msg.mode && (
                     <div className="flex items-center gap-2 mt-1">
-                      <span className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full border ${msg.mode === 'fast_path'
-                        ? 'bg-amber-500/10 text-amber-400 border-amber-500/20'
-                        : 'bg-primary/10 text-primary-light border-primary/20'
+                      <span className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                        msg.mode === 'fast_path'
+                          ? 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+                          : msg.mode === 'degraded_rag'
+                            ? 'bg-orange-500/10 text-orange-400 border-orange-500/20'
+                            : 'bg-primary/10 text-primary-light border-primary/20'
                         }`}>
-                        {msg.mode === 'fast_path' ? '⚡ Fast Answer' : '🔍 RAG Answer'}
+                        {msg.mode === 'fast_path' ? '⚡ Fast Answer' : msg.mode === 'degraded_rag' ? '⚠️ Degraded RAG' : '🔍 RAG Answer'}
                       </span>
                       {msg.latency_ms != null && msg.latency_ms > 0 && (
                         <span className="text-[10px] text-text-secondary/50">{msg.latency_ms.toFixed(0)}ms</span>

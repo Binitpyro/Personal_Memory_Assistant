@@ -4,6 +4,8 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+PYPROJECT_FILE = "pyproject.toml"
+
 
 def _get_app_version() -> str:
     try:
@@ -82,7 +84,6 @@ def determine_query_intent(query: str) -> dict[str, bool]:
 # Project Signatures for Indexing
 UNREAL_PROJECT_EXT = ".uproject"
 UNITY_SCENE_EXT = ".unity"
-PYPROJECT_FILE = "pyproject.toml"
 NODE_PACKAGE_FILE = "package.json"
 PYTHON_PROJECT_LABEL = "Python project"
 

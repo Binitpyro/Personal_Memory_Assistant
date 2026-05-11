@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS chunk_embeddings (
 CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5(
     chunks_text,
     content="",
+    tokenize="trigram",
     detail=column -- Phase 9.2: strip byte-offset index (saves ~40% space)
 );
 

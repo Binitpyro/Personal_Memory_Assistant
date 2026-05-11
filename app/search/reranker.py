@@ -1,86 +1,69 @@
 import asyncio
 import logging
 import threading
+from pathlib import Path
 from typing import Any
 
-from sentence_transformers import CrossEncoder  # ships with sentence-transformers
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
-_reranker: CrossEncoder | None = None
+_session: Any = None  # onnxruntime.InferenceSession
+_tokenizer: Any = None  # tokenizers.Tokenizer
 _reranker_lock = threading.Lock()
 _MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 _MAX_RERANKER_INPUT_LEN = (
-    256  # Phase 3.2: reduced from 384 for faster inference (<1% relevance impact)
+    2048  # P-08: Increased from 256 to 2048 to better utilize model's 512-token context.
 )
 
 
-def _try_init_onnx(device: str) -> tuple[str, dict | None]:
-    backend = "torch"
-    model_kwargs = None
-    if device == "cpu":
-        try:
-            # Verify that the package is actually usable to prevent deferred ImportErrors
-            import onnxruntime as _ort  # type: ignore # noqa: F401
-            import optimum.onnxruntime as _opt_ort  # type: ignore # noqa: F401
-            from optimum.onnxruntime import (
-                ORTModelForFeatureExtraction as _ORTModel,  # type: ignore # noqa: F401
-            )
+def _load_onnx_model():
+    """Lazily load the cross-encoder ONNX model and tokenizer."""
+    global _session, _tokenizer
+    if _session is not None:
+        return
 
-            backend = "onnx"
-            # Reranker typically uses onnx/model.onnx if O4 is missing,
-            # but we check if we can specify a file.
-            model_kwargs = {"file_name": "onnx/model.onnx"}
-            logger.info("ONNX verified for Reranker - accelerating CPU inference.")
-        except (ImportError, AttributeError, Exception) as e:
-            logger.debug("ONNX initialization skipped (backend fallback to torch): %s", e)
-            pass
-    return backend, model_kwargs
+    import onnxruntime as ort
+    from tokenizers import Tokenizer
+
+    model_path = Path("models") / _MODEL_NAME.replace("/", "_")
+    if not model_path.exists():
+        model_path = Path(_MODEL_NAME)
+
+    tokenizer_json = model_path / "tokenizer.json"
+    if not tokenizer_json.exists():
+        tokenizer_json = model_path / "onnx" / "tokenizer.json"
+
+    onnx_file = model_path / "model.onnx"
+    if not onnx_file.exists():
+        onnx_file = model_path / "onnx" / "model.onnx"
+
+    if not onnx_file.exists():
+        raise FileNotFoundError(f"ONNX reranker model not found at {onnx_file}")
+
+    _tokenizer = Tokenizer.from_file(str(tokenizer_json))
+    _tokenizer.enable_truncation(max_length=512)
+    _tokenizer.enable_padding(pad_id=0, pad_token="[PAD]")
+
+    providers = ["CPUExecutionProvider"]
+    _session = ort.InferenceSession(str(onnx_file), providers=providers)
+    logger.info("ONNX Reranker loaded from %s", model_path)
 
 
-def _get_model() -> CrossEncoder:
-    """Lazily load the cross-encoder (≈ 80 MB, ~120 ms on CPU). Thread-safe."""
-    global _reranker
-    if _reranker is None:
+def _get_model_assets():
+    if _session is None:
         with _reranker_lock:
-            if _reranker is None:  # double-checked locking
-                import torch
-
-                device = "cuda" if torch.cuda.is_available() else "cpu"
-
-                backend, model_kwargs = _try_init_onnx(device)
-
-                logger.info("Loading reranker model: %s (backend: %s)", _MODEL_NAME, backend)
-
-                if backend == "onnx":
-                    try:
-                        _reranker = CrossEncoder(
-                            _MODEL_NAME,
-                            max_length=512,
-                            device=device,
-                            backend=backend,
-                            model_kwargs=model_kwargs,
-                        )
-                    except TypeError:
-                        logger.warning(
-                            "ONNX backend not supported by this sentence-transformers "
-                            "version. Falling back."
-                        )
-                        _reranker = CrossEncoder(_MODEL_NAME, max_length=512, device=device)
-                else:
-                    _reranker = CrossEncoder(_MODEL_NAME, max_length=512, device=device)
-
-                logger.info("Reranker model loaded.")
-    return _reranker
+            if _session is None:
+                _load_onnx_model()
+    return _session, _tokenizer
 
 
 def preload_reranker() -> None:
-    """Pre-load the reranker model.
-
-    Avoids cold-start latency on the first user query.
-    Expected to be called within a thread-pool or background task by the app lifespan.
-    """
-    _get_model()
+    """Pre-load the reranker model."""
+    try:
+        _get_model_assets()
+    except Exception as e:
+        logger.debug("Reranker preloading failed (likely missing model file): %s", e)
 
 
 async def rerank(
@@ -90,34 +73,6 @@ async def rerank(
     text_key: str = "text",
     time_budget_ms: float = 500.0,
 ) -> list[dict[str, Any]]:
-    """Re-score *results* against *query* and return the top-k by relevance.
-
-    Performance optimisations:
-    - Truncates chunk text to ``_MAX_RERANKER_INPUT_LEN`` chars before scoring
-      to reduce cross-encoder compute (the model's ``max_length=512`` tokens
-      already truncates, but doing it at the char level avoids tokenizer work).
-    - Caps candidate list to ``top_k * 4`` to bound worst-case latency.
-    - Optional ``time_budget_ms`` (not enforced as hard timeout, but used for
-      logging when the reranker takes too long).
-
-    Parameters
-    ----------
-    query:
-        The user's natural-language question.
-    results:
-        Candidate chunks produced by the hybrid retriever.
-    top_k:
-        How many results to keep after reranking.
-    text_key:
-        Key in each result dict that contains the text to score.
-    time_budget_ms:
-        Advisory time budget for reranking. If exceeded, a warning is logged.
-
-    Returns
-    -------
-    list:
-        The *top_k* results sorted by descending cross-encoder score.
-    """
     if not results:
         return results
     if top_k <= 0:
@@ -132,16 +87,36 @@ async def rerank(
     candidates = results[:max_candidates]
 
     loop = asyncio.get_running_loop()
-    # Load model off the event loop to avoid blocking during first download/load
-    model = await loop.run_in_executor(None, _get_model)
 
-    # Truncate texts for faster tokenization & inference
-    pairs = [(query, item[text_key][:_MAX_RERANKER_INPUT_LEN]) for item in candidates]
+    def _run_rerank():
+        session, tokenizer = _get_model_assets()
 
-    scores = await loop.run_in_executor(
-        None,
-        lambda: model.predict(pairs, show_progress_bar=False).tolist(),
-    )
+        # Prepare pairs for tokenization
+        pairs = [[query, item[text_key][:_MAX_RERANKER_INPUT_LEN]] for item in candidates]
+        encoded = tokenizer.encode_batch(pairs)
+
+        input_ids = np.array([e.ids for e in encoded], dtype=np.int64)
+        attention_mask = np.array([e.attention_mask for e in encoded], dtype=np.int64)
+        token_type_ids = np.array([e.type_ids for e in encoded], dtype=np.int64)
+
+        onnx_inputs = {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "token_type_ids": token_type_ids,
+        }
+
+        # Run inference
+        model_output = session.run(None, onnx_inputs)
+        # Cross-encoder output is usually logits of shape [batch, 1]
+        scores = model_output[0].flatten()
+        return scores.tolist()
+
+    try:
+        scores = await loop.run_in_executor(None, _run_rerank)
+    except Exception as e:
+        logger.error("ONNX Reranking failed: %s", e)
+        # Return original results if reranking fails
+        return results[:top_k]
 
     for item, score in zip(candidates, scores, strict=False):
         item["rerank_score"] = round(float(score), 6)

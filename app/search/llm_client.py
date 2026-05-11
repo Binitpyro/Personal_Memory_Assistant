@@ -24,8 +24,16 @@ class LLMClient:
         self._gemini_client: httpx.AsyncClient | None = None
         self._ollama_client: httpx.AsyncClient | None = None
         self._lm_studio_client: httpx.AsyncClient | None = None
-        self._oauth_token = self._load_oauth_token()
+        # H-07: Defer token loading to avoid blocking the event loop during initialization.
+        self._oauth_token: str | None = None
+        self._token_loaded = False
         self._load_runtime_preferences()
+
+    async def _ensure_token_loaded(self):
+        if not self._token_loaded:
+            import asyncio
+            self._oauth_token = await asyncio.to_thread(self._load_oauth_token)
+            self._token_loaded = True
 
     def _refresh_token_if_expired(self, creds, token_data, token_path):
         from google.auth.transport.requests import Request as GoogleRequest
@@ -159,6 +167,7 @@ Answer:
     async def generate_answer(
         self, query: str, context: str, history: list[dict[str, str]] | None = None
     ) -> str:
+        await self._ensure_token_loaded()
         prompt = self._build_prompt(query, context)
         provider = (self.provider_preference or "auto").lower()
 
@@ -173,6 +182,7 @@ Answer:
     async def stream_answer(
         self, query: str, context: str, history: list[dict[str, str]] | None = None
     ) -> AsyncGenerator[str, None]:
+        await self._ensure_token_loaded()
         prompt = self._build_prompt(query, context)
         provider = (self.provider_preference or "auto").lower()
 
@@ -203,7 +213,9 @@ Answer:
     ) -> dict[str, Any]:
         contents = []
         if history:
-            for msg in history:
+            # P10-3: Rolling window for history to prevent OOM
+            recent_history = history[-10:]
+            for msg in recent_history:
                 role = "user" if msg["role"] == "user" else "model"
                 contents.append({"role": role, "parts": [{"text": msg["content"]}]})
         contents.append({"role": "user", "parts": [{"text": prompt}]})
@@ -308,7 +320,8 @@ Answer:
     ) -> list[dict[str, str]]:
         messages = []
         if history:
-            messages.extend(history)
+            # P10-3: Rolling window for history to prevent OOM
+            messages.extend(history[-10:])
         messages.append({"role": "user", "content": prompt})
         return messages
 

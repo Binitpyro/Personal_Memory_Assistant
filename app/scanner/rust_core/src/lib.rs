@@ -7,6 +7,8 @@ use std::io::Read;
 use ring::digest::{Context, SHA256};
 use rayon::prelude::*;
 
+mod layout;
+
 fn get_sentence_boundary(text: &str, byte_pos: usize, byte_window: usize) -> usize {
     let mut safe_byte_pos = byte_pos;
     // Ensure byte_pos is on a char boundary by moving backward if necessary
@@ -319,7 +321,21 @@ fn _pack_children(nodes: &mut [TreeNode], idx: usize) {
     child_data.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
     _initialize_spiral_positions(&mut child_data);
-    _simulate_repulsion(&mut child_data);
+    // H-06 / P-01: Use the Barnes-Hut O(n log n) layout from layout.rs instead
+    // of the O(n^2) pair-wise repulsion loop that shipped previously.
+    let mut nodes_for_layout: Vec<layout::Node> = child_data.iter().map(|cd| layout::Node {
+        position: cd.2,
+        radius: cd.1,
+        parent_index: u32::MAX,
+        flags: 0,
+        type_hash: 0,
+        pad: 0,
+    }).collect();
+    let cfg = layout::LayoutConfig::default();
+    layout::simulate_layout(&mut nodes_for_layout, &cfg);
+    for (i, cd) in child_data.iter_mut().enumerate() {
+        cd.2 = nodes_for_layout[i].position;
+    }
 
     let mut bounding_radius = 0.0_f32;
     for cd in &child_data {
@@ -513,7 +529,7 @@ fn extract_text_files(paths: Vec<String>, max_size: usize) -> PyResult<Vec<(Stri
 }
 
 
-/// A Python module implemented in Rust using PyO3.
+/// Python module implemented in Rust using PyO3.
 #[pymodule]
 fn rust_core(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(scan_folders, m)?)?;

@@ -49,9 +49,6 @@ uv pip install pyinstaller --quiet 2>nul || pip install pyinstaller --quiet
 echo [3/3] Building PMA.exe with PyInstaller...
 
 set "OPTIONAL_ENV="
-if exist ".env" (
-    set "OPTIONAL_ENV=--add-data .env;."
-)
 
 pyinstaller ^
     --onedir ^
@@ -59,10 +56,12 @@ pyinstaller ^
     --name PMA ^
     --noconfirm ^
     --clean ^
+    --noconsole ^
     --hidden-import=app ^
     --hidden-import=app.main ^
     --hidden-import=app.config ^
     --hidden-import=app.api ^
+    --hidden-import=app.scanner.rust_core ^
     --hidden-import=uvicorn ^
     --hidden-import=uvicorn.logging ^
     --hidden-import=uvicorn.loops ^
@@ -76,13 +75,11 @@ pyinstaller ^
     --hidden-import=uvicorn.lifespan.on ^
     --hidden-import=aiosqlite ^
     --hidden-import=lancedb ^
-    --hidden-import=sentence_transformers ^
-    --collect-data=sentence_transformers ^
-    --collect-data=tokenizers ^
-    --collect-data=transformers ^
+    --hidden-import=onnxruntime ^
+    --hidden-import=tokenizers ^
     --add-data "app;app" ^
     --add-data "static;static" ^
-    %OPTIONAL_ENV% ^
+    --add-binary "app/scanner/rust_core/target/release/rust_core.dll;app/scanner/rust_core/target/release" ^
     __main__.py
 
 if %ERRORLEVEL% neq 0 (
@@ -101,7 +98,8 @@ echo.
 
 echo [Optional] Creating standalone ZIP...
 if exist "dist_readme.txt" copy "dist_readme.txt" "dist\sidecar\PMA\README.txt"
-powershell -Command "Compress-Archive -Path 'dist\sidecar\PMA\*' -DestinationPath 'dist\PMA-sidecar.zip' -Force"
+:: Using native tar.exe (Windows 10+) for 10x-50x faster compression than PowerShell
+tar -a -c -f "dist\PMA-sidecar.zip" -C "dist\sidecar" PMA
 
 :: Detect if run interactively (double-click) vs headless
 if "%IS_CI%"=="0" (

@@ -17,10 +17,11 @@ logger = logging.getLogger(__name__)
 auth_router = APIRouter(prefix="/auth/google", tags=["auth"])
 
 # In Tauri mode the port is dynamic (set via PORT env var by the shell).
-# In web-dev mode it defaults to 8000. The redirect URI must match exactly
-# what is registered in Google Cloud Console — use a fixed loopback URI.
-_OAUTH_REDIRECT_PORT = int(os.environ.get("PORT", "8000"))
-_OAUTH_BASE = f"http://localhost:{_OAUTH_REDIRECT_PORT}"
+# In web-dev mode it defaults to 8000.
+def _get_oauth_base() -> str:
+    port = os.environ.get("PORT", "8000")
+    return f"http://localhost:{port}"
+
 
 # OAuth configuration
 SCOPES = [
@@ -30,7 +31,12 @@ SCOPES = [
 
 # We store the final token here
 TOKEN_PATH = Path("data/credentials.json")
-TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _ensure_data_dir():
+    """L-21: Defer directory creation to first usage rather than import time."""
+    TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+
 
 # The client secret must be provided by the developer building the app
 # Can be a file or built from environment variables.
@@ -149,7 +155,7 @@ async def get_client_config():
             "auth_uri": "https://accounts.google.com/o/oauth2/auth",
             "token_uri": "https://oauth2.googleapis.com/token",
             "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-            "redirect_uris": [f"{_OAUTH_BASE}/api/auth/google/callback"],
+            "redirect_uris": [f"{_get_oauth_base()}/api/auth/google/callback"],
         }
     }
 
@@ -168,7 +174,7 @@ async def start_oauth(request: Request):
         )
 
     # Build redirect URI from the dynamic port assigned by Tauri shell
-    redirect_uri = f"{_OAUTH_BASE}/api/auth/google/callback"
+    redirect_uri = f"{_get_oauth_base()}/api/auth/google/callback"
 
     flow = Flow.from_client_config(client_config, scopes=SCOPES, redirect_uri=redirect_uri)
 
@@ -201,13 +207,12 @@ async def oauth_callback(request: Request):
             success=False,
         )
 
-    redirect_uri = f"{_OAUTH_BASE}/api/auth/google/callback"
+    redirect_uri = f"{_get_oauth_base()}/api/auth/google/callback"
     flow = Flow.from_client_config(client_config, scopes=SCOPES, redirect_uri=redirect_uri)
 
     try:
-        # Reconstruct the full URL to fetch the token
-        # Fetch token parses the code
-        flow.fetch_token(code=code)
+        # fetch_token makes a blocking HTTP request — offload it.
+        await asyncio.to_thread(flow.fetch_token, code=code)
         credentials = flow.credentials
 
         # Save credentials securely
@@ -266,7 +271,8 @@ async def auth_status():
         if creds.valid:
             return {"connected": True, "method": "oauth"}
         if creds.expired and creds.refresh_token:
-            creds.refresh(GoogleRequest())
+            # creds.refresh makes a blocking HTTP request — offload it.
+            await asyncio.to_thread(creds.refresh, GoogleRequest())
             # Save refreshed token
             token_data["token"] = creds.token
 
@@ -288,7 +294,7 @@ async def disconnect_auth():
     """Removes the stored OAuth token."""
     if TOKEN_PATH.exists():
         try:
-            os.remove(TOKEN_PATH)
+            await asyncio.to_thread(os.remove, TOKEN_PATH)
             return {"message": "Disconnected successfully."}
         except Exception as e:
             return JSONResponse(status_code=500, content={"error": f"Failed to disconnect: {e!s}"})

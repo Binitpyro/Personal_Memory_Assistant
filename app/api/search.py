@@ -1,5 +1,6 @@
 import json
 import logging
+import asyncio
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -12,6 +13,8 @@ from app.storage.db import DatabaseManager
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+query_semaphore = asyncio.Semaphore(5)
 
 
 class QueryRequest(BaseModel):
@@ -43,9 +46,10 @@ async def query(
     full_rag = ensure_rag()
 
     try:
-        res = await full_rag(
-            q, db, emb, lancedb_client, llm, payload.file_type, payload.folder_tag, history
-        )
+        async with query_semaphore:
+            res = await full_rag(
+                q, db, emb, lancedb_client, llm, payload.file_type, payload.folder_tag, history
+            )
 
         async def _bg_save_query():
             await db.save_query(
@@ -77,17 +81,25 @@ async def query_stream(
 
     async def stream_results():
         try:
-            async for chunk in stream_rag(
-                query=q,
-                db=db,
-                embedding_service=emb,
-                lancedb_client=lancedb_client,
-                llm_client=llm,
-                file_type=request.file_type,
-                folder_tag=request.folder_tag,
-                history=history,
-            ):
-                yield json.dumps(chunk) + "\n"
+            async with query_semaphore:
+                agen = stream_rag(
+                    query=q,
+                    db=db,
+                    embedding_service=emb,
+                    lancedb_client=lancedb_client,
+                    llm_client=llm,
+                    file_type=request.file_type,
+                    folder_tag=request.folder_tag,
+                    history=history,
+                )
+                while True:
+                    try:
+                        chunk = await asyncio.wait_for(anext(agen), timeout=15.0)
+                        yield json.dumps(chunk) + "\n"
+                    except asyncio.TimeoutError:
+                        yield json.dumps({"type": "ping"}) + "\n"
+        except StopAsyncIteration:
+            yield json.dumps({"type": "done"}) + "\n"
         except Exception as e:
             logger.exception("Stream errored: %s", e)
             yield json.dumps({"type": "error", "text": str(e)}) + "\n"

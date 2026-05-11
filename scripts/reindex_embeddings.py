@@ -99,6 +99,7 @@ async def main() -> None:
         if not rows:
             break
 
+        n_rows = len(rows)
         ids_int = [r[0] for r in rows]
         ids_str = [str(r[0]) for r in rows]
         texts = [_decompress(r[1]) for r in rows]
@@ -108,7 +109,7 @@ async def main() -> None:
         logger.info(
             "Embedding batch offset=%d  (%d chunks, total so far: %d/%d) …",
             offset,
-            len(list(rows)),
+            n_rows,
             processed,
             total_chunks,
         )
@@ -131,10 +132,10 @@ async def main() -> None:
         ]
         await lance.add_documents(ids_str, embeddings_np, lancedb_metas)
 
-        processed += len(list(rows))
+        processed += n_rows
         logger.info("  … done  %d/%d", processed, total_chunks)
 
-        if len(list(rows)) < batch_size:
+        if n_rows < batch_size:
             break
         offset += batch_size
 
@@ -147,5 +148,8 @@ async def main() -> None:
     )
 
 
-if __name__ == "__main__":
+def cli_main():
     asyncio.run(main())
+
+if __name__ == "__main__":
+    cli_main()

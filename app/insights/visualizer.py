@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 import math
 import struct
 import zlib
@@ -68,15 +68,18 @@ async def _stream_visualizer_binary_impl(extension: str | None, db: DatabaseMana
                 # Type Hash for coloring (High speed stable hash)
                 type_hash = zlib.adler32(f_type.lower().encode()) & 0xFFFFFFFF
 
-                # Pack: fff (pos) f (radius) f (pad) I (flags) I (hash) I (pad)
-                # Total 8 elements * 4 bytes = 32 bytes
+                # Pack: pos(fff) radius(f) parent_index(I=uint32) flags(I) type_hash(I) pad(I)
+                # L-17: parent_index uses 0xFFFFFFFF (u32::MAX) as sentinel for "no parent / root
+                # level", matching the Rust rust_core sentinel. Previously 0.0f was packed here
+                # which cast to uint32=0, misattributing every file's LOD to the root node's radius
+                # in the WebGPU culling shader.
                 yield struct.pack(
-                    "<ffff f I I I",
+                    "<ffff I I I I",
                     float(x),
                     float(y),
                     float(z),
                     float(v_radius),
-                    0.0,  # padding
+                    0xFFFFFFFF,  # parent_index sentinel: root-level / no parent
                     int(flags),
                     int(type_hash),
                     0,  # padding to 32 bytes

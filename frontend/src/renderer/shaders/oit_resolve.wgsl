@@ -1,4 +1,11 @@
 // frontend/src/renderer/shaders/oit_resolve.wgsl
+// Weighted Blended Order-Independent Transparency (WBOIT) resolve pass.
+// Reference: McGuire & Bavoil 2013 — "Weighted Blended OIT"
+// Algorithm: visibility = 1 - exp(-totalAlpha), avgColor = accum.rgb / accum.a
+// NOTE: This is NOT Moment-Based OIT (MBOIT). MBOIT requires moment reconstruction
+// from b0-b3 tensors. The momentTexture binding here is used only as an alpha
+// accumulator (moments.x = totalAlpha). The variable name is preserved for
+// compatibility with the existing GPU bind group layout.
 
 struct FullscreenVertexOutput {
     @builtin(position) position: vec4<f32>,

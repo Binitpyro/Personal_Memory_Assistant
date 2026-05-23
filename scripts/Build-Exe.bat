@@ -48,8 +48,6 @@ uv pip install pyinstaller --quiet 2>nul || pip install pyinstaller --quiet
 :: ── Run PyInstaller ───────────────────────────────────────────────────────
 echo [3/3] Building PMA.exe with PyInstaller...
 
-set "OPTIONAL_ENV="
-
 pyinstaller ^
     --onedir ^
     --distpath dist\sidecar ^

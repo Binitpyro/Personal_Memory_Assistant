@@ -24,15 +24,15 @@ class LLMClient:
         self._gemini_client: httpx.AsyncClient | None = None
         self._ollama_client: httpx.AsyncClient | None = None
         self._lm_studio_client: httpx.AsyncClient | None = None
-        # H-07: Defer token loading to avoid blocking the event loop during initialization.
+        # H-07: Defer token and preferences loading to avoid blocking the event loop during initialization.
         self._oauth_token: str | None = None
         self._token_loaded = False
-        self._load_runtime_preferences()
 
     async def _ensure_token_loaded(self):
         if not self._token_loaded:
             import asyncio
             self._oauth_token = await asyncio.to_thread(self._load_oauth_token)
+            await asyncio.to_thread(self._load_runtime_preferences)
             self._token_loaded = True
 
     def _refresh_token_if_expired(self, creds, token_data, token_path):

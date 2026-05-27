@@ -6,7 +6,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.api.deps import ensure_rag, get_db, get_emb, get_lancedb, get_llm
+from app.api.deps import ensure_rag, get_db, get_emb, get_lancedb, get_llm, get_planner
 from app.api.limiter import limiter
 from app.storage.db import DatabaseManager
 
@@ -40,6 +40,7 @@ async def query(
     emb=Depends(get_emb),
     lancedb_client=Depends(get_lancedb),
     llm=Depends(get_llm),
+    planner=Depends(get_planner),
 ):
     q = payload.validated_question
     history = payload.history or []
@@ -48,7 +49,7 @@ async def query(
     try:
         async with query_semaphore:
             res = await full_rag(
-                q, db, emb, lancedb_client, llm, payload.file_type, payload.folder_tag, history
+                q, db, emb, lancedb_client, llm, planner, payload.file_type, payload.folder_tag, history
             )
 
         async def _bg_save_query():
@@ -74,6 +75,7 @@ async def query_stream(
     emb=Depends(get_emb),
     lancedb_client=Depends(get_lancedb),
     llm=Depends(get_llm),
+    planner=Depends(get_planner),
 ):
     q = request.validated_question
     history = request.history or []
@@ -88,6 +90,7 @@ async def query_stream(
                     embedding_service=emb,
                     lancedb_client=lancedb_client,
                     llm_client=llm,
+                    planner=planner,
                     file_type=request.file_type,
                     folder_tag=request.folder_tag,
                     history=history,
@@ -98,8 +101,11 @@ async def query_stream(
                         yield json.dumps(chunk) + "\n"
                     except asyncio.TimeoutError:
                         yield json.dumps({"type": "ping"}) + "\n"
-        except StopAsyncIteration:
-            yield json.dumps({"type": "done"}) + "\n"
+        except StopAsyncIteration as e:
+            payload = {"type": "done"}
+            if e.value:
+                payload.update(e.value)
+            yield json.dumps(payload) + "\n"
         except Exception as e:
             logger.exception("Stream errored: %s", e)
             yield json.dumps({"type": "error", "text": str(e)}) + "\n"

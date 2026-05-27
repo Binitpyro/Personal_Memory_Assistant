@@ -55,8 +55,17 @@ class EmbeddingService:
 
         # Use CPU execution provider for maximum portability and minimum size
         providers = ["CPUExecutionProvider"]
-        self._session = ort.InferenceSession(str(onnx_file), providers=providers)
-        logger.info("ONNX InferenceSession initialized for %s", self.model_name)
+        
+        # O(1) Memory Fix: Prevent ONNX from allocating gigabytes of thread memory arenas
+        # By default, ONNX creates a memory arena per CPU core, scaling RAM to 1.5GB+ on modern CPUs.
+        options = ort.SessionOptions()
+        options.intra_op_num_threads = 2
+        options.inter_op_num_threads = 1
+        options.enable_cpu_mem_arena = False
+        options.enable_mem_pattern = False
+        
+        self._session = ort.InferenceSession(str(onnx_file), sess_options=options, providers=providers)
+        logger.info("ONNX InferenceSession initialized for %s (Bounded Memory)", self.model_name)
 
     def load_model(self) -> None:
         """Loads the embedding model using ONNX Runtime (blocking)."""
@@ -65,13 +74,19 @@ class EmbeddingService:
             return
 
         try:
-            # For now, we expect the model to be in a 'models' directory or similar
-            # In a real app, we might download it from HF if missing.
-            model_path = Path("models") / self.model_name.replace("/", "_")
-
+            model_path = Path(self.model_name)
+            
             if not model_path.exists():
-                # Check if it's an absolute path
-                model_path = Path(self.model_name)
+                logger.info("Downloading/Resolving ONNX model '%s' from HuggingFace...", self.model_name)
+                from huggingface_hub import snapshot_download
+                
+                # Fetch only required ONNX and tokenizer files to save bandwidth and disk space
+                model_path_str = snapshot_download(
+                    repo_id=self.model_name,
+                    allow_patterns=["*.json", "*.txt", "*.onnx", "onnx/*"],
+                    ignore_patterns=["*.safetensors", "*.bin", "*.h5", "*.msgpack"]
+                )
+                model_path = Path(model_path_str)
 
             logger.info("Loading ONNX embedding model from: %s", model_path)
             self._load_onnx_model(model_path)

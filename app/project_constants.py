@@ -57,6 +57,26 @@ LARGEST_RE = re.compile(
 FTS5_OPERATOR_RE = re.compile(r'["*^]|\bAND\b|\bOR\b|\bNOT\b|\bNEAR\b', re.IGNORECASE)
 
 
+_GRAPH_PHRASES = (
+    "what calls",
+    "who calls",
+    "where is",
+    "depends on",
+    "dependencies of",
+    "what does",
+    "how is",
+    "relates to",
+    "connection between",
+    "impact of",
+)
+
+_GRAPH_RE = re.compile(
+    r"\b(?:what calls|who calls|where is .* called|depends on|dependencies of|"
+    r"what does .* use|how is .* used|relates to|connection between|impact of)\b",
+    re.IGNORECASE,
+)
+
+
 def is_metadata_intent(query: str) -> bool:
     return bool(
         re.search(
@@ -78,6 +98,7 @@ def determine_query_intent(query: str) -> dict[str, bool]:
         "latest": bool(LATEST_RE.search(query)),
         "largest": bool(LARGEST_RE.search(query)),
         "metadata_intent": is_metadata_intent(query),
+        "graph": bool(_GRAPH_RE.search(query)),
     }
 
 

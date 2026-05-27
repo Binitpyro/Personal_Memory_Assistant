@@ -52,7 +52,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5(
     chunks_text,
     content="",
     tokenize="trigram",
-    detail=column -- Phase 9.2: strip byte-offset index (saves ~40% space)
+    detail=full -- Updated to full to fix trigram phrase search
 );
 
 -- Trigger to keep FTS index in sync with chunks table

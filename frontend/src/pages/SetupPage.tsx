@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { Brain, Shield, ArrowRight, CheckCircle2, ChevronRight, Key, HardDrive, AlertTriangle } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { useApi } from '../useApi'
-import { getAuthStatus, getLocalModels, launchGoogleAuth, getDriveInfo } from '../api'
+import { getAuthStatus, getLocalModels, launchGoogleAuth, getDriveInfo, enableSplitBrain } from '../api'
 
 export function SetupPage() {
     const navigate = useNavigate()
@@ -11,6 +11,10 @@ export function SetupPage() {
     const { data: driveInfo } = useApi(getDriveInfo, { cacheKey: 'drive-info' })
 
     const [step, setStep] = useState(1)
+
+    const [isEnablingSplitBrain, setIsEnablingSplitBrain] = useState(false)
+    const [requiresRestart, setRequiresRestart] = useState(false)
+    const [splitBrainError, setSplitBrainError] = useState<string | null>(null)
 
     useEffect(() => {
         const refreshAuth = () => {
@@ -31,25 +35,33 @@ export function SetupPage() {
         }
     }, [refetchAuth])
 
-    useEffect(() => {
-        if (authStatus?.connected) {
-            setStep(2)
-        }
-    }, [authStatus?.connected])
 
     const handleConnectGoogle = async () => {
         await launchGoogleAuth()
     }
 
+    const handleEnableSplitBrain = async () => {
+        setIsEnablingSplitBrain(true)
+        setSplitBrainError(null)
+        try {
+            await enableSplitBrain()
+            setRequiresRestart(true)
+        } catch (error: any) {
+            setSplitBrainError(error.message || 'Failed to enable Split-Brain mode')
+        } finally {
+            setIsEnablingSplitBrain(false)
+        }
+    }
+
     const isConnected = authStatus?.connected
     const hasLocalModels = localModels?.ollama.detected || localModels?.lm_studio.detected
 
-    // Block setup if drive is exFAT/FAT32 but mode is not split_brain
+    // Block setup if drive is exFAT/FAT32 but mode is not split_brain, or if restart is required
     const isDriveConfigSafe = driveInfo
         ? !(driveInfo.is_portable_fs && driveInfo.lancedb_mode !== 'split_brain')
         : true
 
-    const canProceed = (isConnected || hasLocalModels) && isDriveConfigSafe
+    const canProceed = (isConnected || hasLocalModels) && isDriveConfigSafe && !requiresRestart
 
     return (
         <div className="fixed inset-0 bg-background flex flex-col items-center justify-center p-6 z-50 overflow-hidden">
@@ -82,18 +94,49 @@ export function SetupPage() {
                     <div className="flex flex-col gap-4 animate-fade-in-right">
 
                         {/* Drive Compatibility Warning */}
-                        {!isDriveConfigSafe && driveInfo && (
-                            <div className="p-4 rounded-xl border border-warning bg-warning/10 flex items-start gap-3">
-                                <AlertTriangle className="w-5 h-5 text-warning flex-shrink-0 mt-0.5" />
+                        {!isDriveConfigSafe && driveInfo && !requiresRestart && (
+                            <div className="p-4 rounded-xl border border-warning bg-warning/10 flex flex-col gap-3">
+                                <div className="flex items-start gap-3">
+                                    <AlertTriangle className="w-5 h-5 text-warning flex-shrink-0 mt-0.5" />
+                                    <div>
+                                        <h4 className="font-semibold text-warning flex items-center gap-2">
+                                            <HardDrive className="w-4 h-4" /> Incompatible Storage Detected
+                                        </h4>
+                                        <p className="text-sm text-text-secondary mt-1">
+                                            Drive <strong>{driveInfo.drive}</strong> is formatted as{' '}
+                                            <strong>{driveInfo.fs_type}</strong>. LanceDB is unstable on portable filesystems.
+                                        </p>
+                                    </div>
+                                </div>
+                                
+                                <div className="ml-8 border-t border-warning/20 pt-3 mt-1">
+                                    <button 
+                                        onClick={handleEnableSplitBrain}
+                                        disabled={isEnablingSplitBrain}
+                                        className="glass-button !bg-warning/20 !text-warning border border-warning/50 hover:!bg-warning/30 px-4 py-2 text-sm disabled:opacity-50 transition-colors"
+                                    >
+                                        {isEnablingSplitBrain ? 'Enabling...' : 'Enable Split-Brain Mode'}
+                                    </button>
+                                    {splitBrainError && (
+                                        <p className="text-red-500 text-xs mt-2">{splitBrainError}</p>
+                                    )}
+                                    <p className="text-xs text-text-secondary mt-2">
+                                        This will configure PMA to safely store its cache on your local computer, allowing the portable drive to function correctly.
+                                    </p>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Restart Required Banner */}
+                        {requiresRestart && (
+                            <div className="p-4 rounded-xl border border-success bg-success/10 flex items-start gap-3 animate-fade-in">
+                                <CheckCircle2 className="w-5 h-5 text-success flex-shrink-0 mt-0.5" />
                                 <div>
-                                    <h4 className="font-semibold text-warning flex items-center gap-2">
-                                        <HardDrive className="w-4 h-4" /> Incompatible Storage Detected
+                                    <h4 className="font-semibold text-success flex items-center gap-2">
+                                        Split-Brain Mode Enabled
                                     </h4>
                                     <p className="text-sm text-text-secondary mt-1">
-                                        Drive <strong>{driveInfo.drive}</strong> is formatted as{' '}
-                                        <strong>{driveInfo.fs_type}</strong>. LanceDB is unstable on portable filesystems.
-                                        Set <code className="bg-warning/20 px-1 rounded text-xs">PMA_LANCEDB_MODE=split_brain</code> in
-                                        your <code className="bg-warning/20 px-1 rounded text-xs">.env</code> and restart to continue.
+                                        The configuration has been updated successfully. Please <strong>fully close and restart the application</strong> to apply the changes.
                                     </p>
                                 </div>
                             </div>
@@ -159,7 +202,9 @@ export function SetupPage() {
                             <button
                                 onClick={() => setStep(2)}
                                 disabled={!canProceed}
-                                className="glass-button !bg-text-primary !text-white hover:opacity-90 gap-2 px-8 py-3 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                                className={`glass-button !bg-text-primary !text-white hover:opacity-90 gap-2 px-8 py-3 disabled:opacity-50 disabled:cursor-not-allowed transition-all ${
+                                    canProceed && isConnected ? 'animate-pulse ring-2 ring-primary ring-offset-2 ring-offset-background' : ''
+                                }`}
                             >
                                 Continue <ArrowRight className="w-5 h-5" />
                             </button>

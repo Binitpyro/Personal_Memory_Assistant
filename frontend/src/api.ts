@@ -11,7 +11,7 @@ export let ENDPOINT = (import.meta as any).env.VITE_API_URL || "http://127.0.0.1
 
 const params = new URLSearchParams(globalThis.location.search);
 const tokenFromUrl = params.get('token');
-export let localToken = tokenFromUrl || sessionStorage.getItem('pma_token') || '';
+export let localToken = tokenFromUrl || sessionStorage.getItem('pma_token') || (import.meta as any).env.VITE_DEV_TOKEN || '';
 
 if (tokenFromUrl) {
   sessionStorage.setItem('pma_token', tokenFromUrl);
@@ -37,7 +37,9 @@ export async function initTauriConnection() {
 }
 
 export function getGoogleAuthStartUrl(): string {
-  return `${ENDPOINT}/api/auth/google/start`;
+  const url = new URL(`${ENDPOINT}/api/auth/google/start`);
+  if (localToken) url.searchParams.set('token', localToken);
+  return url.toString();
 }
 
 export async function launchGoogleAuth(): Promise<void> {
@@ -203,6 +205,9 @@ export interface DriveInfo {
 
 export const getDriveInfo = () => json<DriveInfo>('/system/drive_info');
 
+export const enableSplitBrain = () =>
+  json<{ message: string }>('/system/enable-split-brain', { method: 'POST' });
+
 export const purgeHostCache = () =>
   json<{ message: string }>('/system/purge-host-cache', { method: 'POST' });
 
@@ -238,6 +243,7 @@ export interface QueryResponse {
   latency_ms: number;
   mode?: string;
   timing?: Record<string, number>;
+  graph_hops?: string;
 }
 
 export const postQuery = (question: string, options: { file_type?: string, folder_tag?: string, history?: { role: string, content: string }[] } = {}) =>
@@ -426,6 +432,7 @@ export interface QueryStreamChunk {
   data?: QueryResponse;
   latency_ms?: number;
   retrieval_ms?: number;
+  graph_hops?: string;
 }
 
 export function subscribeQuery(

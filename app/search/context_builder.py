@@ -99,7 +99,7 @@ def _semantic_deduplicate(
     deduped: list[dict[str, Any]] = []
 
     for i, res in enumerate(results):
-        if len(deduped) > 100:
+        if len(deduped) >= 100:
             break
 
         text = res.get("text", "")
@@ -129,7 +129,7 @@ def _semantic_deduplicate_fallback(
     """O(n^2) fallback for deduplication."""
     deduped: list[dict[str, Any]] = []
     for res in results:
-        if len(deduped) > 100:
+        if len(deduped) >= 100:
             break
         text = res.get("text", "")
         if len(text) < 50:
@@ -287,12 +287,27 @@ def _add_file_stats(
     return 0
 
 
+def _add_graph_paths(
+    context_parts: list[str], text: str, max_tokens: int, used_tokens: int
+) -> int:
+    if text and used_tokens < max_tokens:
+        header = "### GRAPH RELATIONSHIPS (Dependencies and Calls)\n"
+        h_tokens = _token_count(header)
+        body = _truncate_to_tokens(text, max_tokens - used_tokens - h_tokens)
+        if body:
+            part = f"{header}<graph_relationships>\n{body}\n</graph_relationships>\n\n"
+            context_parts.append(part)
+            return _token_count(part)
+    return 0
+
+
 def build_context(
     retrieved_results: list[dict[str, Any]],
     max_tokens: int = 0,
     file_stats: dict[str, Any] | None = None,
     folder_profiles_text: str = "",
     metadata_insights: str | None = None,
+    graph_paths_text: str = "",
 ) -> str:
     """Formats retrieved snippets into a single context string for the LLM.
 
@@ -324,7 +339,12 @@ def build_context(
         context_parts, folder_profiles_text, max_tokens, used_tokens
     )
 
-    # 3. Implementation Details (Chunks)
+    # 3. Graph Relationships
+    used_tokens += _add_graph_paths(
+        context_parts, graph_paths_text, max_tokens, used_tokens
+    )
+
+    # 4. Implementation Details (Chunks)
     if retrieved_results and used_tokens < max_tokens:
         header = "### IMPLEMENTATION DETAILS (Specific Code/Text Chunks)\n"
         h_tokens = _token_count(header)

@@ -21,9 +21,15 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # P0-4: Real vacuum state tracking (replaces hardcoded mock)
-_vacuum_lock = asyncio.Lock()
+_vacuum_lock: asyncio.Lock | None = None
 _vacuum_last_run: str | None = None
 _vacuum_last_error: str | None = None
+
+def get_vacuum_lock() -> asyncio.Lock:
+    global _vacuum_lock
+    if _vacuum_lock is None:
+        _vacuum_lock = asyncio.Lock()
+    return _vacuum_lock
 
 
 @router.get("/system/config")
@@ -176,6 +182,38 @@ async def get_system_info():
     }
 
 
+@router.post("/system/enable-split-brain")
+async def enable_split_brain():
+    """Edits the .env file to enable split_brain mode."""
+    env_file = ".env"
+    try:
+        lines = []
+        if os.path.exists(env_file):
+            with open(env_file, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+        
+        found = False
+        for i, line in enumerate(lines):
+            if line.startswith("PMA_LANCEDB_MODE="):
+                lines[i] = "PMA_LANCEDB_MODE=split_brain\n"
+                found = True
+                break
+        
+        if not found:
+            if lines and not lines[-1].endswith("\n"):
+                lines[-1] += "\n"
+            lines.append("PMA_LANCEDB_MODE=split_brain\n")
+            
+        with open(env_file, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+            
+        return {"message": "Split-brain mode enabled in .env"}
+    except (IOError, PermissionError) as e:
+        from fastapi import HTTPException
+        logger.error("Failed to write to .env file: %s", e)
+        raise HTTPException(status_code=403, detail="Failed to write to .env file. Please edit it manually.")
+
+
 @router.post("/system/purge-host-cache")
 async def purge_host_cache():
     """Deletes the local LanceDB split-brain cache directory.
@@ -200,7 +238,7 @@ async def purge_host_cache():
 
 @router.post("/system/compact-db")
 async def compact_db(db: DatabaseManager = Depends(get_db)):
-    if _vacuum_lock.locked():
+    if get_vacuum_lock().locked():
         return {"message": "Compaction already in progress."}
 
     # H-08: Multi-worker safety: Only allow worker 0 to run maintenance tasks.
@@ -209,7 +247,7 @@ async def compact_db(db: DatabaseManager = Depends(get_db)):
 
     async def _do_vacuum():
         global _vacuum_last_run, _vacuum_last_error
-        async with _vacuum_lock:
+        async with get_vacuum_lock():
             _vacuum_last_error = None
             try:
                 # FTS optimize via aiosqlite (non-blocking in event loop terms)
@@ -222,7 +260,7 @@ async def compact_db(db: DatabaseManager = Depends(get_db)):
                 def _vacuum_sync():
                     con = sqlite3.connect(db.db_path, timeout=60)
                     con.isolation_level = None  # autocommit mode
-                    con.execute("VACUUM")
+                    con.execute("PRAGMA incremental_vacuum(100)")
                     con.close()
 
                 await asyncio.to_thread(_vacuum_sync)
@@ -245,7 +283,7 @@ async def compact_db(db: DatabaseManager = Depends(get_db)):
 @router.get("/system/compact-db/status")
 async def compact_status():
     return {
-        "is_running": _vacuum_lock.locked(),
+        "is_running": get_vacuum_lock().locked(),
         "last_run": _vacuum_last_run,
         "error": _vacuum_last_error,
     }
@@ -301,7 +339,7 @@ async def demo_seed(
             def _vacuum_sync():
                 con = sqlite3.connect(db.db_path, timeout=60)
                 con.isolation_level = None
-                con.execute("VACUUM")
+                con.execute("PRAGMA incremental_vacuum(100)")
                 con.close()
 
             await asyncio.to_thread(_vacuum_sync)

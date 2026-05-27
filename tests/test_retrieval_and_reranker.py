@@ -100,24 +100,26 @@ async def test_rerank_empty_short_circuit():
 
 @pytest.mark.asyncio
 async def test_rerank_with_mock_model(monkeypatch):
-    class FakePrediction:
-        def __init__(self, values):
-            self._values = values
+    import numpy as np
+    
+    class FakeSession:
+        def run(self, output_names, inputs):
+            return [np.array([[0.1], [0.9]])]
+            
+    class FakeEncoding:
+        ids = [1]
+        attention_mask = [1]
+        type_ids = [0]
 
-        def tolist(self):
-            return self._values
-
-    class FakeModel:
-        def predict(self, pairs, show_progress_bar=False):
-            assert show_progress_bar is False
-            assert len(pairs) == 2
-            return FakePrediction([0.1, 0.9])
+    class FakeTokenizer:
+        def encode_batch(self, pairs):
+            return [FakeEncoding(), FakeEncoding()]
 
     class FakeLoop:
         async def run_in_executor(self, _executor, fn):
             return fn()
 
-    monkeypatch.setattr("app.search.reranker._get_model", lambda: FakeModel())
+    monkeypatch.setattr("app.search.reranker._get_model_assets", lambda: (FakeSession(), FakeTokenizer()))
     monkeypatch.setattr("app.search.reranker.asyncio.get_running_loop", lambda: FakeLoop())
 
     results = [

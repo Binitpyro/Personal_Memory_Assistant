@@ -524,12 +524,60 @@ async def _check_semantic_query_cache(query, embedding_service, lancedb_client, 
         return None, None
 
 
+async def _execute_graph_plan(
+    plan: Any,
+    db: DatabaseManager,
+    embedding_service: EmbeddingService,
+    lancedb_client: LanceDBClient,
+    k: int = 5,
+    file_type: str | None = None,
+    folder_tag: str | None = None,
+    query_emb: list[float] | None = None,
+) -> tuple[list[dict[str, Any]], str]:
+    seed_chunks = await hybrid_retrieve(
+        plan.original_query, db, embedding_service, lancedb_client,
+        k=3, use_reranker=True, file_type=file_type, folder_tag=folder_tag, query_emb=query_emb
+    )
+    if not seed_chunks:
+        return [], ""
+        
+    seed_ids = [c["chunk_id"] for c in seed_chunks]
+    bfs_chunk_ids = await db.bfs_from_chunks(seed_ids, max_depth=3, limit=k)
+    paths = await db.get_relational_paths(seed_ids, max_depth=3, limit=5)
+    
+    all_ids = list(set(seed_ids + bfs_chunk_ids))
+    if not all_ids:
+        return seed_chunks, "\n".join(paths)
+        
+    placeholders = ",".join("?" for _ in all_ids)
+    query_sql = (
+        f"SELECT c.id, zlib_decompress(c.text_preview) as text_preview, f.path, f.folder_tag "  # noqa: S608
+        f"FROM chunks c JOIN files f ON c.file_id = f.id "
+        f"WHERE c.id IN ({placeholders})"
+    )
+    rows = await db.execute_query(query_sql, tuple(all_ids))
+    
+    results = []
+    for row in rows:
+        results.append({
+            "chunk_id": row[0],
+            "text": row[1],
+            "file_path": row[2],
+            "folder_tag": row[3],
+            "score": 1.0,
+        })
+        
+    graph_context = "\n".join(paths)
+    return results, graph_context
+
+
 async def full_rag(
     query: str,
     db: DatabaseManager,
     embedding_service: EmbeddingService,
     lancedb_client: LanceDBClient,
     llm_client: LLMClient,
+    planner: QueryPlanner,
     k: int = settings.retrieval_top_k,
     file_type: str | None = None,
     folder_tag: str | None = None,
@@ -549,7 +597,6 @@ async def full_rag(
         if cache_res:
             return cast(dict[str, Any], cache_res)
 
-    planner = QueryPlanner()
     plan = planner.plan(query)
 
     inventory = plan.intents["inventory"]
@@ -587,20 +634,28 @@ async def full_rag(
     from app.utils.metrics import Timer
 
     t_ret = time.perf_counter()
+    graph_paths_text = ""
     with Timer("retrieval"):
-        retrieved, file_stats, folder_profiles_text = await _gather_full_rag_inputs(
-            query=query,
-            db=db,
-            embedding_service=embedding_service,
-            lancedb_client=lancedb_client,
-            k=k,
-            inventory=inventory,
-            project=project,
-            unreal=unreal,
-            cached_file_stats=file_stats,
-            include_profiles_text=include_profiles_text,
-            query_emb=query_emb,  # P-03: reuse embedding from semantic cache check
-        )
+        if plan.mode == PlanMode.GRAPH_SEARCH:
+            retrieved, graph_paths_text = await _execute_graph_plan(
+                plan, db, embedding_service, lancedb_client, k, file_type, folder_tag, query_emb
+            )
+            file_stats = None
+            folder_profiles_text = ""
+        else:
+            retrieved, file_stats, folder_profiles_text = await _gather_full_rag_inputs(
+                query=query,
+                db=db,
+                embedding_service=embedding_service,
+                lancedb_client=lancedb_client,
+                k=k,
+                inventory=inventory,
+                project=project,
+                unreal=unreal,
+                cached_file_stats=file_stats,
+                include_profiles_text=include_profiles_text,
+                query_emb=query_emb,  # P-03: reuse embedding from semantic cache check
+            )
     retrieval_ms = round((time.perf_counter() - t_ret) * 1000, 1)
 
     if file_type or folder_tag:
@@ -619,6 +674,7 @@ async def full_rag(
         max_tokens=settings.context_max_tokens,
         file_stats=file_stats,
         folder_profiles_text=folder_profiles_text,
+        graph_paths_text=graph_paths_text,
     )
 
     t_llm = time.perf_counter()
@@ -649,6 +705,8 @@ async def full_rag(
         "timing": {"retrieval_ms": retrieval_ms, "llm_ms": llm_ms, "total_ms": total_ms},
         "_is_error": _llm_error,
     }
+    if graph_paths_text:
+        result["graph_hops"] = graph_paths_text
 
     # Phase 1.1: Cache the full RAG response for repeat queries.
     # P2-4: Only cache if no LLM error occurred Ã¢â‚¬â€ string matching was fragile.
@@ -684,6 +742,7 @@ async def stream_rag(
     embedding_service: EmbeddingService,
     lancedb_client: LanceDBClient,
     llm_client: LLMClient,
+    planner: QueryPlanner,
     k: int = settings.retrieval_top_k,
     file_type: str | None = None,
     folder_tag: str | None = None,
@@ -692,7 +751,6 @@ async def stream_rag(
     """NDJSON stream events for /api/query/stream (match SearchPage chunk types)."""
     t_start = time.perf_counter()
 
-    planner = QueryPlanner()
     plan = planner.plan(query)
 
     inventory = plan.intents["inventory"]
@@ -753,20 +811,28 @@ async def stream_rag(
     include_profiles_text = project or inventory or unreal
     from app.utils.metrics import Timer
 
+    graph_paths_text = ""
     with Timer("retrieval"):
-        retrieved, file_stats, folder_profiles_text = await _gather_full_rag_inputs(
-            query=query,
-            db=db,
-            embedding_service=embedding_service,
-            lancedb_client=lancedb_client,
-            k=k,
-            inventory=inventory,
-            project=project,
-            unreal=unreal,
-            cached_file_stats=file_stats,
-            include_profiles_text=include_profiles_text,
-            query_emb=query_emb,  # P-03: reuse embedding from semantic cache check
-        )
+        if plan.mode == PlanMode.GRAPH_SEARCH:
+            retrieved, graph_paths_text = await _execute_graph_plan(
+                plan, db, embedding_service, lancedb_client, k, file_type, folder_tag, query_emb
+            )
+            file_stats = None
+            folder_profiles_text = ""
+        else:
+            retrieved, file_stats, folder_profiles_text = await _gather_full_rag_inputs(
+                query=query,
+                db=db,
+                embedding_service=embedding_service,
+                lancedb_client=lancedb_client,
+                k=k,
+                inventory=inventory,
+                project=project,
+                unreal=unreal,
+                cached_file_stats=file_stats,
+                include_profiles_text=include_profiles_text,
+                query_emb=query_emb,  # P-03: reuse embedding from semantic cache check
+            )
 
     if file_type or folder_tag:
         retrieved = _filter_retrieved_results(retrieved, file_type=file_type, folder_tag=folder_tag)
@@ -790,6 +856,7 @@ async def stream_rag(
         max_tokens=settings.context_max_tokens,
         file_stats=file_stats,
         folder_profiles_text=folder_profiles_text,
+        graph_paths_text=graph_paths_text,
     )
 
     full_answer = ""
@@ -838,6 +905,9 @@ async def stream_rag(
                     )
         except Exception:
             pass
+
+    if graph_paths_text:
+        yield {"type": "done", "graph_hops": graph_paths_text}
 
 
 async def _load_query_metadata(db, inventory, project, unreal):

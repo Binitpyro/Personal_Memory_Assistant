@@ -2,6 +2,7 @@ import ast
 import logging
 import re
 from typing import Any
+from app.indexing.graph_extractor import CodeGraphExtractor
 
 logger = logging.getLogger(__name__)
 
@@ -22,23 +23,26 @@ class CodeChunker:
 
         try:
             if ext == "py":
-                return self._chunk_python(text, prefix)
+                return self._chunk_python(text, prefix, file_path)
             elif ext in ["js", "ts", "jsx", "tsx"]:
-                return self._chunk_javascript(text, prefix)
+                return self._chunk_javascript(text, prefix, file_path)
             elif ext == "rs":
-                return self._chunk_rust(text, prefix)
+                return self._chunk_rust(text, prefix, file_path)
             else:
                 return self._chunk_fallback(text, prefix)
         except Exception as e:
             logger.warning(f"Syntax chunking failed for {file_path} ({e}), dropping to fallback.")
             return self._chunk_fallback(text, prefix)
 
-    def _chunk_python(self, text: str, prefix: str) -> list[dict[str, Any]]:
+    def _chunk_python(self, text: str, prefix: str, file_path: str) -> list[dict[str, Any]]:
         chunks = []
         try:
             tree = ast.parse(text)
             lines = text.split("\n")
-
+            
+            extractor = CodeGraphExtractor("py")
+            nodes, edges = extractor.extract_from_ast(tree, file_path)
+            
             # Gather top-level imports to prepend to the FIRST chunk only.
             # H-18: Prepending imports to every chunk inflates token usage and
             # introduces duplicate content that degrades retrieval precision.
@@ -78,24 +82,41 @@ class CodeChunker:
                 else:
                     chunks.append({"text_preview": full_chunk})
 
+            # Append the extracted graph items to the first chunk as metadata
+            if chunks and (nodes or edges):
+                chunks[0]["kg_nodes"] = nodes
+                chunks[0]["kg_edges"] = edges
+
             return chunks
         except SyntaxError:
             return self._chunk_fallback(text, prefix)
 
-    def _chunk_javascript(self, text: str, prefix: str) -> list[dict[str, Any]]:
+    def _chunk_javascript(self, text: str, prefix: str, file_path: str) -> list[dict[str, Any]]:
         # Regex heuristic for TS/JS: exported functions, classes, consts
         pattern = re.compile(
             r"^(?:export\s+)?(?:async\s+)?(?:function|class|const|let|var)\s+\w+\s*=?\s*(?:\([^)]*\))?\s*(?:=>)?\s*[{]",
             re.MULTILINE,
         )
-        return self._regex_chunk(text, prefix, pattern)
+        extractor = CodeGraphExtractor("js")
+        nodes, edges = extractor.extract_from_text(text, file_path)
+        chunks = self._regex_chunk(text, prefix, pattern)
+        if chunks and (nodes or edges):
+            chunks[0]["kg_nodes"] = nodes
+            chunks[0]["kg_edges"] = edges
+        return chunks
 
-    def _chunk_rust(self, text: str, prefix: str) -> list[dict[str, Any]]:
+    def _chunk_rust(self, text: str, prefix: str, file_path: str) -> list[dict[str, Any]]:
         # Regex heuristic for Rust: fn, impl, struct, enum
         pattern = re.compile(
             r"^(?:pub\s+)?(?:async\s+)?(?:fn|impl|struct|enum|trait)\s+\w+", re.MULTILINE
         )
-        return self._regex_chunk(text, prefix, pattern)
+        extractor = CodeGraphExtractor("rs")
+        nodes, edges = extractor.extract_from_text(text, file_path)
+        chunks = self._regex_chunk(text, prefix, pattern)
+        if chunks and (nodes or edges):
+            chunks[0]["kg_nodes"] = nodes
+            chunks[0]["kg_edges"] = edges
+        return chunks
 
     def _regex_chunk(self, text: str, prefix: str, pattern: re.Pattern) -> list[dict[str, Any]]:
         chunks = []

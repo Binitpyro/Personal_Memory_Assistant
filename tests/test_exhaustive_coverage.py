@@ -196,7 +196,9 @@ def test_api_exhaustive(real_db, mock_emb, mock_lancedb):
     app.dependency_overrides[get_lancedb] = lambda: mock_lancedb
     app.dependency_overrides[get_llm] = MagicMock()
 
-    client = TestClient(app)
+    import os
+    token = os.environ.get("X_LOCAL_ACCESS_TOKEN", "test-token")
+    client = TestClient(app, headers={"X-Local-Access-Token": token})
     assert client.get("/api/health").status_code == 200
     assert client.get("/api/system/metrics").status_code == 200
     assert client.get("/api/insights").status_code == 200

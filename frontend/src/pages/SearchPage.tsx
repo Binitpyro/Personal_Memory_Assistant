@@ -1,7 +1,33 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
-import { Search, Send, Sparkles, Loader2, FileText, Clock, Trash2, User, Bot, RotateCcw, Filter } from 'lucide-react'
+import { Search, Send, Sparkles, Loader2, FileText, Clock, Trash2, User, Bot, RotateCcw, Filter, Network, ChevronDown, ChevronRight } from 'lucide-react'
 import { useApi, invalidateCache } from '../useApi'
 import { getQueryHistory, clearQueryHistory, subscribeQuery, getFileTree, getAppConfig, type QuerySource, type QueryStreamChunk } from '../api'
+
+import { CrystalGraphTrace } from '../components/CrystalGraphTrace'
+
+// New component for Graph Trace
+const GraphTraceViewer = ({ traceData }: { traceData: string }) => {
+  const [isOpen, setIsOpen] = useState(false)
+  return (
+    <div className="mt-3 border border-primary/20 rounded-xl overflow-hidden bg-surface-dark/30">
+      <button 
+        onClick={() => setIsOpen(!isOpen)}
+        className="w-full flex items-center justify-between px-3 py-2 text-xs font-bold text-primary-light hover:bg-primary/5 transition-colors"
+      >
+        <span className="flex items-center gap-1.5"><Network className="w-3.5 h-3.5" /> Graph Trace: Crystal Dreamscape</span>
+        {isOpen ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+      </button>
+      {isOpen && (
+        <div className="p-3 border-t border-primary/10">
+          <CrystalGraphTrace traceData={traceData} />
+          <div className="mt-4 text-xs font-mono text-text-secondary overflow-x-auto whitespace-pre p-2 bg-black/20 rounded-md">
+            {traceData}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
 
 interface Message {
   role: 'user' | 'assistant'
@@ -10,7 +36,9 @@ interface Message {
   latency_ms?: number
   isStreaming?: boolean
   mode?: 'fast_path' | 'full_rag' | 'degraded_rag'
+  graph_hops?: string
 }
+
 
 export function SearchPage() {
   const [question, setQuestion] = useState('')
@@ -106,7 +134,7 @@ export function SearchPage() {
         setMessages(prev => {
           const last = prev.at(-1)
           if (last?.role === 'assistant') {
-            return [...prev.slice(0, -1), { ...last, sources, latency_ms: latency, mode: chunk.mode as any || 'full_rag' }]
+            return [...prev.slice(0, -1), { ...last, sources, latency_ms: latency, mode: chunk.mode as any || 'full_rag', graph_hops: chunk.graph_hops }]
           }
           return prev
         })
@@ -117,7 +145,7 @@ export function SearchPage() {
         setMessages(prev => {
           const last = prev.at(-1)
           if (last?.role === 'assistant') {
-            return [...prev.slice(0, -1), { ...last, content: fullText, sources: chunk.sources || sources, latency_ms: chunk.latency_ms || latency, mode: 'fast_path' }]
+            return [...prev.slice(0, -1), { ...last, content: fullText, sources: chunk.sources || sources, latency_ms: chunk.latency_ms || latency, mode: 'fast_path', graph_hops: chunk.graph_hops }]
           }
           return prev
         })
@@ -152,7 +180,13 @@ export function SearchPage() {
         setSearching(false)
         setMessages(prev => {
           const last = prev.at(-1)
-          if (last) return [...prev.slice(0, -1), { ...last, isStreaming: false }]
+          if (last) {
+            return [...prev.slice(0, -1), { 
+              ...last, 
+              isStreaming: false,
+              ...(chunk.graph_hops ? { graph_hops: chunk.graph_hops } : {})
+            }]
+          }
           return prev
         })
         invalidateCache('query-history')
@@ -283,6 +317,10 @@ export function SearchPage() {
                         <span className="text-[10px] text-text-secondary self-center">+{msg.sources.length - 3} more</span>
                       )}
                     </div>
+                  )}
+
+                  {msg.role === 'assistant' && msg.graph_hops && (
+                    <GraphTraceViewer traceData={msg.graph_hops} />
                   )}
                 </div>
                 {msg.role === 'user' && (

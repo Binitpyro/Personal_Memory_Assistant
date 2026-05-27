@@ -15,7 +15,7 @@ class TestEmbeddingServiceInit:
     def test_defaults(self):
         svc = EmbeddingService(model_name="test-model")
         assert svc.model_name == "test-model"
-        assert svc.model is None
+        assert svc._session is None
         assert not svc.is_ready
 
     def test_is_ready_false_before_load(self):
@@ -61,7 +61,7 @@ class TestLoadModelBackground:
 
     def test_no_load_if_model_exists(self):
         svc = EmbeddingService("model")
-        svc.model = MagicMock()
+        svc._session = MagicMock()
         with patch.object(svc, "load_model") as _mock_load:
             svc.load_model_background()
         _mock_load.assert_not_called()
@@ -110,20 +110,26 @@ class TestEmbedTexts:
     @pytest.mark.asyncio
     async def test_deduplication(self):
         svc = EmbeddingService("model")
-        mock_model = MagicMock()
         import numpy as np
 
-        mock_model.encode = MagicMock(return_value=np.array([[0.1] * 384]))
-        svc.model = mock_model
+        mock_session = MagicMock()
+        mock_session.run = MagicMock(return_value=[np.array([[0.1] * 384])])
+        svc._session = mock_session
+        
+        mock_tokenizer = MagicMock()
+        mock_encoded = MagicMock()
+        mock_encoded.ids = [1, 2, 3]
+        mock_encoded.attention_mask = [1, 1, 1]
+        mock_encoded.type_ids = [0, 0, 0]
+        mock_tokenizer.encode_batch = MagicMock(return_value=[mock_encoded])
+        svc._tokenizer = mock_tokenizer
 
         with patch("app.indexing.service.progress") as mock_progress:
             mock_progress.set_current_file = MagicMock()
             result = await svc.embed_texts(["hello", "hello"])  # Two identical
 
-        # model.encode should be called with 1 unique text
-        call_args = mock_model.encode.call_args_list
-        total_encoded = sum(len(call[0][0]) for call in call_args)
-        assert total_encoded == 1
+        # _session.run should be called once since there's 1 unique text
+        assert mock_session.run.call_count == 1
         assert len(result) == 2
 
     @pytest.mark.asyncio
@@ -131,9 +137,17 @@ class TestEmbedTexts:
         svc = EmbeddingService("model")
         import numpy as np
 
-        mock_model = MagicMock()
-        mock_model.encode = MagicMock(return_value=np.array([[0.1] * 384]))
-        svc.model = mock_model
+        mock_session = MagicMock()
+        mock_session.run = MagicMock(return_value=[np.array([[0.1] * 384])])
+        svc._session = mock_session
+        
+        mock_tokenizer = MagicMock()
+        mock_encoded = MagicMock()
+        mock_encoded.ids = [1]
+        mock_encoded.attention_mask = [1]
+        mock_encoded.type_ids = [0]
+        mock_tokenizer.encode_batch = MagicMock(return_value=[mock_encoded])
+        svc._tokenizer = mock_tokenizer
 
         with patch("app.indexing.service.progress") as mock_progress:
             mock_progress.set_current_file = MagicMock()

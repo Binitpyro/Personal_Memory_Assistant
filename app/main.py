@@ -35,6 +35,7 @@ from app.api.search import router as search_router
 from app.api.system import router as system_router
 from app.api.telemetry import router as telemetry_router
 from app.config import settings
+from app.storage.db import DatabaseManager
 from app.project_constants import APP_VERSION
 
 _BASE_DIR = Path(__file__).parent.parent
@@ -80,7 +81,7 @@ def _missing_frontend_response() -> HTMLResponse:
 def health(db: DatabaseManager):
     """Shared payload for /health and /api/health."""
     emb = get_emb()
-    model_ready = emb.model is not None
+    model_ready = emb._session is not None
     db_ok = db.conn is not None
     status = "ok" if model_ready and db_ok else "degraded"
     return {
@@ -340,8 +341,8 @@ async def _bg_auto_vacuum(db_manager):
         marker = Path("data/.last_vacuum")
         if marker.exists() and (time.time() - marker.stat().st_mtime) / 86400 < 7:
             return
-        logger.info("Auto-vacuum: running background VACUUM…")
-        await db_manager.vacuum()
+        logger.info("Auto-vacuum: running background incremental VACUUM…")
+        await db_manager.incremental_vacuum(1000)
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.touch()
         logger.info("Auto-vacuum complete.")
@@ -371,7 +372,10 @@ app.add_middleware(
 async def security_and_telemetry_middleware(request: Request, call_next):
     # 1. Enforce Local Access Token if running in desktop mode
     expected_token = os.environ.get("X_LOCAL_ACCESS_TOKEN")
-    if expected_token and request.url.path.startswith("/api/") and request.method != "OPTIONS":
+    if not expected_token:
+        raise RuntimeError("X_LOCAL_ACCESS_TOKEN missing. Refusing to serve request.")
+        
+    if request.url.path.startswith("/api/") and request.method != "OPTIONS":
         if request.url.path not in ("/api/health", "/health", "/api/index/progress-stream"):
             provided_token = request.headers.get("X-Local-Access-Token")
             if not provided_token:

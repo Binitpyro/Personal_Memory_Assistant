@@ -38,18 +38,24 @@ class DatabaseManager:
         self.db_path = db_path
         self.pool_size = pool_size
         self._write_conn: aiosqlite.Connection | None = None
-        self._read_pool: asyncio.Queue[aiosqlite.Connection] = asyncio.Queue()
+        self._read_pool: asyncio.Queue[aiosqlite.Connection] | None = None
         self._pool_initialized = False
-        self._pool_lock = asyncio.Lock()
+        self._pool_lock: asyncio.Lock | None = None
 
     async def connect(self) -> None:
         """Establish connection pool to the SQLite database."""
+        if self._pool_lock is None:
+            self._pool_lock = asyncio.Lock()
+
         if self._pool_initialized:
             return
 
         async with self._pool_lock:
             if self._pool_initialized:
                 return
+
+            if self._read_pool is None:
+                self._read_pool = asyncio.Queue()
 
             # 1. Primary write connection
             self._write_conn = await aiosqlite.connect(self.db_path)
@@ -68,15 +74,16 @@ class DatabaseManager:
         conn.row_factory = aiosqlite.Row
         await conn.create_function("zlib_decompress", 1, _zlib_decompress_fn)
 
+        await conn.execute("PRAGMA auto_vacuum = INCREMENTAL;")
         await conn.execute("PRAGMA journal_mode = WAL;")
         await conn.execute("PRAGMA foreign_keys = ON;")
         await conn.execute("PRAGMA synchronous = NORMAL;")
         await conn.execute("PRAGMA busy_timeout = 5000;")
         # ── Performance PRAGMAs ──────────────────────────────────
-        await conn.execute("PRAGMA cache_size = -2000000;")  # 2 GB page cache
+        await conn.execute("PRAGMA cache_size = -16384;")  # 16 MB page cache for memory constraint
         await conn.execute(
             "PRAGMA mmap_size = 268435456;"
-        )  # 256 MB memory-mapped I/O
+        )  # 256 MB memory-mapped I/O (OS managed, doesn't consume app RAM directly)
         await conn.execute("PRAGMA temp_store = MEMORY;")  # temp tables in RAM
         # NOTE: page_size only affects new databases. Existing ones ignore this until VACUUM.
         await conn.execute("PRAGMA page_size = 32768;")
@@ -95,6 +102,12 @@ class DatabaseManager:
         """Borrow a connection from the read pool."""
         if not self._pool_initialized:
             await self.connect()
+            
+        if self.db_path == ":memory:":
+            yield self._write_conn
+            return
+            
+        assert self._read_pool is not None
         conn = await self._read_pool.get()
         try:
             yield conn
@@ -109,14 +122,18 @@ class DatabaseManager:
 
     async def close(self):
         """Close all connections in the pool."""
+        if self._pool_lock is None:
+            return
+            
         async with self._pool_lock:
             if self._write_conn:
                 await self._write_conn.close()
                 self._write_conn = None
 
-            while not self._read_pool.empty():
-                conn = self._read_pool.get_nowait()
-                await conn.close()
+            if self._read_pool:
+                while not self._read_pool.empty():
+                    conn = self._read_pool.get_nowait()
+                    await conn.close()
 
             self._pool_initialized = False
 
@@ -141,6 +158,18 @@ class DatabaseManager:
             logger.error("Error initializing database: %s", e)
             raise
         await self._migrate(conn)
+        
+        # H-15: Auto-VACUUM locks DB. Check fragmentation on startup.
+        # If there are a large number of free pages, do an incremental vacuum.
+        try:
+            async with conn.execute("PRAGMA freelist_count;") as cur:
+                row = await cur.fetchone()
+                if row and row[0] > 10000:
+                    logger.info("Database heavily fragmented (%d free pages). Running incremental vacuum.", row[0])
+                    await conn.execute("PRAGMA incremental_vacuum(5000);")
+                    await conn.commit()
+        except Exception as e:
+            logger.warning("Failed to run startup incremental vacuum: %s", e)
 
     async def _apply_column_migrations(self, conn: "aiosqlite.Connection") -> None:
         async def _already_applied(name: str) -> bool:
@@ -278,6 +307,44 @@ class DatabaseManager:
         except Exception as exc:
             logger.debug("unreal_project_facts migration note: %s", exc)
 
+        # GraphRAG nodes
+        try:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS kg_nodes (
+                    id TEXT PRIMARY KEY,
+                    type TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    properties TEXT DEFAULT '{}',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+            """)
+            await conn.commit()
+            logger.debug("kg_nodes table ensured.")
+        except Exception as exc:
+            logger.debug("kg_nodes migration note: %s", exc)
+
+        # GraphRAG edges
+        try:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS kg_edges (
+                    source TEXT NOT NULL,
+                    target TEXT NOT NULL,
+                    relation TEXT NOT NULL,
+                    weight REAL DEFAULT 1.0,
+                    properties TEXT DEFAULT '{}',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    PRIMARY KEY (source, target, relation),
+                    FOREIGN KEY (source) REFERENCES kg_nodes(id) ON DELETE CASCADE,
+                    FOREIGN KEY (target) REFERENCES kg_nodes(id) ON DELETE CASCADE
+                )
+            """)
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_kg_edges_target ON kg_edges(target)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_kg_edges_relation ON kg_edges(relation)")
+            await conn.commit()
+            logger.debug("kg_edges table ensured.")
+        except Exception as exc:
+            logger.debug("kg_edges migration note: %s", exc)
+
         # Phase 9.1: Drop the heavy covering index that duplicates chunk text
         try:
             await conn.execute("DROP INDEX IF EXISTS idx_chunks_covering")
@@ -291,7 +358,7 @@ class DatabaseManager:
                 "SELECT sql FROM sqlite_master WHERE type='table' AND name='chunk_fts'"
             )
             row = await cur.fetchone()
-            if row and ("detail=column" not in row[0] or "trigram" not in row[0]):
+            if row and ("detail=full" not in row[0] or "trigram" not in row[0]):
                 # We use content="" (contentless) because the actual text is compressed
                 # in the source table and decompressed via triggers into the FTS index.
                 await conn.executescript("""
@@ -299,7 +366,7 @@ class DatabaseManager:
                     DROP TRIGGER IF EXISTS chunks_ad;
                     DROP TABLE IF EXISTS chunk_fts;
                     CREATE VIRTUAL TABLE chunk_fts USING fts5(
-                        chunks_text, content='', tokenize='trigram', detail=column
+                        chunks_text, content='', tokenize='trigram', detail=full
                     );
                     CREATE TRIGGER chunk_fts_ai AFTER INSERT ON chunks BEGIN
                         INSERT INTO chunk_fts(rowid, chunks_text)
@@ -349,6 +416,16 @@ class DatabaseManager:
         await conn.execute("VACUUM")
         await conn.commit()
         logger.info("Database maintenance completed.")
+
+    async def incremental_vacuum(self, pages: int = 1000) -> None:
+        """Run an incremental vacuum to reclaim space without locking for long periods."""
+        conn = self._get_conn()
+        try:
+            logger.info("Running incremental vacuum (%d pages)...", pages)
+            await conn.execute(f"PRAGMA incremental_vacuum({pages});")
+            await conn.commit()
+        except Exception as e:
+            logger.warning("Incremental vacuum failed: %s", e)
 
     async def wal_checkpoint(self) -> None:
         """Force a WAL checkpoint to truncate the WAL file back to zero size.
@@ -584,6 +661,60 @@ class DatabaseManager:
         )
         await conn.commit()
 
+    async def insert_kg_nodes_bulk(self, data: list[tuple[str, str, str, str]]) -> None:
+        """Insert multiple kg_nodes efficiently.
+        data format: list of (id, type, label, properties)
+        """
+        if not data:
+            return
+        conn = self._get_conn()
+        await conn.executemany(
+            "INSERT INTO kg_nodes (id, type, label, properties) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET type=excluded.type, label=excluded.label, properties=excluded.properties",
+            data,
+        )
+        await conn.commit()
+
+    async def insert_kg_edges_bulk(self, data: list[tuple[str, str, str, float, str]]) -> None:
+        """Insert multiple kg_edges efficiently.
+        data format: list of (source, target, relation, weight, properties)
+        """
+        if not data:
+            return
+        conn = self._get_conn()
+        await conn.executemany(
+            "INSERT INTO kg_edges (source, target, relation, weight, properties) VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(source, target, relation) DO UPDATE SET weight=excluded.weight, properties=excluded.properties",
+            data,
+        )
+        await conn.commit()
+
+    async def resolve_pending_graph_edges(self) -> None:
+        """Resolve PENDING:: edges to actual node IDs based on their name."""
+        conn = self._get_conn()
+        
+        # 1. Update edges where we can find a matching node
+        await conn.execute(
+            """
+            UPDATE kg_edges
+            SET target = (
+                SELECT id FROM kg_nodes
+                WHERE kg_nodes.name = substr(kg_edges.target, 10)
+                LIMIT 1
+            )
+            WHERE target LIKE 'PENDING::%'
+            AND EXISTS (
+                SELECT 1 FROM kg_nodes
+                WHERE kg_nodes.name = substr(kg_edges.target, 10)
+            )
+            """
+        )
+        
+        # 2. Delete unresolved edges to keep the graph clean
+        await conn.execute("DELETE FROM kg_edges WHERE target LIKE 'PENDING::%'")
+        
+        await conn.commit()
+
     async def get_chunk_embeddings(self, chunk_ids: list[int]) -> dict[int, bytes]:
         """Fetch embeddings for a list of chunk IDs."""
         if not chunk_ids:
@@ -624,6 +755,77 @@ class DatabaseManager:
                     for r in rows
                 ]
 
+    async def bfs_from_chunks(self, chunk_ids: list[int], max_depth: int = 3, limit: int = 5) -> list[int]:
+        """Perform BFS to find related chunk_ids starting from a set of seed chunk_ids."""
+        if not chunk_ids:
+            return []
+        
+        placeholders = ",".join("?" for _ in chunk_ids)
+        # We query for edges traversed from the starting nodes
+        query = f"""
+        WITH RECURSIVE
+        bfs_nodes(id, depth) AS (
+            SELECT id, 0 
+            FROM kg_nodes 
+            WHERE json_extract(properties, '$.chunk_id') IN ({placeholders})
+            
+            UNION ALL
+            
+            SELECT e.target, b.depth + 1
+            FROM kg_edges e
+            JOIN bfs_nodes b ON e.source = b.id
+            WHERE b.depth < ?
+            
+            UNION ALL
+            
+            SELECT e.source, b.depth + 1
+            FROM kg_edges e
+            JOIN bfs_nodes b ON e.target = b.id
+            WHERE b.depth < ?
+        )
+        SELECT DISTINCT CAST(json_extract(n.properties, '$.chunk_id') AS INTEGER) as chunk_id
+        FROM bfs_nodes b
+        JOIN kg_nodes n ON b.id = n.id
+        WHERE json_extract(n.properties, '$.chunk_id') IS NOT NULL
+        LIMIT ?
+        """
+        params = chunk_ids + [max_depth, max_depth, limit]
+        
+        async with self._get_read_conn() as conn:
+            async with conn.execute(query, params) as cursor:
+                rows = await cursor.fetchall()
+                return [r[0] for r in rows if r[0] is not None]
+
+    async def get_relational_paths(self, src_chunk_ids: list[int], max_depth: int = 3, limit: int = 5) -> list[str]:
+        """Extract path strings starting from source chunks for LLM context."""
+        if not src_chunk_ids:
+            return []
+            
+        placeholders = ",".join("?" for _ in src_chunk_ids)
+        query = f"""
+        WITH RECURSIVE
+        paths(id, path_str, depth) AS (
+            SELECT id, label || ' ' || name, 0
+            FROM kg_nodes
+            WHERE json_extract(properties, '$.chunk_id') IN ({placeholders})
+            
+            UNION ALL
+            
+            SELECT e.target, p.path_str || ' -[' || e.relation || ']-> ' || (SELECT label || ' ' || name FROM kg_nodes WHERE id = e.target), p.depth + 1
+            FROM kg_edges e
+            JOIN paths p ON e.source = p.id
+            WHERE p.depth < ?
+        )
+        SELECT path_str FROM paths
+        WHERE depth > 0
+        LIMIT ?
+        """
+        params = src_chunk_ids + [max_depth, limit]
+        
+        async with self._get_read_conn() as conn:
+            async with conn.execute(query, params) as cursor:
+                rows = await cursor.fetchall()
+                return [r[0] for r in rows]
 
     async def commit(self) -> None:
         """Explicitly commits the current transaction."""
@@ -1023,6 +1225,8 @@ class DatabaseManager:
 
     async def is_healthy(self) -> bool:
         """Quick DB health check - runs a trivial query."""
+        if self._write_conn is None:
+            return False
         try:
             async with self._get_read_conn() as conn:
                 async with conn.execute("SELECT 1") as cursor:
@@ -1196,3 +1400,63 @@ class DatabaseManager:
                     for r in rows
                 ]
 
+    async def get_graph_edges(self, node_id: str, max_depth: int = 2) -> list[dict[str, Any]]:
+        """Retrieve 1-hop and 2-hop edges for a given node using recursive CTE."""
+        query = """
+            WITH RECURSIVE
+                connected_nodes(id, depth) AS (
+                    SELECT ? AS id, 0 AS depth
+                    UNION ALL
+                    SELECT CASE
+                        WHEN ke.source = cn.id THEN ke.target
+                        ELSE ke.source
+                    END AS id, cn.depth + 1 AS depth
+                    FROM kg_edges ke
+                    JOIN connected_nodes cn ON ke.source = cn.id OR ke.target = cn.id
+                    WHERE cn.depth < ?
+                )
+            SELECT DISTINCT e.source, e.target, e.relation, e.weight, e.properties
+            FROM kg_edges e
+            JOIN connected_nodes n1 ON e.source = n1.id
+            JOIN connected_nodes n2 ON e.target = n2.id
+        """
+        async with self._get_read_conn() as conn:
+            async with conn.execute(query, (node_id, max_depth)) as cursor:
+                rows = await cursor.fetchall()
+                return [
+                    {
+                        "source": r[0],
+                        "target": r[1],
+                        "relation": r[2],
+                        "weight": r[3],
+                        "properties": r[4],
+                    }
+                    for r in rows
+                ]
+
+    async def get_graph_nodes(self, node_ids: list[str]) -> list[dict[str, Any]]:
+        """Retrieve node details for a list of node IDs."""
+        if not node_ids:
+            return []
+        
+        result = []
+        async with self._get_read_conn() as conn:
+            batch_size = 900
+            for i in range(0, len(node_ids), batch_size):
+                batch = node_ids[i:i+batch_size]
+                placeholders = ",".join("?" for _ in batch)
+                query = f"SELECT id, type, label, properties FROM kg_nodes WHERE id IN ({placeholders})"
+                async with conn.execute(query, batch) as cursor:
+                    rows = await cursor.fetchall()
+                    result.extend(
+                        [
+                            {
+                                "id": r[0],
+                                "type": r[1],
+                                "label": r[2],
+                                "properties": r[3],
+                            }
+                            for r in rows
+                        ]
+                    )
+        return result

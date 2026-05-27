@@ -2,6 +2,8 @@ import asyncio
 import json
 import logging
 
+from concurrent.futures import ThreadPoolExecutor
+
 from fastapi import APIRouter, BackgroundTasks, Depends, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -12,6 +14,9 @@ from app.api.limiter import limiter
 from app.storage.db import DatabaseManager
 
 logger = logging.getLogger(__name__)
+
+# Single-worker pool to prevent out-of-memory spikes during concurrent encodes
+_ENCODE_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pma-encode")
 
 router = APIRouter()
 
@@ -217,9 +222,16 @@ async def remove_folder_index(
     from app.state import file_tree_cache as _file_tree_cache
     from app.state import insights_cache as _insights_cache
 
-    folders = request.validated_folders
+    import os
+    folders = []
+    for f in request.folders:
+        p = f.strip().strip('"').strip("'")
+        if p and ".." not in p.replace("\\", "/").split("/"):
+            # C-02: Don't check isdir, just normalize so we can remove deleted folders
+            folders.append(os.path.abspath(os.path.normpath(p)))
+
     if not folders:
-        return JSONResponse(status_code=400, content={"error": "No valid folder paths provided."})
+        return JSONResponse(status_code=200, content={"message": "No valid folder paths provided.", "chunks_removed": 0})
 
     folder = folders[0]
     try:
@@ -278,9 +290,6 @@ async def unreal_import(
 
         import os
 
-        from sentence_transformers import SentenceTransformer
-
-        model: SentenceTransformer = emb.model
         # M-13: Summarize key fields to stay within model token limits (truncation avoidance).
         doc = (
             f"Unreal Project: {stats.get('ProjectName', 'Unknown')} "
@@ -290,8 +299,10 @@ async def unreal_import(
             f"Materials: {stats.get('MaterialCount', 0)} "
             f"Characters: {stats.get('CharacterBPCount', 0)}"
         )
-        embedding_array = await asyncio.to_thread(model.encode, doc)
-        embedding = embedding_array.tolist()
+        
+        # H-05: Use async embed_query which properly uses the thread executor
+        embedding = await emb.embed_query(doc)
+        
         batch_ids = [f"unreal_{os.path.basename(jpath)}"]
         batch_metas = [{"source": jpath, "text": doc}]
         batch_embs = [embedding]

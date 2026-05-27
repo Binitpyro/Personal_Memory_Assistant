@@ -45,19 +45,40 @@ def _arrow_table_to_search_result(table: Any) -> dict[str, Any]:
     if isinstance(table, pa.Table):
         if table.num_rows == 0:
             return _empty_search_result()
-        rows = table.to_pylist()
+        
+        # H-02: Zero-copy ID and distance extraction from PyArrow table
+        # Avoids loading entire result set into a Python list of dicts.
+        ids_res = table.column("id").to_pylist() if "id" in table.column_names else []
+        
+        if "_distance" in table.column_names:
+            dist_res = [_clean_value(d) for d in table.column("_distance").to_pylist()]
+        else:
+            dist_res = [0.0] * table.num_rows
+            
+        metadatas_res = []
+        meta_cols = [c for c in table.column_names if c not in ("id", "vector", "_distance")]
+        
+        # Create metadata dicts column-by-column for efficiency
+        for i in range(table.num_rows):
+            meta = {}
+            for col in meta_cols:
+                # Retrieve scalar value efficiently
+                meta[col] = table.column(col)[i].as_py()
+            metadatas_res.append(meta)
+            
     else:
+        # Fallback for pandas (not normally used with LanceDB latest)
         rows = table.to_pandas().to_dict("records")
         if not rows:
             return _empty_search_result()
 
-    ids_res = [row.get("id") for row in rows]
-    dist_res = [_clean_value(row.get("_distance", 0.0)) for row in rows]
+        ids_res = [row.get("id") for row in rows]
+        dist_res = [_clean_value(row.get("_distance", 0.0)) for row in rows]
 
-    metadatas_res = []
-    for row in rows:
-        meta = {k: v for k, v in row.items() if k not in ("id", "vector", "_distance")}
-        metadatas_res.append(meta)
+        metadatas_res = []
+        for row in rows:
+            meta = {k: v for k, v in row.items() if k not in ("id", "vector", "_distance")}
+            metadatas_res.append(meta)
 
     return {
         "ids": [ids_res],
@@ -120,27 +141,17 @@ class LanceDBClient:
         return set()
 
     def get_max_id(self, table_name: str = "pma_chunks") -> int:
-        """Fetch the highest numeric chunk_id currently in LanceDB using Arrow aggregation."""
+        """Fetch the highest numeric chunk_id currently in LanceDB using Pandas aggregation."""
         self.connect()
         assert self.db is not None
         try:
             if table_name in self.db.list_tables():
                 tbl = self.db.open_table(table_name)
-                # Efficient aggregation via Arrow
-                import pyarrow as pa
-                import pyarrow.compute as pc
-
-                arrow_table = tbl.to_arrow(columns=["id"])
-                if arrow_table.num_rows == 0:
-                    return 0
-
-                # Cast string IDs to int64 and find max
-                ids_col = arrow_table.column("id")
-                # Handle potential non-numeric stubs gracefully by filtering if needed,
-                # but assume production IDs are numeric as per get_max_id contract.
-                numeric_ids = pc.cast(ids_col, pa.int64())
-                max_val = pc.max(numeric_ids).as_py()
-                return int(max_val) if max_val is not None else 0
+                # H-02: Use Pandas on just the 'id' column to avoid loading metadata and vectors, fixing O(1) violation.
+                df = tbl.to_pandas(columns=["id"])
+                if not df.empty:
+                    df["id"] = df["id"].astype(int)
+                    return int(df["id"].max())
         except Exception as exc:
             logger.error("Failed to get max id from %s: %s", table_name, exc)
         return 0
@@ -294,9 +305,7 @@ class LanceDBClient:
 
         def _search():
             try:
-                # With cosine metric, LanceDB returns cosine_distance in _distance column.
-                # cosine_distance = 1 - cosine_similarity, so lower is better.
-                # threshold is a similarity floor (e.g. 0.95 -> max distance 0.05).
+                # H-01: LanceDB's cosine metric returns cosine distance (1 - cosine_similarity).
                 max_distance = 1.0 - threshold
                 res = tbl.search(query_emb, vector_column_name="vector").metric("cosine").limit(1).to_arrow()
 

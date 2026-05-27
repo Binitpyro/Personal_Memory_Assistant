@@ -38,6 +38,8 @@ class Settings(BaseSettings):
             else:
                 persist_base = os.path.expanduser("~/.cache/personal_memory_assistant")
 
+            os.makedirs(persist_base, exist_ok=True)
+
             # Update paths to use the persistent base
             self.db_path = os.path.join(persist_base, "pma_metadata.db")
             self.lancedb_persist_dir = os.path.join(persist_base, "lancedb_cache")
@@ -47,6 +49,9 @@ class Settings(BaseSettings):
                 self.lancedb_persist_dir = "data/lancedb"
             if not self.db_path:
                 self.db_path = "data/pma_metadata.db"
+            
+            os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
+            os.makedirs(os.path.abspath(self.lancedb_persist_dir), exist_ok=True)
 
         return self
 

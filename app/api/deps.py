@@ -11,11 +11,21 @@ _db_manager: DatabaseManager | None = None
 embedding_service = None
 lancedb_client = None
 llm_client = None
+_planner = None
 
 _indexing_service_cls: Any = None
 _progress_obj: Any = None
 _full_rag_func: Any = None
 _insights_service_cls: Any = None
+
+
+def get_planner():
+    global _planner
+    if _planner is None:
+        from app.search.planner import QueryPlanner
+
+        _planner = QueryPlanner()
+    return _planner
 
 
 async def get_db() -> DatabaseManager:

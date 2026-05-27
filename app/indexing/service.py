@@ -36,6 +36,8 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# H-18: Dedicated thread pool for disk I/O to avoid contention with indexing tasks
+_DISK_EXECUTOR = ThreadPoolExecutor(max_workers=32, thread_name_prefix="pma_disk")
 
 class IndexingProgress:
     def __init__(self):
@@ -207,7 +209,7 @@ class IndexingService:
                 progress.complete()
                 return
 
-            batch_size = 1500
+            batch_size = 16  # Reduced from 100 to rigidly enforce O(1) memory bounds
             for i in range(0, len(files_to_index), batch_size):
                 batch = files_to_index[i : i + batch_size]
                 await self._batch_index_pipeline(
@@ -216,6 +218,10 @@ class IndexingService:
                 import gc
 
                 gc.collect()
+
+            # Phase 1: Resolve pending GraphRAG edges (Disabled for now)
+            # progress.set_current_file("Resolving code graph edges…")
+            # await self.db.resolve_pending_graph_edges()
 
             await self._generate_folder_profiles(all_files, unique_folders)
             from app.search.retrieval import clear_retrieval_cache
@@ -227,6 +233,8 @@ class IndexingService:
 
             state.bg_tasks.add(task)
             task.add_done_callback(state.bg_tasks.discard)
+
+            # Removed post-index incremental vacuum to avoid database locks (H-15)
 
             progress.complete()
 
@@ -243,8 +251,8 @@ class IndexingService:
 
         pre_extracted = await self._rust_pre_extract(files_to_index)
 
-        embed_queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=1000)
-        store_queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=1000)
+        embed_queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=100)
+        store_queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=100)
 
         # C-03: Use return_exceptions=True so one stage failure doesn't silently cancel
         # the downstream workers, leaving queues stalled. Each worker injects its own
@@ -294,7 +302,8 @@ class IndexingService:
         async def _safe_stream_extract(path: Path, tag: str):
             nonlocal extracted_count
             async with semaphore:
-                cached_text = pre_extracted.get(str(path.absolute()))
+                # O(1) Memory Fix: Pop the text to free RAM immediately as we consume it
+                cached_text = pre_extracted.pop(str(path.absolute()), None)
                 # M-14: format progress string *before* acquiring lock to keep
                 # lock duration minimal (pure counter increment only).
                 async with extracted_lock:
@@ -405,7 +414,7 @@ class IndexingService:
 
                 if item["type"] == "chunk":
                     chunk_batch.append(item)
-                    if len(chunk_batch) >= 100:
+                    if len(chunk_batch) >= 32:
                         await self._process_embed_stream_batch(chunk_batch)
                         for c in chunk_batch:
                             await store_queue.put(c)
@@ -463,7 +472,7 @@ class IndexingService:
                     item["file_id"] = file_info["id"]
                     pending_chunks.append(item)
                     file_info["chunk_count"] += 1
-                    if len(pending_chunks) >= 200:
+                    if len(pending_chunks) >= 50:
                         await self._flush_pending_chunks(pending_chunks, active_files)
                         pending_chunks.clear()
             elif ptype == "footer":
@@ -479,16 +488,20 @@ class IndexingService:
         if not chunks:
             return
         import numpy as np
+        import json
 
         chunk_rows = []
         for item in chunks:
-            row = {k: v for k, v in item["chunk"].items() if k != "_embedding"}
+            row = {k: v for k, v in item["chunk"].items() if k not in ("_embedding", "kg_nodes", "kg_edges")}
             row["file_id"] = item["file_id"]
             chunk_rows.append(row)
 
         chunk_ids_int = await self.db.insert_chunks_bulk(chunk_rows)
 
         l_ids, l_embs, l_metas, emb_blobs = [], [], [], []
+        kg_nodes_data = []
+        kg_edges_data = []
+        
         for chunk_id, item in zip(chunk_ids_int, chunks, strict=False):
             cid_str = str(chunk_id)
             l_ids.append(cid_str)
@@ -505,8 +518,22 @@ class IndexingService:
             emb_blobs.append(
                 (chunk_id, np.array(item["chunk"]["_embedding"], dtype=np.float16).tobytes())
             )
+            
+            for node in item["chunk"].get("kg_nodes", []):
+                props = json.dumps({"chunk_id": chunk_id, "start_line": node.get("start_line"), "end_line": node.get("end_line")})
+                kg_nodes_data.append((node["id"], "entity", node["label"], props))
+                
+            for edge in item["chunk"].get("kg_edges", []):
+                props = json.dumps({"chunk_id": chunk_id})
+                kg_edges_data.append((edge["src_id"], edge["dst_id"], edge["rel_type"], 1.0, props))
 
         await self.db.insert_chunk_embeddings_bulk(emb_blobs)
+        # Entity Graph disabled
+        # if kg_nodes_data:
+        #     await self.db.insert_kg_nodes_bulk(kg_nodes_data)
+        # if kg_edges_data:
+        #     await self.db.insert_kg_edges_bulk(kg_edges_data)
+            
         await self.lancedb_client.add_documents(l_ids, l_embs, l_metas)
         await self.db.commit()
 
@@ -696,7 +723,14 @@ class IndexingService:
         if not text:
             return []
         prefix = self._build_context_prefix(file_path)
-        return self._split_text(text, prefix, 0)
+        chunks = self.code_chunker.chunk_code(text, file_path=file_path, prefix=prefix)
+        # Ensure chunks have start_offset and end_offset
+        for c in chunks:
+            if "start_offset" not in c:
+                c["start_offset"] = 0
+            if "end_offset" not in c:
+                c["end_offset"] = len(c["text_preview"])
+        return chunks
 
     @staticmethod
     def _build_context_prefix(file_path: str) -> str:

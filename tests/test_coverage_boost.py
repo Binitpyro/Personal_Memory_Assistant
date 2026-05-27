@@ -189,16 +189,15 @@ class FakeInsightsDB:
         if self.fail:
             raise RuntimeError("boom")
 
-        # L-08: Use query-string matching instead of call counters for robustness
         sql_lower = sql.lower()
-        if "sum(size)" in sql_lower and "count(*)" in sql_lower:
-            return [(150, 3)]
-        if "order by size desc" in sql_lower:
-            return [("a.py", 100)]
-        if "order by usage_count desc" in sql_lower:
-            return [("b.py", 40, 0)]
         if "group by type" in sql_lower:
             return [(".py", 2, 140), (".md", 1, 10)]
+        if "sum(size)" in sql_lower and "count(*)" in sql_lower:
+            return [(150, 3)]
+        if "limit 10" in sql_lower:
+            return [("a.py", 100)]
+        if "limit 15" in sql_lower:
+            return [("b.py", 40, 0)]
         return []
 
 

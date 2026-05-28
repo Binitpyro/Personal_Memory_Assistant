@@ -149,20 +149,7 @@ def _semantic_deduplicate_fallback(
     return deduped
 
 
-def append_unreal_fact_lines(lines: list[str], unreal_facts: list[dict[str, Any]]) -> None:
-    lines.append("Unreal project summary:")
-    for uf in unreal_facts:
-        lines.append(
-            f"  - {uf['project_name']} (UE {uf['engine_version']}): "
-            f"{uf['total_assets']} assets, {uf['map_count']} maps, "
-            f"{uf['character_blueprints']} char BPs, {uf['material_count']} materials."
-        )
 
-
-def append_unreal_profile_hint(lines: list[str], unreal_profiles: list[dict[str, Any]]) -> None:
-    lines.append("Unreal Engine projects detected:")
-    for up in unreal_profiles:
-        lines.append(f"  - {up['folder_tag']} ({up['file_count']} files)")
 
 
 def append_project_profile_lines(lines: list[str], folder_profiles: list[dict[str, Any]]) -> None:

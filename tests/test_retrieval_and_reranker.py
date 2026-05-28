@@ -51,20 +51,18 @@ async def test_load_query_metadata_and_gather_full_inputs(monkeypatch):
         async def get_file_stats_summary(self):
             return {"total_files": 1, "total_size_mb": 1.0, "by_type": [], "by_folder": []}
 
-        async def get_all_unreal_project_facts(self):
-            return [{"project_name": "U"}]
+
 
         async def get_folder_profiles_text(self):
             return "profiles text"
 
     db = FakeDB()
-    profiles, stats, facts = await retrieval._load_query_metadata(
+    profiles, stats = await retrieval._load_query_metadata(
         db,
         inventory=True,
         project=True,
-        unreal=True,
     )
-    assert profiles and stats and facts
+    assert profiles and stats
 
     async def fake_hybrid_retrieve(**_kwargs):
         return [{"file_path": "a.py", "text": "x", "folder_tag": "A"}]
@@ -86,7 +84,6 @@ async def test_load_query_metadata_and_gather_full_inputs(monkeypatch):
         k=3,
         inventory=True,
         project=True,
-        unreal=False,
         cached_file_stats=stats,
         include_profiles_text=True,
     )

@@ -1,8 +1,76 @@
 import { useState, useEffect } from 'react'
-import { Brain, Shield, ArrowRight, CheckCircle2, ChevronRight, Key, HardDrive, AlertTriangle } from 'lucide-react'
+import { Brain, Shield, ArrowRight, CheckCircle2, ChevronRight, Key, HardDrive, AlertTriangle, Save, Loader2 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { useApi } from '../useApi'
-import { getAuthStatus, getLocalModels, launchGoogleAuth, getDriveInfo, enableSplitBrain } from '../api'
+import { getAuthStatus, getLocalModels, launchGoogleAuth, getDriveInfo, enableSplitBrain, getApiKeyStatus, setApiKey } from '../api'
+
+const PROVIDERS = [
+    { id: 'gemini', name: 'Google Gemini', icon: '✨' },
+    { id: 'groq', name: 'Groq', icon: '⚡' },
+    { id: 'nvidia_nim', name: 'NVIDIA NIM', icon: '🟢' },
+    { id: 'openrouter', name: 'OpenRouter', icon: '🌐' }
+]
+
+function ApiKeyInput({ provider }: { provider: typeof PROVIDERS[0] }) {
+    const { data: status, refetch } = useApi(() => getApiKeyStatus(provider.id), { cacheKey: `api-key-${provider.id}` })
+    const [key, setKey] = useState('')
+    const [saving, setSaving] = useState(false)
+
+    const handleSave = async () => {
+        if (!key) return
+        setSaving(true)
+        try {
+            await setApiKey(provider.id, key)
+            setKey('')
+            await refetch()
+        } catch (e) {
+            console.error(e)
+        } finally {
+            setSaving(false)
+        }
+    }
+
+    return (
+        <div className={`p-4 rounded-xl border flex items-center justify-between gap-4 ${status?.is_set ? 'border-success bg-success/5' : 'border-primary/10 bg-white/50'}`}>
+            <div className="flex items-center gap-3 w-1/3">
+                <span className="text-xl">{provider.icon}</span>
+                <span className="font-semibold">{provider.name}</span>
+            </div>
+            
+            {status?.is_set ? (
+                <div className="flex-1 flex justify-end items-center gap-4">
+                    <span className="text-xs font-mono text-success opacity-80 bg-success/10 px-2 py-1 rounded">
+                        {status.preview}
+                    </span>
+                    <span className="text-success text-sm flex items-center gap-1 font-medium">
+                        <CheckCircle2 className="w-4 h-4" /> Ready
+                    </span>
+                    <button onClick={() => { setKey(''); setSaving(false) }} className="text-xs text-text-secondary hover:text-primary transition-colors">
+                        Update
+                    </button>
+                </div>
+            ) : (
+                <div className="flex-1 flex items-center gap-2">
+                    <input 
+                        type="password"
+                        placeholder="Enter API Key..."
+                        value={key}
+                        onChange={e => setKey(e.target.value)}
+                        className="flex-1 bg-background/50 border border-primary/20 rounded-lg px-3 py-1.5 text-sm outline-none focus:border-primary/50 transition-colors"
+                    />
+                    <button 
+                        onClick={handleSave} 
+                        disabled={saving || !key}
+                        className="glass-button !bg-primary/10 !text-primary hover:!bg-primary/20 px-3 py-1.5 rounded-lg text-sm disabled:opacity-50 flex items-center gap-1"
+                    >
+                        {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+                        Save
+                    </button>
+                </div>
+            )}
+        </div>
+    )
+}
 
 export function SetupPage() {
     const navigate = useNavigate()
@@ -153,23 +221,27 @@ export function SetupPage() {
                         )}
 
                         <div className={`p-5 rounded-2xl border transition-all duration-300 ${isConnected ? 'border-success bg-success/5' : 'border-primary/10 bg-white/50'}`}>
-                            <div className="flex items-center justify-between">
+                            <div className="flex items-center justify-between mb-4">
                                 <div>
                                     <h3 className="font-bold text-lg flex items-center gap-2">
-                                        Google Gemini Account <span className="text-xs ml-2 bg-primary/10 text-primary px-2 py-0.5 rounded-full">Recommended</span>
+                                        Cloud Intelligence <span className="text-xs ml-2 bg-primary/10 text-primary px-2 py-0.5 rounded-full">Secure Keyring</span>
                                     </h3>
-                                    <p className="text-sm text-text-secondary mt-1">Free, instant intelligence with no setup required.</p>
+                                    <p className="text-sm text-text-secondary mt-1">Provide API keys for your preferred cloud models.</p>
                                 </div>
                                 {isConnected ? (
-                                    <div className="flex items-center gap-2 text-success font-medium">
-                                        <CheckCircle2 className="w-5 h-5" /> 
-                                        {authStatus?.method === 'env' ? 'Connected via .env' : 'Connected'}
+                                    <div className="flex items-center gap-2 text-success font-medium text-sm bg-success/10 px-3 py-1 rounded-full">
+                                        <CheckCircle2 className="w-4 h-4" /> 
+                                        {authStatus?.method === 'oauth' ? 'OAuth Connected' : 'Env Connected'}
                                     </div>
                                 ) : (
-                                    <button onClick={handleConnectGoogle} className="glass-button !bg-primary !text-white hover:!bg-primary-h gap-2 text-sm px-5 py-2">
-                                        <Key className="w-4 h-4" /> Connect Google
+                                    <button onClick={handleConnectGoogle} className="glass-button !bg-primary/10 !text-primary hover:!bg-primary/20 gap-2 text-xs px-3 py-1.5">
+                                        <Key className="w-3 h-3" /> OAuth (Gemini)
                                     </button>
                                 )}
+                            </div>
+
+                            <div className="flex flex-col gap-3">
+                                {PROVIDERS.map(p => <ApiKeyInput key={p.id} provider={p} />)}
                             </div>
                         </div>
 

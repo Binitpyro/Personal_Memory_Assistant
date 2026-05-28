@@ -63,7 +63,7 @@ class Settings(BaseSettings):
     max_file_size_mb: int = 50
     supported_extensions: str = (
         ".txt,.md,.pdf,.docx,.csv,.json,.py,.js,.ts,.java,.c,.cpp,.rs,.go,.rb,.html,.css,.xml"
-        ",.yaml,.yml,.toml,.ini,.cfg,.sh,.bat,.uasset,.umap,.uproject,.uplugin"
+        ",.yaml,.yml,.toml,.ini,.cfg,.sh,.bat"
         # Extended language support (overhaul plan)
         ",.swift,.kt,.dart,.vue,.svelte,.graphql,.gql,.proto,.thrift"
         ",.sql,.log,.r,.lua,.zig,.tf,.hcl,.ipynb,.rtf,.odt"

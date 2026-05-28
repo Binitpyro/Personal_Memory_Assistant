@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from app.api.indexing import IndexRequest, UnrealImportRequest, cleanup_stale, export_index
+from app.api.indexing import IndexRequest, cleanup_stale, export_index
 from app.api.insights import get_files_tree
 from app.api.search import QueryRequest, query_history
 from app.api.system import get_system_info
@@ -141,10 +141,7 @@ def test_request_validation_helpers(tmp_path: Path):
     q = QueryRequest(question="   hello world   ")
     assert q.validated_question == "hello world"
 
-    fake_json = tmp_path / "meta.json"
-    fake_json.write_text("{}", encoding="utf-8")
-    ur = UnrealImportRequest(json_path=f" '{fake_json}' ")
-    assert ur.validated_json_path == str(fake_json.resolve())
+    pass
 
 
 def test_context_builder_includes_stats_profiles_and_snippets():

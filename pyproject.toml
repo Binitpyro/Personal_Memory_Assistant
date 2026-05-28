@@ -29,6 +29,7 @@ dependencies = [
     "slowapi>=0.1.0",
     "google-auth>=2.0.0",
     "google-auth-oauthlib>=1.0.0",
+    "keyring>=24.0.0",
 ]
 
 [project.scripts]

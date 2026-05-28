@@ -98,26 +98,7 @@ CREATE TABLE IF NOT EXISTS folder_profiles (
 CREATE INDEX IF NOT EXISTS idx_folder_profiles_tag ON folder_profiles(folder_tag);
 CREATE INDEX IF NOT EXISTS idx_folder_profiles_type ON folder_profiles(project_type);
 
--- Structured Unreal project facts imported from metadata export
-CREATE TABLE IF NOT EXISTS unreal_project_facts (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  folder_path TEXT UNIQUE NOT NULL,
-  folder_tag TEXT NOT NULL,
-  project_name TEXT NOT NULL DEFAULT '',
-  engine_version TEXT NOT NULL DEFAULT 'unknown',
-  total_assets INTEGER NOT NULL DEFAULT 0,
-  map_count INTEGER NOT NULL DEFAULT 0,
-  character_blueprints INTEGER NOT NULL DEFAULT 0,
-  pawn_blueprints INTEGER NOT NULL DEFAULT 0,
-  skeletal_meshes INTEGER NOT NULL DEFAULT 0,
-  material_count INTEGER NOT NULL DEFAULT 0,
-  niagara_systems INTEGER NOT NULL DEFAULT 0,
-  environment_assets INTEGER NOT NULL DEFAULT 0,
-  metadata_source TEXT NOT NULL DEFAULT '',
-  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
 
-CREATE INDEX IF NOT EXISTS idx_unreal_facts_folder_tag ON unreal_project_facts(folder_tag);
 
 -- NOTE: The covering index idx_chunks_covering was dropped in Phase 9 
 -- because it duplicated the entire text corpus and caused massive bloat.

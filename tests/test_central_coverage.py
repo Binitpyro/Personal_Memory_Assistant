@@ -94,26 +94,6 @@ async def test_db_logic_coverage(real_db):
     )
     counts = await real_db.get_counts()
     assert counts[0] >= 1
-    await real_db.upsert_unreal_project_facts(
-        {
-            "folder_path": "/p",
-            "folder_tag": "t",
-            "project_name": "N",
-            "engine_version": "5",
-            "total_assets": 1,
-            "map_count": 1,
-            "character_blueprints": 1,
-            "pawn_blueprints": 1,
-            "skeletal_meshes": 1,
-            "material_count": 1,
-            "niagara_systems": 1,
-            "environment_assets": 1,
-            "metadata_source": "S",
-            "profile_text": "P",
-        }
-    )
-    facts = await real_db.get_all_unreal_project_facts()
-    assert len(facts) > 0
     await real_db.save_query("q", "a", "c", 100)
     history = await real_db.get_query_history(limit=1)
     assert len(history) > 0
@@ -238,6 +218,7 @@ async def test_full_rag_logic():
     llm = MagicMock()
     llm.generate_answer = AsyncMock(return_value="Ans")
     try:
+        from app.search.planner import QueryPlanner
         with (
             patch(
                 "app.search.retrieval._fts_search",
@@ -250,7 +231,7 @@ async def test_full_rag_logic():
             patch("app.search.retrieval._summary_search_with_emb", AsyncMock(return_value=["tag"])),
         ):
             res = await retrieval.full_rag(
-                "query", db, MockEmbeddingService(), MockLanceDBClient(), llm
+                "query", db, MockEmbeddingService(), MockLanceDBClient(), llm, QueryPlanner()
             )
             assert res["answer"] == "Ans"
     finally:

@@ -505,6 +505,19 @@ export interface AuthStatus {
 export const getAuthStatus = () => json<AuthStatus>('/auth/google/status');
 export const disconnectAuth = () => json<{ message: string }>('/auth/google/disconnect', { method: 'POST' });
 
+export interface ApiKeyStatus {
+  provider: string;
+  is_set: boolean;
+  preview?: string;
+}
+
+export const getApiKeyStatus = (provider: string) => json<ApiKeyStatus>(`/auth/google/keys/${provider}`);
+export const setApiKey = (provider: string, api_key: string) => json<{ status: string }>('/auth/google/keys', {
+  method: 'POST',
+  body: JSON.stringify({ provider, api_key })
+});
+export const deleteApiKey = (provider: string) => json<{ status: string }>(`/auth/google/keys/${provider}`, { method: 'DELETE' });
+
 // â”€â”€ Models â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export interface LocalModelDetection {

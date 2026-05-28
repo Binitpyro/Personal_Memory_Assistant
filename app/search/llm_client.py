@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import keyring
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from app.config import settings
@@ -15,6 +16,7 @@ logger = logging.getLogger(__name__)
 class LLMClient:
     def __init__(self):
         self.api_key = settings.gemini_api_key
+        self.provider_keys = {}
         self.ollama_url = settings.ollama_url
         self.ollama_model = settings.ollama_model
         self.model = settings.gemini_model
@@ -33,7 +35,26 @@ class LLMClient:
             import asyncio
             self._oauth_token = await asyncio.to_thread(self._load_oauth_token)
             await asyncio.to_thread(self._load_runtime_preferences)
+            await self._load_keyring_keys()
             self._token_loaded = True
+
+    async def _load_keyring_keys(self):
+        import asyncio
+        try:
+            # We fetch potential keys from the keyring securely off the main thread.
+            gemini_key = await asyncio.to_thread(keyring.get_password, "pma_backend", "gemini")
+            if gemini_key:
+                self.api_key = gemini_key
+                self.provider_keys["gemini"] = gemini_key
+            
+            # Other providers (Groq, NVIDIA NIM, OpenRouter) can be loaded here similarly in the future.
+            for provider in ["groq", "nvidia_nim", "openrouter"]:
+                key = await asyncio.to_thread(keyring.get_password, "pma_backend", provider)
+                if key:
+                    self.provider_keys[provider] = key
+
+        except Exception as e:
+            logger.warning("Failed to load keys from OS keyring: %s", e)
 
     def _refresh_token_if_expired(self, creds, token_data, token_path):
         from google.auth.transport.requests import Request as GoogleRequest

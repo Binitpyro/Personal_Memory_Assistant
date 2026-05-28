@@ -4,6 +4,8 @@ import logging
 import os
 from pathlib import Path
 
+from pydantic import BaseModel
+import keyring
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from google.auth.transport.requests import Request as GoogleRequest
@@ -299,3 +301,38 @@ async def disconnect_auth():
         except Exception as e:
             return JSONResponse(status_code=500, content={"error": f"Failed to disconnect: {e!s}"})
     return {"message": "Already disconnected."}
+
+class KeyRequest(BaseModel):
+    provider: str
+    api_key: str
+
+@auth_router.post("/keys")
+async def set_api_key(req: KeyRequest):
+    """Sets an API key in the OS keyring."""
+    try:
+        await asyncio.to_thread(keyring.set_password, "pma_backend", req.provider, req.api_key)
+        return {"status": "success"}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+@auth_router.get("/keys/{provider}")
+async def get_api_key(provider: str):
+    """Gets an API key status/preview from the OS keyring."""
+    try:
+        key = await asyncio.to_thread(keyring.get_password, "pma_backend", provider)
+        if key:
+            preview = key[:4] + "..." + key[-4:] if len(key) > 8 else "****"
+            return {"provider": provider, "preview": preview, "is_set": True}
+        return {"provider": provider, "is_set": False}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+@auth_router.delete("/keys/{provider}")
+async def delete_api_key(provider: str):
+    """Deletes an API key from the OS keyring."""
+    try:
+        await asyncio.to_thread(keyring.delete_password, "pma_backend", provider)
+        return {"status": "success"}
+    except Exception as e:
+        # deletion might fail if not found
+        return JSONResponse(status_code=500, content={"error": str(e)})

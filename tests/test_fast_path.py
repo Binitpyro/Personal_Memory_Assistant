@@ -18,11 +18,7 @@ def test_planner_detects_project():
     assert plan.mode == PlanMode.FAST_PROJECT
 
 
-def test_planner_detects_unreal():
-    planner = QueryPlanner()
-    plan = planner.plan("unreal project overview")
-    assert plan.intents["unreal"] is True
-    assert plan.mode == PlanMode.FAST_PROJECT
+
 
 
 def test_planner_detects_full_rag():

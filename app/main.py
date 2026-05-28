@@ -5,6 +5,7 @@ Handles API routing, dependency injection, and lifespan events.
 
 import asyncio
 import ctypes
+import keyring
 import logging
 import os
 import platform as plat
@@ -31,6 +32,7 @@ from app.api.indexing import router as indexing_router
 from app.api.insights import router as insights_router
 from app.api.limiter import limiter
 from app.api.models import models_router
+from app.api.modules import router as modules_router
 from app.api.search import router as search_router
 from app.api.system import router as system_router
 from app.api.telemetry import router as telemetry_router
@@ -43,17 +45,41 @@ _REACT_DIR = _BASE_DIR / "static" / "react"
 INDEX_HTML = "index.html"
 _REACT_INDEX = _REACT_DIR / INDEX_HTML
 
-# Fail-fast security check: Ensure the local access token is set (C-08)
-if not os.environ.get("X_LOCAL_ACCESS_TOKEN"):
-    # This prevents PMA from starting in an insecure "fail-open" state.
-    raise RuntimeError("X_LOCAL_ACCESS_TOKEN must be set before starting PMA")
-
 # ── Logging Setup ─────────────────────────────────────────────────────
 logging.basicConfig(
     level=getattr(logging, settings.log_level.upper(), logging.INFO),
     format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+# Load or generate X_LOCAL_ACCESS_TOKEN securely via OS keyring
+def _init_local_access_token():
+    token = os.environ.get("X_LOCAL_ACCESS_TOKEN")
+    if not token:
+        try:
+            token = keyring.get_password("PersonalMemoryAssistant", "X_LOCAL_ACCESS_TOKEN")
+            if not token:
+                token = secrets.token_urlsafe(32)
+                keyring.set_password("PersonalMemoryAssistant", "X_LOCAL_ACCESS_TOKEN", token)
+                logger.info("Generated new X_LOCAL_ACCESS_TOKEN and stored it in the OS keyring.")
+            else:
+                logger.info("Retrieved X_LOCAL_ACCESS_TOKEN from the OS keyring.")
+            os.environ["X_LOCAL_ACCESS_TOKEN"] = token
+        except Exception as e:
+            # Fallback to a secure in-memory token to avoid fail-open/insecure state while maintaining usability
+            token = secrets.token_urlsafe(32)
+            os.environ["X_LOCAL_ACCESS_TOKEN"] = token
+            logger.warning(
+                f"Failed to access OS keyring ({e}). Generated temporary in-memory X_LOCAL_ACCESS_TOKEN."
+            )
+
+_init_local_access_token()
+
+# Fail-fast security check: Ensure the local access token is set (C-08)
+if not os.environ.get("X_LOCAL_ACCESS_TOKEN"):
+    # This prevents PMA from starting in an insecure "fail-open" state.
+    raise RuntimeError("X_LOCAL_ACCESS_TOKEN must be set before starting PMA")
 
 
 # ── Internal Helpers ──────────────────────────────────────────────────
@@ -421,6 +447,7 @@ api_router = APIRouter()
 
 api_router.include_router(auth_router)
 api_router.include_router(models_router)
+api_router.include_router(modules_router)
 api_router.include_router(indexing_router, prefix="/index", tags=["indexing"])
 api_router.include_router(search_router, prefix="/query", tags=["search"])
 api_router.include_router(insights_router, tags=["insights"])

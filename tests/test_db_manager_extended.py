@@ -97,7 +97,7 @@ async def test_usage_filters_stats_and_modified_map(db: DatabaseManager, tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_query_history_profiles_and_unreal_facts(db: DatabaseManager, tmp_path: Path):
+async def test_query_history_profiles(db: DatabaseManager, tmp_path: Path):
     qid = await db.save_query("q", "a", 2, 12.3)
     assert qid > 0
     history = await db.get_query_history(limit=5)
@@ -121,25 +121,7 @@ async def test_query_history_profiles_and_unreal_facts(db: DatabaseManager, tmp_
     assert "Indexed Project/Folder Profiles" in text
     assert "Proj" in text
 
-    facts = {
-        "folder_path": str(tmp_path / "uproject"),
-        "folder_tag": "Game",
-        "project_name": "SpaceGame",
-        "engine_version": "5.3",
-        "total_assets": 11,
-        "map_count": 2,
-        "character_blueprints": 1,
-        "pawn_blueprints": 1,
-        "skeletal_meshes": 2,
-        "material_count": 3,
-        "niagara_systems": 1,
-        "environment_assets": 4,
-        "metadata_source": "import",
-    }
-    await db.upsert_unreal_project_facts(facts)
-    all_facts = await db.get_all_unreal_project_facts()
-    assert len(all_facts) == 1
-    assert all_facts[0]["project_name"] == "SpaceGame"
+
 
 
 @pytest.mark.asyncio
@@ -174,3 +156,63 @@ async def test_cleanup_delete_prefix_clear_all_and_health(db: DatabaseManager, t
 
     await db.close()
     assert await db.is_healthy() is False
+
+
+@pytest.mark.asyncio
+async def test_cascading_deletes(db: DatabaseManager, tmp_path: Path):
+    # 1. Insert a file that will become stale
+    p = tmp_path / "stale_cascade.py"
+    # Do not write the file, so it is stale/missing immediately
+    file_id = await db.insert_file(_file_data(p, "CascadeTest"))
+    assert file_id > 0
+
+    # 2. Insert a chunk
+    chunk_id = await db.insert_chunk(
+        {"file_id": file_id, "start_offset": 0, "end_offset": 10, "text_preview": "cascade chunk"}
+    )
+    assert chunk_id > 0
+
+    # 3. Insert chunk embedding
+    await db.insert_chunk_embeddings_bulk([(chunk_id, b"dummy_embedding")])
+
+    # 4. Insert kg_nodes connected to the chunk
+    await db.insert_kg_nodes_bulk([
+        ("node1", "class", "NodeOne", "{}", chunk_id),
+        ("node2", "function", "NodeTwo", "{}", chunk_id),
+    ])
+
+    # 5. Insert kg_edge connecting the nodes
+    await db.insert_kg_edges_bulk([
+        ("node1", "node2", "calls", 1.0, "{}")
+    ])
+
+    # Verify everything exists initially
+    async with db._get_read_conn() as conn:
+        async with conn.execute("SELECT COUNT(*) FROM files WHERE id = ?", (file_id,)) as cur:
+            assert (await cur.fetchone())[0] == 1
+        async with conn.execute("SELECT COUNT(*) FROM chunks WHERE id = ?", (chunk_id,)) as cur:
+            assert (await cur.fetchone())[0] == 1
+        async with conn.execute("SELECT COUNT(*) FROM chunk_embeddings WHERE chunk_id = ?", (chunk_id,)) as cur:
+            assert (await cur.fetchone())[0] == 1
+        async with conn.execute("SELECT COUNT(*) FROM kg_nodes WHERE chunk_id = ?", (chunk_id,)) as cur:
+            assert (await cur.fetchone())[0] == 2
+        async with conn.execute("SELECT COUNT(*) FROM kg_edges WHERE source = 'node1'") as cur:
+            assert (await cur.fetchone())[0] == 1
+
+    # 6. Run cleanup_stale_files which should delete the stale file, cascading all the way down
+    cleaned = await db.cleanup_stale_files()
+    assert str(p) in cleaned
+
+    # 7. Verify all related records are cascadingly deleted
+    async with db._get_read_conn() as conn:
+        async with conn.execute("SELECT COUNT(*) FROM files WHERE id = ?", (file_id,)) as cur:
+            assert (await cur.fetchone())[0] == 0
+        async with conn.execute("SELECT COUNT(*) FROM chunks WHERE id = ?", (chunk_id,)) as cur:
+            assert (await cur.fetchone())[0] == 0
+        async with conn.execute("SELECT COUNT(*) FROM chunk_embeddings WHERE chunk_id = ?", (chunk_id,)) as cur:
+            assert (await cur.fetchone())[0] == 0
+        async with conn.execute("SELECT COUNT(*) FROM kg_nodes WHERE chunk_id = ?", (chunk_id,)) as cur:
+            assert (await cur.fetchone())[0] == 0
+        async with conn.execute("SELECT COUNT(*) FROM kg_edges WHERE source = 'node1'") as cur:
+            assert (await cur.fetchone())[0] == 0
+

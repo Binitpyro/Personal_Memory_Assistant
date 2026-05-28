@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 from app.embeddings.service import EmbeddingService
 from app.insights.service import InsightsService
-from app.insights.unreal_import import parse_unreal_metadata
+
 from app.main import app, get_db
 from app.search import retrieval
 from app.storage.db import DatabaseManager
@@ -149,6 +149,7 @@ async def test_all_logic_deep(real_db, mock_emb, mock_lancedb, mock_llm):
     )
 
     # 2. Retrieval logic
+    from app.search.planner import QueryPlanner
     with (
         patch(
             "app.search.retrieval._fts_search", AsyncMock(return_value=[{"id": "1", "score": 1.0}])
@@ -159,30 +160,14 @@ async def test_all_logic_deep(real_db, mock_emb, mock_lancedb, mock_llm):
         ),
     ):
         res = await retrieval.full_rag(
-            "What is in test.py?", real_db, mock_emb, mock_lancedb, mock_llm
+            "What is in test.py?", real_db, mock_emb, mock_lancedb, mock_llm, QueryPlanner()
         )
         assert res["answer"] == "Logic verified answer"
 
 
-def test_unreal_and_metrics():
+def test_metrics():
     with Timer("test"):
         pass
-    with tempfile.NamedTemporaryFile(suffix=".json", mode="w", delete=False) as tf:
-        json.dump(
-            {
-                "ProjectName": "P",
-                "EngineVersion": "5",
-                "AssetStats": {"Total": 1},
-                "Components": [],
-            },
-            tf,
-        )
-        tf_path = Path(tf.name)
-    try:
-        f = parse_unreal_metadata(tf_path, "t")
-        assert f["project_name"] == "P"
-    finally:
-        os.remove(tf_path)
 
 
 # --- API ---

@@ -166,7 +166,7 @@ class QueryPlanner:
             )
 
         # 2. Specific project context fast path
-        if intents["metadata_intent"] and (intents["unreal"] or intents["project"]):
+        if intents["metadata_intent"] and intents["project"]:
             return QueryPlan(
                 mode=PlanMode.FAST_PROJECT, original_query=query, intents=intents, keywords=keywords
             )

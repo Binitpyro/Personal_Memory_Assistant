@@ -68,15 +68,7 @@ class IndexRequest(BaseModel):
         return cleaned
 
 
-class UnrealImportRequest(BaseModel):
-    json_path: str = Field(..., min_length=1)
-    folder_tag: str | None = Field(None)
 
-    @property
-    def validated_json_path(self) -> str:
-        import os
-
-        return os.path.realpath(self.json_path.strip().strip('"').strip("'"))
 
 
 @router.post("/start")
@@ -256,66 +248,3 @@ async def remove_folder_index(
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
-@router.post("/unreal-import")
-async def unreal_import(
-    request: UnrealImportRequest,
-    db: DatabaseManager = Depends(get_db),
-    emb=Depends(get_emb),
-    lancedb_client=Depends(get_lancedb),
-):
-    try:
-        from app.insights.unreal_import import parse_unreal_metadata
-
-        jpath = request.validated_json_path
-        tag = request.folder_tag or "unreal_import"
-        stats = await asyncio.to_thread(parse_unreal_metadata, jpath)
-        if stats:
-            await db.upsert_unreal_project_facts(
-                {
-                    "folder_path": jpath,
-                    "folder_tag": tag,
-                    "project_name": stats.get("ProjectName", ""),
-                    "engine_version": stats.get("EngineVersion", ""),
-                    "total_assets": stats.get("AssetCount", 0),
-                    "map_count": stats.get("MapCount", 0),
-                    "character_blueprints": stats.get("CharacterBPCount", 0),
-                    "pawn_blueprints": stats.get("PawnBPCount", 0),
-                    "skeletal_meshes": stats.get("SkeletalMeshCount", 0),
-                    "material_count": stats.get("MaterialCount", 0),
-                    "niagara_systems": stats.get("NiagaraCount", 0),
-                    "environment_assets": stats.get("EnvAssetCount", 0),
-                    "metadata_source": jpath,
-                }
-            )
-
-        import os
-
-        # M-13: Summarize key fields to stay within model token limits (truncation avoidance).
-        doc = (
-            f"Unreal Project: {stats.get('ProjectName', 'Unknown')} "
-            f"Engine: {stats.get('EngineVersion', 'Unknown')} "
-            f"Assets: {stats.get('AssetCount', 0)} "
-            f"Maps: {stats.get('MapCount', 0)} "
-            f"Materials: {stats.get('MaterialCount', 0)} "
-            f"Characters: {stats.get('CharacterBPCount', 0)}"
-        )
-        
-        # H-05: Use async embed_query which properly uses the thread executor
-        embedding = await emb.embed_query(doc)
-        
-        batch_ids = [f"unreal_{os.path.basename(jpath)}"]
-        batch_metas = [{"source": jpath, "text": doc}]
-        batch_embs = [embedding]
-
-        await lancedb_client.add_documents(
-            ids=batch_ids, embeddings=batch_embs, metadatas=batch_metas
-        )
-
-        from app.state import file_tree_cache as _file_tree_cache
-        from app.state import insights_cache as _insights_cache
-
-        _file_tree_cache["data"] = _insights_cache["data"] = None
-        return {"message": "Unreal Engine metadata imported successfully.", "stats": stats}
-    except Exception as e:
-        logger.error("Unreal import failed: %s", e)
-        return JSONResponse(status_code=500, content={"error": str(e)})

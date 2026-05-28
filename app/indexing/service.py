@@ -21,8 +21,6 @@ from app.indexing.folder_profiler import (
 from app.indexing.summarizer import generate_deep_summary
 from app.project_constants import (
     TEXT_EXTENSIONS,
-    UNREAL_BINARY_EXTENSIONS,
-    UNREAL_PROJECT_EXTENSIONS,
 )
 from app.scanner.scanner import scan_folder as fast_scan
 from app.storage.db import DatabaseManager
@@ -568,12 +566,10 @@ class IndexingService:
 
     def _extract_text_monolithic(self, path: Path) -> str:
         ext = path.suffix.lower()
-        if ext in TEXT_EXTENSIONS or ext in UNREAL_PROJECT_EXTENSIONS:
+        if ext in TEXT_EXTENSIONS:
             if self._is_binary(path):
                 return f"[BINARY: {path.name}] content not indexed."
             return self._extract_plain_text(path)
-        if ext in UNREAL_BINARY_EXTENSIONS:
-            return self._extract_unreal_asset_stub(path)
         return self._extract_plain_text(path)
 
     def _extract_plain_text(self, path: Path) -> str:
@@ -711,10 +707,6 @@ class IndexingService:
                 return b"\x00" in chunk
         except Exception:
             return True
-
-    @staticmethod
-    def _extract_unreal_asset_stub(path: Path) -> str:
-        return f"Unreal Engine binary asset: {path.name}."
 
     def _generate_summary(self, text: str, path: Path, max_chars: int = 300) -> str:
         return generate_deep_summary(text, path, max_chars)

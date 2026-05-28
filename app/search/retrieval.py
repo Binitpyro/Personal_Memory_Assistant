@@ -20,8 +20,6 @@ from app.project_constants import (
 from app.search.context_builder import (
     append_inventory_type_lines,
     append_project_profile_lines,
-    append_unreal_fact_lines,
-    append_unreal_profile_hint,
     build_context,
 )
 from app.search.llm_client import LLMClient
@@ -89,17 +87,15 @@ async def _get_metadata_insights(
     db: DatabaseManager,
     file_stats: dict[str, Any] | None,
     folder_profiles: list[dict[str, Any]],
-    unreal_facts: list[dict[str, Any]],
 ) -> str | None:
     """Gather factual metadata insights based on the user query."""
     intent = determine_query_intent(query)
 
     if not (
-        intent["inventory"]
-        or intent["project"]
-        or intent["unreal"]
-        or intent["latest"]
-        or intent["largest"]
+        intent.get("inventory")
+        or intent.get("project")
+        or intent.get("latest")
+        or intent.get("largest")
     ):
         return None
 
@@ -111,22 +107,11 @@ async def _get_metadata_insights(
     if intent.get("largest"):
         await _append_largest_files(lines, db)
 
-    unreal_profiles = [
-        profile
-        for profile in folder_profiles
-        if "unreal" in str(profile.get("project_type", "")).lower()
-    ]
-
-    if intent["inventory"] and file_stats:
+    if intent.get("inventory") and file_stats:
         file_count = file_stats["total_files"]
         size_mb = file_stats["total_size_mb"]
         lines.append(f"Total indexed files: {file_count}. Total size: ~{size_mb} MB.")
         append_inventory_type_lines(lines, file_stats)
-
-    if intent["unreal"] and unreal_facts:
-        append_unreal_fact_lines(lines, unreal_facts)
-    elif intent["unreal"] and unreal_profiles:
-        append_unreal_profile_hint(lines, unreal_profiles)
 
     if intent["project"] and folder_profiles:
         append_project_profile_lines(lines, folder_profiles)
@@ -140,7 +125,6 @@ def _build_fast_answer(
     plan: Any,
     file_stats: dict[str, Any] | None,
     folder_profiles: list[dict[str, Any]],
-    unreal_facts: list[dict[str, Any]],
 ) -> str | None:
     """Provide immediate answers for pure metadata/inventory queries without hitting the LLM."""
     intent = plan.intents
@@ -151,12 +135,7 @@ def _build_fast_answer(
         s_mb = file_stats["total_size_mb"]
         return f"You currently have {f_count} indexed files taking up a total of {s_mb} MB."
 
-    if plan.mode == PlanMode.FAST_PROJECT and unreal_facts and intent["unreal"]:
-        lines = ["Here is your Unreal project summary:"]
-        append_unreal_fact_lines(lines, unreal_facts)
-        return "\n".join(lines)
-
-    if plan.mode == PlanMode.FAST_PROJECT and folder_profiles and intent["project"]:
+    if plan.mode == PlanMode.FAST_PROJECT and folder_profiles and intent.get("project"):
         lines = ["Here is a summary of your indexed projects:"]
         append_project_profile_lines(lines, folder_profiles)
         return "\n".join(lines)
@@ -599,18 +578,16 @@ async def full_rag(
 
     plan = planner.plan(query)
 
-    inventory = plan.intents["inventory"]
-    project = plan.intents["project"]
-    unreal = plan.intents["unreal"]
+    inventory = plan.intents.get("inventory")
+    project = plan.intents.get("project")
 
-    folder_profiles, file_stats, unreal_facts = await _load_query_metadata(
+    folder_profiles, file_stats = await _load_query_metadata(
         db,
         inventory=inventory,
         project=project,
-        unreal=unreal,
     )
 
-    fast_answer = _build_fast_answer(query, plan, file_stats, folder_profiles, unreal_facts)
+    fast_answer = _build_fast_answer(query, plan, file_stats, folder_profiles)
     if fast_answer and not history:  # Skip fast-path if there's history to allow follow-ups
         source_rows = [
             {
@@ -630,7 +607,7 @@ async def full_rag(
             "timing": {"metadata_ms": total_ms, "retrieval_ms": 0, "llm_ms": 0},
         }
 
-    include_profiles_text = project or inventory or unreal
+    include_profiles_text = project or inventory
     from app.utils.metrics import Timer
 
     t_ret = time.perf_counter()
@@ -651,7 +628,6 @@ async def full_rag(
                 k=k,
                 inventory=inventory,
                 project=project,
-                unreal=unreal,
                 cached_file_stats=file_stats,
                 include_profiles_text=include_profiles_text,
                 query_emb=query_emb,  # P-03: reuse embedding from semantic cache check
@@ -753,18 +729,16 @@ async def stream_rag(
 
     plan = planner.plan(query)
 
-    inventory = plan.intents["inventory"]
-    project = plan.intents["project"]
-    unreal = plan.intents["unreal"]
+    inventory = plan.intents.get("inventory")
+    project = plan.intents.get("project")
 
-    folder_profiles, file_stats, unreal_facts = await _load_query_metadata(
+    folder_profiles, file_stats = await _load_query_metadata(
         db,
         inventory=inventory,
         project=project,
-        unreal=unreal,
     )
 
-    fast_answer = _build_fast_answer(query, plan, file_stats, folder_profiles, unreal_facts)
+    fast_answer = _build_fast_answer(query, plan, file_stats, folder_profiles)
     if fast_answer and not history:
         source_rows = [
             {
@@ -808,7 +782,7 @@ async def stream_rag(
         except Exception as e:
             logger.warning("Error checking semantic cache in stream_rag: %s", e)
 
-    include_profiles_text = project or inventory or unreal
+    include_profiles_text = project or inventory
     from app.utils.metrics import Timer
 
     graph_paths_text = ""
@@ -828,7 +802,6 @@ async def stream_rag(
                 k=k,
                 inventory=inventory,
                 project=project,
-                unreal=unreal,
                 cached_file_stats=file_stats,
                 include_profiles_text=include_profiles_text,
                 query_emb=query_emb,  # P-03: reuse embedding from semantic cache check
@@ -910,13 +883,12 @@ async def stream_rag(
         yield {"type": "done", "graph_hops": graph_paths_text}
 
 
-async def _load_query_metadata(db, inventory, project, unreal):
+async def _load_query_metadata(db, inventory, project):
     p_coro = (
-        db.get_all_folder_profiles() if (project or inventory or unreal) else asyncio.sleep(0, [])
+        db.get_all_folder_profiles() if (project or inventory) else asyncio.sleep(0, [])
     )
     s_coro = db.get_file_stats_summary() if inventory else asyncio.sleep(0, None)
-    u_coro = db.get_all_unreal_project_facts() if (unreal or project) else asyncio.sleep(0, [])
-    return await asyncio.gather(p_coro, s_coro, u_coro)
+    return await asyncio.gather(p_coro, s_coro)
 
 
 async def _gather_full_rag_inputs(
@@ -927,7 +899,6 @@ async def _gather_full_rag_inputs(
     k,
     inventory,
     project,
-    unreal,
     cached_file_stats,
     include_profiles_text,
     query_emb: list[float] | None = None,
@@ -948,7 +919,7 @@ async def _gather_full_rag_inputs(
             embedding_service=embedding_service,
             lancedb_client=lancedb_client,
             k=k,
-            use_reranker=not (project or inventory or unreal),
+            use_reranker=not (project or inventory),
             query_emb=query_emb,  # P-02: pass pre-computed embedding
         ),
         _get_top_relevant_profiles(lancedb_client, db, query_emb, k=2),

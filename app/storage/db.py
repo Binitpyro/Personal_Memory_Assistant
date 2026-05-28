@@ -278,35 +278,6 @@ class DatabaseManager:
         except Exception as exc:
             logger.debug("folder_profiles migration note: %s", exc)
 
-        try:
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS unreal_project_facts (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    folder_path TEXT UNIQUE NOT NULL,
-                    folder_tag TEXT NOT NULL,
-                    project_name TEXT NOT NULL DEFAULT '',
-                    engine_version TEXT NOT NULL DEFAULT 'unknown',
-                    total_assets INTEGER NOT NULL DEFAULT 0,
-                    map_count INTEGER NOT NULL DEFAULT 0,
-                    character_blueprints INTEGER NOT NULL DEFAULT 0,
-                    pawn_blueprints INTEGER NOT NULL DEFAULT 0,
-                    skeletal_meshes INTEGER NOT NULL DEFAULT 0,
-                    material_count INTEGER NOT NULL DEFAULT 0,
-                    niagara_systems INTEGER NOT NULL DEFAULT 0,
-                    environment_assets INTEGER NOT NULL DEFAULT 0,
-                    metadata_source TEXT NOT NULL DEFAULT '',
-                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-                )
-            """)
-            await conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_unreal_facts_folder_tag "
-                "ON unreal_project_facts(folder_tag)"
-            )
-            await conn.commit()
-            logger.debug("unreal_project_facts table ensured.")
-        except Exception as exc:
-            logger.debug("unreal_project_facts migration note: %s", exc)
-
         # GraphRAG nodes
         try:
             await conn.execute("""
@@ -315,13 +286,50 @@ class DatabaseManager:
                     type TEXT NOT NULL,
                     label TEXT NOT NULL,
                     properties TEXT DEFAULT '{}',
-                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                    chunk_id INTEGER,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
                 )
             """)
             await conn.commit()
             logger.debug("kg_nodes table ensured.")
         except Exception as exc:
             logger.debug("kg_nodes migration note: %s", exc)
+
+        # GraphRAG nodes schema upgrade migration (for pre-existing DBs)
+        try:
+            has_chunk_id = False
+            async with conn.execute("PRAGMA table_info(kg_nodes)") as cur:
+                async for row in cur:
+                    if row[1] == "chunk_id":
+                        has_chunk_id = True
+                        break
+            if not has_chunk_id:
+                logger.info("Migrating kg_nodes table to add chunk_id foreign key cascade...")
+                await conn.execute("ALTER TABLE kg_nodes RENAME TO kg_nodes_old")
+                await conn.execute("""
+                    CREATE TABLE kg_nodes (
+                        id TEXT PRIMARY KEY,
+                        type TEXT NOT NULL,
+                        label TEXT NOT NULL,
+                        properties TEXT DEFAULT '{}',
+                        chunk_id INTEGER,
+                        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                        FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
+                    )
+                """)
+                await conn.execute("""
+                    INSERT INTO kg_nodes (id, type, label, properties, chunk_id, created_at)
+                    SELECT id, type, label, properties, 
+                           CAST(json_extract(properties, '$.chunk_id') AS INTEGER),
+                           created_at
+                    FROM kg_nodes_old
+                """)
+                await conn.execute("DROP TABLE kg_nodes_old")
+                await conn.commit()
+                logger.info("kg_nodes migration completed successfully.")
+        except Exception as exc:
+            logger.warning("kg_nodes schema migration failed: %s", exc)
 
         # GraphRAG edges
         try:
@@ -661,16 +669,16 @@ class DatabaseManager:
         )
         await conn.commit()
 
-    async def insert_kg_nodes_bulk(self, data: list[tuple[str, str, str, str]]) -> None:
+    async def insert_kg_nodes_bulk(self, data: list[tuple[str, str, str, str, int | None]]) -> None:
         """Insert multiple kg_nodes efficiently.
-        data format: list of (id, type, label, properties)
+        data format: list of (id, type, label, properties, chunk_id)
         """
         if not data:
             return
         conn = self._get_conn()
         await conn.executemany(
-            "INSERT INTO kg_nodes (id, type, label, properties) VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(id) DO UPDATE SET type=excluded.type, label=excluded.label, properties=excluded.properties",
+            "INSERT INTO kg_nodes (id, type, label, properties, chunk_id) VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET type=excluded.type, label=excluded.label, properties=excluded.properties, chunk_id=excluded.chunk_id",
             data,
         )
         await conn.commit()
@@ -1125,12 +1133,38 @@ class DatabaseManager:
                 logger.info("Cleaned stale file: %s", path)
         if stale_ids:
             conn = self._get_conn()
-            placeholders = ",".join("?" for _ in stale_ids)
-            await conn.execute(
-                f"DELETE FROM files WHERE id IN ({placeholders})",  # noqa: S608
-                tuple(stale_ids),
-            )
-            await conn.commit()
+            savepoint_name = None
+            try:
+                try:
+                    await conn.execute("BEGIN IMMEDIATE")
+                except Exception as e:
+                    if "cannot start a transaction within a transaction" in str(e):
+                        savepoint_name = f"sp_{uuid.uuid4().hex}"
+                        await conn.execute(f"SAVEPOINT {savepoint_name}")
+                    else:
+                        raise
+
+                batch_size = 900
+                for i in range(0, len(stale_ids), batch_size):
+                    batch = stale_ids[i : i + batch_size]
+                    placeholders = ",".join("?" for _ in batch)
+                    await conn.execute(
+                        f"DELETE FROM files WHERE id IN ({placeholders})",
+                        tuple(batch),
+                    )
+
+                if savepoint_name:
+                    await conn.execute(f"RELEASE {savepoint_name}")
+                else:
+                    await conn.commit()
+            except Exception:
+                if savepoint_name:
+                    with contextlib.suppress(Exception):
+                        await conn.execute(f"ROLLBACK TO {savepoint_name}")
+                else:
+                    with contextlib.suppress(Exception):
+                        await conn.rollback()
+                raise
         return cleaned
 
     async def clear_all(self) -> dict[str, int]:
@@ -1164,7 +1198,7 @@ class DatabaseManager:
             DELETE FROM files;
             DELETE FROM query_history;
             DELETE FROM folder_profiles;
-            DELETE FROM unreal_project_facts;
+            DROP TABLE IF EXISTS unreal_project_facts;
 
             -- Recreate FTS table with optimized detail=column schema and contentless mode.
             -- text_preview is stored zlib-compressed so triggers decompress on the fly.
@@ -1327,78 +1361,7 @@ class DatabaseManager:
         lines.append("=" * 50)
         return "\n".join(lines)
 
-    async def upsert_unreal_project_facts(self, facts: dict[str, Any]) -> None:
-        """Insert or update structured Unreal project facts."""
-        conn = self._get_conn()
-        await conn.execute(
-            """
-            INSERT INTO unreal_project_facts
-                (folder_path, folder_tag, project_name, engine_version,
-                 total_assets, map_count, character_blueprints, pawn_blueprints,
-                 skeletal_meshes, material_count, niagara_systems,
-                 environment_assets, metadata_source, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-            ON CONFLICT(folder_path) DO UPDATE SET
-                folder_tag = excluded.folder_tag,
-                project_name = excluded.project_name,
-                engine_version = excluded.engine_version,
-                total_assets = excluded.total_assets,
-                map_count = excluded.map_count,
-                character_blueprints = excluded.character_blueprints,
-                pawn_blueprints = excluded.pawn_blueprints,
-                skeletal_meshes = excluded.skeletal_meshes,
-                material_count = excluded.material_count,
-                niagara_systems = excluded.niagara_systems,
-                environment_assets = excluded.environment_assets,
-                metadata_source = excluded.metadata_source,
-                updated_at = datetime('now')
-            """,
-            (
-                facts["folder_path"],
-                facts["folder_tag"],
-                facts["project_name"],
-                facts["engine_version"],
-                facts["total_assets"],
-                facts["map_count"],
-                facts["character_blueprints"],
-                facts["pawn_blueprints"],
-                facts["skeletal_meshes"],
-                facts["material_count"],
-                facts["niagara_systems"],
-                facts["environment_assets"],
-                facts["metadata_source"],
-            ),
-        )
-        await conn.commit()
 
-    async def get_all_unreal_project_facts(self) -> list[dict[str, Any]]:
-        """Return all imported Unreal project facts."""
-        async with self._get_read_conn() as conn:
-            async with conn.execute(
-                "SELECT folder_path, folder_tag, project_name, engine_version, "
-                "total_assets, map_count, character_blueprints, pawn_blueprints, "
-                "skeletal_meshes, material_count, niagara_systems, environment_assets, metadata_source "
-                "FROM unreal_project_facts ORDER BY folder_tag"
-            ) as cursor:
-                rows = await cursor.fetchall()
-                return [
-                    {
-                        "folder_path": r[0],
-                        "folder_tag": r[1],
-                        "project_name": r[2],
-                        "engine_version": r[3],
-                        "total_assets": r[4],
-                        "map_count": r[5],
-                        "character_blueprints": r[6],
-                        "pawn_blueprints": r[7],
-                        "skeletal_meshes": r[8],
-                        "material_count": r[9],
-                        "niagara_systems": r[10],
-                        "environment_assets": r[11],
-                        "metadata_source": r[12],
-                    }
-                    for r in rows
-                ]
 
     async def get_graph_edges(self, node_id: str, max_depth: int = 2) -> list[dict[str, Any]]:
         """Retrieve 1-hop and 2-hop edges for a given node using recursive CTE."""

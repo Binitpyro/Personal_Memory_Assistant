@@ -21,6 +21,8 @@ class QueryRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=2000)
     file_type: str | None = Field(None)
     folder_tag: str | None = Field(None)
+    mode: str | None = Field(None)
+    forced_chunk_ids: list[int] | None = Field(None)
     history: list[dict[str, str]] | None = Field(
         None
     )  # List of {"role": "user/assistant", "content": "..."}
@@ -49,16 +51,28 @@ async def query(
     try:
         async with query_semaphore:
             res = await full_rag(
-                q, db, emb, lancedb_client, llm, planner, payload.file_type, payload.folder_tag, history
+                q, db, emb, lancedb_client, llm, planner, payload.file_type, payload.folder_tag, payload.mode, history
             )
 
         async def _bg_save_query():
-            await db.save_query(
+            query_id = await db.save_query(
                 q,
                 res.get("answer", ""),
                 int(res.get("retrieved_count", 0)),
                 float(res.get("latency_ms", 0.0)),
             )
+            telemetry = res.get("_telemetry")
+            if telemetry:
+                await db.save_telemetry(
+                    query_id=query_id,
+                    time_to_first_token_ms=0.0,
+                    mode_selected=payload.mode,
+                    model_class=telemetry.get("model_class"),
+                    context_tokens_budget=telemetry.get("context_tokens_budget"),
+                    context_tokens_used=telemetry.get("context_tokens_used"),
+                    chunks_included=telemetry.get("chunks_included"),
+                    chunks_dropped=telemetry.get("chunks_dropped"),
+                )
 
         background_tasks.add_task(_bg_save_query)
 
@@ -93,6 +107,8 @@ async def query_stream(
                     planner=planner,
                     file_type=request.file_type,
                     folder_tag=request.folder_tag,
+                    mode=request.mode,
+                    forced_chunk_ids=request.forced_chunk_ids,
                     history=history,
                 )
                 while True:

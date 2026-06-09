@@ -99,6 +99,32 @@ class LLMClient:
             self._lm_studio_client = httpx.AsyncClient(timeout=settings.ollama_timeout)
         return self._lm_studio_client
 
+    def get_model_class(self) -> str:
+        provider = (self.provider_preference or "auto").lower()
+        if provider == "gemini":
+            return "cloud"
+        if provider == "ollama":
+            model_lower = self.ollama_model.lower()
+            if "3b" in model_lower or "2b" in model_lower or "mini" in model_lower:
+                return "3b_local"
+            if "7b" in model_lower or "8b" in model_lower:
+                return "7b_local"
+            return "7b_local"
+        if provider == "lm_studio":
+            model_lower = self.lm_studio_model.lower()
+            if "3b" in model_lower or "2b" in model_lower or "mini" in model_lower:
+                return "3b_local"
+            if "7b" in model_lower or "8b" in model_lower:
+                return "7b_local"
+            return "7b_local"
+        
+        if self.api_key or self._oauth_token:
+            return "cloud"
+        model_lower = self.ollama_model.lower()
+        if "3b" in model_lower or "2b" in model_lower or "mini" in model_lower:
+            return "3b_local"
+        return "7b_local"
+
     def _load_runtime_preferences(self) -> None:
         pref_path = Path("data/settings.json")
         if not pref_path.exists():
@@ -130,15 +156,26 @@ class LLMClient:
         if lm_studio_model is not None:
             self.lm_studio_model = lm_studio_model
 
-    def _build_prompt(self, query: str, context: str) -> str:
+    def _build_prompt(self, query: str, context: str, mode: str | None = None) -> str:
         prompt_path = Path("prompts/rag_system.txt")
         # P10-2: Use delimiters to harden AI boundary
         safe_query = f"<user_query>\n{query}\n</user_query>"
+
+        mode_instructions = {
+            "explain": "\nMODE INSTRUCTION (Explain): Explain the concepts clearly using at least one analogy or 'in other words' reformulation.",
+            "verify": "\nMODE INSTRUCTION (Verify): Act strictly as a verifier. You MUST cite at least 2 source files with direct quotes to substantiate claims.",
+            "explore": "\nMODE INSTRUCTION (Explore): End your response with at least 2 relevant follow-up questions to help the user explore the topic further.",
+            "distill": "\nMODE INSTRUCTION (Distill): Distill the answer. Your response MUST be 150 words or less and use bullet points.",
+            "challenge": "\nMODE INSTRUCTION (Challenge): Actively highlight any contradictions or conflicting information found in the sources. Point out where different sources disagree.",
+        }
+        mode_str = mode_instructions.get(mode.lower()) if mode else ""
 
         try:
             if prompt_path.exists():
                 with open(prompt_path, encoding="utf-8") as f:
                     template = f.read()
+                if mode_str:
+                    template += f"\n{mode_str}\n"
                 return template.format(context=context, query=safe_query)
         except Exception as e:
             logger.warning("Failed to load prompt template, falling back to default: %s", e)
@@ -173,6 +210,8 @@ Instructions:
 
 Answer:
 """
+        if mode_str:
+            template += f"\n{mode_str}\n"
         return template.format(context=context, query=safe_query)
 
     async def _check_ollama_health(self) -> bool:
@@ -186,10 +225,10 @@ Answer:
             return False
 
     async def generate_answer(
-        self, query: str, context: str, history: list[dict[str, str]] | None = None
+        self, query: str, context: str, history: list[dict[str, str]] | None = None, mode: str | None = None
     ) -> str:
         await self._ensure_token_loaded()
-        prompt = self._build_prompt(query, context)
+        prompt = self._build_prompt(query, context, mode)
         provider = (self.provider_preference or "auto").lower()
 
         if provider in {"gemini", "auto"} and (self.api_key or self._oauth_token):
@@ -201,10 +240,10 @@ Answer:
         return "LLM unavailable. Please provide a GEMINI_API_KEY or ensure Ollama is running."
 
     async def stream_answer(
-        self, query: str, context: str, history: list[dict[str, str]] | None = None
+        self, query: str, context: str, history: list[dict[str, str]] | None = None, mode: str | None = None
     ) -> AsyncGenerator[str, None]:
         await self._ensure_token_loaded()
-        prompt = self._build_prompt(query, context)
+        prompt = self._build_prompt(query, context, mode)
         provider = (self.provider_preference or "auto").lower()
 
         if provider in {"gemini", "auto"} and (self.api_key or self._oauth_token):

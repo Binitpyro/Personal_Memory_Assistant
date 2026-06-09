@@ -195,6 +195,14 @@ class DatabaseManager:
                 "chunks_created_at",
                 "ALTER TABLE chunks ADD COLUMN created_at TEXT NOT NULL DEFAULT ''",
             ),
+            (
+                "chunks_sentence_offsets",
+                "ALTER TABLE chunks ADD COLUMN sentence_offsets TEXT",
+            ),
+            (
+                "chunks_segmenter_version",
+                "ALTER TABLE chunks ADD COLUMN segmenter_version TEXT",
+            ),
         ]
         for col_name, ddl in migrations:
             if await _already_applied(col_name):
@@ -554,11 +562,17 @@ class DatabaseManager:
             else chunk_data["text_preview"]
         )
         query = """
-        INSERT INTO chunks (file_id, start_offset, end_offset, text_preview)
-        VALUES (:file_id, :start_offset, :end_offset, :text_preview)
+        INSERT INTO chunks (file_id, start_offset, end_offset, text_preview, sentence_offsets, segmenter_version)
+        VALUES (:file_id, :start_offset, :end_offset, :text_preview, :sentence_offsets, :segmenter_version)
         RETURNING id;
         """
-        async with conn.execute(query, {**chunk_data, "text_preview": compressed_text}) as cursor:
+        data = {
+            **chunk_data,
+            "text_preview": compressed_text,
+            "sentence_offsets": chunk_data.get("sentence_offsets"),
+            "segmenter_version": chunk_data.get("segmenter_version"),
+        }
+        async with conn.execute(query, data) as cursor:
             row = await cursor.fetchone()
             if row is None:
                 raise RuntimeError("INSERT RETURNING id failed for chunk")
@@ -585,6 +599,8 @@ class DatabaseManager:
                 "text_preview": zlib.compress(c["text_preview"].encode("utf-8"))
                 if isinstance(c["text_preview"], str)
                 else c["text_preview"],
+                "sentence_offsets": c.get("sentence_offsets"),
+                "segmenter_version": c.get("segmenter_version"),
             }
             for c in chunks
         ]
@@ -594,8 +610,8 @@ class DatabaseManager:
             ids: list[int] = []
             for chunk in insert_data:
                 async with conn.execute(
-                    "INSERT INTO chunks (file_id, start_offset, end_offset, text_preview) "
-                    "VALUES (:file_id, :start_offset, :end_offset, :text_preview) RETURNING id;",
+                    "INSERT INTO chunks (file_id, start_offset, end_offset, text_preview, sentence_offsets, segmenter_version) "
+                    "VALUES (:file_id, :start_offset, :end_offset, :text_preview, :sentence_offsets, :segmenter_version) RETURNING id;",
                     chunk,
                 ) as cursor:
                     row = await cursor.fetchone()
@@ -629,8 +645,8 @@ class DatabaseManager:
             for i in range(0, len(insert_data), max_rows_per_query):
                 batch = insert_data[i : i + max_rows_per_query]
                 await conn.executemany(
-                    "INSERT INTO chunks (file_id, start_offset, end_offset, text_preview) "
-                    "VALUES (:file_id, :start_offset, :end_offset, :text_preview);",
+                    "INSERT INTO chunks (file_id, start_offset, end_offset, text_preview, sentence_offsets, segmenter_version) "
+                    "VALUES (:file_id, :start_offset, :end_offset, :text_preview, :sentence_offsets, :segmenter_version);",
                     batch,
                 )
 
@@ -1085,6 +1101,40 @@ class DatabaseManager:
             row = await cursor.fetchone()
             await conn.commit()
             return row[0] if row else 0
+
+    async def save_telemetry(
+        self,
+        query_id: int | None,
+        time_to_first_token_ms: float,
+        mode_selected: str | None,
+        model_class: str | None,
+        context_tokens_budget: int | None,
+        context_tokens_used: int | None,
+        chunks_included: int | None,
+        chunks_dropped: int | None,
+        response_abandoned: bool = False,
+        query_retry_within_60s: bool = False,
+        deep_analysis_toggled: bool = False,
+        force_include_count: int = 0,
+        feature_thumbs: str | None = None
+    ) -> None:
+        """Save local-only telemetry for Rich Output tracking."""
+        conn = self._get_conn()
+        await conn.execute(
+            """
+            INSERT INTO pma_metrics (
+                query_id, time_to_first_token_ms, response_abandoned, query_retry_within_60s,
+                deep_analysis_toggled, mode_selected, force_include_count, feature_thumbs,
+                model_class, context_tokens_budget, context_tokens_used, chunks_included, chunks_dropped
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                query_id, time_to_first_token_ms, response_abandoned, query_retry_within_60s,
+                deep_analysis_toggled, mode_selected, force_include_count, feature_thumbs,
+                model_class, context_tokens_budget, context_tokens_used, chunks_included, chunks_dropped
+            )
+        )
+        await conn.commit()
 
     async def get_query_history(self, limit: int = 20) -> list[dict[str, Any]]:
         """Return recent queries from history."""

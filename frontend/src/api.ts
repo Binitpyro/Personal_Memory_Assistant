@@ -234,6 +234,11 @@ export interface QuerySource {
   folder_tag?: string;
   text?: string;
   score?: number;
+  sentence_offsets?: string;
+  segmenter_version?: string;
+  modified_at?: string;
+  _challenge_source?: boolean;
+  chunk_id?: number;
 }
 
 export interface QueryResponse {
@@ -429,10 +434,15 @@ export interface QueryStreamChunk {
   text?: string;
   answer?: string;
   sources?: QuerySource[];
+  near_misses?: QuerySource[];
   data?: QueryResponse;
   latency_ms?: number;
   retrieval_ms?: number;
   graph_hops?: string;
+  contradictions_found?: boolean;
+  knowledge_gaps?: string[];
+  pattern_annotations?: string[];
+  answer_evolution_diff?: string;
 }
 
 export function subscribeQuery(

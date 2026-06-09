@@ -2,6 +2,9 @@ import { useState, useCallback, useRef, useEffect } from 'react'
 import { Search, Send, Sparkles, Loader2, FileText, Clock, Trash2, User, Bot, RotateCcw, Filter, Network, ChevronDown, ChevronRight } from 'lucide-react'
 import { useApi, invalidateCache } from '../useApi'
 import { getQueryHistory, clearQueryHistory, subscribeQuery, getFileTree, getAppConfig, type QuerySource, type QueryStreamChunk } from '../api'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import rehypeRaw from 'rehype-raw'
 
 import { CrystalGraphTrace } from '../components/CrystalGraphTrace'
 
@@ -29,14 +32,80 @@ const GraphTraceViewer = ({ traceData }: { traceData: string }) => {
   )
 }
 
+import { Plus } from 'lucide-react'
+
+const SourceViewer = ({ src, onForceInclude }: { src: QuerySource, onForceInclude?: () => void }) => {
+  const [isOpen, setIsOpen] = useState(false)
+  
+  let content = <>{src.text}</>
+  if (src.text && src.sentence_offsets) {
+    try {
+      const offsets = JSON.parse(src.sentence_offsets) as [number, number][]
+      content = (
+        <>
+          {offsets.map(([start, end], i) => (
+            <span key={i} className="hover:bg-primary/30 transition-colors rounded px-0.5 cursor-text relative group">
+              {src.text!.substring(start, end)}
+              <span className="absolute -top-6 left-1/2 -translate-x-1/2 bg-black/80 text-[9px] text-white px-2 py-1 rounded opacity-0 group-hover:opacity-100 pointer-events-none whitespace-nowrap z-10 transition-opacity">
+                Precision Match
+              </span>
+            </span>
+          ))}
+        </>
+      )
+    } catch (e) {
+      console.error("Failed to parse sentence offsets", e)
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-1 w-full max-w-sm mt-1">
+      <div className="flex items-center gap-1.5">
+        <button 
+          onClick={() => setIsOpen(!isOpen)}
+          className={`flex items-center gap-1.5 px-2 py-1 transition-colors rounded-lg text-[10px] border w-fit ${
+            src._challenge_source 
+              ? 'bg-red-500/10 hover:bg-red-500/20 text-red-300 border-red-500/30' 
+              : 'bg-white/5 hover:bg-white/10 text-text-secondary border-white/5'
+          }`}
+        >
+          <FileText className={`w-3 h-3 ${src._challenge_source ? 'text-red-400' : 'text-primary-light'}`} />
+          <span className="max-w-[150px] truncate">{src.file_path.split(/[\\/]/).pop()}</span>
+          {isOpen ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+        </button>
+        {onForceInclude && (
+          <button 
+            onClick={(e) => { e.stopPropagation(); onForceInclude(); }}
+            className="flex items-center gap-1 px-1.5 py-1 bg-primary/10 hover:bg-primary/20 transition-colors rounded-lg text-[10px] text-primary-light border border-primary/20 ml-auto"
+            title="Force include this chunk into context and re-query"
+          >
+            <Plus className="w-3 h-3" />
+            <span>Force Include</span>
+          </button>
+        )}
+      </div>
+      {isOpen && src.text && (
+        <div className="p-2 text-xs text-text-secondary bg-black/20 border border-white/5 rounded-lg max-h-48 overflow-y-auto whitespace-pre-wrap leading-relaxed">
+          {content}
+        </div>
+      )}
+    </div>
+  )
+}
+
 interface Message {
   role: 'user' | 'assistant'
   content: string
   sources?: QuerySource[]
+  near_misses?: QuerySource[]
   latency_ms?: number
   isStreaming?: boolean
   mode?: 'fast_path' | 'full_rag' | 'degraded_rag'
   graph_hops?: string
+  contradictions_found?: boolean
+  knowledge_gaps?: string[]
+  pattern_annotations?: string[]
+  answer_evolution_diff?: string
 }
 
 
@@ -48,6 +117,7 @@ export function SearchPage() {
   const [showHistory, setShowHistory] = useState(false)
   const [selectedFileType, setSelectedFileType] = useState('')
   const [selectedFolderTag, setSelectedFolderTag] = useState('')
+  const [selectedMode, setSelectedMode] = useState('')
 
   // P10-1: SSE Throttling Buffer to prevent render thrashing
   const streamBufferRef = useRef('')
@@ -94,32 +164,35 @@ export function SearchPage() {
     lastUpdateRef.current = Date.now()
   }, [])
 
-  const handleSearch = useCallback(async () => {
-    if (!question.trim() || searching) return
+  const handleSearch = useCallback(async (overrideQuestion?: string, forcedChunkId?: number) => {
+    const userMsg = overrideQuestion || question.trim()
+    if (!userMsg || searching) return
 
-    const userMsg = question.trim()
-    setQuestion('')
+    if (!overrideQuestion) setQuestion('')
     setError(null)
     setSearching(true)
     streamBufferRef.current = ''
     lastUpdateRef.current = 0
 
-    // Add user message
-    const newMessages: Message[] = [...messages, { role: 'user', content: userMsg }]
+    // Add user message if it's a new query OR an override
+    const newMessages: Message[] = [...messages, { role: 'user' as const, content: overrideQuestion ? `(Retrying) ${userMsg}` : userMsg }]
 
     // Add empty assistant message for streaming
-    setMessages([...newMessages, { role: 'assistant', content: '', isStreaming: true }])
+    setMessages([...newMessages, { role: 'assistant' as const, content: '', isStreaming: true }])
 
-    const historyForApi = messages.map(m => ({ role: m.role, content: m.content }))
+    const historyForApi = newMessages.map(m => ({ role: m.role, content: m.content }))
 
     let sources: QuerySource[] = []
+    let nearMisses: QuerySource[] = []
     let latency = 0
 
     const unsubscribe = subscribeQuery({
       question: userMsg,
       history: historyForApi,
       file_type: selectedFileType || null,
-      folder_tag: selectedFolderTag || null
+      folder_tag: selectedFolderTag || null,
+      mode: selectedMode || null,
+      forced_chunk_ids: forcedChunkId ? [forcedChunkId] : null
     }, (chunk: QueryStreamChunk) => {
       if (chunk.type === 'error') {
         setError(chunk.text || 'Search failed')
@@ -130,11 +203,21 @@ export function SearchPage() {
 
       if (chunk.type === 'sources') {
         sources = chunk.sources || []
+        nearMisses = chunk.near_misses || []
         latency = chunk.latency_ms || chunk.retrieval_ms || 0
         setMessages(prev => {
           const last = prev.at(-1)
           if (last?.role === 'assistant') {
-            return [...prev.slice(0, -1), { ...last, sources, latency_ms: latency, mode: chunk.mode as any || 'full_rag', graph_hops: chunk.graph_hops }]
+            return [...prev.slice(0, -1), { 
+              ...last, 
+              sources, 
+              near_misses: nearMisses, 
+              latency_ms: latency, 
+              mode: chunk.mode as any || 'full_rag', 
+              graph_hops: chunk.graph_hops,
+              contradictions_found: chunk.contradictions_found,
+              knowledge_gaps: chunk.knowledge_gaps
+            }]
           }
           return prev
         })
@@ -191,6 +274,20 @@ export function SearchPage() {
         })
         invalidateCache('query-history')
         refetchHistory()
+      }
+
+      if (chunk.type === 'metadata') {
+        setMessages(prev => {
+          const last = prev.at(-1)
+          if (last?.role === 'assistant') {
+            return [...prev.slice(0, -1), { 
+              ...last, 
+              pattern_annotations: chunk.pattern_annotations || last.pattern_annotations,
+              answer_evolution_diff: chunk.answer_evolution_diff || last.answer_evolution_diff
+            }]
+          }
+          return prev
+        })
       }
 
     })
@@ -283,7 +380,18 @@ export function SearchPage() {
                         <span className="w-1.5 h-1.5 bg-primary-light rounded-full animate-bounce [animation-delay:0.4s]"></span>
                       </div>
                     ) : (
-                      <div className="whitespace-pre-wrap">{msg.content}</div>
+                      <div className="prose prose-invert prose-sm max-w-none">
+                        <ReactMarkdown 
+                          remarkPlugins={[remarkGfm]}
+                          rehypePlugins={[rehypeRaw]}
+                          components={{
+                            claim: ({node, ...props}: any) => <span className="underline decoration-green-500/50 decoration-2 underline-offset-4 bg-green-500/10 px-1 rounded" title={`Sources: ${props.sources}`} {...props} />,
+                            inference: ({node, ...props}: any) => <span className="bg-amber-500/10 text-amber-200/90 px-1 rounded border-b border-amber-500/30" title="Inference (Ungrounded)" {...props} />
+                          } as any}
+                        >
+                          {msg.content}
+                        </ReactMarkdown>
+                      </div>
                     )}
                   </div>
 
@@ -305,17 +413,113 @@ export function SearchPage() {
                     </div>
                   )}
 
+                  {/* Contradictions Banner */}
+                  {msg.role === 'assistant' && msg.contradictions_found && (
+                    <div className="mt-2 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2 flex items-start gap-2 text-red-200/90 text-xs">
+                      <span className="text-red-400 mt-0.5">⚠️</span>
+                      <div className="flex flex-col">
+                        <span className="font-bold text-red-300">Contradictions Found</span>
+                        <span>The system identified opposing viewpoints or conflicting information in your files.</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Knowledge Gaps Panel */}
+                  {msg.role === 'assistant' && msg.knowledge_gaps && msg.knowledge_gaps.length > 0 && (
+                    <div className="mt-2 bg-purple-500/10 border border-purple-500/20 rounded-lg overflow-hidden">
+                      <div className="px-3 py-2 flex items-center gap-2 text-purple-200/90 text-xs font-bold border-b border-purple-500/10">
+                        <Sparkles className="w-4 h-4" />
+                        What You Don't Know
+                      </div>
+                      <div className="p-3 text-xs text-purple-200/70 flex flex-wrap gap-2">
+                        {msg.knowledge_gaps.map((gap, i) => (
+                          <span key={i} className="bg-purple-500/20 px-2 py-1 rounded-md border border-purple-500/30">
+                            {gap}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Pattern Annotator Panel */}
+                  {msg.role === 'assistant' && msg.pattern_annotations && msg.pattern_annotations.length > 0 && (
+                    <div className="mt-2 bg-blue-500/10 border border-blue-500/20 rounded-lg overflow-hidden">
+                      <div className="px-3 py-2 flex items-center gap-2 text-blue-200/90 text-xs font-bold border-b border-blue-500/10">
+                        <User className="w-4 h-4" />
+                        Personal Pattern Annotator
+                      </div>
+                      <div className="p-3 text-xs text-blue-200/70 flex flex-col gap-1.5">
+                        {msg.pattern_annotations.map((annotation, i) => (
+                          <div key={i} className="flex items-start gap-1.5">
+                            <span className="text-blue-400/80 mt-0.5">•</span>
+                            <span>{annotation}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Answer Evolution Panel */}
+                  {msg.role === 'assistant' && msg.answer_evolution_diff && (
+                    <div className="mt-2 bg-emerald-500/10 border border-emerald-500/20 rounded-lg overflow-hidden">
+                      <div className="px-3 py-2 flex items-center gap-2 text-emerald-200/90 text-xs font-bold border-b border-emerald-500/10">
+                        <RotateCcw className="w-4 h-4" />
+                        Answer Evolution
+                      </div>
+                      <div className="p-3 text-xs text-emerald-200/70">
+                        {msg.answer_evolution_diff}
+                      </div>
+                    </div>
+                  )}
+
                   {msg.role === 'assistant' && msg.sources && msg.sources.length > 0 && (
-                    <div className="flex flex-wrap gap-2 mt-1">
+                    <div className="flex flex-col gap-2 mt-2">
                       {msg.sources.slice(0, 3).map((src) => (
-                        <div key={`${src.file_path}-${src.score || 0}`} className="flex items-center gap-1.5 px-2 py-1 bg-white/5 rounded-lg text-[10px] text-text-secondary border border-white/5">
-                          <FileText className="w-3 h-3 text-primary-light" />
-                          <span className="max-w-[150px] truncate">{src.file_path.split(/[\\/]/).pop()}</span>
-                        </div>
+                        <SourceViewer key={`${src.file_path}-${src.score || 0}`} src={src} />
                       ))}
                       {msg.sources.length > 3 && (
-                        <span className="text-[10px] text-text-secondary self-center">+{msg.sources.length - 3} more</span>
+                        <span className="text-[10px] text-text-secondary self-start ml-2">+{msg.sources.length - 3} more</span>
                       )}
+                      {(() => {
+                        const dates = msg.sources
+                          ?.map(s => s.modified_at ? new Date(s.modified_at).getTime() : 0)
+                          .filter(d => d > 0 && !isNaN(d)) || [];
+                        if (dates.length > 0) {
+                          const minDate = new Date(Math.min(...dates)).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+                          const maxDate = new Date(Math.max(...dates)).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+                          const dateText = minDate === maxDate ? minDate : `${minDate} to ${maxDate}`;
+                          return (
+                            <div className="text-[10px] text-text-secondary mt-1 flex items-center gap-1.5 border-t border-white/5 pt-2 pl-2">
+                              <Clock className="w-3 h-3 opacity-70" />
+                              Based on documents from {dateText}
+                            </div>
+                          );
+                        }
+                        return null;
+                      })()}
+                    </div>
+                  )}
+
+                  {msg.role === 'assistant' && msg.near_misses && msg.near_misses.length > 0 && (
+                    <div className="mt-4 pt-4 border-t border-white/5">
+                      <details className="group cursor-pointer">
+                        <summary className="text-[11px] font-medium text-text-secondary/70 hover:text-text-primary transition-colors flex items-center gap-2 select-none mb-2">
+                          <span className="w-4 h-4 flex items-center justify-center rounded-sm bg-surface-elevation-2/50 group-hover:bg-surface-elevation-3 transition-colors">
+                            <span className="group-open:rotate-90 transition-transform text-[10px]">▶</span>
+                          </span>
+                          Near Misses ({msg.near_misses.length})
+                          <span className="text-[9px] text-text-secondary/50 font-normal ml-auto group-hover:text-text-secondary/80 transition-colors">Click to expand • May contain relevant context</span>
+                        </summary>
+                        <div className="flex flex-col gap-2 pl-6 mt-3 animate-in slide-in-from-top-2 duration-200">
+                          {msg.near_misses.map((src) => (
+                            <SourceViewer 
+                              key={`near-${src.file_path}-${src.score || 0}`} 
+                              src={src} 
+                              onForceInclude={() => handleSearch(messages[idx - 1]?.content, src.chunk_id)} 
+                            />
+                          ))}
+                        </div>
+                      </details>
                     </div>
                   )}
 
@@ -380,7 +584,7 @@ export function SearchPage() {
                 disabled={searching}
               />
               <button
-                onClick={handleSearch}
+                onClick={() => handleSearch()}
                 disabled={!question.trim() || searching}
                 className="p-3 mr-2 bg-primary hover:bg-primary-dark disabled:bg-white/5 text-white rounded-xl transition-all shadow-lg"
               >
@@ -414,12 +618,26 @@ export function SearchPage() {
                 <option key={folder} value={folder}>{folder}</option>
               ))}
             </select>
-            {(selectedFileType || selectedFolderTag) && (
+            <select
+              value={selectedMode}
+              onChange={(e) => setSelectedMode(e.target.value)}
+              className="text-[11px] bg-white/5 border border-white/10 rounded-lg px-2 py-1 text-text-primary"
+              disabled={searching}
+            >
+              <option value="">Default Mode</option>
+              <option value="explain">Explain</option>
+              <option value="verify">Verify</option>
+              <option value="explore">Explore</option>
+              <option value="distill">Distill</option>
+              <option value="challenge">Challenge</option>
+            </select>
+            {(selectedFileType || selectedFolderTag || selectedMode) && (
               <button
                 type="button"
                 onClick={() => {
                   setSelectedFileType('')
                   setSelectedFolderTag('')
+                  setSelectedMode('')
                 }}
                 className="text-[10px] px-2 py-1 rounded-lg border border-primary/20 text-primary-light hover:bg-primary/10"
               >

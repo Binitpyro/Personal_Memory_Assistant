@@ -9,6 +9,38 @@ use rayon::prelude::*;
 
 mod layout;
 
+fn get_sentence_offsets_json(text: &str) -> String {
+    let mut offsets = Vec::new();
+    let chars: Vec<char> = text.chars().collect();
+    let mut curr = 0;
+    
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '.' || c == '!' || c == '?' {
+            let mut j = i + 1;
+            let mut has_ws = false;
+            while j < chars.len() && chars[j].is_whitespace() {
+                has_ws = true;
+                j += 1;
+            }
+            if has_ws && j < chars.len() && chars[j].is_uppercase() {
+                let end = i + 2;
+                offsets.push(format!("[{}, {}]", curr, end));
+                curr = j;
+                i = j;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    if curr < chars.len() {
+        offsets.push(format!("[{}, {}]", curr, chars.len()));
+    }
+    
+    format!("[{}]", offsets.join(", "))
+}
+
 fn get_sentence_boundary(text: &str, byte_pos: usize, byte_window: usize) -> usize {
     let mut safe_byte_pos = byte_pos;
     // Ensure byte_pos is on a char boundary by moving backward if necessary
@@ -67,7 +99,10 @@ fn create_chunks(py: Python, text: &str, chunk_size_chars: usize, chunk_overlap_
         dict.set_item("start_offset", base_offset + start_char)?;
         let chunk_char_len = chunk_text.chars().count();
         dict.set_item("end_offset", base_offset + start_char + chunk_char_len)?;
-        dict.set_item("text_preview", format!("{}{}", prefix, chunk_text))?;
+        let full_text = format!("{}{}", prefix, chunk_text);
+        dict.set_item("text_preview", &full_text)?;
+        dict.set_item("sentence_offsets", get_sentence_offsets_json(&full_text))?;
+        dict.set_item("segmenter_version", "rs_v1")?;
         
         chunks.push(dict.into());
 
@@ -108,7 +143,10 @@ fn chunk_markdown(py: Python, text: &str, chunk_size_chars: usize, chunk_overlap
                     let dict = PyDict::new(py);
                     dict.set_item("start_offset", start_char)?;
                     dict.set_item("end_offset", start_char + sec_chars)?;
-                    dict.set_item("text_preview", format!("{}{}", prefix, sec.trim()))?;
+                    let full_text = format!("{}{}", prefix, sec.trim());
+                    dict.set_item("text_preview", &full_text)?;
+                    dict.set_item("sentence_offsets", get_sentence_offsets_json(&full_text))?;
+                    dict.set_item("segmenter_version", "rs_v1")?;
                     chunks.push(dict.into());
                 } else {
                     let mut c = create_chunks(py, sec, chunk_size_chars, chunk_overlap_chars, prefix, start_char)?;
@@ -129,7 +167,10 @@ fn chunk_markdown(py: Python, text: &str, chunk_size_chars: usize, chunk_overlap
                 let dict = PyDict::new(py);
                 dict.set_item("start_offset", start_char)?;
                 dict.set_item("end_offset", start_char + sec_chars)?;
-                dict.set_item("text_preview", format!("{}{}", prefix, sec.trim()))?;
+                let full_text = format!("{}{}", prefix, sec.trim());
+                dict.set_item("text_preview", &full_text)?;
+                dict.set_item("sentence_offsets", get_sentence_offsets_json(&full_text))?;
+                dict.set_item("segmenter_version", "rs_v1")?;
                 chunks.push(dict.into());
             } else {
                 let mut c = create_chunks(py, sec, chunk_size_chars, chunk_overlap_chars, prefix, start_char)?;

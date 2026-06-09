@@ -7,6 +7,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+import json
+import re
 
 from app.config import settings
 from app.embeddings.service import EmbeddingService
@@ -33,6 +35,56 @@ except ImportError:
     RUST_CORE_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
+
+_nltk_punkt_downloaded = False
+_SENTENCE_SPLIT_RE = re.compile(r'(?<=[.!?])\s+(?=[A-Z])')
+
+def _get_sentence_offsets(text: str) -> list[list[int]]:
+    """Compute start and end offsets for sentences within a text string."""
+    global _nltk_punkt_downloaded
+    if not text:
+        return []
+        
+    try:
+        import nltk
+        if not _nltk_punkt_downloaded:
+            try:
+                nltk.data.find('tokenizers/punkt')
+                nltk.data.find('tokenizers/punkt_tab')
+            except LookupError:
+                nltk.download('punkt', quiet=True)
+                nltk.download('punkt_tab', quiet=True)
+            _nltk_punkt_downloaded = True
+            
+        sentences = nltk.tokenize.sent_tokenize(text)
+        offsets = []
+        curr = 0
+        for s in sentences:
+            start = text.find(s, curr)
+            if start == -1:
+                start = curr
+            end = start + len(s)
+            offsets.append([start, end])
+            curr = end
+        
+        if curr < len(text):
+            if offsets:
+                offsets[-1][1] = len(text)
+            else:
+                offsets.append([0, len(text)])
+        return offsets
+    except Exception as e:
+        logger.debug("Failed to use NLTK for sentence segmentation, using fallback: %s", e)
+        offsets = []
+        matches = list(_SENTENCE_SPLIT_RE.finditer(text))
+        curr = 0
+        for m in matches:
+            end = m.start() + 1
+            offsets.append([curr, end])
+            curr = m.end()
+        if curr < len(text):
+            offsets.append([curr, len(text)])
+        return offsets
 
 # H-18: Dedicated thread pool for disk I/O to avoid contention with indexing tasks
 _DISK_EXECUTOR = ThreadPoolExecutor(max_workers=32, thread_name_prefix="pma_disk")
@@ -109,11 +161,14 @@ class StreamChunker:
             end = self._find_boundary(self.buffer, raw_end)
 
             chunk_text = self.buffer[:end]
+            preview = self.prefix + chunk_text
             chunks.append(
                 {
                     "start_offset": self.total_offset,
                     "end_offset": self.total_offset + end,
-                    "text_preview": self.prefix + chunk_text,
+                    "text_preview": preview,
+                    "sentence_offsets": json.dumps(_get_sentence_offsets(preview)),
+                    "segmenter_version": "py_v1"
                 }
             )
 
@@ -128,11 +183,14 @@ class StreamChunker:
         """Process any remaining text in the buffer."""
         chunks = []
         if self.buffer.strip():
+            preview = self.prefix + self.buffer
             chunks.append(
                 {
                     "start_offset": self.total_offset,
                     "end_offset": self.total_offset + len(self.buffer),
-                    "text_preview": self.prefix + self.buffer,
+                    "text_preview": preview,
+                    "sentence_offsets": json.dumps(_get_sentence_offsets(preview)),
+                    "segmenter_version": "py_v1"
                 }
             )
         self.buffer = ""
@@ -716,12 +774,13 @@ class IndexingService:
             return []
         prefix = self._build_context_prefix(file_path)
         chunks = self.code_chunker.chunk_code(text, file_path=file_path, prefix=prefix)
-        # Ensure chunks have start_offset and end_offset
         for c in chunks:
             if "start_offset" not in c:
                 c["start_offset"] = 0
             if "end_offset" not in c:
                 c["end_offset"] = len(c["text_preview"])
+            c["sentence_offsets"] = json.dumps(_get_sentence_offsets(c["text_preview"]))
+            c["segmenter_version"] = "py_v1"
         return chunks
 
     @staticmethod

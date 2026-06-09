@@ -8,6 +8,8 @@ Instructions:
 4. Group information logically (e.g., by project, folder, or purpose).
 5. Cite source files by their paths using [source_index] notation.
 6. Do not use excessive filler words. Be professional, direct, and thorough where needed.
+7. For each factual claim in your response based on the context, wrap it in: <claim sources='[chunk_id_1,chunk_id_2]'>claim text</claim>. (Use the chunk ID provided in the context snippet).
+8. For inferences not supported by retrieved context, use: <inference>inference text</inference>.
 
 ### Context
 {context}

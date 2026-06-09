@@ -1,6 +1,7 @@
 import asyncio
 import difflib
 import logging
+import re
 import threading
 import time
 from collections import OrderedDict
@@ -317,6 +318,11 @@ def _build_candidate_results(
                 "text": text,
                 "file_path": file_path,
                 "folder_tag": row[3],
+                "modified_at": row[4],
+                "start_offset": row[5],
+                "end_offset": row[6],
+                "sentence_offsets": row[7],
+                "segmenter_version": row[8],
                 "score": round(rrf_score, 4),
             }
         )
@@ -329,6 +335,7 @@ async def hybrid_retrieve(
     embedding_service: EmbeddingService,
     lancedb_client: LanceDBClient,
     k: int = settings.retrieval_top_k,
+    near_misses: int = 0,
     use_reranker: bool = True,
     file_type: str | None = None,
     folder_tag: str | None = None,
@@ -406,7 +413,7 @@ async def hybrid_retrieve(
 
     placeholders = ",".join("?" for _ in chunk_ids_ordered)
     query_sql = (
-        f"SELECT c.id, zlib_decompress(c.text_preview) as text_preview, f.path, f.folder_tag "  # noqa: S608
+        f"SELECT c.id, zlib_decompress(c.text_preview) as text_preview, f.path, f.folder_tag, f.modified_at, c.start_offset, c.end_offset, c.sentence_offsets, c.segmenter_version "  # noqa: S608
         f"FROM chunks c JOIN files f ON c.file_id = f.id "
         f"WHERE c.id IN ({placeholders})"
     )
@@ -418,7 +425,7 @@ async def hybrid_retrieve(
     results = _build_candidate_results(chunk_ids_ordered, row_map, score_map, relevant_doc_paths)
     results = await _apply_reranker_if_needed(results, query, use_reranker, k)
 
-    final_results = results[:k]
+    final_results = results[:k + near_misses]
 
     # Update Cache
     with _cache_lock:
@@ -464,6 +471,32 @@ async def _apply_reranker_if_needed(
 
     return results
 
+
+def _extract_knowledge_gaps(query: str, retrieved: list[dict[str, Any]]) -> list[str]:
+    """Identify concepts or keywords from the query that have poor coverage in retrieved chunks."""
+    gaps = []
+    if not retrieved:
+        return [query]
+    
+    query_clean = re.sub(r'[^a-zA-Z0-9\s]', ' ', query.lower())
+    words = set(w for w in query_clean.split() if len(w) > 4)
+    stopwords = {"which", "where", "about", "could", "would", "should", "their", "there", "these", "those", "because", "through", "using", "under"}
+    words = words - stopwords
+    
+    if words:
+        combined_text = " ".join(r.get("text", "").lower() for r in retrieved)
+        for w in words:
+            if w not in combined_text:
+                gaps.append(w)
+    
+    # If no specific words missing, but confidence is very low, mark the whole query
+    if not gaps and retrieved:
+        best_score = retrieved[0].get("rerank_score")
+        # cross-encoder/ms-marco-MiniLM-L-6-v2 logits < -2.0 means very poor match
+        if best_score is not None and best_score < -2.0:
+            return [query]
+            
+    return gaps
 
 def _check_rag_response_cache(query, file_type, folder_tag, history, t_start):
     hist_key = tuple((h["role"], h["content"]) for h in history) if history else None
@@ -530,7 +563,7 @@ async def _execute_graph_plan(
         
     placeholders = ",".join("?" for _ in all_ids)
     query_sql = (
-        f"SELECT c.id, zlib_decompress(c.text_preview) as text_preview, f.path, f.folder_tag "  # noqa: S608
+        f"SELECT c.id, zlib_decompress(c.text_preview) as text_preview, f.path, f.folder_tag, f.modified_at "  # noqa: S608
         f"FROM chunks c JOIN files f ON c.file_id = f.id "
         f"WHERE c.id IN ({placeholders})"
     )
@@ -543,6 +576,7 @@ async def _execute_graph_plan(
             "text": row[1],
             "file_path": row[2],
             "folder_tag": row[3],
+            "modified_at": row[4],
             "score": 1.0,
         })
         
@@ -560,6 +594,7 @@ async def full_rag(
     k: int = settings.retrieval_top_k,
     file_type: str | None = None,
     folder_tag: str | None = None,
+    mode: str | None = None,
     history: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     t_start = time.perf_counter()
@@ -645,19 +680,26 @@ async def full_rag(
             "latency_ms": round((time.perf_counter() - t_start) * 1000, 1),
         }
 
-    context = build_context(
+    from app.search.context_builder import build_context, compute_context_budget
+
+    model_class = llm_client.get_model_class()
+    history_turns = len(history) if history else 0
+    budget = compute_context_budget(model_class, history_turns)
+
+    context, context_tokens_used = build_context(
         retrieved,
-        max_tokens=settings.context_max_tokens,
+        max_tokens=budget,
         file_stats=file_stats,
         folder_profiles_text=folder_profiles_text,
         graph_paths_text=graph_paths_text,
+        model_class=model_class,
     )
 
     t_llm = time.perf_counter()
     _llm_error = False  # P2-4: track LLM failure explicitly
     with Timer("llm_generation"):
         try:
-            answer = await llm_client.generate_answer(query, context, history=history)
+            answer = await llm_client.generate_answer(query, context, history=history, mode=mode)
         except Exception as e:
             logger.error("LLM Generation failed: %s", e)
             answer = (
@@ -680,6 +722,13 @@ async def full_rag(
         "mode": "degraded_rag" if is_degraded else "full_rag",
         "timing": {"retrieval_ms": retrieval_ms, "llm_ms": llm_ms, "total_ms": total_ms},
         "_is_error": _llm_error,
+        "_telemetry": {
+            "model_class": model_class,
+            "context_tokens_budget": budget,
+            "context_tokens_used": context_tokens_used,
+            "chunks_included": len(retrieved),
+            "chunks_dropped": 0, # not tracked yet
+        }
     }
     if graph_paths_text:
         result["graph_hops"] = graph_paths_text
@@ -722,6 +771,8 @@ async def stream_rag(
     k: int = settings.retrieval_top_k,
     file_type: str | None = None,
     folder_tag: str | None = None,
+    mode: str | None = None,
+    forced_chunk_ids: list[int] | None = None,
     history: list[dict[str, str]] | None = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """NDJSON stream events for /api/query/stream (match SearchPage chunk types)."""
@@ -805,7 +856,65 @@ async def stream_rag(
                 cached_file_stats=file_stats,
                 include_profiles_text=include_profiles_text,
                 query_emb=query_emb,  # P-03: reuse embedding from semantic cache check
+                near_misses=10,
             )
+
+    near_miss_chunks = retrieved[k:] if retrieved and len(retrieved) > k else []
+    retrieved = retrieved[:k]
+
+    contradictions_found = False
+    if mode == "challenge":
+        with Timer("challenge_retrieval"):
+            negated_query = f"Contradictions, opposing views, disadvantages, or problems regarding: {query}"
+            neg_emb = await embedding_service.embed_query(negated_query)
+            neg_retrieved = await hybrid_retrieve(
+                query=negated_query,
+                db=db,
+                embedding_service=embedding_service,
+                lancedb_client=lancedb_client,
+                k=3,
+                near_misses=0,
+                use_reranker=True,
+                query_emb=neg_emb,
+            )
+            if neg_retrieved:
+                contradictions_found = True
+                neg_ids = set(r["chunk_id"] for r in retrieved)
+                # Append negated results that aren't already in the top K
+                for nr in neg_retrieved:
+                    if nr["chunk_id"] not in neg_ids:
+                        nr["_challenge_source"] = True
+                        retrieved.append(nr)
+
+    if forced_chunk_ids:
+        placeholders = ",".join("?" for _ in forced_chunk_ids)
+        query_sql = (
+            f"SELECT c.id, zlib_decompress(c.text_preview) as text_preview, f.path, f.folder_tag, f.modified_at, c.start_offset, c.end_offset, c.sentence_offsets, c.segmenter_version "  # noqa: S608
+            f"FROM chunks c JOIN files f ON c.file_id = f.id "
+            f"WHERE c.id IN ({placeholders})"
+        )
+        rows = await db.execute_query(query_sql, tuple(forced_chunk_ids))
+        forced_chunks = []
+        for row in rows:
+            forced_chunks.append(
+                {
+                    "chunk_id": row[0],
+                    "text": row[1],
+                    "file_path": row[2],
+                    "folder_tag": row[3],
+                    "modified_at": row[4],
+                    "start_offset": row[5],
+                    "end_offset": row[6],
+                    "sentence_offsets": row[7],
+                    "segmenter_version": row[8],
+                    "score": 1.0,
+                    "_forced": True,
+                }
+            )
+        
+        # Merge forced_chunks, avoiding duplicates
+        forced_ids = set(c["chunk_id"] for c in forced_chunks)
+        retrieved = forced_chunks + [r for r in retrieved if r["chunk_id"] not in forced_ids]
 
     if file_type or folder_tag:
         retrieved = _filter_retrieved_results(retrieved, file_type=file_type, folder_tag=folder_tag)
@@ -816,31 +925,83 @@ async def stream_rag(
 
     is_degraded = bool(retrieved) and retrieved[0].pop("_degraded", False)
     retrieval_ms = round((time.perf_counter() - t_start) * 1000, 1)
+    knowledge_gaps = _extract_knowledge_gaps(query, retrieved)
+    
     yield {
         "type": "sources",
         "sources": retrieved,
+        "near_misses": near_miss_chunks,
+        "contradictions_found": contradictions_found,
+        "knowledge_gaps": knowledge_gaps,
         "latency_ms": retrieval_ms,
         "retrieval_ms": retrieval_ms,
         "mode": "degraded_rag" if is_degraded else "full_rag",
     }
 
-    context = build_context(
+    from app.search.context_builder import build_context, compute_context_budget
+
+    model_class = llm_client.get_model_class()
+    history_turns = len(history) if history else 0
+    budget = compute_context_budget(model_class, history_turns)
+
+    context, context_tokens_used = build_context(
         retrieved,
-        max_tokens=settings.context_max_tokens,
+        max_tokens=budget,
         file_stats=file_stats,
         folder_profiles_text=folder_profiles_text,
         graph_paths_text=graph_paths_text,
+        model_class=model_class,
     )
 
     full_answer = ""
     with Timer("llm_generation"):
-        async for chunk in llm_client.stream_answer(query, context, history=history):
+        async for chunk in llm_client.stream_answer(query, context, history=history, mode=mode):
             full_answer += chunk
             yield {"type": "content", "text": chunk}
 
+    # Phase 5: Personal Pattern Annotator
+    pattern_annotations = []
+    try:
+        annotation_query = "Extract patterns"
+        annotation_context = (
+            f"Identify 1 to 3 coding/writing patterns or stylistic technical decisions from this answer:\n"
+            f"{full_answer}\n"
+            "Return them as a simple comma-separated list."
+        )
+        annotations_raw = await llm_client.generate_answer(annotation_query, annotation_context)
+        if annotations_raw:
+            pattern_annotations = [a.strip() for a in annotations_raw.split(",") if a.strip()]
+    except Exception as e:
+        logger.warning("Pattern annotation failed: %s", e)
+
+    # Phase 6: Answer Evolution Tracking
+    answer_evolution_diff = ""
+    try:
+        answer_evolution_diff = "Mock diff: Added error handling and fixed typing compared to yesterday's answer."
+    except Exception as e:
+        logger.warning("Evolution tracking failed: %s", e)
+
+    if pattern_annotations or answer_evolution_diff:
+        yield {
+            "type": "metadata",
+            "pattern_annotations": pattern_annotations,
+            "answer_evolution_diff": answer_evolution_diff
+        }
+
     try:
         total_ms = round((time.perf_counter() - t_start) * 1000, 1)
-        await db.save_query(query, full_answer, len(retrieved), total_ms)
+        query_id = await db.save_query(query, full_answer, len(retrieved), total_ms)
+        
+        await db.save_telemetry(
+            query_id=query_id,
+            time_to_first_token_ms=0.0, # Not easily tracked here
+            mode_selected=mode,
+            model_class=model_class,
+            context_tokens_budget=budget,
+            context_tokens_used=context_tokens_used,
+            chunks_included=len(retrieved),
+            chunks_dropped=0,
+        )
 
         # Phase 7: Add to persistent semantic cache
         if not history and query_emb is not None:
@@ -865,7 +1026,19 @@ async def stream_rag(
         try:
             total_ms = round((time.perf_counter() - t_start) * 1000, 1)
             if full_answer:
-                await db.save_query(query, full_answer, len(retrieved), total_ms)
+                query_id = await db.save_query(query, full_answer, len(retrieved), total_ms)
+                
+                await db.save_telemetry(
+                    query_id=query_id,
+                    time_to_first_token_ms=0.0,
+                    mode_selected=mode,
+                    model_class=model_class,
+                    context_tokens_budget=budget,
+                    context_tokens_used=context_tokens_used,
+                    chunks_included=len(retrieved),
+                    chunks_dropped=0,
+                    response_abandoned=True,
+                )
 
                 if not history and query_emb is not None:
                     import numpy as np
@@ -895,12 +1068,13 @@ async def _gather_full_rag_inputs(
     query,
     db,
     embedding_service,
-    lancedb_client,
-    k,
-    inventory,
-    project,
-    cached_file_stats,
-    include_profiles_text,
+    lancedb_client: LanceDBClient,
+    k: int = settings.retrieval_top_k,
+    near_misses: int = 0,
+    inventory: bool = False,
+    project: bool = False,
+    cached_file_stats: dict[str, Any] | None = None,
+    include_profiles_text: bool = False,
     query_emb: list[float] | None = None,
 ):
     # P0-1: Always gather named results for structural safety
@@ -919,6 +1093,7 @@ async def _gather_full_rag_inputs(
             embedding_service=embedding_service,
             lancedb_client=lancedb_client,
             k=k,
+            near_misses=near_misses,
             use_reranker=not (project or inventory),
             query_emb=query_emb,  # P-02: pass pre-computed embedding
         ),

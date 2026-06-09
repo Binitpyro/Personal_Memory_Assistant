@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS chunks (
     file_id INTEGER NOT NULL,
     start_offset INTEGER NOT NULL,
     end_offset INTEGER NOT NULL,
+    sentence_offsets TEXT,
+    segmenter_version TEXT,
     text_preview TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE CASCADE
@@ -105,3 +107,23 @@ CREATE INDEX IF NOT EXISTS idx_folder_profiles_type ON folder_profiles(project_t
 
 -- NOTE: idx_files_change_detection is created in db.py migrations
 -- because it references the sha256 column added via ALTER TABLE.
+
+-- PMA Metrics for Telemetry (Local-Only)
+CREATE TABLE IF NOT EXISTS pma_metrics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    query_id INTEGER,
+    time_to_first_token_ms REAL,
+    response_abandoned BOOLEAN DEFAULT 0,
+    query_retry_within_60s BOOLEAN DEFAULT 0,
+    deep_analysis_toggled BOOLEAN DEFAULT 0,
+    mode_selected TEXT,
+    force_include_count INTEGER DEFAULT 0,
+    feature_thumbs TEXT,
+    model_class TEXT,
+    context_tokens_budget INTEGER,
+    context_tokens_used INTEGER,
+    chunks_included INTEGER,
+    chunks_dropped INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY(query_id) REFERENCES query_history(id) ON DELETE SET NULL
+);

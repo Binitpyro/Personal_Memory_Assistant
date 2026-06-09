@@ -215,7 +215,8 @@ def _format_snippets(
         if snippet_budget <= 0:
             break
 
-        label = f"Snippet {snippet_id} [{path}]:\n"
+        chunk_id = res.get("chunk_id", snippet_id)
+        label = f"Snippet {snippet_id} [ID: {chunk_id}] [{path}]:\n"
         label_tokens = _token_count(label)
         if label_tokens >= snippet_budget:
             continue
@@ -288,6 +289,25 @@ def _add_graph_paths(
     return 0
 
 
+def compute_context_budget(model_class: str, history_turns: int) -> int:
+    """Adaptive context budget based on model's effective capacity."""
+    EFFECTIVE_CEILINGS = {
+        "cloud":    100_000,
+        "7b_local":  10_000,
+        "3b_local":   4_000,
+    }
+    ceiling = EFFECTIVE_CEILINGS.get(model_class, 8000)
+    
+    # Fixed costs
+    system_prompt = 400
+    output_reserve = min(1000, ceiling // 4)
+    query_overhead = 80
+    history_cost = history_turns * 400
+    
+    context_budget = ceiling - system_prompt - output_reserve - query_overhead - history_cost
+    return max(1000, context_budget)
+
+
 def build_context(
     retrieved_results: list[dict[str, Any]],
     max_tokens: int = 0,
@@ -295,7 +315,8 @@ def build_context(
     folder_profiles_text: str = "",
     metadata_insights: str | None = None,
     graph_paths_text: str = "",
-) -> str:
+    model_class: str = "cloud",
+) -> tuple[str, int]:
     """Formats retrieved snippets into a single context string for the LLM.
 
     Optimisations:
@@ -309,10 +330,23 @@ def build_context(
         and not folder_profiles_text
         and not metadata_insights
     ):
-        return "No relevant context found."
+        msg = "No relevant context found."
+        return msg, _token_count(msg)
 
     if max_tokens <= 0:
         max_tokens = settings.context_max_tokens
+
+    # Adaptive changes for 3b_local
+    if model_class == "3b_local":
+        folder_profiles_text = ""
+        graph_paths_text = ""
+        max_per_file = 1
+        score_multiplier = 0.4
+        max_chunks = 3
+    else:
+        max_per_file = 2
+        score_multiplier = 0.2
+        max_chunks = 15
 
     context_parts: list[str] = []
     used_tokens = 0
@@ -339,18 +373,22 @@ def build_context(
             context_parts.append(header)
             used_tokens += h_tokens
 
-            deduplicated = _deduplicate_by_file(retrieved_results)
+            deduplicated = _deduplicate_by_file(retrieved_results, max_per_file=max_per_file)
 
             if deduplicated:
                 top_score = deduplicated[0].get("score", 1.0)
                 if top_score > 0:
-                    score_threshold = top_score * 0.2
+                    score_threshold = top_score * score_multiplier
                     deduplicated = [
                         r for r in deduplicated if r.get("score", 1.0) >= score_threshold
                     ]
+            
+            # Keep only top max_chunks
+            deduplicated = deduplicated[:max_chunks]
 
             snippet_parts = _format_snippets(deduplicated, max(0, max_tokens - used_tokens))
             context_parts.extend(snippet_parts)
 
     final_context = _compress_text("\n".join(context_parts))
-    return _truncate_to_tokens(final_context, max_tokens)
+    truncated = _truncate_to_tokens(final_context, max_tokens)
+    return truncated, _token_count(truncated)

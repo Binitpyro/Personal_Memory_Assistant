@@ -251,5 +251,7 @@ def test_context_builder_edge_cases():
 async def test_llm_client_retry_logic():
     client = LLMClient()
     client.api_key = None
+    client._check_ollama_health = AsyncMock(return_value=False)
+    client._check_lm_studio_health = AsyncMock(return_value=False)
     ans = await client.generate_answer("q", "c")
     assert "LLM unavailable" in ans

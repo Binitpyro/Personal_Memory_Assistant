@@ -9,6 +9,7 @@ import keyring
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from app.config import settings
+from app.search.capability_detector import capability_detector
 
 logger = logging.getLogger(__name__)
 
@@ -156,7 +157,7 @@ class LLMClient:
         if lm_studio_model is not None:
             self.lm_studio_model = lm_studio_model
 
-    def _build_prompt(self, query: str, context: str, mode: str | None = None) -> str:
+    def _build_prompt(self, query: str, context: str, mode: str | None = None, supports_claims: bool = False) -> str:
         prompt_path = Path("prompts/rag_system.txt")
         # P10-2: Use delimiters to harden AI boundary
         safe_query = f"<user_query>\n{query}\n</user_query>"
@@ -174,6 +175,12 @@ class LLMClient:
             if prompt_path.exists():
                 with open(prompt_path, encoding="utf-8") as f:
                     template = f.read()
+                if supports_claims:
+                    template_parts = template.split("### Context")
+                    if len(template_parts) == 2:
+                        claim_instr = "\n7. HIGH PRIORITY: Wrap any assertions or facts derived from the context in <claim sources=\"[n]\"> tags.\n   Example: <claim sources=\"[1]\">Python was created in 1991</claim> by <claim sources=\"[1]\">Guido van Rossum</claim>.\n\n"
+                        template = template_parts[0] + claim_instr + "### Context" + template_parts[1]
+                
                 if mode_str:
                     template += f"\n{mode_str}\n"
                 return template.format(context=context, query=safe_query)
@@ -201,7 +208,14 @@ Instructions:
 4. Group information logically (e.g., by project, folder, or purpose).
 5. Cite source files by their paths using [source_index] notation.
 6. Do not use excessive filler words. Be professional, direct, and thorough where needed.
+"""
+        if supports_claims:
+            template += """
+7. HIGH PRIORITY: Wrap any assertions or facts derived from the context in <claim sources="[n]"> tags.
+   Example: <claim sources="[1]">Python was created in 1991</claim> by <claim sources="[1]">Guido van Rossum</claim>.
+"""
 
+        template += """
 ### Context
 {context}
 
@@ -225,10 +239,13 @@ Answer:
             return False
 
     async def generate_answer(
-        self, query: str, context: str, history: list[dict[str, str]] | None = None, mode: str | None = None
+        self, query: str, context: str, history: list[dict[str, str]] | None = None, mode: str | None = None, skip_capability_check: bool = False
     ) -> str:
         await self._ensure_token_loaded()
-        prompt = self._build_prompt(query, context, mode)
+        supports_claims = False
+        if not skip_capability_check:
+            supports_claims = await capability_detector.detect_capabilities(self)
+        prompt = self._build_prompt(query, context, mode, supports_claims=supports_claims)
         provider = (self.provider_preference or "auto").lower()
 
         if provider in {"gemini", "auto"} and (self.api_key or self._oauth_token):
@@ -243,22 +260,42 @@ Answer:
         self, query: str, context: str, history: list[dict[str, str]] | None = None, mode: str | None = None
     ) -> AsyncGenerator[str, None]:
         await self._ensure_token_loaded()
-        prompt = self._build_prompt(query, context, mode)
+        supports_claims = await capability_detector.detect_capabilities(self)
+        prompt = self._build_prompt(query, context, mode, supports_claims=supports_claims)
         provider = (self.provider_preference or "auto").lower()
 
-        if provider in {"gemini", "auto"} and (self.api_key or self._oauth_token):
-            async for chunk in self._stream_gemini(prompt, history=history):
-                yield chunk
-            return
-        if provider in {"lm_studio", "auto"} and await self._check_lm_studio_health():
-            async for chunk in self._stream_lm_studio(prompt, history=history):
-                yield chunk
-            return
-        if provider in {"ollama", "auto"} and await self._check_ollama_health():
-            async for chunk in self._stream_ollama(prompt, history=history):
-                yield chunk
-            return
-        yield "LLM unavailable."
+        async def _generator():
+            if provider in {"gemini", "auto"} and (self.api_key or self._oauth_token):
+                async for chunk in self._stream_gemini(prompt, history=history):
+                    yield chunk
+                return
+            if provider in {"lm_studio", "auto"} and await self._check_lm_studio_health():
+                async for chunk in self._stream_lm_studio(prompt, history=history):
+                    yield chunk
+                return
+            if provider in {"ollama", "auto"} and await self._check_ollama_health():
+                async for chunk in self._stream_ollama(prompt, history=history):
+                    yield chunk
+                return
+            yield "LLM unavailable."
+
+        # Session-level monitoring for first real response
+        buffer = ""
+        found_claim = False
+        chars_checked = 0
+
+        async for chunk in _generator():
+            yield chunk
+            
+            if supports_claims and not found_claim and chars_checked < 600:
+                buffer += chunk
+                chars_checked += len(chunk)
+                if "<claim" in buffer:
+                    found_claim = True
+                elif chars_checked >= 600 and not found_claim:
+                    capability_detector.report_failure(self)
+                    # We only report once per session (it caches the failure)
+                    supports_claims = False
 
     async def _check_lm_studio_health(self) -> bool:
         try:

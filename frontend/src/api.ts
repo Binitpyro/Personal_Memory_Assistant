@@ -4,10 +4,13 @@
  * base URL resolution, and easy-to-mock endpoints for tests.
  */
 
+import { isTauri, initTauriConnection as _initTauri } from './utils/tauriShell';
+import { getGoogleAuthStartUrl as _getGoogleAuthStartUrl, launchGoogleAuth as _launchGoogleAuth } from './utils/auth';
+
 const BASE = '/api'; 
 export let ENDPOINT = (import.meta as any).env.VITE_API_URL || "http://127.0.0.1:8000";
 
-// â”€â”€ Security Token Injection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Security Token Injection ─────────────────────────────────────────────
 
 const params = new URLSearchParams(globalThis.location.search);
 const tokenFromUrl = params.get('token');
@@ -19,42 +22,16 @@ if (tokenFromUrl) {
   globalThis.history.replaceState({}, document.title, globalThis.location.pathname);
 }
 
-const isTauri = typeof globalThis !== 'undefined' && '__TAURI_INTERNALS__' in globalThis;
-
 export async function initTauriConnection() {
-  if (isTauri) {
-    try {
-      const { invoke } = await import('@tauri-apps/api/core');
-      const [port, token] = await invoke<[number, string]>('get_backend_info');
-      ENDPOINT = `http://127.0.0.1:${port}`;
-      localToken = token;
-      sessionStorage.setItem('pma_token', token);
-      console.log(`[Tauri] Connected to backend on port ${port}`);
-    } catch (e) {
-      console.error("[Tauri] Failed to get backend info from shell:", e);
-    }
-  }
+  await _initTauri((e) => ENDPOINT = e, (t) => localToken = t);
 }
 
 export function getGoogleAuthStartUrl(): string {
-  const url = new URL(`${ENDPOINT}/api/auth/google/start`);
-  if (localToken) url.searchParams.set('token', localToken);
-  return url.toString();
+  return _getGoogleAuthStartUrl(ENDPOINT, localToken);
 }
 
 export async function launchGoogleAuth(): Promise<void> {
-  const url = getGoogleAuthStartUrl();
-
-  if (isTauri) {
-    const { open } = await import('@tauri-apps/plugin-shell');
-    await open(url);
-    return;
-  }
-
-  const popup = globalThis.open(url, '_blank', 'noopener,noreferrer');
-  if (!popup) {
-    globalThis.location.assign(url);
-  }
+  return _launchGoogleAuth(ENDPOINT, localToken);
 }
 
 // â”€â”€ API Wrappers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -345,33 +322,7 @@ export const seedDemo = () =>
 
 // â”€â”€ Stream Tracking â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-export let activeStreamCount = 0;
-const activeControllers = new Set<AbortController>();
-
-function updateStreamCount(delta: number, controller?: AbortController) {
-  if (controller) {
-    if (delta > 0) activeControllers.add(controller);
-    else activeControllers.delete(controller);
-  }
-  activeStreamCount = Math.max(0, Array.from(activeControllers).filter(c => !c.signal.aborted).length);
-  globalThis.dispatchEvent(new CustomEvent('stream-activity', { detail: activeStreamCount > 0 }));
-}
-
-/** Failsafe: reset stream count if all known controllers are aborted */
-export function checkStreamFailsafe() {
-  const liveCount = Array.from(activeControllers).filter(c => !c.signal.aborted).length;
-  if (liveCount === 0 && activeStreamCount > 0) {
-    console.warn("[API] Stream failsafe triggered: resetting activeStreamCount");
-    activeStreamCount = 0;
-    activeControllers.clear();
-    globalThis.dispatchEvent(new CustomEvent('stream-activity', { detail: false }));
-  }
-}
-
-// Run failsafe check periodically
-if (typeof globalThis !== 'undefined' && 'setInterval' in globalThis) {
-  setInterval(checkStreamFailsafe, 30_000);
-}
+// â”€â”€ Stream Tracking (Removed in favor of local hook state) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 // â”€â”€ SSE Progress Stream â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -380,7 +331,6 @@ export function subscribeProgress(onData: (data: IndexStatus & { current_file: s
   let closed = false;
   let retries = 0;
   const MAX_RETRIES = 10;
-  let streamCounted = false;
   const controller = new AbortController();
 
   function connect() {
@@ -388,23 +338,14 @@ export function subscribeProgress(onData: (data: IndexStatus & { current_file: s
     const tokenQuery = localToken ? `?token=${encodeURIComponent(localToken)}` : '';
     es = new EventSource(`${ENDPOINT}${BASE}/index/progress-stream${tokenQuery}`);
     es.onopen = () => {
-      // Connection established, but wait for first message to count as active as per plan
     };
     es.addEventListener('progress', (e) => {
-      if (!streamCounted) {
-        streamCounted = true;
-        updateStreamCount(1, controller);
-      }
       retries = 0; // reset on success
       try {
         onData(JSON.parse(e.data));
       } catch { /* ignore malformed */ }
     });
     es.onerror = () => {
-      if (streamCounted) {
-        updateStreamCount(-1, controller);
-        streamCounted = false;
-      }
       es?.close();
       if (!closed && retries < MAX_RETRIES) {
         retries++;
@@ -418,10 +359,6 @@ export function subscribeProgress(onData: (data: IndexStatus & { current_file: s
   return () => { 
     closed = true; 
     controller.abort();
-    if (streamCounted) {
-      updateStreamCount(-1, controller);
-      streamCounted = false;
-    }
     es?.close(); 
   };
 }
@@ -450,8 +387,6 @@ export function subscribeQuery(
   onChunk: (chunk: QueryStreamChunk) => void
 ): () => void {
   const controller = new AbortController()
-  let streamCounted = true;
-  updateStreamCount(1, controller); // Increment immediately since fetch starts
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -469,16 +404,35 @@ export function subscribeQuery(
     if (!reader) return;
 
     const decoder = new TextDecoder();
+    let buffer = '';
     while (true) {
       const { done, value } = await reader.read();
-      if (done) break;
-      const chunk = decoder.decode(value);
-      const lines = chunk.split('\n');
+      if (done) {
+        if (buffer.trim()) {
+          try {
+            onChunk(JSON.parse(buffer));
+          } catch { /* ignore */ }
+        }
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      
+      // Handle Case 3: Two complete objects concatenated without \n between them (e.g. }{ )
+      buffer = buffer.replace(/\}\{/g, '}\n{');
+      
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || ''; // Keep the last incomplete line in the buffer
+      
       for (const line of lines) {
         if (!line.trim()) continue;
         try {
           onChunk(JSON.parse(line));
-        } catch { /* ignore malformed */ }
+        } catch (err) { 
+          // If JSON parse fails, it could be a deeply fragmented chunk that needs more data.
+          // However, since we split by \n, this line should be complete.
+          // In case of extreme edge cases, we could push it back to the buffer,
+          // but for now we follow the existing pattern of ignoring genuinely malformed data.
+        }
       }
     }
     onChunk({ type: 'done' });
@@ -489,19 +443,10 @@ export function subscribeQuery(
       // Send 'done' explicitly so the UI spinner always clears.
       onChunk({ type: 'done' });
     }
-  }).finally(() => {
-    if (streamCounted) {
-      updateStreamCount(-1, controller);
-      streamCounted = false;
-    }
   });
 
   return () => {
     controller.abort();
-    if (streamCounted) {
-      updateStreamCount(-1, controller);
-      streamCounted = false;
-    }
   };
 }
 

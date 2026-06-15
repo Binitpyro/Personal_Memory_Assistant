@@ -472,7 +472,28 @@ async def _apply_reranker_if_needed(
     return results
 
 
-def _extract_knowledge_gaps(query: str, retrieved: list[dict[str, Any]]) -> list[str]:
+def _detect_heuristic_contradiction(query: str, retrieved: list[dict[str, Any]]) -> bool:
+    """Identify potential contradictions using TF-IDF proxy overlap and negation words."""
+    if not retrieved:
+        return False
+    
+    negation_words = {"not", "no", "never", "false", "contradicts", "incorrect", "wrong", "disagree", "but", "however", "except"}
+    query_terms = set(re.findall(r'\w+', query.lower()))
+    if not query_terms:
+        return False
+        
+    for chunk in retrieved:
+        text = chunk.get("text", "").lower()
+        chunk_terms = set(re.findall(r'\w+', text))
+        
+        overlap = query_terms.intersection(chunk_terms)
+        if len(overlap) / len(query_terms) > 0.5:
+            if negation_words.intersection(chunk_terms):
+                return True
+    return False
+
+
+async def _extract_knowledge_gaps(query: str, retrieved: list[dict[str, Any]], db: DatabaseManager) -> list[str]:
     """Identify concepts or keywords from the query that have poor coverage in retrieved chunks."""
     gaps = []
     if not retrieved:
@@ -487,7 +508,16 @@ def _extract_knowledge_gaps(query: str, retrieved: list[dict[str, Any]]) -> list
         combined_text = " ".join(r.get("text", "").lower() for r in retrieved)
         for w in words:
             if w not in combined_text:
-                gaps.append(w)
+                try:
+                    # Check global frequency in FTS5
+                    safe_w = w.replace('"', '""')
+                    rows = await db.execute_query('SELECT COUNT(*) FROM chunk_fts WHERE chunk_fts MATCH ?', (f'"{safe_w}"',))
+                    count = rows[0][0] if rows else 0
+                    if count < 3:
+                        gaps.append(w)
+                except Exception as e:
+                    logger.warning("FTS5 frequency check failed for word '%s': %s", w, e)
+                    gaps.append(w)
     
     # If no specific words missing, but confidence is very low, mark the whole query
     if not gaps and retrieved:
@@ -885,6 +915,9 @@ async def stream_rag(
                     if nr["chunk_id"] not in neg_ids:
                         nr["_challenge_source"] = True
                         retrieved.append(nr)
+    else:
+        # Standard heuristic
+        contradictions_found = _detect_heuristic_contradiction(query, retrieved)
 
     if forced_chunk_ids:
         placeholders = ",".join("?" for _ in forced_chunk_ids)
@@ -925,7 +958,7 @@ async def stream_rag(
 
     is_degraded = bool(retrieved) and retrieved[0].pop("_degraded", False)
     retrieval_ms = round((time.perf_counter() - t_start) * 1000, 1)
-    knowledge_gaps = _extract_knowledge_gaps(query, retrieved)
+    knowledge_gaps = await _extract_knowledge_gaps(query, retrieved, db)
     
     yield {
         "type": "sources",
@@ -992,16 +1025,20 @@ async def stream_rag(
         total_ms = round((time.perf_counter() - t_start) * 1000, 1)
         query_id = await db.save_query(query, full_answer, len(retrieved), total_ms)
         
-        await db.save_telemetry(
-            query_id=query_id,
-            time_to_first_token_ms=0.0, # Not easily tracked here
-            mode_selected=mode,
-            model_class=model_class,
-            context_tokens_budget=budget,
-            context_tokens_used=context_tokens_used,
-            chunks_included=len(retrieved),
-            chunks_dropped=0,
+        telemetry_task = asyncio.create_task(
+            db.save_telemetry(
+                query_id=query_id,
+                time_to_first_token_ms=0.0, # Not easily tracked here
+                mode_selected=mode,
+                model_class=model_class,
+                context_tokens_budget=budget,
+                context_tokens_used=context_tokens_used,
+                chunks_included=len(retrieved),
+                chunks_dropped=0,
+            )
         )
+        state.bg_tasks.add(telemetry_task)
+        telemetry_task.add_done_callback(state.bg_tasks.discard)
 
         # Phase 7: Add to persistent semantic cache
         if not history and query_emb is not None:
@@ -1028,17 +1065,21 @@ async def stream_rag(
             if full_answer:
                 query_id = await db.save_query(query, full_answer, len(retrieved), total_ms)
                 
-                await db.save_telemetry(
-                    query_id=query_id,
-                    time_to_first_token_ms=0.0,
-                    mode_selected=mode,
-                    model_class=model_class,
-                    context_tokens_budget=budget,
-                    context_tokens_used=context_tokens_used,
-                    chunks_included=len(retrieved),
-                    chunks_dropped=0,
-                    response_abandoned=True,
+                telemetry_task = asyncio.create_task(
+                    db.save_telemetry(
+                        query_id=query_id,
+                        time_to_first_token_ms=0.0,
+                        mode_selected=mode,
+                        model_class=model_class,
+                        context_tokens_budget=budget,
+                        context_tokens_used=context_tokens_used,
+                        chunks_included=len(retrieved),
+                        chunks_dropped=0,
+                        response_abandoned=True,
+                    )
                 )
+                state.bg_tasks.add(telemetry_task)
+                telemetry_task.add_done_callback(state.bg_tasks.discard)
 
                 if not history and query_emb is not None:
                     import numpy as np

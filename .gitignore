@@ -212,7 +212,7 @@ app/vector_store/lancedb_data/
 # Jupyter etc (if you use them)
 .ipynb_checkpoints/
 
-# Hackathon local/private files
+# local/private files
 PMA Obsidian/
 # scripts/      <-- Tracked
 GEMINI.md

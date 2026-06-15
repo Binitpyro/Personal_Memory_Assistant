@@ -158,6 +158,27 @@ export function LibraryPage() {
         </div>
       )}
 
+      {/* Update Recommendation */}
+      <div className="glass p-5 rounded-2xl border border-primary/20 bg-primary/5 mb-6 flex items-start gap-4">
+        <div className="p-2 bg-primary/20 rounded-xl mt-0.5">
+          <RefreshCw className="w-5 h-5 text-primary" />
+        </div>
+        <div className="flex-1">
+          <h3 className="font-bold text-text-primary">Full Re-index Recommended</h3>
+          <p className="text-sm text-text-secondary mt-1">
+            To take advantage of the new high-performance Rust chunker (rs_v1) and ensure maximum precision for answers, we recommend clearing your index and performing a full re-index of your library.
+          </p>
+        </div>
+        <button
+          onClick={handleClear}
+          disabled={isRunning}
+          className="glass-button !bg-primary !text-white hover:!bg-primary-h !py-2 !px-4 gap-2 border border-primary/20 whitespace-nowrap disabled:opacity-50"
+        >
+          <Trash2 className="w-4 h-4" />
+          Clear Index
+        </button>
+      </div>
+
       {/* Hero Metrics */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         {[

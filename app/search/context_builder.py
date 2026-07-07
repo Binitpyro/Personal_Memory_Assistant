@@ -36,7 +36,7 @@ def _get_tokens(text: str) -> list[int]:
     enc = _get_encoding()
     if not enc:
         return []
-    return enc.encode(text)
+    return enc.encode(text)  # type: ignore
 
 
 def _token_count(text: str) -> int:
@@ -147,9 +147,6 @@ def _semantic_deduplicate_fallback(
         if not is_duplicate:
             deduped.append(res)
     return deduped
-
-
-
 
 
 def append_project_profile_lines(lines: list[str], folder_profiles: list[dict[str, Any]]) -> None:
@@ -275,9 +272,7 @@ def _add_file_stats(
     return 0
 
 
-def _add_graph_paths(
-    context_parts: list[str], text: str, max_tokens: int, used_tokens: int
-) -> int:
+def _add_graph_paths(context_parts: list[str], text: str, max_tokens: int, used_tokens: int) -> int:
     if text and used_tokens < max_tokens:
         header = "### GRAPH RELATIONSHIPS (Dependencies and Calls)\n"
         h_tokens = _token_count(header)
@@ -291,19 +286,19 @@ def _add_graph_paths(
 
 def compute_context_budget(model_class: str, history_turns: int) -> int:
     """Adaptive context budget based on model's effective capacity."""
-    EFFECTIVE_CEILINGS = {
-        "cloud":    100_000,
-        "7b_local":  10_000,
-        "3b_local":   4_000,
+    EFFECTIVE_CEILINGS = {  # noqa: N806
+        "cloud": 100_000,
+        "7b_local": 10_000,
+        "3b_local": 4_000,
     }
     ceiling = EFFECTIVE_CEILINGS.get(model_class, 8000)
-    
+
     # Fixed costs
     system_prompt = 400
     output_reserve = min(1000, ceiling // 4)
     query_overhead = 80
     history_cost = history_turns * 400
-    
+
     context_budget = ceiling - system_prompt - output_reserve - query_overhead - history_cost
     return max(1000, context_budget)
 
@@ -361,9 +356,7 @@ def build_context(
     )
 
     # 3. Graph Relationships
-    used_tokens += _add_graph_paths(
-        context_parts, graph_paths_text, max_tokens, used_tokens
-    )
+    used_tokens += _add_graph_paths(context_parts, graph_paths_text, max_tokens, used_tokens)
 
     # 4. Implementation Details (Chunks)
     if retrieved_results and used_tokens < max_tokens:
@@ -382,7 +375,7 @@ def build_context(
                     deduplicated = [
                         r for r in deduplicated if r.get("score", 1.0) >= score_threshold
                     ]
-            
+
             # Keep only top max_chunks
             deduplicated = deduplicated[:max_chunks]
 

@@ -51,8 +51,6 @@ async def test_load_query_metadata_and_gather_full_inputs(monkeypatch):
         async def get_file_stats_summary(self):
             return {"total_files": 1, "total_size_mb": 1.0, "by_type": [], "by_folder": []}
 
-
-
         async def get_folder_profiles_text(self):
             return "profiles text"
 
@@ -98,15 +96,15 @@ async def test_rerank_empty_short_circuit():
 @pytest.mark.asyncio
 async def test_rerank_with_mock_model(monkeypatch):
     import numpy as np
-    
+
     class FakeSession:
         def run(self, output_names, inputs):
             return [np.array([[0.1], [0.9]])]
-            
+
     class FakeEncoding:
-        ids = [1]
-        attention_mask = [1]
-        type_ids = [0]
+        ids = [1]  # noqa: RUF012
+        attention_mask = [1]  # noqa: RUF012
+        type_ids = [0]  # noqa: RUF012
 
     class FakeTokenizer:
         def encode_batch(self, pairs):
@@ -116,7 +114,9 @@ async def test_rerank_with_mock_model(monkeypatch):
         async def run_in_executor(self, _executor, fn):
             return fn()
 
-    monkeypatch.setattr("app.search.reranker._get_model_assets", lambda: (FakeSession(), FakeTokenizer()))
+    monkeypatch.setattr(
+        "app.search.reranker._get_model_assets", lambda: (FakeSession(), FakeTokenizer())
+    )
     monkeypatch.setattr("app.search.reranker.asyncio.get_running_loop", lambda: FakeLoop())
 
     results = [
@@ -143,9 +143,9 @@ def test_build_candidate_results_deduplication(monkeypatch):
     text3 = "different" * 50  # completely different
 
     row_map = {
-        1: (1, text1, "file1.txt", "tag1"),
-        2: (2, text2, "file2.txt", "tag2"),
-        3: (3, text3, "file3.txt", "tag3"),
+        1: (1, text1, "file1.txt", "tag1", 12345, 0, 10, "[]", "1.0"),
+        2: (2, text2, "file2.txt", "tag2", 12345, 0, 10, "[]", "1.0"),
+        3: (3, text3, "file3.txt", "tag3", 12345, 0, 10, "[]", "1.0"),
     }
     chunk_ids_ordered = [1, 2, 3]
     score_map = {1: 1.0, 2: 0.9, 3: 0.8}
@@ -170,8 +170,8 @@ def test_build_candidate_results_deduplication(monkeypatch):
 def test_build_candidate_results_short_text():
     # Chunks < 50 chars should be skipped
     row_map = {
-        1: (1, "too short", "file1.txt", "tag1"),
-        2: (2, "A" * 60, "file2.txt", "tag2"),
+        1: (1, "too short", "file1.txt", "tag1", 12345, 0, 10, "[]", "1.0"),
+        2: (2, "A" * 60, "file2.txt", "tag2", 12345, 0, 10, "[]", "1.0"),
     }
     chunk_ids_ordered = [1, 2]
     score_map = {1: 1.0, 2: 0.9}

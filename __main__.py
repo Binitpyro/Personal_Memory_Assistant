@@ -30,6 +30,7 @@ from threading import Timer
 # Ensure project root on path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+
 # Fix for PyInstaller noconsole mode where sys.stdout and sys.stderr are None,
 # which causes uvicorn's logging setup to crash on .isatty() calls.
 class _DummyIO:

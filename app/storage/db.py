@@ -30,6 +30,16 @@ def _zlib_decompress_fn(blob: Any) -> str:
         return str(blob)
 
 
+import functools
+
+def serialize_write(func):
+    @functools.wraps(func)
+    async def wrapper(self: "DatabaseManager", *args, **kwargs):
+        async with self._write_lock:
+            return await func(self, *args, **kwargs)
+    return wrapper
+
+
 class DatabaseManager:
     """Manages the SQLite database connection and operations with a read-connection pool."""
 
@@ -41,6 +51,7 @@ class DatabaseManager:
         self._read_pool: asyncio.Queue[aiosqlite.Connection] | None = None
         self._pool_initialized = False
         self._pool_lock: asyncio.Lock | None = None
+        self._write_lock = asyncio.Lock()
 
     async def connect(self) -> None:
         """Establish connection pool to the SQLite database."""
@@ -102,11 +113,11 @@ class DatabaseManager:
         """Borrow a connection from the read pool."""
         if not self._pool_initialized:
             await self.connect()
-            
+
         if self.db_path == ":memory:":
             yield self._write_conn
             return
-            
+
         assert self._read_pool is not None
         conn = await self._read_pool.get()
         try:
@@ -124,7 +135,7 @@ class DatabaseManager:
         """Close all connections in the pool."""
         if self._pool_lock is None:
             return
-            
+
         async with self._pool_lock:
             if self._write_conn:
                 await self._write_conn.close()
@@ -158,14 +169,17 @@ class DatabaseManager:
             logger.error("Error initializing database: %s", e)
             raise
         await self._migrate(conn)
-        
+
         # H-15: Auto-VACUUM locks DB. Check fragmentation on startup.
         # If there are a large number of free pages, do an incremental vacuum.
         try:
             async with conn.execute("PRAGMA freelist_count;") as cur:
                 row = await cur.fetchone()
                 if row and row[0] > 10000:
-                    logger.info("Database heavily fragmented (%d free pages). Running incremental vacuum.", row[0])
+                    logger.info(
+                        "Database heavily fragmented (%d free pages). Running incremental vacuum.",
+                        row[0],
+                    )
                     await conn.execute("PRAGMA incremental_vacuum(5000);")
                     await conn.commit()
         except Exception as e:
@@ -328,7 +342,7 @@ class DatabaseManager:
                 """)
                 await conn.execute("""
                     INSERT INTO kg_nodes (id, type, label, properties, chunk_id, created_at)
-                    SELECT id, type, label, properties, 
+                    SELECT id, type, label, properties,
                            CAST(json_extract(properties, '$.chunk_id') AS INTEGER),
                            created_at
                     FROM kg_nodes_old
@@ -355,7 +369,9 @@ class DatabaseManager:
                 )
             """)
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_kg_edges_target ON kg_edges(target)")
-            await conn.execute("CREATE INDEX IF NOT EXISTS idx_kg_edges_relation ON kg_edges(relation)")
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_kg_edges_relation ON kg_edges(relation)"
+            )
             await conn.commit()
             logger.debug("kg_edges table ensured.")
         except Exception as exc:
@@ -373,7 +389,7 @@ class DatabaseManager:
             cur = await conn.execute(
                 "SELECT sql FROM sqlite_master WHERE type='table' AND name='chunk_fts'"
             )
-            row = await cur.fetchone()
+            row = await cur.fetchone()  # type: ignore
             if row and ("detail=full" not in row[0] or "trigram" not in row[0]):
                 # We use content="" (contentless) because the actual text is compressed
                 # in the source table and decompressed via triggers into the FTS index.
@@ -409,7 +425,7 @@ class DatabaseManager:
         except Exception as exc:
             logger.warning("Failed to rebuild FTS table: %s", exc)
 
-
+    @serialize_write
     async def fts_optimize(self) -> None:
         """Optimizes the FTS5 index to reduce fragmentation and improve search speed."""
         conn = self._get_conn()
@@ -421,18 +437,26 @@ class DatabaseManager:
         except Exception as e:
             logger.warning("FTS5 optimization failed: %s", e)
 
+    @serialize_write
     async def vacuum(self) -> None:
         """Compacts the database and optimizes search indexes."""
         conn = self._get_conn()
         logger.info("Starting database maintenance (FTS optimize + VACUUM)...")
 
         # Optimize FTS before vacuuming to reclaim maximum space
-        await self.fts_optimize()
+        try:
+            logger.info("Optimizing FTS5 index (chunk_fts)...")
+            await conn.execute("INSERT INTO chunk_fts(chunk_fts) VALUES('optimize')")
+        except Exception as e:
+            logger.warning("FTS5 optimization failed during vacuum: %s", e)
 
+        # Commit transaction to allow VACUUM command to run
+        await conn.commit()
         await conn.execute("VACUUM")
         await conn.commit()
         logger.info("Database maintenance completed.")
 
+    @serialize_write
     async def incremental_vacuum(self, pages: int = 1000) -> None:
         """Run an incremental vacuum to reclaim space without locking for long periods."""
         conn = self._get_conn()
@@ -443,6 +467,7 @@ class DatabaseManager:
         except Exception as e:
             logger.warning("Incremental vacuum failed: %s", e)
 
+    @serialize_write
     async def wal_checkpoint(self) -> None:
         """Force a WAL checkpoint to truncate the WAL file back to zero size.
 
@@ -457,6 +482,7 @@ class DatabaseManager:
         except Exception as e:
             logger.warning("WAL checkpoint failed: %s", e)
 
+    @serialize_write
     async def insert_file(
         self,
         file_data: dict[str, Any],
@@ -493,6 +519,7 @@ class DatabaseManager:
                 await conn.commit()
             return file_id
 
+    @serialize_write
     async def batch_insert_files(self, files_data: list[dict[str, Any]]) -> list[int]:
         """Inserts multiple file metadata records in a single transaction."""
         if not files_data:
@@ -553,6 +580,7 @@ class DatabaseManager:
             raise
         return file_ids
 
+    @serialize_write
     async def insert_chunk(self, chunk_data: dict[str, Any]) -> int:
         """Inserts a chunk and returns the new chunk id."""
         conn = self._get_conn()
@@ -565,7 +593,7 @@ class DatabaseManager:
         INSERT INTO chunks (file_id, start_offset, end_offset, text_preview, sentence_offsets, segmenter_version)
         VALUES (:file_id, :start_offset, :end_offset, :text_preview, :sentence_offsets, :segmenter_version)
         RETURNING id;
-        """
+        """  # noqa: E501
         data = {
             **chunk_data,
             "text_preview": compressed_text,
@@ -579,6 +607,7 @@ class DatabaseManager:
             chunk_id: int = row[0]
             return chunk_id
 
+    @serialize_write
     async def insert_chunks_bulk(self, chunks: list[dict[str, Any]]) -> list[int]:
         """Insert multiple chunks efficiently in a single transaction.
 
@@ -610,8 +639,8 @@ class DatabaseManager:
             ids: list[int] = []
             for chunk in insert_data:
                 async with conn.execute(
-                    "INSERT INTO chunks (file_id, start_offset, end_offset, text_preview, sentence_offsets, segmenter_version) "
-                    "VALUES (:file_id, :start_offset, :end_offset, :text_preview, :sentence_offsets, :segmenter_version) RETURNING id;",
+                    "INSERT INTO chunks (file_id, start_offset, end_offset, text_preview, sentence_offsets, segmenter_version) "  # noqa: E501
+                    "VALUES (:file_id, :start_offset, :end_offset, :text_preview, :sentence_offsets, :segmenter_version) RETURNING id;",  # noqa: E501
                     chunk,
                 ) as cursor:
                     row = await cursor.fetchone()
@@ -645,8 +674,8 @@ class DatabaseManager:
             for i in range(0, len(insert_data), max_rows_per_query):
                 batch = insert_data[i : i + max_rows_per_query]
                 await conn.executemany(
-                    "INSERT INTO chunks (file_id, start_offset, end_offset, text_preview, sentence_offsets, segmenter_version) "
-                    "VALUES (:file_id, :start_offset, :end_offset, :text_preview, :sentence_offsets, :segmenter_version);",
+                    "INSERT INTO chunks (file_id, start_offset, end_offset, text_preview, sentence_offsets, segmenter_version) "  # noqa: E501
+                    "VALUES (:file_id, :start_offset, :end_offset, :text_preview, :sentence_offsets, :segmenter_version);",  # noqa: E501
                     batch,
                 )
 
@@ -673,6 +702,7 @@ class DatabaseManager:
                     await conn.rollback()
             raise
 
+    @serialize_write
     async def insert_chunk_embeddings_bulk(self, data: list[tuple[int, bytes]]) -> None:
         """Insert multiple chunk embeddings in a single transaction."""
         if not data:
@@ -685,6 +715,7 @@ class DatabaseManager:
         )
         await conn.commit()
 
+    @serialize_write
     async def insert_kg_nodes_bulk(self, data: list[tuple[str, str, str, str, int | None]]) -> None:
         """Insert multiple kg_nodes efficiently.
         data format: list of (id, type, label, properties, chunk_id)
@@ -694,11 +725,12 @@ class DatabaseManager:
         conn = self._get_conn()
         await conn.executemany(
             "INSERT INTO kg_nodes (id, type, label, properties, chunk_id) VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT(id) DO UPDATE SET type=excluded.type, label=excluded.label, properties=excluded.properties, chunk_id=excluded.chunk_id",
+            "ON CONFLICT(id) DO UPDATE SET type=excluded.type, label=excluded.label, properties=excluded.properties, chunk_id=excluded.chunk_id",  # noqa: E501
             data,
         )
         await conn.commit()
 
+    @serialize_write
     async def insert_kg_edges_bulk(self, data: list[tuple[str, str, str, float, str]]) -> None:
         """Insert multiple kg_edges efficiently.
         data format: list of (source, target, relation, weight, properties)
@@ -706,37 +738,42 @@ class DatabaseManager:
         if not data:
             return
         conn = self._get_conn()
-        await conn.executemany(
-            "INSERT INTO kg_edges (source, target, relation, weight, properties) VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT(source, target, relation) DO UPDATE SET weight=excluded.weight, properties=excluded.properties",
-            data,
-        )
-        await conn.commit()
+        await conn.execute("PRAGMA foreign_keys = OFF")
+        try:
+            await conn.executemany(
+                "INSERT INTO kg_edges (source, target, relation, weight, properties) VALUES (?, ?, ?, ?, ?) "  # noqa: E501
+                "ON CONFLICT(source, target, relation) DO UPDATE SET weight=excluded.weight, properties=excluded.properties",  # noqa: E501
+                data,
+            )
+            await conn.commit()
+        finally:
+            await conn.execute("PRAGMA foreign_keys = ON")
 
+    @serialize_write
     async def resolve_pending_graph_edges(self) -> None:
         """Resolve PENDING:: edges to actual node IDs based on their name."""
         conn = self._get_conn()
-        
+
         # 1. Update edges where we can find a matching node
         await conn.execute(
             """
             UPDATE kg_edges
             SET target = (
                 SELECT id FROM kg_nodes
-                WHERE kg_nodes.name = substr(kg_edges.target, 10)
+                WHERE kg_nodes.label = substr(kg_edges.target, 10)
                 LIMIT 1
             )
             WHERE target LIKE 'PENDING::%'
             AND EXISTS (
                 SELECT 1 FROM kg_nodes
-                WHERE kg_nodes.name = substr(kg_edges.target, 10)
+                WHERE kg_nodes.label = substr(kg_edges.target, 10)
             )
             """
         )
-        
+
         # 2. Delete unresolved edges to keep the graph clean
         await conn.execute("DELETE FROM kg_edges WHERE target LIKE 'PENDING::%'")
-        
+
         await conn.commit()
 
     async def get_chunk_embeddings(self, chunk_ids: list[int]) -> dict[int, bytes]:
@@ -771,37 +808,44 @@ class DatabaseManager:
             ORDER BY ce.chunk_id ASC
             LIMIT ?
         """
-        async with self._get_read_conn() as conn:
+        async with self._get_read_conn() as conn:  # noqa: SIM117
             async with conn.execute(query, (last_id, limit)) as cursor:
                 rows = await cursor.fetchall()
                 return [
-                    {"chunk_id": str(r[0]), "embedding": r[1], "file_path": r[2], "folder_tag": r[3]}
+                    {
+                        "chunk_id": str(r[0]),
+                        "embedding": r[1],
+                        "file_path": r[2],
+                        "folder_tag": r[3],
+                    }
                     for r in rows
                 ]
 
-    async def bfs_from_chunks(self, chunk_ids: list[int], max_depth: int = 3, limit: int = 5) -> list[int]:
+    async def bfs_from_chunks(
+        self, chunk_ids: list[int], max_depth: int = 3, limit: int = 5
+    ) -> list[int]:
         """Perform BFS to find related chunk_ids starting from a set of seed chunk_ids."""
         if not chunk_ids:
             return []
-        
+
         placeholders = ",".join("?" for _ in chunk_ids)
         # We query for edges traversed from the starting nodes
         query = f"""
         WITH RECURSIVE
         bfs_nodes(id, depth) AS (
-            SELECT id, 0 
-            FROM kg_nodes 
+            SELECT id, 0
+            FROM kg_nodes
             WHERE json_extract(properties, '$.chunk_id') IN ({placeholders})
-            
+
             UNION ALL
-            
+
             SELECT e.target, b.depth + 1
             FROM kg_edges e
             JOIN bfs_nodes b ON e.source = b.id
             WHERE b.depth < ?
-            
+
             UNION ALL
-            
+
             SELECT e.source, b.depth + 1
             FROM kg_edges e
             JOIN bfs_nodes b ON e.target = b.id
@@ -812,30 +856,31 @@ class DatabaseManager:
         JOIN kg_nodes n ON b.id = n.id
         WHERE json_extract(n.properties, '$.chunk_id') IS NOT NULL
         LIMIT ?
-        """
-        params = chunk_ids + [max_depth, max_depth, limit]
-        
-        async with self._get_read_conn() as conn:
-            async with conn.execute(query, params) as cursor:
-                rows = await cursor.fetchall()
-                return [r[0] for r in rows if r[0] is not None]
+        """  # noqa: S608
+        params = [*chunk_ids, max_depth, max_depth, limit]
 
-    async def get_relational_paths(self, src_chunk_ids: list[int], max_depth: int = 3, limit: int = 5) -> list[str]:
+        async with self._get_read_conn() as conn, conn.execute(query, params) as cursor:
+            rows = await cursor.fetchall()
+            return [r[0] for r in rows if r[0] is not None]
+
+    async def get_relational_paths(
+        self, src_chunk_ids: list[int], max_depth: int = 3, limit: int = 5
+    ) -> list[str]:
         """Extract path strings starting from source chunks for LLM context."""
         if not src_chunk_ids:
             return []
-            
+
         placeholders = ",".join("?" for _ in src_chunk_ids)
         query = f"""
         WITH RECURSIVE
         paths(id, path_str, depth) AS (
-            SELECT id, label || ' ' || name, 0
+            SELECT id, label || ' ' || id, 0
             FROM kg_nodes
             WHERE json_extract(properties, '$.chunk_id') IN ({placeholders})
-            
+
             UNION ALL
-            
-            SELECT e.target, p.path_str || ' -[' || e.relation || ']-> ' || (SELECT label || ' ' || name FROM kg_nodes WHERE id = e.target), p.depth + 1
+
+            SELECT e.target, p.path_str || ' -[' || e.relation || ']-> ' || (SELECT label || ' ' || id FROM kg_nodes WHERE id = e.target), p.depth + 1
             FROM kg_edges e
             JOIN paths p ON e.source = p.id
             WHERE p.depth < ?
@@ -843,19 +888,20 @@ class DatabaseManager:
         SELECT path_str FROM paths
         WHERE depth > 0
         LIMIT ?
-        """
-        params = src_chunk_ids + [max_depth, limit]
-        
-        async with self._get_read_conn() as conn:
-            async with conn.execute(query, params) as cursor:
-                rows = await cursor.fetchall()
-                return [r[0] for r in rows]
+        """  # noqa: E501, S608
+        params = [*src_chunk_ids, max_depth, limit]
 
+        async with self._get_read_conn() as conn, conn.execute(query, params) as cursor:
+            rows = await cursor.fetchall()
+            return [r[0] for r in rows]
+
+    @serialize_write
     async def commit(self) -> None:
         """Explicitly commits the current transaction."""
         if self.conn:
             await self.conn.commit()
 
+    @serialize_write
     async def delete_file_chunks(self, file_id: int, *, auto_commit: bool = True) -> None:
         """Deletes all chunks associated with a file.
 
@@ -868,19 +914,21 @@ class DatabaseManager:
 
     async def get_file_chunks(self, file_id: int) -> list[aiosqlite.Row]:
         """Returns all chunks for a given file id, decompressing text_preview."""
-        async with self._get_read_conn() as conn:
-            async with conn.execute(
+        async with (
+            self._get_read_conn() as conn,
+            conn.execute(
                 "SELECT id, file_id, start_offset, end_offset, created_at, "
                 "zlib_decompress(text_preview) as text_preview FROM chunks WHERE file_id = ?",
                 (file_id,),
-            ) as cursor:
-                return list(await cursor.fetchall())
+            ) as cursor,
+        ):
+            return list(await cursor.fetchall())
 
     async def get_file_by_path(self, path: str) -> aiosqlite.Row | None:
         """Returns file metadata by path."""
-        async with self._get_read_conn() as conn:
+        async with self._get_read_conn() as conn:  # noqa: SIM117
             async with conn.execute("SELECT * FROM files WHERE path = ?", (path,)) as cursor:
-                return await cursor.fetchone()
+                return await cursor.fetchone()  # type: ignore
 
     async def get_existing_file_ids(self, paths: list[str]) -> dict[str, int]:
         """Return {path: file_id} for every path that already exists in the DB.
@@ -921,7 +969,9 @@ class DatabaseManager:
             for i in range(0, len(paths), batch_size):
                 batch = paths[i : i + batch_size]
                 placeholders = ",".join("?" for _ in batch)
-                query = f"SELECT path, COALESCE(sha256, '') FROM files WHERE path IN ({placeholders})"  # noqa: S608
+                query = (
+                    f"SELECT path, COALESCE(sha256, '') FROM files WHERE path IN ({placeholders})"  # noqa: S608
+                )
                 async with conn.execute(query, batch) as cursor:
                     async for row in cursor:
                         result[row[0]] = row[1]
@@ -948,6 +998,7 @@ class DatabaseManager:
                         result[row[0]] = (row[1], row[2])
         return result
 
+    @serialize_write
     async def increment_usage_count(self, file_path: str) -> None:
         """Increments the usage_count for a given file path."""
         conn = self._get_conn()
@@ -957,6 +1008,7 @@ class DatabaseManager:
         )
         await conn.commit()
 
+    @serialize_write
     async def batch_increment_usage(self, file_paths: list[str]) -> None:
         """Increment usage_count for multiple file paths in a single transaction."""
         if not file_paths:
@@ -986,18 +1038,20 @@ class DatabaseManager:
 
     async def get_all_files(self) -> list[aiosqlite.Row]:
         """Returns all indexed files ordered by folder and path."""
-        async with self._get_read_conn() as conn:
-            async with conn.execute(
-                "SELECT path, size, type, folder_tag, usage_count FROM files ORDER BY folder_tag, path"
-            ) as cursor:
-                return list(await cursor.fetchall())
+        async with (
+            self._get_read_conn() as conn,
+            conn.execute(
+                "SELECT id, path, size, type, folder_tag, usage_count FROM files ORDER BY folder_tag, path"  # noqa: E501
+            ) as cursor,
+        ):
+            return list(await cursor.fetchall())
 
     async def stream_all_nodes(self):
         """Asynchronous generator to yield all folders and files for scalable visualization."""
         async with self._get_read_conn() as conn:
             # First stream all folder profiles
             async with conn.execute(
-                "SELECT folder_path, project_type, file_count, total_size_bytes FROM folder_profiles"
+                "SELECT folder_path, project_type, file_count, total_size_bytes FROM folder_profiles"  # noqa: E501
             ) as cursor:
                 async for row in cursor:
                     yield {
@@ -1065,29 +1119,32 @@ class DatabaseManager:
 
     async def get_counts(self) -> tuple[int, int]:
         """Return (file_count, chunk_count) in a single public call."""
-        async with self._get_read_conn() as conn:
-            async with conn.execute(
+        async with (
+            self._get_read_conn() as conn,
+            conn.execute(
                 "SELECT "
                 "(SELECT COUNT(*) FROM files) AS file_count, "
                 "(SELECT COUNT(*) FROM chunks) AS chunk_count"
-            ) as cursor:
-                row = await cursor.fetchone()
-                if not row:
-                    return 0, 0
-                return row[0], row[1]
+            ) as cursor,
+        ):
+            row = await cursor.fetchone()
+            if not row:
+                return 0, 0
+            return row[0], row[1]
 
     async def execute_query(self, sql: str, params: tuple = ()) -> list[Any]:
         """Execute a read-only SQL query via the read-pool and return all rows."""
-        async with self._get_read_conn() as conn:
-            async with conn.execute(sql, params) as cursor:
-                return list(await cursor.fetchall())
+        async with self._get_read_conn() as conn, conn.execute(sql, params) as cursor:
+            return list(await cursor.fetchall())
 
+    @serialize_write
     async def execute_write(self, sql: str, params: tuple = ()) -> None:
         """Execute a write SQL statement via the write connection and commit."""
         conn = self._get_conn()
         await conn.execute(sql, params)
         await conn.commit()
 
+    @serialize_write
     async def save_query(
         self, question: str, answer: str, source_count: int, latency_ms: float
     ) -> int:
@@ -1102,6 +1159,7 @@ class DatabaseManager:
             await conn.commit()
             return row[0] if row else 0
 
+    @serialize_write
     async def save_telemetry(
         self,
         query_id: int | None,
@@ -1116,7 +1174,7 @@ class DatabaseManager:
         query_retry_within_60s: bool = False,
         deep_analysis_toggled: bool = False,
         force_include_count: int = 0,
-        feature_thumbs: str | None = None
+        feature_thumbs: str | None = None,
     ) -> None:
         """Save local-only telemetry for Rich Output tracking."""
         conn = self._get_conn()
@@ -1127,37 +1185,49 @@ class DatabaseManager:
                 deep_analysis_toggled, mode_selected, force_include_count, feature_thumbs,
                 model_class, context_tokens_budget, context_tokens_used, chunks_included, chunks_dropped
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
+            """,  # noqa: E501
             (
-                query_id, time_to_first_token_ms, response_abandoned, query_retry_within_60s,
-                deep_analysis_toggled, mode_selected, force_include_count, feature_thumbs,
-                model_class, context_tokens_budget, context_tokens_used, chunks_included, chunks_dropped
-            )
+                query_id,
+                time_to_first_token_ms,
+                response_abandoned,
+                query_retry_within_60s,
+                deep_analysis_toggled,
+                mode_selected,
+                force_include_count,
+                feature_thumbs,
+                model_class,
+                context_tokens_budget,
+                context_tokens_used,
+                chunks_included,
+                chunks_dropped,
+            ),
         )
         await conn.commit()
 
     async def get_query_history(self, limit: int = 20) -> list[dict[str, Any]]:
         """Return recent queries from history."""
-        async with self._get_read_conn() as conn:
-            async with conn.execute(
+        async with (
+            self._get_read_conn() as conn,
+            conn.execute(
                 "SELECT id, question, answer, source_count, latency_ms, created_at "
                 "FROM query_history ORDER BY created_at DESC LIMIT ?",
                 (limit,),
-            ) as cursor:
-                rows = await cursor.fetchall()
-                return [
-                    {
-                        "id": r[0],
-                        "question": r[1],
-                        "answer": r[2],
-                        "source_count": r[3],
-                        "latency_ms": r[4],
-                        "created_at": r[5],
-                    }
-                    for r in rows
-                ]
+            ) as cursor,
+        ):
+            rows = await cursor.fetchall()
+            return [
+                {
+                    "id": r[0],
+                    "question": r[1],
+                    "answer": r[2],
+                    "source_count": r[3],
+                    "latency_ms": r[4],
+                    "created_at": r[5],
+                }
+                for r in rows
+            ]
 
-
+    @serialize_write
     async def clear_query_history(self) -> dict[str, str]:
         """Delete all entries from the query_history table."""
         conn = self._get_conn()
@@ -1165,6 +1235,7 @@ class DatabaseManager:
         await conn.commit()
         return {"message": "Query history cleared successfully."}
 
+    @serialize_write
     async def cleanup_stale_files(self) -> list[str]:
         """Remove index entries for files that no longer exist on disk.
 
@@ -1172,7 +1243,7 @@ class DatabaseManager:
         """
         cleaned: list[str] = []
         stale_ids: list[int] = []
-        async with self._get_read_conn() as conn:
+        async with self._get_read_conn() as conn:  # noqa: SIM117
             async with conn.execute("SELECT id, path FROM files") as cursor:
                 rows = list(await cursor.fetchall())
         for row in rows:
@@ -1199,7 +1270,7 @@ class DatabaseManager:
                     batch = stale_ids[i : i + batch_size]
                     placeholders = ",".join("?" for _ in batch)
                     await conn.execute(
-                        f"DELETE FROM files WHERE id IN ({placeholders})",
+                        f"DELETE FROM files WHERE id IN ({placeholders})",  # noqa: S608
                         tuple(batch),
                     )
 
@@ -1217,6 +1288,7 @@ class DatabaseManager:
                 raise
         return cleaned
 
+    @serialize_write
     async def clear_all(self) -> dict[str, int]:
         """Delete ALL indexed data: files, chunks, FTS, and query history.
 
@@ -1274,7 +1346,6 @@ class DatabaseManager:
         logger.info("Cleared all data: %d files, %d chunks", files_count, chunks_count)
         return {"files_removed": files_count, "chunks_removed": chunks_count}
 
-
     async def get_files_by_filter(
         self,
         file_type: str | None = None,
@@ -1294,10 +1365,10 @@ class DatabaseManager:
             "SELECT path, size, type, folder_tag, usage_count "  # noqa: S608
             f"FROM files{where} ORDER BY path"
         )
-        async with self._get_read_conn() as conn:
-            async with conn.execute(sql, params) as cursor:
-                return list(await cursor.fetchall())
+        async with self._get_read_conn() as conn, conn.execute(sql, params) as cursor:
+            return list(await cursor.fetchall())
 
+    @serialize_write
     async def delete_files_by_folder_prefix(self, folder: str) -> None:
         """Delete all files (and cascading chunks) whose path starts with *folder*."""
         conn = self._get_conn()
@@ -1312,7 +1383,7 @@ class DatabaseManager:
         if self._write_conn is None:
             return False
         try:
-            async with self._get_read_conn() as conn:
+            async with self._get_read_conn() as conn:  # noqa: SIM117
                 async with conn.execute("SELECT 1") as cursor:
                     row = await cursor.fetchone()
                     return row is not None and row[0] == 1
@@ -1321,15 +1392,18 @@ class DatabaseManager:
 
     async def get_all_summaries(self) -> list[dict[str, Any]]:
         """Return (id, path, summary) for every file that has a non-empty summary."""
-        async with self._get_read_conn() as conn:
-            async with conn.execute(
+        async with (
+            self._get_read_conn() as conn,
+            conn.execute(
                 "SELECT id, path, summary FROM files WHERE summary != '' ORDER BY id"
-            ) as cursor:
-                rows = await cursor.fetchall()
-                return [{"id": r[0], "path": r[1], "summary": r[2]} for r in rows]
+            ) as cursor,
+        ):
+            rows = await cursor.fetchall()
+            return [{"id": r[0], "path": r[1], "summary": r[2]} for r in rows]
 
     # ── Folder profiles ───────────────────────────────────────────────
 
+    @serialize_write
     async def upsert_folder_profile(
         self, profile: dict[str, Any], *, auto_commit: bool = True
     ) -> None:
@@ -1371,26 +1445,28 @@ class DatabaseManager:
 
     async def get_all_folder_profiles(self) -> list[dict[str, Any]]:
         """Return every stored folder profile."""
-        async with self._get_read_conn() as conn:
-            async with conn.execute(
+        async with (
+            self._get_read_conn() as conn,
+            conn.execute(
                 "SELECT folder_path, folder_tag, profile_text, project_type, "
                 "file_count, total_size_bytes, top_extensions, key_files "
                 "FROM folder_profiles ORDER BY folder_path"
-            ) as cursor:
-                rows = await cursor.fetchall()
-                return [
-                    {
-                        "folder_path": r[0],
-                        "folder_tag": r[1],
-                        "profile_text": r[2],
-                        "project_type": r[3],
-                        "file_count": r[4],
-                        "total_size_bytes": r[5],
-                        "top_extensions": r[6],
-                        "key_files": r[7],
-                    }
-                    for r in rows
-                ]
+            ) as cursor,
+        ):
+            rows = await cursor.fetchall()
+            return [
+                {
+                    "folder_path": r[0],
+                    "folder_tag": r[1],
+                    "profile_text": r[2],
+                    "project_type": r[3],
+                    "file_count": r[4],
+                    "total_size_bytes": r[5],
+                    "top_extensions": r[6],
+                    "key_files": r[7],
+                }
+                for r in rows
+            ]
 
     async def get_folder_profiles_text(self) -> str:
         """Return a human-readable summary of all folder profiles for LLM context."""
@@ -1410,8 +1486,6 @@ class DatabaseManager:
                 lines.append(f"   Description: {p['profile_text']}")
         lines.append("=" * 50)
         return "\n".join(lines)
-
-
 
     async def get_graph_edges(self, node_id: str, max_depth: int = 2) -> list[dict[str, Any]]:
         """Retrieve 1-hop and 2-hop edges for a given node using recursive CTE."""
@@ -1433,7 +1507,7 @@ class DatabaseManager:
             JOIN connected_nodes n1 ON e.source = n1.id
             JOIN connected_nodes n2 ON e.target = n2.id
         """
-        async with self._get_read_conn() as conn:
+        async with self._get_read_conn() as conn:  # noqa: SIM117
             async with conn.execute(query, (node_id, max_depth)) as cursor:
                 rows = await cursor.fetchall()
                 return [
@@ -1451,14 +1525,16 @@ class DatabaseManager:
         """Retrieve node details for a list of node IDs."""
         if not node_ids:
             return []
-        
+
         result = []
         async with self._get_read_conn() as conn:
             batch_size = 900
             for i in range(0, len(node_ids), batch_size):
-                batch = node_ids[i:i+batch_size]
+                batch = node_ids[i : i + batch_size]
                 placeholders = ",".join("?" for _ in batch)
-                query = f"SELECT id, type, label, properties FROM kg_nodes WHERE id IN ({placeholders})"
+                query = (
+                    f"SELECT id, type, label, properties FROM kg_nodes WHERE id IN ({placeholders})"  # noqa: S608
+                )
                 async with conn.execute(query, batch) as cursor:
                     rows = await cursor.fetchall()
                     result.extend(

@@ -1,9 +1,7 @@
 import asyncio
 import contextlib
-import json
 import os
 import tempfile
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -11,7 +9,6 @@ from fastapi.testclient import TestClient
 
 from app.embeddings.service import EmbeddingService
 from app.insights.service import InsightsService
-
 from app.main import app, get_db
 from app.search import retrieval
 from app.storage.db import DatabaseManager
@@ -150,6 +147,7 @@ async def test_all_logic_deep(real_db, mock_emb, mock_lancedb, mock_llm):
 
     # 2. Retrieval logic
     from app.search.planner import QueryPlanner
+
     with (
         patch(
             "app.search.retrieval._fts_search", AsyncMock(return_value=[{"id": "1", "score": 1.0}])
@@ -182,6 +180,7 @@ def test_api_exhaustive(real_db, mock_emb, mock_lancedb):
     app.dependency_overrides[get_llm] = MagicMock()
 
     import os
+
     token = os.environ.get("X_LOCAL_ACCESS_TOKEN", "test-token")
     client = TestClient(app, headers={"X-Local-Access-Token": token})
     assert client.get("/api/health").status_code == 200

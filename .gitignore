@@ -245,3 +245,11 @@ build/
 .scannerwork/
 /.agent
 sonar-project.properties
+/.agents
+/.claude
+/.codex
+/agents
+ORIGINAL_REQUEST.md
+progress.md
+security_report.md
+AGENTS.md

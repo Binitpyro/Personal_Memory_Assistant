@@ -14,7 +14,8 @@ export let ENDPOINT = (import.meta as any).env.VITE_API_URL || "http://127.0.0.1
 
 const params = new URLSearchParams(globalThis.location.search);
 const tokenFromUrl = params.get('token');
-export let localToken = tokenFromUrl || sessionStorage.getItem('pma_token') || (import.meta as any).env.VITE_DEV_TOKEN || '';
+const envToken = (import.meta as any).env.VITE_DEV_TOKEN || '';
+export let localToken = tokenFromUrl || envToken || sessionStorage.getItem('pma_token') || '';
 
 if (tokenFromUrl) {
   sessionStorage.setItem('pma_token', tokenFromUrl);
@@ -128,6 +129,11 @@ export const startIndexing = (folders: string[]) =>
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ folders }),
+  });
+
+export const cancelIndexing = () =>
+  json<{ message: string }>('/index/cancel', {
+    method: 'POST',
   });
 
 export const removeFolderIndex = (folders: string[]) =>

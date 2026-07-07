@@ -40,7 +40,11 @@ def generate_deep_summary(text: str, path: Path, max_chars: int = 300) -> str:
 
 def _summarize_python(text: str, max_limit: int) -> str:
     try:
-        tree = ast.parse(text)
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            tree = ast.parse(text)
         classes = [n.name for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]
         functions = [
             n.name

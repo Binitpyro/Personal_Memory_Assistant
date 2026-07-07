@@ -219,6 +219,7 @@ async def test_full_rag_logic():
     llm.generate_answer = AsyncMock(return_value="Ans")
     try:
         from app.search.planner import QueryPlanner
+
         with (
             patch(
                 "app.search.retrieval._fts_search",
@@ -242,7 +243,7 @@ async def test_full_rag_logic():
 
 def test_context_builder_edge_cases():
     stats = {"total_files": 0, "total_size_mb": 0, "by_type": [], "by_folder": []}
-    res = context_builder.build_context([], 100, stats, "")
+    res, _ = context_builder.build_context([], 100, stats, "")
     # Check if we didn't crash and got the stats header at least
     assert "File Statistics" in res
 

@@ -99,7 +99,7 @@ async def main() -> None:
         if not rows:
             break
 
-        n_rows = len(rows)
+        n_rows = len(rows)  # type: ignore
         ids_int = [r[0] for r in rows]
         ids_str = [str(r[0]) for r in rows]
         texts = [_decompress(r[1]) for r in rows]
@@ -150,6 +150,7 @@ async def main() -> None:
 
 def cli_main():
     asyncio.run(main())
+
 
 if __name__ == "__main__":
     cli_main()

@@ -5,7 +5,6 @@ Handles API routing, dependency injection, and lifespan events.
 
 import asyncio
 import ctypes
-import keyring
 import logging
 import os
 import platform as plat
@@ -15,6 +14,7 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import keyring
 from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -37,8 +37,8 @@ from app.api.search import router as search_router
 from app.api.system import router as system_router
 from app.api.telemetry import router as telemetry_router
 from app.config import settings
-from app.storage.db import DatabaseManager
 from app.project_constants import APP_VERSION
+from app.storage.db import DatabaseManager
 
 _BASE_DIR = Path(__file__).parent.parent
 _REACT_DIR = _BASE_DIR / "static" / "react"
@@ -67,12 +67,13 @@ def _init_local_access_token():
                 logger.info("Retrieved X_LOCAL_ACCESS_TOKEN from the OS keyring.")
             os.environ["X_LOCAL_ACCESS_TOKEN"] = token
         except Exception as e:
-            # Fallback to a secure in-memory token to avoid fail-open/insecure state while maintaining usability
+            # Fallback to a secure in-memory token to avoid fail-open/insecure state while maintaining usability  # noqa: E501
             token = secrets.token_urlsafe(32)
             os.environ["X_LOCAL_ACCESS_TOKEN"] = token
             logger.warning(
-                f"Failed to access OS keyring ({e}). Generated temporary in-memory X_LOCAL_ACCESS_TOKEN."
+                f"Failed to access OS keyring ({e}). Generated temporary in-memory X_LOCAL_ACCESS_TOKEN."  # noqa: E501
             )
+
 
 _init_local_access_token()
 
@@ -160,6 +161,7 @@ async def lifespan(fastapi_app: FastAPI):
     # 1. Initialize core infrastructure
     logger.info("Initializing database...")
     from app.api.deps import get_db
+
     db_manager = await get_db()
     await db_manager.init_db(schema_path=settings.schema_path)
 
@@ -331,12 +333,12 @@ async def _split_brain_sync(db_manager, lancedb_client, emb_svc):
             async with conn.execute("SELECT id FROM chunks") as cur:
                 rows = await cur.fetchall()
                 sql_ids = {str(r[0]) for r in rows}
-            
+
             ghost_ids = list(ldb_ids - sql_ids)
             if ghost_ids:
                 logger.info("Split-brain: Removing %d ghost vectors from cache...", len(ghost_ids))
                 for i in range(0, len(ghost_ids), 5000):
-                    await lancedb_client.delete_documents(ghost_ids[i:i+5000])
+                    await lancedb_client.delete_documents(ghost_ids[i : i + 5000])
 
         state.split_brain_sync_status = "done"
         logger.info("Split-brain sync complete. %d new vectors cached.", total_synced)
@@ -400,15 +402,22 @@ async def security_and_telemetry_middleware(request: Request, call_next):
     expected_token = os.environ.get("X_LOCAL_ACCESS_TOKEN")
     if not expected_token:
         raise RuntimeError("X_LOCAL_ACCESS_TOKEN missing. Refusing to serve request.")
-        
-    if request.url.path.startswith("/api/") and request.method != "OPTIONS":
-        if request.url.path not in ("/api/health", "/health", "/api/index/progress-stream"):
+
+    if request.url.path.startswith("/api/") and request.method != "OPTIONS":  # noqa: SIM102
+        if request.url.path not in (
+            "/api/health",
+            "/health",
+            "/api/index/progress-stream",
+            "/api/auth/google/callback",
+        ):
             provided_token = request.headers.get("X-Local-Access-Token")
             if not provided_token:
                 provided_token = request.query_params.get("token")
 
             if not provided_token or not secrets.compare_digest(provided_token, expected_token):
-                return JSONResponse(status_code=401, content={"error": "Unauthorized local access."})
+                return JSONResponse(
+                    status_code=401, content={"error": "Unauthorized local access."}
+                )
 
     # 2. Telemetry and Security Headers
     request_id = str(uuid.uuid4())[:8]
@@ -438,8 +447,9 @@ async def security_and_telemetry_middleware(request: Request, call_next):
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    from fastapi.encoders import jsonable_encoder
     return JSONResponse(
-        status_code=422, content={"error": "Validation error", "detail": exc.errors()}
+        status_code=422, content={"error": "Validation error", "detail": jsonable_encoder(exc.errors())}
     )
 
 
@@ -478,7 +488,13 @@ async def root(request: Request):
 
 @app.get("/{full_path:path}")
 async def spa_catch_all(request: Request, full_path: str):
-    candidate = _REACT_DIR / full_path
+    try:
+        candidate = (_REACT_DIR / full_path).resolve()
+        if not candidate.is_relative_to(_REACT_DIR.resolve()):
+            return JSONResponse(status_code=403, content={"error": "Access denied"})
+    except Exception:
+        return JSONResponse(status_code=403, content={"error": "Access denied"})
+
     if candidate.exists() and candidate.is_file():
         return FileResponse(candidate)
 

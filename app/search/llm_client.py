@@ -27,13 +27,14 @@ class LLMClient:
         self._gemini_client: httpx.AsyncClient | None = None
         self._ollama_client: httpx.AsyncClient | None = None
         self._lm_studio_client: httpx.AsyncClient | None = None
-        # H-07: Defer token and preferences loading to avoid blocking the event loop during initialization.
+        # H-07: Defer token and preferences loading to avoid blocking the event loop during initialization.  # noqa: E501
         self._oauth_token: str | None = None
         self._token_loaded = False
 
     async def _ensure_token_loaded(self):
         if not self._token_loaded:
             import asyncio
+
             self._oauth_token = await asyncio.to_thread(self._load_oauth_token)
             await asyncio.to_thread(self._load_runtime_preferences)
             await self._load_keyring_keys()
@@ -41,14 +42,15 @@ class LLMClient:
 
     async def _load_keyring_keys(self):
         import asyncio
+
         try:
             # We fetch potential keys from the keyring securely off the main thread.
             gemini_key = await asyncio.to_thread(keyring.get_password, "pma_backend", "gemini")
             if gemini_key:
                 self.api_key = gemini_key
                 self.provider_keys["gemini"] = gemini_key
-            
-            # Other providers (Groq, NVIDIA NIM, OpenRouter) can be loaded here similarly in the future.
+
+            # Other providers (Groq, NVIDIA NIM, OpenRouter) can be loaded here similarly in the future.  # noqa: E501
             for provider in ["groq", "nvidia_nim", "openrouter"]:
                 key = await asyncio.to_thread(keyring.get_password, "pma_backend", provider)
                 if key:
@@ -118,7 +120,7 @@ class LLMClient:
             if "7b" in model_lower or "8b" in model_lower:
                 return "7b_local"
             return "7b_local"
-        
+
         if self.api_key or self._oauth_token:
             return "cloud"
         model_lower = self.ollama_model.lower()
@@ -157,17 +159,19 @@ class LLMClient:
         if lm_studio_model is not None:
             self.lm_studio_model = lm_studio_model
 
-    def _build_prompt(self, query: str, context: str, mode: str | None = None, supports_claims: bool = False) -> str:
+    def _build_prompt(
+        self, query: str, context: str, mode: str | None = None, supports_claims: bool = False
+    ) -> str:
         prompt_path = Path("prompts/rag_system.txt")
         # P10-2: Use delimiters to harden AI boundary
         safe_query = f"<user_query>\n{query}\n</user_query>"
 
         mode_instructions = {
-            "explain": "\nMODE INSTRUCTION (Explain): Explain the concepts clearly using at least one analogy or 'in other words' reformulation.",
-            "verify": "\nMODE INSTRUCTION (Verify): Act strictly as a verifier. You MUST cite at least 2 source files with direct quotes to substantiate claims.",
-            "explore": "\nMODE INSTRUCTION (Explore): End your response with at least 2 relevant follow-up questions to help the user explore the topic further.",
-            "distill": "\nMODE INSTRUCTION (Distill): Distill the answer. Your response MUST be 150 words or less and use bullet points.",
-            "challenge": "\nMODE INSTRUCTION (Challenge): Actively highlight any contradictions or conflicting information found in the sources. Point out where different sources disagree.",
+            "explain": "\nMODE INSTRUCTION (Explain): Explain the concepts clearly using at least one analogy or 'in other words' reformulation.",  # noqa: E501
+            "verify": "\nMODE INSTRUCTION (Verify): Act strictly as a verifier. You MUST cite at least 2 source files with direct quotes to substantiate claims.",  # noqa: E501
+            "explore": "\nMODE INSTRUCTION (Explore): End your response with at least 2 relevant follow-up questions to help the user explore the topic further.",  # noqa: E501
+            "distill": "\nMODE INSTRUCTION (Distill): Distill the answer. Your response MUST be 150 words or less and use bullet points.",  # noqa: E501
+            "challenge": "\nMODE INSTRUCTION (Challenge): Actively highlight any contradictions or conflicting information found in the sources. Point out where different sources disagree.",  # noqa: E501
         }
         mode_str = mode_instructions.get(mode.lower()) if mode else ""
 
@@ -178,9 +182,11 @@ class LLMClient:
                 if supports_claims:
                     template_parts = template.split("### Context")
                     if len(template_parts) == 2:
-                        claim_instr = "\n7. HIGH PRIORITY: Wrap any assertions or facts derived from the context in <claim sources=\"[n]\"> tags.\n   Example: <claim sources=\"[1]\">Python was created in 1991</claim> by <claim sources=\"[1]\">Guido van Rossum</claim>.\n\n"
-                        template = template_parts[0] + claim_instr + "### Context" + template_parts[1]
-                
+                        claim_instr = '\n7. HIGH PRIORITY: Wrap any assertions or facts derived from the context in <claim sources="[n]"> tags.\n   Example: <claim sources="[1]">Python was created in 1991</claim> by <claim sources="[1]">Guido van Rossum</claim>.\n\n'  # noqa: E501
+                        template = (
+                            template_parts[0] + claim_instr + "### Context" + template_parts[1]
+                        )
+
                 if mode_str:
                     template += f"\n{mode_str}\n"
                 return template.format(context=context, query=safe_query)
@@ -213,7 +219,7 @@ Instructions:
             template += """
 7. HIGH PRIORITY: Wrap any assertions or facts derived from the context in <claim sources="[n]"> tags.
    Example: <claim sources="[1]">Python was created in 1991</claim> by <claim sources="[1]">Guido van Rossum</claim>.
-"""
+"""  # noqa: E501
 
         template += """
 ### Context
@@ -239,7 +245,12 @@ Answer:
             return False
 
     async def generate_answer(
-        self, query: str, context: str, history: list[dict[str, str]] | None = None, mode: str | None = None, skip_capability_check: bool = False
+        self,
+        query: str,
+        context: str,
+        history: list[dict[str, str]] | None = None,
+        mode: str | None = None,
+        skip_capability_check: bool = False,
     ) -> str:
         await self._ensure_token_loaded()
         supports_claims = False
@@ -257,7 +268,11 @@ Answer:
         return "LLM unavailable. Please provide a GEMINI_API_KEY or ensure Ollama is running."
 
     async def stream_answer(
-        self, query: str, context: str, history: list[dict[str, str]] | None = None, mode: str | None = None
+        self,
+        query: str,
+        context: str,
+        history: list[dict[str, str]] | None = None,
+        mode: str | None = None,
     ) -> AsyncGenerator[str, None]:
         await self._ensure_token_loaded()
         supports_claims = await capability_detector.detect_capabilities(self)
@@ -286,7 +301,7 @@ Answer:
 
         async for chunk in _generator():
             yield chunk
-            
+
             if supports_claims and not found_claim and chars_checked < 600:
                 buffer += chunk
                 chars_checked += len(chunk)

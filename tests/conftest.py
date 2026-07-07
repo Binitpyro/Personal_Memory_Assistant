@@ -1,11 +1,40 @@
+import asyncio
+import gc
+import os
+import sys
+import re
 from unittest.mock import AsyncMock, MagicMock
 
+# Ensure nltk is mocked to prevent network calls and lookup issues
+try:
+    import nltk
+except ImportError:
+    nltk = MagicMock()
+    sys.modules["nltk"] = nltk
+
+nltk.download = MagicMock(return_value=True)
+if not hasattr(nltk, "data"):
+    nltk.data = MagicMock()
+nltk.data.find = MagicMock(return_value="mocked/path")
+
+if not hasattr(nltk, "tokenize"):
+    nltk.tokenize = MagicMock()
+
+def dummy_sent_tokenize(text, language="english"):
+    if not text:
+        return []
+    sents = re.split(r'(?<=[.!?])\s+', text)
+    return [s for s in sents if s]
+
+nltk.tokenize.sent_tokenize = MagicMock(side_effect=dummy_sent_tokenize)
+
 import pytest
-import gc
 from httpx import ASGITransport, AsyncClient
 
-import os
-os.environ["X_LOCAL_ACCESS_TOKEN"] = "test-token"
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+os.environ["X_LOCAL_ACCESS_TOKEN"] = "test-token"  # noqa: S105
 
 from app.api.deps import get_db, get_emb, get_lancedb, get_llm
 from app.config import settings
@@ -14,6 +43,10 @@ from app.storage.db import DatabaseManager
 
 # Override settings to ensure we don't accidentally write to real disk
 settings.db_path = ":memory:"
+
+# Disable rate limiter during tests
+from app.api.limiter import limiter
+limiter.enabled = False
 
 
 @pytest.fixture(scope="session")
@@ -72,8 +105,13 @@ async def client(mock_db, mock_emb, mock_lancedb, mock_llm):
     app.dependency_overrides[get_llm] = lambda: mock_llm
 
     import os
+
     token = os.environ.get("X_LOCAL_ACCESS_TOKEN", "test_token")
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test", headers={"X-Local-Access-Token": token}) as ac:
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers={"X-Local-Access-Token": token},
+    ) as ac:
         yield ac
 
     app.dependency_overrides.clear()

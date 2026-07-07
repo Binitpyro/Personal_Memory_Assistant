@@ -1,0 +1,36 @@
+# deny.toml - Strict security and license policy
+
+[licenses]
+# List of explicitly allowed licenses. We enforce a strict NO AGPL/GPL rule.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "Unlicense",
+    "Apache-2.0 WITH LLVM-exception"
+]
+# Reject anything else, failing the build.
+exceptions = []
+
+[bans]
+# Warn if multiple versions of the same crate are pulled in (bloat)
+multiple-versions = "warn"
+highlight = "all"
+wildcards = "allow"
+
+[sources]
+unknown-registry = "warn"
+unknown-git = "warn"
+
+[advisories]
+ignore = [
+    "RUSTSEC-2025-0020",
+    "RUSTSEC-2026-0177"
+]

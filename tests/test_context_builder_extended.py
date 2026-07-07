@@ -162,12 +162,12 @@ class TestDeduplicateByFile:
 
 class TestBuildContext:
     def test_empty_all_returns_no_relevant(self):
-        result = build_context([], max_tokens=1000)
+        result, _ = build_context([], max_tokens=1000)
         assert result == "No relevant context found."
 
     def test_with_results(self):
         results = [{"file_path": "app.py", "text": "def main(): pass", "score": 1.0}]
-        result = build_context(results, max_tokens=1000)
+        result, _ = build_context(results, max_tokens=1000)
         assert "app.py" in result or "main" in result
 
     def test_with_file_stats(self):
@@ -177,11 +177,11 @@ class TestBuildContext:
             "by_type": [{"ext": ".py", "count": 5, "size_mb": 1.0}],
             "by_folder": [{"folder": "src", "count": 5}],
         }
-        result = build_context([], max_tokens=2000, file_stats=stats)
+        result, _ = build_context([], max_tokens=2000, file_stats=stats)
         assert "File Statistics" in result
 
     def test_with_folder_profiles(self):
-        result = build_context(
+        result, _ = build_context(
             [],
             max_tokens=2000,
             folder_profiles_text="PROJECT: MyApp\nType: Python",
@@ -189,7 +189,7 @@ class TestBuildContext:
         assert "MyApp" in result
 
     def test_with_metadata_insights(self):
-        result = build_context(
+        result, _ = build_context(
             [],
             max_tokens=2000,
             metadata_insights="You have 3 Python projects indexed.",
@@ -199,7 +199,7 @@ class TestBuildContext:
     def test_token_budget_respected(self):
         large_text = "content " * 5000
         results = [{"file_path": "big.py", "text": large_text, "score": 1.0}]
-        result = build_context(results, max_tokens=100)
+        result, _ = build_context(results, max_tokens=100)
         # Should be truncated
         assert len(result) < len(large_text)
 
@@ -208,11 +208,11 @@ class TestBuildContext:
             {"file_path": "top.py", "text": "top scoring result " * 20, "score": 1.0},
             {"file_path": "low.py", "text": "very low scoring result " * 20, "score": 0.01},
         ]
-        result = build_context(results, max_tokens=5000)
+        result, _ = build_context(results, max_tokens=5000)
         # Top result should be included
         assert isinstance(result, str)
 
     def test_zero_max_tokens_uses_settings_default(self):
         results = [{"file_path": "x.py", "text": "some text", "score": 1.0}]
-        result = build_context(results, max_tokens=0)
+        result, _ = build_context(results, max_tokens=0)
         assert isinstance(result, str)

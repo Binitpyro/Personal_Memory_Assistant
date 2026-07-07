@@ -49,7 +49,7 @@ class Settings(BaseSettings):
                 self.lancedb_persist_dir = "data/lancedb"
             if not self.db_path:
                 self.db_path = "data/pma_metadata.db"
-            
+
             os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
             os.makedirs(os.path.abspath(self.lancedb_persist_dir), exist_ok=True)
 

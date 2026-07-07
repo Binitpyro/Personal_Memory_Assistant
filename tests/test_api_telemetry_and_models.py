@@ -125,8 +125,9 @@ def app_client():
     app.dependency_overrides[get_emb] = lambda: mock_emb
     app.dependency_overrides[get_lancedb] = lambda: mock_lancedb
     app.dependency_overrides[get_llm] = lambda: mock_llm
-    
+
     import os
+
     token = os.environ.get("X_LOCAL_ACCESS_TOKEN", "test-token")
     with TestClient(app, headers={"X-Local-Access-Token": token}) as client:
         yield client

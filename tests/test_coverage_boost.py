@@ -155,26 +155,26 @@ def test_context_builder_includes_stats_profiles_and_snippets():
     assert "Total indexed files: 3" in stats_text
     assert "Proj: 3 files" in stats_text
 
-    context = build_context(
+    context, _ = build_context(
         [{"file_path": "a.py", "text": "print('x')"}],
         max_tokens=500,
         file_stats=stats,
         folder_profiles_text="PROFILE",
     )
     assert "PROFILE" in context
-    assert "Snippet 1 [a.py]" in context
+    assert "[a.py]" in context
 
 
 def test_context_builder_empty_and_truncation():
-    assert build_context([], max_tokens=10) == "No relevant context found."
+    assert build_context([], max_tokens=10)[0] == "No relevant context found."
 
     long_text = "x" * 5000
     # Increase tokens to allow room for the headers
-    context = build_context(
+    context, _ = build_context(
         [{"file_path": "big.txt", "text": long_text}],
         max_tokens=200,
     )
-    assert "Snippet 1 [big.txt]" in context
+    assert "[big.txt]" in context
     assert len(context) < len(long_text)
 
 

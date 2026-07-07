@@ -9,6 +9,7 @@ import {
   pickFolder,
   startIndexing,
   clearIndex,
+  cancelIndexing,
   seedDemo,
   subscribeProgress,
   clearBackendCaches,
@@ -18,6 +19,7 @@ import {
 export function LibraryPage() {
   const [folderPath, setFolderPath] = useState('')
   const [indexing, setIndexing] = useState(false)
+  const [cancelling, setCancelling] = useState(false)
   const [liveProgress, setLiveProgress] = useState<(IndexStatus & { current_file: string }) | null>(null)
   const [message, setMessage] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
 
@@ -49,8 +51,9 @@ export function LibraryPage() {
     if (!isRunning) return
     const unsub = subscribeProgress((data) => {
       setLiveProgress(data)
-      if (data.status !== 'running') {
+      if (data.status !== 'running' && data.status !== 'cancelling') {
         setIndexing(false)
+        setCancelling(false)
         setLiveProgress(null)
         invalidateCache()
         refetchHealth()
@@ -80,6 +83,18 @@ export function LibraryPage() {
       setMessage({ type: 'err', text: e instanceof Error ? e.message : 'Indexing failed' })
     }
   }, [folderPath])
+
+  const handleCancel = useCallback(async () => {
+    if (!isRunning || cancelling) return
+    try {
+      setCancelling(true)
+      await cancelIndexing()
+      setMessage({ type: 'ok', text: 'Cancelling... Please wait for current files to finish.' })
+    } catch (e) {
+      setMessage({ type: 'err', text: e instanceof Error ? e.message : 'Cancel failed' })
+      setCancelling(false)
+    }
+  }, [isRunning, cancelling])
 
   const handleClear = useCallback(async () => {
     if (isRunning) return
@@ -158,27 +173,6 @@ export function LibraryPage() {
         </div>
       )}
 
-      {/* Update Recommendation */}
-      <div className="glass p-5 rounded-2xl border border-primary/20 bg-primary/5 mb-6 flex items-start gap-4">
-        <div className="p-2 bg-primary/20 rounded-xl mt-0.5">
-          <RefreshCw className="w-5 h-5 text-primary" />
-        </div>
-        <div className="flex-1">
-          <h3 className="font-bold text-text-primary">Full Re-index Recommended</h3>
-          <p className="text-sm text-text-secondary mt-1">
-            To take advantage of the new high-performance Rust chunker (rs_v1) and ensure maximum precision for answers, we recommend clearing your index and performing a full re-index of your library.
-          </p>
-        </div>
-        <button
-          onClick={handleClear}
-          disabled={isRunning}
-          className="glass-button !bg-primary !text-white hover:!bg-primary-h !py-2 !px-4 gap-2 border border-primary/20 whitespace-nowrap disabled:opacity-50"
-        >
-          <Trash2 className="w-4 h-4" />
-          Clear Index
-        </button>
-      </div>
-
       {/* Hero Metrics */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         {[
@@ -247,11 +241,21 @@ export function LibraryPage() {
           <button
             onClick={handleIndex}
             disabled={!folderPath.trim() || isRunning}
-            className="btn bg-primary hover:bg-primary-dark text-white rounded-xl px-6 gap-2 disabled:opacity-40 shadow-lg"
+            className={`flex items-center justify-center gap-2 bg-primary hover:brightness-110 text-white font-bold rounded-xl px-6 py-3 shadow-lg transition-all active:scale-95 disabled:opacity-40 ${isRunning ? 'hidden' : ''}`}
           >
             {isRunning ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
             Index
           </button>
+          {isRunning && (
+            <button
+              onClick={handleCancel}
+              disabled={cancelling}
+              className="flex items-center justify-center gap-2 bg-error hover:brightness-110 text-white font-bold rounded-xl px-6 py-3 shadow-lg transition-all active:scale-95 disabled:opacity-40"
+            >
+              {cancelling ? <Loader2 className="w-4 h-4 animate-spin" /> : <AlertCircle className="w-4 h-4" />}
+              {cancelling ? 'Cancelling...' : 'Cancel'}
+            </button>
+          )}
         </div>
       </div>
 

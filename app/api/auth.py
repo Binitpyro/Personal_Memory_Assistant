@@ -4,19 +4,20 @@ import logging
 import os
 from pathlib import Path
 
-from pydantic import BaseModel
 import keyring
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from google.auth.transport.requests import Request as GoogleRequest
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow  # type: ignore
+from pydantic import BaseModel
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
 auth_router = APIRouter(prefix="/auth/google", tags=["auth"])
+
 
 # In Tauri mode the port is dynamic (set via PORT env var by the shell).
 # In web-dev mode it defaults to 8000.
@@ -302,9 +303,11 @@ async def disconnect_auth():
             return JSONResponse(status_code=500, content={"error": f"Failed to disconnect: {e!s}"})
     return {"message": "Already disconnected."}
 
+
 class KeyRequest(BaseModel):
     provider: str
     api_key: str
+
 
 @auth_router.post("/keys")
 async def set_api_key(req: KeyRequest):
@@ -314,6 +317,7 @@ async def set_api_key(req: KeyRequest):
         return {"status": "success"}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
+
 
 @auth_router.get("/keys/{provider}")
 async def get_api_key(provider: str):
@@ -326,6 +330,7 @@ async def get_api_key(provider: str):
         return {"provider": provider, "is_set": False}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
+
 
 @auth_router.delete("/keys/{provider}")
 async def delete_api_key(provider: str):

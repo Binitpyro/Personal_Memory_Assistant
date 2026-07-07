@@ -1,0 +1,59 @@
+# deny.toml - Strict security and license policy
+
+[licenses]
+# List of explicitly allowed licenses. We enforce a strict NO AGPL/GPL rule.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "Unlicense",
+    "Apache-2.0 WITH LLVM-exception"
+]
+# Reject anything else, failing the build.
+exceptions = []
+
+[bans]
+# Warn if multiple versions of the same crate are pulled in (bloat)
+multiple-versions = "warn"
+highlight = "all"
+wildcards = "allow"
+
+[sources]
+unknown-registry = "warn"
+unknown-git = "warn"
+
+[advisories]
+ignore = [
+    # Tauri GTK3 unmaintained bindings (Linux/Cross-platform)
+    "RUSTSEC-2024-0411",
+    "RUSTSEC-2024-0412",
+    "RUSTSEC-2024-0413",
+    "RUSTSEC-2024-0414",
+    "RUSTSEC-2024-0415",
+    "RUSTSEC-2024-0416",
+    "RUSTSEC-2024-0417",
+    "RUSTSEC-2024-0418",
+    "RUSTSEC-2024-0419",
+    "RUSTSEC-2024-0420",
+    # Other unmaintained crates tied to current dependencies
+    "RUSTSEC-2025-0057", # fxhash
+    "RUSTSEC-2024-0370", # proc-macro-error
+    "RUSTSEC-2025-0075", # unic-char-range
+    "RUSTSEC-2025-0080", # unic-common
+    "RUSTSEC-2025-0081", # unic-char-property
+    "RUSTSEC-2025-0098", # unic-ucd-version
+    "RUSTSEC-2025-0100", # unic-ucd-ident
+    # Blocked updates
+    "RUSTSEC-2026-0194", # quick-xml (requires >=0.41.0, stuck on 0.39.4)
+    "RUSTSEC-2026-0195", # quick-xml (requires >=0.41.0, stuck on 0.39.4)
+    "RUSTSEC-2026-0190", # anyhow
+    "RUSTSEC-2024-0429", # glib
+    "RUSTSEC-2026-0097", # rand
+]

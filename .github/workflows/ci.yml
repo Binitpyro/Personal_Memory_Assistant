@@ -7,7 +7,7 @@ on:
     branches: [ "main" ]
 
 jobs:
-  test-and-lint:
+  python-checks:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -30,3 +30,92 @@ jobs:
       - name: Run MyPy (Type Checks)
         run: |
           uv run mypy .
+
+      - name: Run Bandit (Security Checks)
+        run: |
+          uv run bandit -r app
+
+      - name: Run Pytest (Unit Tests)
+        run: |
+          uv run pytest
+
+  frontend-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: 'frontend/package-lock.json'
+
+      - name: Install frontend dependencies
+        working-directory: ./frontend
+        run: |
+          npm ci
+
+      - name: Install Playwright browsers
+        working-directory: ./frontend
+        run: |
+          npx playwright install --with-deps
+
+      - name: Run ESLint (TypeScript Security & Quality)
+        working-directory: ./frontend
+        run: |
+          npm run lint
+
+      - name: Run Vitest (Unit Tests)
+        working-directory: ./frontend
+        run: |
+          npm run test
+
+      - name: Run Playwright (E2E Tests)
+        working-directory: ./frontend
+        run: |
+          npm run test:e2e
+
+  rust-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Install cargo-deny and cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny,cargo-audit
+
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - name: Clippy (rust_core)
+        working-directory: app/scanner/rust_core
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Cargo Deny (rust_core)
+        working-directory: app/scanner/rust_core
+        run: cargo deny check
+
+      - name: Cargo Audit (rust_core)
+        working-directory: app/scanner/rust_core
+        run: cargo audit
+
+      - name: Clippy (src-tauri)
+        working-directory: frontend/src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Cargo Deny (src-tauri)
+        working-directory: frontend/src-tauri
+        run: cargo deny check
+
+      - name: Cargo Audit (src-tauri)
+        working-directory: frontend/src-tauri
+        run: cargo audit

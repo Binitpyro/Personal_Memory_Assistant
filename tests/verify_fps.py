@@ -12,8 +12,9 @@ async def generate_mock_db(size: int):
     Simulates a database with 'size' number of files for the visualizer.
     This is used if we want to test with a real backend but synthetic data.
     """
-    from app.storage.db import DatabaseManager
     import os
+
+    from app.storage.db import DatabaseManager
 
     db_path = "mock_pma_bench.db"
     if os.path.exists(db_path):

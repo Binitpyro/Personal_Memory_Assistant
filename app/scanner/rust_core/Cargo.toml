@@ -2,13 +2,14 @@
 name = "rust_core"
 version = "0.0.70"
 edition = "2021"
+license = "MIT"
 
 [lib]
 name = "rust_core"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { version = "0.20", features = ["extension-module"] }
+pyo3 = { version = "0.20", features = ["extension-module", "abi3-py38"] }
 jwalk = "0.8"
 rayon = "1.8"
 ring = "0.17.8"

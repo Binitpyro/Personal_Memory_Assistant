@@ -121,7 +121,7 @@ def build_folder_profile(
     files: list[tuple[Path, str]],
 ) -> dict[str, Any]:
     """Analyse an indexed folder and produce a rich profile dict."""
-    folder_files = [(fp, ft) for fp, ft in files if str(fp).startswith(str(folder))]
+    folder_files = [(fp, content) for fp, content in files if fp.is_relative_to(folder)]
 
     ext_counts: Counter = Counter()
     total_size = 0
@@ -170,14 +170,24 @@ async def generate_folder_profiles_async(
     loop = asyncio.get_running_loop()
     max_workers = min(len(folders), (os.cpu_count() or 4) + 2)
     profiles: list[dict[str, Any]] = []
+
+    # Pre-group files by their folder_tag to avoid O(N * M) string matching
+    grouped_files: dict[str, list[Any]] = {f.name: [] for f in folders}
+    for fp, tag in all_files:
+        if tag in grouped_files:
+            grouped_files[tag].append((fp, tag))
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
         futs = [
-            loop.run_in_executor(pool, build_folder_profile, f, f.name, all_files) for f in folders
+            loop.run_in_executor(
+                pool, build_folder_profile, f, f.name, grouped_files.get(f.name, [])
+            )
+            for f in folders
         ]
         results = await asyncio.gather(*futs, return_exceptions=True)
 
     for folder, res in zip(folders, results, strict=False):
-        if isinstance(res, (dict)):
+        if isinstance(res, dict):
             profiles.append(res)
         elif isinstance(res, Exception):
             logger.warning("Folder profile failed for %s: %s", folder, res)

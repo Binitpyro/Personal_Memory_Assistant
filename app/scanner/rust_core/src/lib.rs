@@ -401,36 +401,7 @@ fn _initialize_spiral_positions(child_data: &mut [(usize, f32, [f32; 3])]) {
     }
 }
 
-fn _simulate_repulsion(child_data: &mut [(usize, f32, [f32; 3])]) {
-    let child_count = child_data.len();
-    for _ in 0..150 {
-        for cd in child_data.iter_mut() { 
-            cd.2[0] *= 0.95; cd.2[1] *= 0.95; cd.2[2] *= 0.95; 
-        }
-        for i in 0..child_count {
-            for j in (i+1)..child_count {
-                let dx = child_data[i].2[0] - child_data[j].2[0];
-                let dy = child_data[i].2[1] - child_data[j].2[1];
-                let dz = child_data[i].2[2] - child_data[j].2[2];
-                let dist_sq = dx*dx + dy*dy + dz*dz;
-                let min_dist = child_data[i].1 + child_data[j].1 + 0.8;
-                if dist_sq < min_dist * min_dist && dist_sq > 0.0001 {
-                    let dist = dist_sq.sqrt();
-                    let overlap = min_dist - dist;
-                    let (nx, ny, nz) = (dx / dist, dy / dist, dz / dist);
-                    let push = overlap * 0.5;
-                    let total_r = child_data[i].1 + child_data[j].1;
-                    child_data[i].2[0] += nx * push * (child_data[j].1 / total_r);
-                    child_data[i].2[1] += ny * push * (child_data[j].1 / total_r);
-                    child_data[i].2[2] += nz * push * (child_data[j].1 / total_r);
-                    child_data[j].2[0] -= nx * push * (child_data[i].1 / total_r);
-                    child_data[j].2[1] -= ny * push * (child_data[i].1 / total_r);
-                    child_data[j].2[2] -= nz * push * (child_data[i].1 / total_r);
-                }
-            }
-        }
-    }
-}
+
 
 /// Generates a tightly packed binary buffer for 3D visualization using Hierarchical Spherical Packing
 #[pyfunction]
@@ -455,6 +426,9 @@ fn get_spatial_binary(files: Vec<(String, f32, String)>) -> PyResult<Vec<u8>> {
     }
 
     let mut buffer = Vec::new();
+    // SAFETY: Node is #[repr(C, align(32))] and contains only primitive types (f32, u32).
+    // Casting to [u8] is safe because Node has no uninitialized padding bytes,
+    // and gpu_nodes has exactly nodes.len() * size_of::<Node>() valid bytes.
     let slice_u8 = unsafe { std::slice::from_raw_parts(gpu_nodes.as_ptr() as *const u8, gpu_nodes.len() * std::mem::size_of::<Node>()) };
     buffer.extend_from_slice(slice_u8);
     Ok(buffer)
@@ -735,4 +709,135 @@ mod tests {
     fn test_ext_empty_string() {
         assert_eq!(normalize_ext(""), "");
     }
+
+    #[test]
+    fn test_calculate_sha256_valid_file() {
+        let temp_dir = std::env::temp_dir().join("pma_test_sha256");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let file_path = temp_dir.join("test_sha256.txt");
+        std::fs::write(&file_path, "PMA Test Data").unwrap();
+        
+        let hash_res = calculate_sha256(file_path.to_str().unwrap()).unwrap();
+        assert_eq!(hash_res, "cea2d8a89cbf1cf9d2e23d3f5bd5bf2e58a9622c7030febd2d034efab8d700d6");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_calculate_sha256_non_existent() {
+        let hash_res = calculate_sha256("non_existent_file_path_12345.txt").unwrap();
+        assert_eq!(hash_res, "");
+    }
+
+    #[test]
+    fn test_scan_folders_non_existent() {
+        let res = scan_folders(vec!["/non_existent_folder_path_12345".to_string()], vec![]).unwrap();
+        assert!(res.is_empty());
+    }
+
+    #[test]
+    fn test_scan_folders_matching_extensions() {
+        let temp_dir = std::env::temp_dir().join("pma_test_scan");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        
+        std::fs::write(temp_dir.join("a.py"), "print(1)").unwrap();
+        std::fs::write(temp_dir.join("b.txt"), "hello").unwrap();
+        std::fs::write(temp_dir.join("c.bin"), b"\x00\x01\x02").unwrap();
+
+        let paths = scan_folders(vec![temp_dir.to_str().unwrap().to_string()], vec![".py".to_string(), "txt".to_string()]).unwrap();
+        
+        assert_eq!(paths.len(), 2);
+        let has_a = paths.iter().any(|p| p.ends_with("a.py"));
+        let has_b = paths.iter().any(|p| p.ends_with("b.txt"));
+        let has_c = paths.iter().any(|p| p.ends_with("c.bin"));
+        assert!(has_a);
+        assert!(has_b);
+        assert!(!has_c);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_extract_text_files_valid() {
+        let temp_dir = std::env::temp_dir().join("pma_test_extract");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        
+        let file1 = temp_dir.join("file1.txt");
+        let file2 = temp_dir.join("file2.txt");
+        std::fs::write(&file1, "First File").unwrap();
+        std::fs::write(&file2, "Second File").unwrap();
+
+        let paths = vec![file1.to_str().unwrap().to_string(), file2.to_str().unwrap().to_string()];
+        let results = extract_text_files(paths, 1000).unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].1, "First File");
+        assert_eq!(results[1].1, "Second File");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_extract_text_files_binary() {
+        let temp_dir = std::env::temp_dir().join("pma_test_extract_bin");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        
+        let file1 = temp_dir.join("binary.bin");
+        std::fs::write(&file1, b"\x00\x00\x00\x00Hello\x00\x01\x02").unwrap();
+
+        let paths = vec![file1.to_str().unwrap().to_string()];
+        let results = extract_text_files(paths, 1000).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].1.contains("Binary content not indexed"));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_find_sentence_boundary_standard() {
+        let text = "Hello world. This is a test sentence here. Third sentence.";
+        let boundary = find_sentence_boundary(text, 25, 20);
+        assert_eq!(boundary, 13);
+    }
+
+    #[test]
+    fn test_get_spatial_binary_empty() {
+        let res = get_spatial_binary(vec![]).unwrap();
+        assert_eq!(res.len(), 32);
+    }
+
+    #[test]
+    fn test_get_spatial_binary_some_files() {
+        let files = vec![
+            ("src/main.rs".to_string(), 1000.0, "rs".to_string()),
+            ("src/lib.rs".to_string(), 500.0, "rs".to_string()),
+        ];
+        let res = get_spatial_binary(files).unwrap();
+        assert_eq!(res.len(), 4 * 32);
+    }
+
+    #[test]
+    fn test_pyo3_create_chunks() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let text = "This is a test sentence. And here is another one. And a third.";
+            let res = create_chunks(py, text, 30, 10, "Prefix: ", 0).unwrap();
+            assert!(!res.is_empty());
+        });
+    }
+
+    #[test]
+    fn test_pyo3_chunk_markdown() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let text = "# Section 1\nThis is the first section.\n## Sub Section\nThis is a sub section.\n# Section 2\nAnother section.";
+            let res = chunk_markdown(py, text, 50, 10, "MD: ").unwrap();
+            assert!(!res.is_empty());
+        });
+    }
 }
+

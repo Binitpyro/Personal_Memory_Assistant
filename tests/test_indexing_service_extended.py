@@ -189,6 +189,6 @@ def test_extract_monolithic_and_chunking(tmp_path: Path):
     assert md_chunks
     assert "[MD: doc.md]" in md_chunks[0]["text_preview"]
 
-    plain_chunks = svc._split_text("A. B. C. D." * 10, "Prefix: ", 0)
+    plain_chunks = svc._create_chunks("A. B. C. D." * 10, file_path="test.txt")
     assert plain_chunks
-    assert "Prefix: " in plain_chunks[0]["text_preview"]
+    assert "A. B." in plain_chunks[0]["text_preview"]

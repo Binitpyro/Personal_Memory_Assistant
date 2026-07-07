@@ -17,25 +17,28 @@ class DocxExtractor:
             doc = Document(str(path))
             total = 0
 
-            # 1. Paragraphs
-            for p in doc.paragraphs:
-                txt = p.text.strip()
-                if txt:
-                    yield txt
-                    total += len(txt)
-                    if total > max_file_size:
-                        return
+            from docx.table import Table
+            from docx.text.paragraph import Paragraph
 
-            # 2. Tables
-            for table in doc.tables:
-                for row in table.rows:
-                    row_data = [cell.text for cell in row.cells if cell.text.strip()]
-                    if row_data:
-                        line = " | ".join(row_data)
-                        yield line
-                        total += len(line)
+            for child in doc.element.body.iterchildren():
+                if child.tag.endswith("}p"):
+                    p = Paragraph(child, doc)
+                    txt = p.text.strip()
+                    if txt:
+                        yield txt
+                        total += len(txt)
                         if total > max_file_size:
                             return
+                elif child.tag.endswith("}tbl"):
+                    t = Table(child, doc)
+                    for row in t.rows:
+                        row_data = [cell.text for cell in row.cells if cell.text.strip()]
+                        if row_data:
+                            line = " | ".join(row_data)
+                            yield line
+                            total += len(line)
+                            if total > max_file_size:
+                                return
         except Exception as e:
             err_msg = str(e).lower()
             if "encrypted" in err_msg or "password" in err_msg:

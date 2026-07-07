@@ -122,8 +122,6 @@ async def test_query_history_profiles(db: DatabaseManager, tmp_path: Path):
     assert "Proj" in text
 
 
-
-
 @pytest.mark.asyncio
 async def test_cleanup_delete_prefix_clear_all_and_health(db: DatabaseManager, tmp_path: Path):
     existing = tmp_path / "keep.txt"
@@ -176,15 +174,15 @@ async def test_cascading_deletes(db: DatabaseManager, tmp_path: Path):
     await db.insert_chunk_embeddings_bulk([(chunk_id, b"dummy_embedding")])
 
     # 4. Insert kg_nodes connected to the chunk
-    await db.insert_kg_nodes_bulk([
-        ("node1", "class", "NodeOne", "{}", chunk_id),
-        ("node2", "function", "NodeTwo", "{}", chunk_id),
-    ])
+    await db.insert_kg_nodes_bulk(
+        [
+            ("node1", "class", "NodeOne", "{}", chunk_id),
+            ("node2", "function", "NodeTwo", "{}", chunk_id),
+        ]
+    )
 
     # 5. Insert kg_edge connecting the nodes
-    await db.insert_kg_edges_bulk([
-        ("node1", "node2", "calls", 1.0, "{}")
-    ])
+    await db.insert_kg_edges_bulk([("node1", "node2", "calls", 1.0, "{}")])
 
     # Verify everything exists initially
     async with db._get_read_conn() as conn:
@@ -192,9 +190,13 @@ async def test_cascading_deletes(db: DatabaseManager, tmp_path: Path):
             assert (await cur.fetchone())[0] == 1
         async with conn.execute("SELECT COUNT(*) FROM chunks WHERE id = ?", (chunk_id,)) as cur:
             assert (await cur.fetchone())[0] == 1
-        async with conn.execute("SELECT COUNT(*) FROM chunk_embeddings WHERE chunk_id = ?", (chunk_id,)) as cur:
+        async with conn.execute(
+            "SELECT COUNT(*) FROM chunk_embeddings WHERE chunk_id = ?", (chunk_id,)
+        ) as cur:
             assert (await cur.fetchone())[0] == 1
-        async with conn.execute("SELECT COUNT(*) FROM kg_nodes WHERE chunk_id = ?", (chunk_id,)) as cur:
+        async with conn.execute(
+            "SELECT COUNT(*) FROM kg_nodes WHERE chunk_id = ?", (chunk_id,)
+        ) as cur:
             assert (await cur.fetchone())[0] == 2
         async with conn.execute("SELECT COUNT(*) FROM kg_edges WHERE source = 'node1'") as cur:
             assert (await cur.fetchone())[0] == 1
@@ -209,10 +211,13 @@ async def test_cascading_deletes(db: DatabaseManager, tmp_path: Path):
             assert (await cur.fetchone())[0] == 0
         async with conn.execute("SELECT COUNT(*) FROM chunks WHERE id = ?", (chunk_id,)) as cur:
             assert (await cur.fetchone())[0] == 0
-        async with conn.execute("SELECT COUNT(*) FROM chunk_embeddings WHERE chunk_id = ?", (chunk_id,)) as cur:
+        async with conn.execute(
+            "SELECT COUNT(*) FROM chunk_embeddings WHERE chunk_id = ?", (chunk_id,)
+        ) as cur:
             assert (await cur.fetchone())[0] == 0
-        async with conn.execute("SELECT COUNT(*) FROM kg_nodes WHERE chunk_id = ?", (chunk_id,)) as cur:
+        async with conn.execute(
+            "SELECT COUNT(*) FROM kg_nodes WHERE chunk_id = ?", (chunk_id,)
+        ) as cur:
             assert (await cur.fetchone())[0] == 0
         async with conn.execute("SELECT COUNT(*) FROM kg_edges WHERE source = 'node1'") as cur:
             assert (await cur.fetchone())[0] == 0
-

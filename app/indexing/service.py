@@ -1,14 +1,14 @@
 import asyncio
 import hashlib
+import json
 import logging
+import re
 import threading
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-import json
-import re
 
 from app.config import settings
 from app.embeddings.service import EmbeddingService
@@ -37,25 +37,27 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 _nltk_punkt_downloaded = False
-_SENTENCE_SPLIT_RE = re.compile(r'(?<=[.!?])\s+(?=[A-Z])')
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z])")
+
 
 def _get_sentence_offsets(text: str) -> list[list[int]]:
     """Compute start and end offsets for sentences within a text string."""
     global _nltk_punkt_downloaded
     if not text:
         return []
-        
+
     try:
         import nltk
+
         if not _nltk_punkt_downloaded:
             try:
-                nltk.data.find('tokenizers/punkt')
-                nltk.data.find('tokenizers/punkt_tab')
+                nltk.data.find("tokenizers/punkt")
+                nltk.data.find("tokenizers/punkt_tab")
             except LookupError:
-                nltk.download('punkt', quiet=True)
-                nltk.download('punkt_tab', quiet=True)
+                nltk.download("punkt", quiet=True)
+                nltk.download("punkt_tab", quiet=True)
             _nltk_punkt_downloaded = True
-            
+
         sentences = nltk.tokenize.sent_tokenize(text)
         offsets = []
         curr = 0
@@ -66,7 +68,7 @@ def _get_sentence_offsets(text: str) -> list[list[int]]:
             end = start + len(s)
             offsets.append([start, end])
             curr = end
-        
+
         if curr < len(text):
             if offsets:
                 offsets[-1][1] = len(text)
@@ -86,8 +88,6 @@ def _get_sentence_offsets(text: str) -> list[list[int]]:
             offsets.append([curr, len(text)])
         return offsets
 
-# H-18: Dedicated thread pool for disk I/O to avoid contention with indexing tasks
-_DISK_EXECUTOR = ThreadPoolExecutor(max_workers=32, thread_name_prefix="pma_disk")
 
 class IndexingProgress:
     def __init__(self):
@@ -102,6 +102,7 @@ class IndexingProgress:
         self.scan_method = ""
         self.scan_duration_ms = 0.0
         self.current_file = "Ready"
+        self.is_cancelled = False
 
     def reset(self, total_files: int, initial_status: str = "running"):
         with self._lock:
@@ -115,6 +116,7 @@ class IndexingProgress:
             self.scan_method = ""
             self.scan_duration_ms = 0.0
             self.current_file = "Starting…"
+            self.is_cancelled = False
 
     def update(self, chunks_added: int, current_file: str = ""):
         with self._lock:
@@ -144,8 +146,8 @@ class StreamChunker:
     """Helper to process a stream of text fragments into properly sized chunks."""
 
     def __init__(self, chunk_size: int, chunk_overlap: int, prefix: str):
-        self.chunk_size = chunk_size
-        self.chunk_overlap = chunk_overlap
+        self.chunk_size = chunk_size if chunk_size > 0 else 500
+        self.chunk_overlap = min(max(0, chunk_overlap), self.chunk_size - 1)
         self.prefix = prefix
         self.buffer = ""
         self.total_offset = 0
@@ -154,7 +156,15 @@ class StreamChunker:
         self.buffer += text_fragment
         chunks = []
 
+        max_iters = len(self.buffer) + 2
+        iters = 0
         while len(self.buffer) > self.chunk_size:
+            iters += 1
+            if iters > max_iters:
+                logger.error("Infinite loop guard triggered in StreamChunker.process! Forcing exit.")
+                break
+            prev_len = len(self.buffer)
+
             # Find a good split point in the current window
             raw_end = self.chunk_size
             # Use simple sentence snapping for streaming
@@ -168,14 +178,23 @@ class StreamChunker:
                     "end_offset": self.total_offset + end,
                     "text_preview": preview,
                     "sentence_offsets": json.dumps(_get_sentence_offsets(preview)),
-                    "segmenter_version": "py_v1"
+                    "segmenter_version": "py_v1",
                 }
             )
 
             # Advance
             overlap_start = max(0, end - self.chunk_overlap)
+            if overlap_start <= 0:
+                overlap_start = 1
             self.buffer = self.buffer[overlap_start:]
             self.total_offset += overlap_start
+
+            if len(self.buffer) >= prev_len:
+                # Force shrink buffer to guarantee progress and break infinite loops
+                self.buffer = self.buffer[1:]
+                self.total_offset += 1
+                if len(self.buffer) == 0:
+                    break
 
         return chunks
 
@@ -190,7 +209,7 @@ class StreamChunker:
                     "end_offset": self.total_offset + len(self.buffer),
                     "text_preview": preview,
                     "sentence_offsets": json.dumps(_get_sentence_offsets(preview)),
-                    "segmenter_version": "py_v1"
+                    "segmenter_version": "py_v1",
                 }
             )
         self.buffer = ""
@@ -225,6 +244,12 @@ class IndexingService:
         self._concurrency = settings.index_concurrency
         self.code_chunker = CodeChunker(max_tokens=512)
 
+    def cancel_indexing(self):
+        with progress._lock:
+            progress.is_cancelled = True
+            progress.status = "cancelling"
+            logger.info("Cancellation requested, will gracefully abort the batch.")
+
     async def index_folders(self, folders: list[str]):
         if indexing_lock.locked():
             logger.warning("Indexing already in progress.")
@@ -233,12 +258,14 @@ class IndexingService:
         async with indexing_lock:
             unique_folders = _resolve_folder_overlaps(folders)
             if not unique_folders:
-                progress.status = "idle"
+                with progress._lock:
+                    progress.status = "idle"
                 return
 
             progress.reset(0)
-            progress.status = "running"
-            progress.current_file = "Scanning folders…"
+            with progress._lock:
+                progress.status = "running"
+                progress.current_file = "Scanning folders…"
 
             loop = asyncio.get_running_loop()
             all_files, scan_method, scan_duration = await loop.run_in_executor(
@@ -246,7 +273,8 @@ class IndexingService:
             )
 
             if not all_files:
-                progress.status = "idle"
+                with progress._lock:
+                    progress.status = "idle"
                 return
 
             files_to_index, skipped, new_count, changed_count = await self._detect_changes(
@@ -254,11 +282,12 @@ class IndexingService:
             )
 
             progress.reset(len(files_to_index))
-            progress.scan_method = scan_method
-            progress.scan_duration_ms = scan_duration
-            progress.skipped_files = skipped
-            progress.new_files = new_count
-            progress.changed_files = changed_count
+            with progress._lock:
+                progress.scan_method = scan_method
+                progress.scan_duration_ms = scan_duration
+                progress.skipped_files = skipped
+                progress.new_files = new_count
+                progress.changed_files = changed_count
 
             if not files_to_index:
                 await self._generate_folder_profiles(all_files, unique_folders)
@@ -267,6 +296,8 @@ class IndexingService:
 
             batch_size = 16  # Reduced from 100 to rigidly enforce O(1) memory bounds
             for i in range(0, len(files_to_index), batch_size):
+                if progress.is_cancelled:
+                    break
                 batch = files_to_index[i : i + batch_size]
                 await self._batch_index_pipeline(
                     batch, offset=i, total_to_index=len(files_to_index)
@@ -275,9 +306,13 @@ class IndexingService:
 
                 gc.collect()
 
-            # Phase 1: Resolve pending GraphRAG edges (Disabled for now)
-            # progress.set_current_file("Resolving code graph edges…")
-            # await self.db.resolve_pending_graph_edges()
+            if progress.is_cancelled:
+                progress.complete()
+                return
+
+            # Phase 1: Resolve pending GraphRAG edges
+            progress.set_current_file("Resolving code graph edges…")
+            await self.db.resolve_pending_graph_edges()
 
             await self._generate_folder_profiles(all_files, unique_folders)
             from app.search.retrieval import clear_retrieval_cache
@@ -310,20 +345,21 @@ class IndexingService:
         embed_queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=100)
         store_queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=100)
 
-        # C-03: Use return_exceptions=True so one stage failure doesn't silently cancel
-        # the downstream workers, leaving queues stalled. Each worker injects its own
-        # sentinel in a finally block to guarantee the pipeline always drains.
-        results = await asyncio.gather(
-            self._extractor_worker(
-                files_to_index, pre_extracted, embed_queue, total_so_far, grand_total
-            ),
-            self._embedder_worker(embed_queue, store_queue),
-            self._storer_worker(store_queue),
-            return_exceptions=True,
-        )
-        for exc in results:
-            if isinstance(exc, Exception):
-                logger.error("Pipeline stage failed: %s", exc)
+        try:
+            async with asyncio.TaskGroup() as tg:
+                tg.create_task(
+                    self._extractor_worker(
+                        files_to_index, pre_extracted, embed_queue, total_so_far, grand_total
+                    )
+                )
+                tg.create_task(self._embedder_worker(embed_queue, store_queue))
+                tg.create_task(self._storer_worker(store_queue))
+        except ExceptionGroup as eg:
+            for exc in eg.exceptions:
+                logger.error("Pipeline stage sub-exception:", exc_info=exc)
+            logger.error("Pipeline stage failed or cancelled due to TaskGroup exceptions.")
+        except Exception as e:
+            logger.error("Pipeline stage failed or cancelled:", exc_info=e)
 
     async def _rust_pre_extract(self, files_to_index: list[tuple[Path, str]]) -> dict[str, str]:
         pre_extracted: dict[str, str] = {}
@@ -356,6 +392,8 @@ class IndexingService:
         semaphore = asyncio.Semaphore(self._concurrency * 2)
 
         async def _safe_stream_extract(path: Path, tag: str):
+            if progress.is_cancelled:
+                return
             nonlocal extracted_count
             async with semaphore:
                 # O(1) Memory Fix: Pop the text to free RAM immediately as we consume it
@@ -371,7 +409,10 @@ class IndexingService:
 
         tasks = [_safe_stream_extract(fp, ft) for fp, ft in files_to_index]
         try:
-            await asyncio.gather(*tasks, return_exceptions=True)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for res in results:
+                if isinstance(res, Exception):
+                    logger.error("File extraction failed: %s", res)
         finally:
             # C-03: Always send sentinel so _embedder_worker drains even on partial failure.
             await embed_queue.put(None)
@@ -380,6 +421,7 @@ class IndexingService:
         self, path: Path, folder_tag: str, pre_text: str | None, queue: asyncio.Queue
     ) -> None:
         loop = asyncio.get_running_loop()
+        header_sent = False
         try:
             # H-18: Use dedicated disk executor
             stat = await loop.run_in_executor(_DISK_EXECUTOR, path.stat)
@@ -399,6 +441,7 @@ class IndexingService:
                 },
             }
             await queue.put(header)
+            header_sent = True
 
             prefix = self._build_context_prefix(str(path))
             is_structured = any(ex.can_handle(path) for ex in EXTRACTORS)
@@ -406,23 +449,32 @@ class IndexingService:
 
             full_text_for_summary = ""
 
+            logger.info("Started extracting and chunking for file: %s", path)
+
             if is_structured or is_large_log:
                 chunker = StreamChunker(self.chunk_size, self.chunk_overlap, prefix)
 
-                def _get_stream():
-                    for ex in EXTRACTORS:
-                        if ex.can_handle(path):
-                            return ex.extract_stream(path, self.max_file_size)
-                    return self._extract_plain_text_stream(path)
+                def _evaluate_stream():
+                    def _get_stream():
+                        for ex in EXTRACTORS:
+                            if ex.can_handle(path):
+                                return ex.extract_stream(path, self.max_file_size)
+                        return self._extract_plain_text_stream(path)
 
-                stream = await loop.run_in_executor(None, _get_stream)
-                for fragment in stream:
-                    chunks = chunker.process(fragment)
-                    for c in chunks:
-                        await queue.put({"type": "chunk", "path": path, "chunk": c})
-                    if len(full_text_for_summary) < 2000:
-                        full_text_for_summary += fragment
-                for c in chunker.finalize():
+                    stream = _get_stream()
+                    out_chunks = []
+                    ft_summary = ""
+                    for fragment in stream:
+                        out_chunks.extend(chunker.process(fragment))
+                        if len(ft_summary) < 2000:
+                            ft_summary += fragment
+                    out_chunks.extend(chunker.finalize())
+                    return out_chunks, ft_summary
+
+                all_chunks, full_text_for_summary = await loop.run_in_executor(
+                    None, _evaluate_stream
+                )
+                for c in all_chunks:
                     await queue.put({"type": "chunk", "path": path, "chunk": c})
             else:
                 text = (
@@ -430,16 +482,45 @@ class IndexingService:
                     if pre_text is not None
                     else await loop.run_in_executor(None, self._extract_text_monolithic, path)
                 )
-                chunks = self._create_chunks(text, file_path=str(path))
-                for c in chunks:
-                    await queue.put({"type": "chunk", "path": path, "chunk": c})
-                full_text_for_summary = text
+                # Skip binary stubs — they pollute the vector index with useless noise
+                if text and text.startswith("[BINARY:"):
+                    logger.debug("Skipping binary stub for %s — no indexable text.", path)
+                    full_text_for_summary = ""
+                else:
+                    chunks = await loop.run_in_executor(None, self._create_chunks, text, str(path))
+                    for c in chunks:
+                        await queue.put({"type": "chunk", "path": path, "chunk": c})
+                    full_text_for_summary = text
 
-            summary = self._generate_summary(full_text_for_summary, path)
+            summary = await loop.run_in_executor(
+                None, self._generate_summary, full_text_for_summary, path
+            )
             await queue.put({"type": "footer", "path": path, "summary": summary})
 
         except Exception as e:
             logger.error("Streaming extraction failed for %s: %s", path, e)
+            if not header_sent:
+                try:
+                    # Send a dummy header so storer has a file_id to associate with the footer
+                    dummy_header = {
+                        "type": "header",
+                        "path": path,
+                        "folder_tag": folder_tag,
+                        "file_data": {
+                            "path": str(path.absolute()),
+                            "size": 0,
+                            "modified_at": datetime.now().isoformat(),
+                            "type": path.suffix.lower(),
+                            "folder_tag": folder_tag,
+                            "sha256": "ERROR",
+                        },
+                    }
+                    await queue.put(dummy_header)
+                    header_sent = True
+                except Exception as inner_h:
+                    logger.error("Failed to send dummy header for %s: %s", path, inner_h)
+            if header_sent:
+                await queue.put({"type": "footer", "path": path, "summary": f"[ERROR: {str(e)}]"})
 
     def _extract_plain_text_stream(self, path: Path) -> Iterator[str]:
         try:
@@ -492,6 +573,11 @@ class IndexingService:
         if not texts:
             return
 
+        unique_paths = list(set(str(item["path"].name) for item in batch_items))
+        logger.info(
+            "Embedding batch of %d chunks for files: %s", len(texts), ", ".join(unique_paths)
+        )
+
         def report_progress(batch_num, total_batches):
             progress.set_current_file(f"Phase 2/3: Embedding chunks ({batch_num}/{total_batches})…")
 
@@ -539,16 +625,23 @@ class IndexingService:
                         (item["summary"], file_info["id"]),
                     )
                     progress.update(file_info["chunk_count"], current_file=item["path"].name)
+                else:
+                    progress.update(0, current_file=item["path"].name)
 
     async def _flush_pending_chunks(self, chunks: list[dict[str, Any]], active_files: dict):
         if not chunks:
             return
-        import numpy as np
         import json
+
+        import numpy as np
 
         chunk_rows = []
         for item in chunks:
-            row = {k: v for k, v in item["chunk"].items() if k not in ("_embedding", "kg_nodes", "kg_edges")}
+            row = {
+                k: v
+                for k, v in item["chunk"].items()
+                if k not in ("_embedding", "kg_nodes", "kg_edges")
+            }
             row["file_id"] = item["file_id"]
             chunk_rows.append(row)
 
@@ -557,8 +650,8 @@ class IndexingService:
         l_ids, l_embs, l_metas, emb_blobs = [], [], [], []
         kg_nodes_data = []
         kg_edges_data = []
-        
-        for chunk_id, item in zip(chunk_ids_int, chunks, strict=False):
+
+        for chunk_id, item in zip(chunk_ids_int, chunks, strict=True):
             cid_str = str(chunk_id)
             l_ids.append(cid_str)
             l_embs.append(item["chunk"]["_embedding"])
@@ -574,22 +667,27 @@ class IndexingService:
             emb_blobs.append(
                 (chunk_id, np.array(item["chunk"]["_embedding"], dtype=np.float16).tobytes())
             )
-            
+
             for node in item["chunk"].get("kg_nodes", []):
-                props = json.dumps({"chunk_id": chunk_id, "start_line": node.get("start_line"), "end_line": node.get("end_line")})
-                kg_nodes_data.append((node["id"], "entity", node["label"], props))
-                
+                props = json.dumps(
+                    {
+                        "chunk_id": chunk_id,
+                        "start_line": node.get("start_line"),
+                        "end_line": node.get("end_line"),
+                    }
+                )
+                kg_nodes_data.append((node["id"], "entity", node["label"], props, chunk_id))
+
             for edge in item["chunk"].get("kg_edges", []):
                 props = json.dumps({"chunk_id": chunk_id})
                 kg_edges_data.append((edge["src_id"], edge["dst_id"], edge["rel_type"], 1.0, props))
 
         await self.db.insert_chunk_embeddings_bulk(emb_blobs)
-        # Entity Graph disabled
-        # if kg_nodes_data:
-        #     await self.db.insert_kg_nodes_bulk(kg_nodes_data)
-        # if kg_edges_data:
-        #     await self.db.insert_kg_edges_bulk(kg_edges_data)
-            
+        if kg_nodes_data:
+            await self.db.insert_kg_nodes_bulk(kg_nodes_data)  # type: ignore
+        if kg_edges_data:
+            await self.db.insert_kg_edges_bulk(kg_edges_data)
+
         await self.lancedb_client.add_documents(l_ids, l_embs, l_metas)
         await self.db.commit()
 
@@ -709,8 +807,14 @@ class IndexingService:
                 return fp, "", None
 
         loop = asyncio.get_running_loop()
-        stat_tasks = [_stat_file(fp) for fp, _ in all_files]
-        stat_results = await asyncio.gather(*stat_tasks, return_exceptions=False)
+        stat_results = []
+        batch_size = 1000
+        for i in range(0, len(all_files), batch_size):
+            batch = all_files[i : i + batch_size]
+            stat_tasks = [_stat_file(fp) for fp, _ in batch]
+            res = await asyncio.gather(*stat_tasks, return_exceptions=False)
+            stat_results.extend(res)
+
         stat_map: dict[str, str] = {}
         failed_paths: set[str] = set()
         for fp, mtime, _ in stat_results:
@@ -728,15 +832,7 @@ class IndexingService:
             mtime = stat_map.get(key, "")
             stored = change_map.get(key)
             if stored and stored[0] == mtime:
-                # H-03: Double-check with SHA256 if mtime matches
-                current_sha256 = await loop.run_in_executor(
-                    _DISK_EXECUTOR, self._calculate_sha256, fp
-                )
-                if stored[1] == current_sha256:
-                    skipped += 1
-                else:
-                    changed_c += 1
-                    to_index.append((fp, tag))
+                skipped += 1
             elif stored:
                 changed_c += 1
                 to_index.append((fp, tag))
@@ -787,21 +883,3 @@ class IndexingService:
     def _build_context_prefix(file_path: str) -> str:
         p = Path(file_path)
         return f"[{p.suffix.lstrip('.').upper() or 'file'}: {p.name}] "
-
-    def _split_text(self, text: str, prefix: str, base_offset: int) -> list[dict[str, Any]]:
-        chunks, start, text_len = [], 0, len(text)
-        while start < text_len:
-            end = min(start + self.chunk_size, text_len)
-            chunks.append(
-                {
-                    "start_offset": base_offset + start,
-                    "end_offset": base_offset + end,
-                    "text_preview": prefix + text[start:end],
-                }
-            )
-            start = end - self.chunk_overlap if end < text_len else text_len
-            if start < 0:
-                start = 0
-            if end >= text_len:
-                break
-        return chunks

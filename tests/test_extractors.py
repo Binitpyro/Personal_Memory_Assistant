@@ -164,11 +164,25 @@ class TestDocxExtractor:
         mock_docx = MagicMock()
         mock_para = MagicMock()
         mock_para.text = "Paragraph text content"
+
+        mock_paragraph_module = MagicMock()
+        mock_paragraph_module.Paragraph.return_value = mock_para
+        mock_table_module = MagicMock()
+
         mock_doc = MagicMock()
-        mock_doc.paragraphs = [mock_para]
-        mock_doc.tables = []
+        mock_child_p = MagicMock()
+        mock_child_p.tag = "}p"
+        mock_doc.element.body.iterchildren.return_value = [mock_child_p]
         mock_docx.Document.return_value = mock_doc
-        with patch.dict("sys.modules", {"docx": mock_docx}):
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "docx": mock_docx,
+                "docx.text.paragraph": mock_paragraph_module,
+                "docx.table": mock_table_module,
+            },
+        ):
             result = self.ext.extract(fake_path, MAX_SIZE)
         assert "Paragraph" in result
 
@@ -186,6 +200,7 @@ class TestXlsxExtractor:
 
     def test_can_handle(self, tmp_path):
         assert self.ext.can_handle(tmp_path / "sheet.xlsx")
+        assert self.ext.can_handle(tmp_path / "sheet.xls")
         assert not self.ext.can_handle(tmp_path / "sheet.csv")
 
     def test_extract_success(self, tmp_path):
@@ -205,7 +220,77 @@ class TestXlsxExtractor:
         mock_openpyxl.load_workbook.return_value = mock_wb
         with patch.dict("sys.modules", {"openpyxl": mock_openpyxl}):
             result = self.ext.extract(fake_path, MAX_SIZE)
-        assert isinstance(result, str)
+        assert "Sheet1" in result
+        assert "Header" in result
+        assert "Row1" in result
+
+    def test_extract_xlsx_size_truncation(self, tmp_path):
+        fake_path = tmp_path / "test.xlsx"
+        fake_path.touch()
+        mock_openpyxl = MagicMock()
+        mock_ws = MagicMock()
+        mock_ws.title = "Sheet1"
+        mock_ws.iter_rows.return_value = iter(
+            [
+                ("HeaderLongValue1234567890", "Value"),
+            ]
+        )
+        mock_wb = MagicMock()
+        mock_wb.worksheets = [mock_ws]
+        mock_openpyxl.load_workbook.return_value = mock_wb
+        with patch.dict("sys.modules", {"openpyxl": mock_openpyxl}):
+            result = self.ext.extract(fake_path, 10)
+        # Should truncate or exit loop early when size exceeded
+        assert len(result) <= 30
+
+    def test_extract_legacy_xls(self, tmp_path):
+        fake_path = tmp_path / "test.xls"
+        fake_path.touch()
+        
+        mock_xlrd = MagicMock()
+        mock_wb = MagicMock()
+        mock_sheet = MagicMock()
+        mock_sheet.name = "LegacySheet"
+        mock_sheet.nrows = 2
+        
+        c1 = MagicMock()
+        c1.value = "H1"
+        c2 = MagicMock()
+        c2.value = "V1"
+        c3 = MagicMock()
+        c3.value = "H2"
+        c4 = MagicMock()
+        c4.value = "V2"
+        
+        mock_sheet.row.side_effect = [[c1, c2], [c3, c4]]
+        mock_wb.sheets.return_value = [mock_sheet]
+        mock_xlrd.open_workbook.return_value = mock_wb
+        
+        with patch.dict("sys.modules", {"xlrd": mock_xlrd}):
+            result = self.ext.extract(fake_path, MAX_SIZE)
+        assert "LegacySheet" in result
+        assert "H1 | V1" in result
+        assert "H2 | V2" in result
+
+    def test_extract_legacy_xls_size_truncation(self, tmp_path):
+        fake_path = tmp_path / "test.xls"
+        fake_path.touch()
+        
+        mock_xlrd = MagicMock()
+        mock_wb = MagicMock()
+        mock_sheet = MagicMock()
+        mock_sheet.name = "S"
+        mock_sheet.nrows = 10
+        c = MagicMock()
+        c.value = "SomeLongTextValue"
+        mock_sheet.row.return_value = [c]
+        mock_wb.sheets.return_value = [mock_sheet]
+        mock_xlrd.open_workbook.return_value = mock_wb
+        
+        with patch.dict("sys.modules", {"xlrd": mock_xlrd}):
+            result = self.ext.extract(fake_path, 5)
+        # Should stop processing sheets
+        assert len(result) < 50
 
     def test_missing_file_returns_empty(self, tmp_path):
         result = self.ext.extract(tmp_path / "missing.xlsx", MAX_SIZE)
@@ -257,7 +342,45 @@ class TestEpubExtractor:
 
     def test_missing_file_returns_empty_or_error(self, tmp_path):
         result = self.ext.extract(tmp_path / "missing.epub", MAX_SIZE)
-        assert isinstance(result, str)
+        assert result == ""
+
+    def test_epub_extraction_success(self, tmp_path):
+        fake_epub = tmp_path / "test.epub"
+        
+        # We can write a real zip file to test real EPUB structure
+        import zipfile
+        with zipfile.ZipFile(fake_epub, "w") as zf:
+            zf.writestr("mimetype", "application/epub+zip")
+            # Subfolder OEBPS/ or any folder
+            zf.writestr("OEBPS/ch1.xhtml", "<html><body><h1>Introduction</h1><p>Welcome to &amp; standard text. This is a longer text paragraph that contains enough characters to pass the fifty character check in the extractor.</p></body></html>")
+            zf.writestr("OEBPS/ch2.html", "<html><body><p>This is second page. It has a lot of additional characters in order to exceed fifty characters as well.</p></body></html>")
+            # Ignored folder
+            zf.writestr("__MACOSX/ch1.xhtml", "ignored")
+            # Non-html file suffix
+            zf.writestr("OEBPS/image.png", "binarydata")
+            
+        result = self.ext.extract(fake_epub, MAX_SIZE)
+        assert "Introduction" in result
+        assert "Welcome to standard text." in result
+        assert "This is second page." in result
+        assert "ignored" not in result
+
+    def test_epub_zip_bomb_prevention(self, tmp_path):
+        fake_epub = tmp_path / "zip_bomb.epub"
+        fake_epub.touch()
+
+        mock_zf = MagicMock()
+        mock_zf.namelist.return_value = ["ch1.xhtml"]
+        
+        # mock f.read to return 101MB of text to trigger cumulative size limit
+        mock_file = MagicMock()
+        mock_file.read.return_value = b"A" * 101_000_000
+        mock_zf.open.return_value = mock_file
+
+        with patch("zipfile.ZipFile", return_value=mock_zf):
+            result = self.ext.extract(fake_epub, MAX_SIZE)
+        # Should raise ValueError inside, catch and abort, returning empty/truncated string
+        assert result == ""
 
 
 # ── EXTRACTORS registry ───────────────────────────────────────────────────────

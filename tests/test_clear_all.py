@@ -1,6 +1,9 @@
-import pytest
 import zlib
+
+import pytest
+
 from app.storage.db import DatabaseManager
+
 
 @pytest.mark.asyncio
 async def test_clear_all_and_fts_behavior(mock_db: DatabaseManager):
@@ -11,7 +14,7 @@ async def test_clear_all_and_fts_behavior(mock_db: DatabaseManager):
         "size": 100,
         "modified_at": "2026-05-11T00:00:00",
         "type": ".txt",
-        "folder_tag": "Test"
+        "folder_tag": "Test",
     }
     file_id = await mock_db.insert_file(file_data)
 
@@ -21,7 +24,7 @@ async def test_clear_all_and_fts_behavior(mock_db: DatabaseManager):
 
     await mock_db.execute_write(
         "INSERT INTO chunks (file_id, start_offset, end_offset, text_preview) VALUES (?,?,?,?)",
-        (file_id, 0, len(text), compressed)
+        (file_id, 0, len(text), compressed),
     )
 
     # 3. Verify FTS search works before clear
@@ -39,17 +42,19 @@ async def test_clear_all_and_fts_behavior(mock_db: DatabaseManager):
     assert chunks == 0
 
     # 5. Re-insert and verify FTS still works (verifies triggers are correctly recreated)
-    file_id_2 = await mock_db.insert_file({
-        "path": "test2.txt",
-        "size": 100,
-        "modified_at": "2026-05-11T00:00:01",
-        "type": ".txt",
-        "folder_tag": "Test"
-    })
+    file_id_2 = await mock_db.insert_file(
+        {
+            "path": "test2.txt",
+            "size": 100,
+            "modified_at": "2026-05-11T00:00:01",
+            "type": ".txt",
+            "folder_tag": "Test",
+        }
+    )
 
     await mock_db.execute_write(
         "INSERT INTO chunks (file_id, start_offset, end_offset, text_preview) VALUES (?,?,?,?)",
-        (file_id_2, 0, len(text), compressed)
+        (file_id_2, 0, len(text), compressed),
     )
 
     # Search FTS again

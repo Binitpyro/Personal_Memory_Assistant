@@ -115,7 +115,7 @@ class TestEmbedTexts:
         mock_session = MagicMock()
         mock_session.run = MagicMock(return_value=[np.array([[0.1] * 384])])
         svc._session = mock_session
-        
+
         mock_tokenizer = MagicMock()
         mock_encoded = MagicMock()
         mock_encoded.ids = [1, 2, 3]
@@ -140,7 +140,7 @@ class TestEmbedTexts:
         mock_session = MagicMock()
         mock_session.run = MagicMock(return_value=[np.array([[0.1] * 384])])
         svc._session = mock_session
-        
+
         mock_tokenizer = MagicMock()
         mock_encoded = MagicMock()
         mock_encoded.ids = [1]

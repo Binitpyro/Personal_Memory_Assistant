@@ -1,10 +1,10 @@
+import asyncio
 import json
 import logging
-import asyncio
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.api.deps import ensure_rag, get_db, get_emb, get_lancedb, get_llm, get_planner
 from app.api.limiter import limiter
@@ -19,13 +19,41 @@ query_semaphore = asyncio.Semaphore(5)
 
 class QueryRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=2000)
-    file_type: str | None = Field(None)
-    folder_tag: str | None = Field(None)
-    mode: str | None = Field(None)
-    forced_chunk_ids: list[int] | None = Field(None)
+    file_type: str | None = Field(None, max_length=50)
+    folder_tag: str | None = Field(None, max_length=100)
+    mode: str | None = Field(None, max_length=50)
+    forced_chunk_ids: list[int] | None = Field(None, max_length=500)
     history: list[dict[str, str]] | None = Field(
         None
     )  # List of {"role": "user/assistant", "content": "..."}
+
+    @field_validator("history")
+    @classmethod
+    def validate_history(cls, v):
+        if v is None:
+            return v
+        if not isinstance(v, list):
+            raise ValueError("history must be a list")
+        for item in v:
+            if not isinstance(item, dict):
+                raise ValueError("history items must be dictionaries")
+            # validate that keys are strings and only valid keys
+            keys = set(item.keys())
+            if not keys.issubset({"role", "content"}) or not keys:
+                raise ValueError("history items must contain only 'role' and 'content' keys")
+            # validate keys and values are strings
+            for key, val in item.items():
+                if not isinstance(key, str) or not isinstance(val, str):
+                    raise ValueError("history item keys and values must be strings")
+            # valid roles (user, assistant, system)
+            role = item.get("role")
+            if role not in ("user", "assistant", "system"):
+                raise ValueError("history item role must be one of: 'user', 'assistant', 'system'")
+            # content length limit (10000 characters)
+            content = item.get("content", "")
+            if len(content) > 10000:
+                raise ValueError("history item content length must not exceed 10000 characters")
+        return v
 
     @property
     def validated_question(self) -> str:
@@ -45,13 +73,24 @@ async def query(
     planner=Depends(get_planner),
 ):
     q = payload.validated_question
+    if not q:
+        return JSONResponse(status_code=422, content={"error": "Question cannot be empty or whitespace only"})
     history = payload.history or []
     full_rag = ensure_rag()
 
     try:
         async with query_semaphore:
             res = await full_rag(
-                q, db, emb, lancedb_client, llm, planner, payload.file_type, payload.folder_tag, payload.mode, history
+                query=q,
+                db=db,
+                embedding_service=emb,
+                lancedb_client=lancedb_client,
+                llm_client=llm,
+                planner=planner,
+                file_type=payload.file_type,
+                folder_tag=payload.folder_tag,
+                mode=payload.mode,
+                history=history,
             )
 
         async def _bg_save_query():
@@ -92,6 +131,8 @@ async def query_stream(
     planner=Depends(get_planner),
 ):
     q = request.validated_question
+    if not q:
+        return JSONResponse(status_code=422, content={"error": "Question cannot be empty or whitespace only"})
     history = request.history or []
     from app.search.retrieval import stream_rag
 
@@ -115,13 +156,10 @@ async def query_stream(
                     try:
                         chunk = await asyncio.wait_for(anext(agen), timeout=15.0)
                         yield json.dumps(chunk) + "\n"
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         yield json.dumps({"type": "ping"}) + "\n"
-        except StopAsyncIteration as e:
-            payload = {"type": "done"}
-            if e.value:
-                payload.update(e.value)
-            yield json.dumps(payload) + "\n"
+        except StopAsyncIteration:
+            yield json.dumps({"type": "done"}) + "\n"
         except Exception as e:
             logger.exception("Stream errored: %s", e)
             yield json.dumps({"type": "error", "text": str(e)}) + "\n"

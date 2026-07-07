@@ -6,7 +6,6 @@ Provides a secure WebSocket endpoint for real-time bidirectional messaging.
 import logging
 import os
 import secrets
-from typing import Any
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
@@ -16,10 +15,7 @@ router = APIRouter(prefix="/modules", tags=["modules"])
 
 
 @router.websocket("/ws")
-async def websocket_endpoint(
-    websocket: WebSocket,
-    token: str | None = Query(None)
-):
+async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(None)):
     """
     Secure WebSocket connection endpoint for modules (e.g. Creative Module).
     Requires a valid X_LOCAL_ACCESS_TOKEN passed either in the header
@@ -49,22 +45,18 @@ async def websocket_endpoint(
             # Handle incoming JSON messages
             data = await websocket.receive_json()
             action = data.get("action")
-            
+
             if action == "ping":
                 await websocket.send_json({"status": "pong"})
             else:
                 # Basic echo/broadcast structure for local modules
-                await websocket.send_json({
-                    "status": "success",
-                    "action": action,
-                    "received": data
-                })
+                await websocket.send_json({"status": "success", "action": action, "received": data})
     except WebSocketDisconnect:
         logger.info("Module WebSocket client disconnected.")
     except Exception as e:
         logger.error("Error in module WebSocket loop: %s", e)
         # Attempt to close cleanly if still open
-        try:
+        try:  # noqa: SIM105
             await websocket.close(code=1011)  # Internal Error
-        except Exception:
+        except Exception:  # noqa: S110
             pass

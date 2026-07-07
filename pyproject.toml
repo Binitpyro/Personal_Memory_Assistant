@@ -31,6 +31,8 @@ dependencies = [
     "google-auth>=2.0.0",
     "google-auth-oauthlib>=1.0.0",
     "keyring>=24.0.0",
+    "PyYAML>=6.0",
+    "xlrd>=2.0.1",
 ]
 
 [project.scripts]
@@ -45,6 +47,7 @@ dev = [
     "httpx",
     "ruff>=0.15.8",
     "mypy>=1.20.0",
+    "bandit>=1.7.5",
     "maturin>=1.12.6",
     "pyinstaller>=6.5.0",
     "types-PyYAML",
@@ -117,7 +120,19 @@ warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false
 check_untyped_defs = true
-exclude = ['^\.pytest_temp/', '^tests/']
+exclude = ['^\.pytest_temp/', '^tests/', '^dist/']
+
+[[tool.mypy.overrides]]
+module = [
+    "xlrd.*",
+    "onnxruntime.*",
+    "tokenizers.*",
+    "sentence_transformers.*",
+    "torch.*",
+    "datasketch.*",
+    "nltk.*"
+]
+ignore_missing_imports = true
 
 [build-system]
 requires = ["setuptools>=61.0"]

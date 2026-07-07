@@ -25,6 +25,7 @@ _vacuum_lock: asyncio.Lock | None = None
 _vacuum_last_run: str | None = None
 _vacuum_last_error: str | None = None
 
+
 def get_vacuum_lock() -> asyncio.Lock:
     global _vacuum_lock
     if _vacuum_lock is None:
@@ -189,29 +190,32 @@ async def enable_split_brain():
     try:
         lines = []
         if os.path.exists(env_file):
-            with open(env_file, "r", encoding="utf-8") as f:
+            with open(env_file, encoding="utf-8") as f:
                 lines = f.readlines()
-        
+
         found = False
         for i, line in enumerate(lines):
             if line.startswith("PMA_LANCEDB_MODE="):
                 lines[i] = "PMA_LANCEDB_MODE=split_brain\n"
                 found = True
                 break
-        
+
         if not found:
             if lines and not lines[-1].endswith("\n"):
                 lines[-1] += "\n"
             lines.append("PMA_LANCEDB_MODE=split_brain\n")
-            
+
         with open(env_file, "w", encoding="utf-8") as f:
             f.writelines(lines)
-            
+
         return {"message": "Split-brain mode enabled in .env"}
-    except (IOError, PermissionError) as e:
+    except (OSError, PermissionError) as e:
         from fastapi import HTTPException
+
         logger.error("Failed to write to .env file: %s", e)
-        raise HTTPException(status_code=403, detail="Failed to write to .env file. Please edit it manually.")
+        raise HTTPException(  # noqa: B904
+            status_code=403, detail="Failed to write to .env file. Please edit it manually."
+        )
 
 
 @router.post("/system/purge-host-cache")
@@ -371,4 +375,3 @@ async def pick_folder():
         logger.warning("tkinter folder picker failed (expected in Tauri mode): %s", e)
         return {"path": "", "error": "Use the native Tauri dialog instead."}
     return {"path": path}
-

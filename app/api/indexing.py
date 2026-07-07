@@ -1,7 +1,6 @@
 import asyncio
 import json
 import logging
-
 from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Request
@@ -68,9 +67,6 @@ class IndexRequest(BaseModel):
         return cleaned
 
 
-
-
-
 @router.post("/start")
 @limiter.limit("3/minute")
 async def index_start(
@@ -105,6 +101,26 @@ async def index_start(
 
     background_tasks.add_task(_index_then_compact)
     return {"message": "Indexing started"}
+
+
+@router.post("/cancel")
+async def index_cancel():
+    _indexing_service_cls, progress = ensure_indexing()
+
+    if progress.status != "running":
+        return JSONResponse(
+            status_code=400, content={"error": "Indexing is not currently running."}
+        )
+
+    # We don't need db, emb, etc to just set the cancel flag.
+    # We can instantiate a dummy service just to call cancel_indexing
+    # or just set it on the progress singleton directly, but let's use the service method
+    # for encapsulation if we can, or just set the flag directly since we have `progress`.
+    with progress._lock:
+        progress.is_cancelled = True
+        progress.status = "cancelling"
+
+    return {"message": "Cancellation requested. Finishing current files..."}
 
 
 @router.get("/status")
@@ -211,10 +227,11 @@ async def remove_folder_index(
     db: DatabaseManager = Depends(get_db),
     lancedb_client=Depends(get_lancedb),
 ):
+    import os
+
     from app.state import file_tree_cache as _file_tree_cache
     from app.state import insights_cache as _insights_cache
 
-    import os
     folders = []
     for f in request.folders:
         p = f.strip().strip('"').strip("'")
@@ -223,7 +240,10 @@ async def remove_folder_index(
             folders.append(os.path.abspath(os.path.normpath(p)))
 
     if not folders:
-        return JSONResponse(status_code=200, content={"message": "No valid folder paths provided.", "chunks_removed": 0})
+        return JSONResponse(
+            status_code=200,
+            content={"message": "No valid folder paths provided.", "chunks_removed": 0},
+        )
 
     folder = folders[0]
     try:
@@ -246,5 +266,3 @@ async def remove_folder_index(
     except Exception as e:
         logger.error("Failed to remove folder: %s", e)
         return JSONResponse(status_code=500, content={"error": str(e)})
-
-

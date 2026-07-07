@@ -18,9 +18,6 @@ def test_planner_detects_project():
     assert plan.mode == PlanMode.FAST_PROJECT
 
 
-
-
-
 def test_planner_detects_full_rag():
     planner = QueryPlanner()
     plan = planner.plan("how does the retrieval algorithm work in app/search?")

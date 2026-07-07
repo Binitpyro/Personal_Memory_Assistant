@@ -23,6 +23,9 @@ class EpubExtractor:
         """Yield text from an EPUB by streaming its internal XHTML documents."""
         try:
             total_chars = 0
+            cumulative_decompressed_bytes = 0
+            MAX_CUMULATIVE_DECOMPRESSED_SIZE = 100 * 1024 * 1024  # 100MB
+
             with zipfile.ZipFile(str(path), "r") as zf:
                 content_files = sorted(
                     name
@@ -40,6 +43,14 @@ class EpubExtractor:
                         with zf.open(file_name) as f:
                             # Read internal member in up to 10MB chunks for safety
                             raw_bytes = f.read(10_000_000)
+                            cumulative_decompressed_bytes += len(raw_bytes)
+                            if cumulative_decompressed_bytes > MAX_CUMULATIVE_DECOMPRESSED_SIZE:
+                                logger.warning(
+                                    "EPUB extraction stopped: cumulative decompressed size limit (%d bytes) exceeded for %s",
+                                    MAX_CUMULATIVE_DECOMPRESSED_SIZE, path
+                                )
+                                raise ValueError("Decompression limit exceeded (potential ZIP bomb)")
+
                             raw_html = raw_bytes.decode("utf-8", errors="ignore")
 
                             # Strip XML/HTML tags and collapse whitespace
@@ -51,9 +62,13 @@ class EpubExtractor:
                             if len(text) > 50:
                                 yield text
                                 total_chars += len(text)
+                    except ValueError as ve:
+                        raise ve
                     except Exception as inner_e:
                         logger.debug("Skipping EPUB entry %s: %s", file_name, inner_e)
                         continue
+        except ValueError as ve:
+            logger.warning("EPUB extraction aborted: %s", ve)
         except Exception as e:
             logger.warning("Failed to extract EPUB %s: %s", path, e)
 

@@ -43,7 +43,7 @@ def _load_onnx_model():
 
     _tokenizer = Tokenizer.from_file(str(tokenizer_json))
     _tokenizer.enable_truncation(max_length=512)
-    _tokenizer.enable_padding(pad_id=0, pad_token="[PAD]")
+    _tokenizer.enable_padding(pad_id=0, pad_token="[PAD]")  # noqa: S106
 
     providers = ["CPUExecutionProvider"]
     _session = ort.InferenceSession(str(onnx_file), providers=providers)

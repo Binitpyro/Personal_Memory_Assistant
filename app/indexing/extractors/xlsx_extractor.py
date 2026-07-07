@@ -12,6 +12,28 @@ class XlsxExtractor:
     def extract_stream(self, path: Path, max_file_size: int) -> Iterator[str]:
         """Yield text from sheets and rows in an XLSX document."""
         try:
+            ext = path.suffix.lower()
+            if ext == ".xls":
+                import xlrd
+
+                wb = xlrd.open_workbook(str(path))
+                total = 0
+                for sheet in wb.sheets():
+                    yield f"--- Sheet: {sheet.name} ---"
+                    for rowx in range(sheet.nrows):
+                        row_data = [
+                            str(cell.value)
+                            for cell in sheet.row(rowx)
+                            if cell.value is not None and str(cell.value).strip()
+                        ]
+                        if row_data:
+                            line = " | ".join(row_data)
+                            yield line
+                            total += len(line)
+                        if total > max_file_size:
+                            return
+                return
+
             import openpyxl  # type: ignore
 
             wb = openpyxl.load_workbook(str(path), read_only=True, data_only=True)

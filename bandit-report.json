@@ -1,6 +1,6 @@
 {
   "errors": [],
-  "generated_at": "2026-07-02T11:30:58Z",
+  "generated_at": "2026-07-09T15:48:50Z",
   "metrics": {
     "_totals": {
       "CONFIDENCE.HIGH": 10,
@@ -11,7 +11,7 @@
       "SEVERITY.LOW": 12,
       "SEVERITY.MEDIUM": 17,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 8003,
+      "loc": 8246,
       "nosec": 0,
       "skipped_tests": 0
     },
@@ -89,7 +89,7 @@
       "SEVERITY.LOW": 0,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 90,
+      "loc": 99,
       "nosec": 0,
       "skipped_tests": 0
     },
@@ -141,7 +141,7 @@
       "SEVERITY.LOW": 0,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 136,
+      "loc": 167,
       "nosec": 0,
       "skipped_tests": 0
     },
@@ -219,7 +219,7 @@
       "SEVERITY.LOW": 1,
       "SEVERITY.MEDIUM": 1,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 182,
+      "loc": 183,
       "nosec": 0,
       "skipped_tests": 0
     },
@@ -297,7 +297,7 @@
       "SEVERITY.LOW": 0,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 48,
+      "loc": 64,
       "nosec": 0,
       "skipped_tests": 0
     },
@@ -388,7 +388,7 @@
       "SEVERITY.LOW": 0,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 711,
+      "loc": 752,
       "nosec": 0,
       "skipped_tests": 0
     },
@@ -440,7 +440,7 @@
       "SEVERITY.LOW": 0,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 55,
+      "loc": 141,
       "nosec": 0,
       "skipped_tests": 0
     },
@@ -453,7 +453,7 @@
       "SEVERITY.LOW": 0,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 391,
+      "loc": 398,
       "nosec": 0,
       "skipped_tests": 0
     },
@@ -635,7 +635,7 @@
       "SEVERITY.LOW": 1,
       "SEVERITY.MEDIUM": 11,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 1320,
+      "loc": 1361,
       "nosec": 0,
       "skipped_tests": 0
     },
@@ -674,662 +674,10 @@
       "SEVERITY.LOW": 5,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 288,
+      "loc": 299,
       "nosec": 0,
       "skipped_tests": 0
     }
   },
-  "results": [
-    {
-      "code": "158             \"auth_uri\": \"https://accounts.google.com/o/oauth2/auth\",\n159             \"token_uri\": \"https://oauth2.googleapis.com/token\",\n160             \"auth_provider_x509_cert_url\": \"https://www.googleapis.com/oauth2/v1/certs\",\n161             \"redirect_uris\": [f\"{_get_oauth_base()}/api/auth/google/callback\"],\n162         }\n163     }\n164 \n165 \n166 @auth_router.get(\"/start\")\n167 async def start_oauth(request: Request):\n168     \"\"\"Starts the Google OAuth flow.\"\"\"\n",
-      "col_offset": 12,
-      "end_col_offset": 23,
-      "filename": "app\\api\\auth.py",
-      "issue_confidence": "MEDIUM",
-      "issue_cwe": {
-        "id": 259,
-        "link": "https://cwe.mitre.org/data/definitions/259.html"
-      },
-      "issue_severity": "LOW",
-      "issue_text": "Possible hardcoded password: 'https://oauth2.googleapis.com/token'",
-      "line_number": 159,
-      "line_range": [
-        154,
-        155,
-        156,
-        157,
-        158,
-        159,
-        160,
-        161,
-        162
-      ],
-      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b105_hardcoded_password_string.html",
-      "test_id": "B105",
-      "test_name": "hardcoded_password_string"
-    },
-    {
-      "code": "60             await websocket.close(code=1011)  # Internal Error\n61         except Exception:  # noqa: S110\n62             pass\n",
-      "col_offset": 8,
-      "end_col_offset": 16,
-      "filename": "app\\api\\modules.py",
-      "issue_confidence": "HIGH",
-      "issue_cwe": {
-        "id": 703,
-        "link": "https://cwe.mitre.org/data/definitions/703.html"
-      },
-      "issue_severity": "LOW",
-      "issue_text": "Try, Except, Pass detected.",
-      "line_number": 61,
-      "line_range": [
-        61,
-        62
-      ],
-      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b110_try_except_pass.html",
-      "test_id": "B110",
-      "test_name": "try_except_pass"
-    },
-    {
-      "code": "44                 if candidates:\n45                     target_idx = random.choice(candidates)  # noqa: S311\n46                     pairs.append((texts[i], texts[target_idx]))\n",
-      "col_offset": 33,
-      "end_col_offset": 58,
-      "filename": "app\\embeddings\\finetune.py",
-      "issue_confidence": "HIGH",
-      "issue_cwe": {
-        "id": 330,
-        "link": "https://cwe.mitre.org/data/definitions/330.html"
-      },
-      "issue_severity": "LOW",
-      "issue_text": "Standard pseudo-random generators are not suitable for security/cryptographic purposes.",
-      "line_number": 45,
-      "line_range": [
-        45
-      ],
-      "more_info": "https://bandit.readthedocs.io/en/1.9.4/blacklists/blacklist_calls.html#b311-random",
-      "test_id": "B311",
-      "test_name": "blacklist"
-    },
-    {
-      "code": "42         self._tokenizer.enable_truncation(max_length=512)\n43         self._tokenizer.enable_padding(pad_id=0, pad_token=\"[PAD]\")  # noqa: S106\n44 \n",
-      "col_offset": 8,
-      "end_col_offset": 67,
-      "filename": "app\\embeddings\\service.py",
-      "issue_confidence": "MEDIUM",
-      "issue_cwe": {
-        "id": 259,
-        "link": "https://cwe.mitre.org/data/definitions/259.html"
-      },
-      "issue_severity": "LOW",
-      "issue_text": "Possible hardcoded password: '[PAD]'",
-      "line_number": 43,
-      "line_range": [
-        43
-      ],
-      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b106_hardcoded_password_funcarg.html",
-      "test_id": "B106",
-      "test_name": "hardcoded_password_funcarg"
-    },
-    {
-      "code": "85                 # Fetch only required ONNX and tokenizer files to save bandwidth and disk space\n86                 model_path_str = snapshot_download(\n87                     repo_id=self.model_name,\n88                     allow_patterns=[\"*.json\", \"*.txt\", \"*.onnx\", \"onnx/*\"],\n89                     ignore_patterns=[\"*.safetensors\", \"*.bin\", \"*.h5\", \"*.msgpack\"],\n90                 )\n91                 model_path = Path(model_path_str)\n",
-      "col_offset": 33,
-      "end_col_offset": 17,
-      "filename": "app\\embeddings\\service.py",
-      "issue_confidence": "HIGH",
-      "issue_cwe": {
-        "id": 494,
-        "link": "https://cwe.mitre.org/data/definitions/494.html"
-      },
-      "issue_severity": "MEDIUM",
-      "issue_text": "Unsafe Hugging Face Hub download without revision pinning in snapshot_download()",
-      "line_number": 86,
-      "line_range": [
-        86,
-        87,
-        88,
-        89,
-        90
-      ],
-      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b615_huggingface_unsafe_download.html",
-      "test_id": "B615",
-      "test_name": "huggingface_unsafe_download"
-    },
-    {
-      "code": "45     _tokenizer.enable_truncation(max_length=512)\n46     _tokenizer.enable_padding(pad_id=0, pad_token=\"[PAD]\")  # noqa: S106\n47 \n",
-      "col_offset": 4,
-      "end_col_offset": 58,
-      "filename": "app\\search\\reranker.py",
-      "issue_confidence": "MEDIUM",
-      "issue_cwe": {
-        "id": 259,
-        "link": "https://cwe.mitre.org/data/definitions/259.html"
-      },
-      "issue_severity": "LOW",
-      "issue_text": "Possible hardcoded password: '[PAD]'",
-      "line_number": 46,
-      "line_range": [
-        46
-      ],
-      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b106_hardcoded_password_funcarg.html",
-      "test_id": "B106",
-      "test_name": "hardcoded_password_funcarg"
-    },
-    {
-      "code": "177         fts_sql = (\n178             \"SELECT cf.rowid, cf.chunks_text FROM chunk_fts cf \"  # noqa: S608\n179             \"JOIN chunks c ON c.id = cf.rowid \"\n180             \"JOIN files f ON f.id = c.file_id \"\n181             f\"WHERE {' AND '.join(where_clauses)} \"\n182             \"ORDER BY rank LIMIT ?\"\n183         )\n",
-      "col_offset": 12,
-      "end_col_offset": 20,
-      "filename": "app\\search\\retrieval.py",
-      "issue_confidence": "LOW",
-      "issue_cwe": {
-        "id": 89,
-        "link": "https://cwe.mitre.org/data/definitions/89.html"
-      },
-      "issue_severity": "MEDIUM",
-      "issue_text": "Possible SQL injection vector through string-based query construction.",
-      "line_number": 178,
-      "line_range": [
-        178,
-        179,
-        180,
-        181,
-        182
-      ],
-      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html",
-      "test_id": "B608",
-      "test_name": "hardcoded_sql_expressions"
-    },
-    {
-      "code": "417     query_sql = (\n418         f\"SELECT c.id, zlib_decompress(c.text_preview) as text_preview, f.path, f.folder_tag, f.modified_at, c.start_offset, c.end_offset, c.sentence_offsets, c.segmenter_version \"  # noqa: E501, S608\n419         f\"FROM chunks c JOIN files f ON c.file_id = f.id \"\n420         f\"WHERE c.id IN ({placeholders})\"\n421     )\n",
-      "col_offset": 10,
-      "end_col_offset": 25,
-      "filename": "app\\search\\retrieval.py",
-      "issue_confidence": "LOW",
-      "issue_cwe": {
-        "id": 89,
-        "link": "https://cwe.mitre.org/data/definitions/89.html"
-      },
-      "issue_severity": "MEDIUM",
-      "issue_text": "Possible SQL injection vector through string-based query construction.",
-      "line_number": 418,
-      "line_range": [
-        418,
-        419,
-        420
-      ],
-      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html",
-      "test_id": "B608",
-      "test_name": "hardcoded_sql_expressions"
-    },
-    {
-      "code": "636     query_sql = (\n637         f\"SELECT c.id, zlib_decompress(c.text_preview) as text_preview, f.path, f.folder_tag, f.modified_at \"  # noqa: E501, S608\n638         f\"FROM chunks c JOIN files f ON c.file_id = f.id \"\n639         f\"WHERE c.id IN ({placeholders})\"\n640     )\n",
-      "col_offset": 10,
-      "end_col_offset": 25,
-      "filename": "app\\search\\retrieval.py",
-      "issue_confidence": "LOW",
-      "issue_cwe": {
-        "id": 89,
-        "link": "https://cwe.mitre.org/data/definitions/89.html"
-      },
-      "issue_severity": "MEDIUM",
-      "issue_text": "Possible SQL injection vector through string-based query construction.",
-      "line_number": 637,
-      "line_range": [
-        637,
-        638,
-        639
-      ],
-      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html",
-      "test_id": "B608",
-      "test_name": "hardcoded_sql_expressions"
-    },
-    {
-      "code": "969         query_sql = (\n970             f\"SELECT c.id, zlib_decompress(c.text_preview) as text_preview, f.path, f.folder_tag, f.modified_at, c.start_offset, c.end_offset, c.sentence_offsets, c.segmenter_version \"  # noqa: E501, S608\n971             f\"FROM chunks c JOIN files f ON c.file_id = f.id \"\n972             f\"WHERE c.id IN ({placeholders})\"\n973         )\n",
-      "col_offset": 14,
-      "end_col_offset": 29,
-      "filename": "app\\search\\retrieval.py",
-      "issue_confidence": "LOW",
-      "issue_cwe": {
-        "id": 89,
-        "link": "https://cwe.mitre.org/data/definitions/89.html"
-      },
-      "issue_severity": "MEDIUM",
-      "issue_text": "Possible SQL injection vector through string-based query construction.",
-      "line_number": 970,
-      "line_range": [
-        970,
-        971,
-        972
-      ],
-      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html",
-      "test_id": "B608",
-      "test_name": "hardcoded_sql_expressions"
-    },
-    {
-      "code": "1139                     )\n1140         except Exception:  # noqa: S110\n1141             pass\n1142 \n",
-      "col_offset": 8,
-      "end_col_offset": 16,
-      "filename": "app\\search\\retrieval.py",
-      "issue_confidence": "HIGH",
-      "issue_cwe": {
-        "id": 703,
-        "link": "https://cwe.mitre.org/data/definitions/703.html"
-      },
-      "issue_severity": "LOW",
-      "issue_text": "Try, Except, Pass detected.",
-      "line_number": 1140,
-      "line_range": [
-        1140,
-        1141
-      ],
-      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b110_try_except_pass.html",
-      "test_id": "B110",
-      "test_name": "try_except_pass"
-    },
-    {
-      "code": "1218         placeholders = \",\".join(\"?\" for _ in tags)\n1219         sql = f\"SELECT profile_text FROM folder_profiles WHERE folder_tag IN ({placeholders})\"  # noqa: S608  # noqa: S608\n1220         rows = await db.execute_query(sql, tuple(tags))\n",
-      "col_offset": 16,
-      "end_col_offset": 78,
-      "filename": "app\\search\\retrieval.py",
-      "issue_confidence": "LOW",
-      "issue_cwe": {
-        "id": 89,
-        "link": "https://cwe.mitre.org/data/definitions/89.html"
-      },
-      "issue_severity": "MEDIUM",
-      "issue_text": "Possible SQL injection vector through string-based query construction.",
-      "line_number": 1219,
-      "line_range": [
-        1219
-      ],
-      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html",
-      "test_id": "B608",
-      "test_name": "hardcoded_sql_expressions"
-    },
-    {
-      "code": "109 \n110         assert self._read_pool is not None\n111         conn = await self._read_pool.get()\n",
-      "col_offset": 8,
-      "end_col_offset": 42,
-      "filename": "app\\storage\\db.py",
-      "issue_confidence": "HIGH",
-      "issue_cwe": {
-        "id": 703,
-        "link": "https://cwe.mitre.org/data/definitions/703.html"
-      },
-      "issue_severity": "LOW",
-      "issue_text": "Use of assert detected. The enclosed code will be removed when compiling to optimised byte code.",
-      "line_number": 110,
-      "line_range": [
-        110
-      ],
-      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b101_assert_used.html",
-      "test_id": "B101",
-      "test_name": "assert_used"
-    },
-    {
-      "code": "756                 query = (\n757                     \"SELECT chunk_id, embedding FROM chunk_embeddings \"  # noqa: S608\n758                     f\"WHERE chunk_id IN ({placeholders})\"\n759                 )\n",
-      "col_offset": 20,
-      "end_col_offset": 41,
-      "filename": "app\\storage\\db.py",
-      "issue_confidence": "LOW",
-      "issue_cwe": {
-        "id": 89,
-        "link": "https://cwe.mitre.org/data/definitions/89.html"
-      },
-      "issue_severity": "MEDIUM",
-      "issue_text": "Possible SQL injection vector through string-based query construction.",
-      "line_number": 757,
-      "line_range": [
-        757,
-        758
-      ],
-      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html",
-      "test_id": "B608",
-      "test_name": "hardcoded_sql_expressions"
-    },
-    {
-      "code": "799         # We query for edges traversed from the starting nodes\n800         query = f\"\"\"\n801         WITH RECURSIVE\n802         bfs_nodes(id, depth) AS (\n803             SELECT id, 0\n804             FROM kg_nodes\n805             WHERE json_extract(properties, '$.chunk_id') IN ({placeholders})\n806 \n807             UNION ALL\n808 \n809             SELECT e.target, b.depth + 1\n810             FROM kg_edges e\n811             JOIN bfs_nodes b ON e.source = b.id\n812             WHERE b.depth < ?\n813 \n814             UNION ALL\n815 \n816             SELECT e.source, b.depth + 1\n817             FROM kg_edges e\n818             JOIN bfs_nodes b ON e.target = b.id\n819             WHERE b.depth < ?\n820         )\n821         SELECT DISTINCT CAST(json_extract(n.properties, '$.chunk_id') AS INTEGER) as chunk_id\n822         FROM bfs_nodes b\n823         JOIN kg_nodes n ON b.id = n.id\n824         WHERE json_extract(n.properties, '$.chunk_id') IS NOT NULL\n825         LIMIT ?\n826         \"\"\"  # noqa: S608\n827         params = [*chunk_ids, max_depth, max_depth, limit]\n",
-      "col_offset": 20,
-      "end_col_offset": 61,
-      "filename": "app\\storage\\db.py",
-      "issue_confidence": "LOW",
-      "issue_cwe": {
-        "id": 89,
-        "link": "https://cwe.mitre.org/data/definitions/89.html"
-      },
-      "issue_severity": "MEDIUM",
-      "issue_text": "Possible SQL injection vector through string-based query construction.",
-      "line_number": 800,
-      "line_range": [
-        800,
-        801,
-        802,
-        803,
-        804,
-        805,
-        806,
-        807,
-        808,
-        809,
-        810,
-        811,
-        812,
-        813,
-        814,
-        815,
-        816,
-        817,
-        818,
-        819,
-        820,
-        821,
-        822,
-        823,
-        824,
-        825,
-        826
-      ],
-      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html",
-      "test_id": "B608",
-      "test_name": "hardcoded_sql_expressions"
-    },
-    {
-      "code": "840         placeholders = \",\".join(\"?\" for _ in src_chunk_ids)\n841         query = f\"\"\"\n842         WITH RECURSIVE\n843         paths(id, path_str, depth) AS (\n844             SELECT id, label || ' ' || name, 0\n845             FROM kg_nodes\n846             WHERE json_extract(properties, '$.chunk_id') IN ({placeholders})\n847 \n848             UNION ALL\n849 \n850             SELECT e.target, p.path_str || ' -[' || e.relation || ']-> ' || (SELECT label || ' ' || name FROM kg_nodes WHERE id = e.target), p.depth + 1\n851             FROM kg_edges e\n852             JOIN paths p ON e.source = p.id\n853             WHERE p.depth < ?\n854         )\n855         SELECT path_str FROM paths\n856         WHERE depth > 0\n857         LIMIT ?\n858         \"\"\"  # noqa: E501, S608\n859         params = [*src_chunk_ids, max_depth, limit]\n",
-      "col_offset": 20,
-      "end_col_offset": 61,
-      "filename": "app\\storage\\db.py",
-      "issue_confidence": "LOW",
-      "issue_cwe": {
-        "id": 89,
-        "link": "https://cwe.mitre.org/data/definitions/89.html"
-      },
-      "issue_severity": "MEDIUM",
-      "issue_text": "Possible SQL injection vector through string-based query construction.",
-      "line_number": 841,
-      "line_range": [
-        841,
-        842,
-        843,
-        844,
-        845,
-        846,
-        847,
-        848,
-        849,
-        850,
-        851,
-        852,
-        853,
-        854,
-        855,
-        856,
-        857,
-        858
-      ],
-      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html",
-      "test_id": "B608",
-      "test_name": "hardcoded_sql_expressions"
-    },
-    {
-      "code": "908                 placeholders = \",\".join(\"?\" for _ in batch)\n909                 query = f\"SELECT path, id FROM files WHERE path IN ({placeholders})\"  # noqa: S608\n910                 async with conn.execute(query, batch) as cursor:\n",
-      "col_offset": 26,
-      "end_col_offset": 68,
-      "filename": "app\\storage\\db.py",
-      "issue_confidence": "LOW",
-      "issue_cwe": {
-        "id": 89,
-        "link": "https://cwe.mitre.org/data/definitions/89.html"
-      },
-      "issue_severity": "MEDIUM",
-      "issue_text": "Possible SQL injection vector through string-based query construction.",
-      "line_number": 909,
-      "line_range": [
-        909
-      ],
-      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html",
-      "test_id": "B608",
-      "test_name": "hardcoded_sql_expressions"
-    },
-    {
-      "code": "922                 placeholders = \",\".join(\"?\" for _ in batch)\n923                 query = f\"SELECT path, modified_at FROM files WHERE path IN ({placeholders})\"  # noqa: S608\n924                 async with conn.execute(query, batch) as cursor:\n",
-      "col_offset": 26,
-      "end_col_offset": 77,
-      "filename": "app\\storage\\db.py",
-      "issue_confidence": "LOW",
-      "issue_cwe": {
-        "id": 89,
-        "link": "https://cwe.mitre.org/data/definitions/89.html"
-      },
-      "issue_severity": "MEDIUM",
-      "issue_text": "Possible SQL injection vector through string-based query construction.",
-      "line_number": 923,
-      "line_range": [
-        923
-      ],
-      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html",
-      "test_id": "B608",
-      "test_name": "hardcoded_sql_expressions"
-    },
-    {
-      "code": "937                 query = (\n938                     f\"SELECT path, COALESCE(sha256, '') FROM files WHERE path IN ({placeholders})\"  # noqa: S608\n939                 )\n",
-      "col_offset": 22,
-      "end_col_offset": 82,
-      "filename": "app\\storage\\db.py",
-      "issue_confidence": "LOW",
-      "issue_cwe": {
-        "id": 89,
-        "link": "https://cwe.mitre.org/data/definitions/89.html"
-      },
-      "issue_severity": "MEDIUM",
-      "issue_text": "Possible SQL injection vector through string-based query construction.",
-      "line_number": 938,
-      "line_range": [
-        938
-      ],
-      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html",
-      "test_id": "B608",
-      "test_name": "hardcoded_sql_expressions"
-    },
-    {
-      "code": "957                 query = (\n958                     f\"SELECT path, modified_at, COALESCE(sha256, '') FROM files \"  # noqa: S608\n959                     f\"WHERE path IN ({placeholders})\"\n960                 )\n",
-      "col_offset": 22,
-      "end_col_offset": 37,
-      "filename": "app\\storage\\db.py",
-      "issue_confidence": "LOW",
-      "issue_cwe": {
-        "id": 89,
-        "link": "https://cwe.mitre.org/data/definitions/89.html"
-      },
-      "issue_severity": "MEDIUM",
-      "issue_text": "Possible SQL injection vector through string-based query construction.",
-      "line_number": 958,
-      "line_range": [
-        958,
-        959
-      ],
-      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html",
-      "test_id": "B608",
-      "test_name": "hardcoded_sql_expressions"
-    },
-    {
-      "code": "992         sql = (\n993             \"UPDATE files SET usage_count = CASE path \"  # noqa: S608\n994             + \" \".join(when_clauses)\n995             + \" ELSE usage_count END WHERE path IN (\"\n",
-      "col_offset": 12,
-      "end_col_offset": 55,
-      "filename": "app\\storage\\db.py",
-      "issue_confidence": "LOW",
-      "issue_cwe": {
-        "id": 89,
-        "link": "https://cwe.mitre.org/data/definitions/89.html"
-      },
-      "issue_severity": "MEDIUM",
-      "issue_text": "Possible SQL injection vector through string-based query construction.",
-      "line_number": 993,
-      "line_range": [
-        993,
-        994
-      ],
-      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html",
-      "test_id": "B608",
-      "test_name": "hardcoded_sql_expressions"
-    },
-    {
-      "code": "1230                     await conn.execute(\n1231                         f\"DELETE FROM files WHERE id IN ({placeholders})\",  # noqa: S608\n1232                         tuple(batch),\n",
-      "col_offset": 26,
-      "end_col_offset": 57,
-      "filename": "app\\storage\\db.py",
-      "issue_confidence": "MEDIUM",
-      "issue_cwe": {
-        "id": 89,
-        "link": "https://cwe.mitre.org/data/definitions/89.html"
-      },
-      "issue_severity": "MEDIUM",
-      "issue_text": "Possible SQL injection vector through string-based query construction.",
-      "line_number": 1231,
-      "line_range": [
-        1231
-      ],
-      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html",
-      "test_id": "B608",
-      "test_name": "hardcoded_sql_expressions"
-    },
-    {
-      "code": "1321         sql = (\n1322             \"SELECT path, size, type, folder_tag, usage_count \"  # noqa: S608\n1323             f\"FROM files{where} ORDER BY path\"\n1324         )\n",
-      "col_offset": 12,
-      "end_col_offset": 24,
-      "filename": "app\\storage\\db.py",
-      "issue_confidence": "LOW",
-      "issue_cwe": {
-        "id": 89,
-        "link": "https://cwe.mitre.org/data/definitions/89.html"
-      },
-      "issue_severity": "MEDIUM",
-      "issue_text": "Possible SQL injection vector through string-based query construction.",
-      "line_number": 1322,
-      "line_range": [
-        1322,
-        1323
-      ],
-      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html",
-      "test_id": "B608",
-      "test_name": "hardcoded_sql_expressions"
-    },
-    {
-      "code": "1490                 query = (\n1491                     f\"SELECT id, type, label, properties FROM kg_nodes WHERE id IN ({placeholders})\"  # noqa: S608\n1492                 )\n",
-      "col_offset": 22,
-      "end_col_offset": 84,
-      "filename": "app\\storage\\db.py",
-      "issue_confidence": "LOW",
-      "issue_cwe": {
-        "id": 89,
-        "link": "https://cwe.mitre.org/data/definitions/89.html"
-      },
-      "issue_severity": "MEDIUM",
-      "issue_text": "Possible SQL injection vector through string-based query construction.",
-      "line_number": 1491,
-      "line_range": [
-        1491
-      ],
-      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html",
-      "test_id": "B608",
-      "test_name": "hardcoded_sql_expressions"
-    },
-    {
-      "code": "107         self.connect()\n108         assert self.db is not None\n109         if name in self.db.list_tables():\n",
-      "col_offset": 8,
-      "end_col_offset": 34,
-      "filename": "app\\vector_store\\lancedb_client.py",
-      "issue_confidence": "HIGH",
-      "issue_cwe": {
-        "id": 703,
-        "link": "https://cwe.mitre.org/data/definitions/703.html"
-      },
-      "issue_severity": "LOW",
-      "issue_text": "Use of assert detected. The enclosed code will be removed when compiling to optimised byte code.",
-      "line_number": 108,
-      "line_range": [
-        108
-      ],
-      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b101_assert_used.html",
-      "test_id": "B101",
-      "test_name": "assert_used"
-    },
-    {
-      "code": "114         self.connect()\n115         assert self.db is not None\n116         with self._write_lock:\n",
-      "col_offset": 8,
-      "end_col_offset": 34,
-      "filename": "app\\vector_store\\lancedb_client.py",
-      "issue_confidence": "HIGH",
-      "issue_cwe": {
-        "id": 703,
-        "link": "https://cwe.mitre.org/data/definitions/703.html"
-      },
-      "issue_severity": "LOW",
-      "issue_text": "Use of assert detected. The enclosed code will be removed when compiling to optimised byte code.",
-      "line_number": 115,
-      "line_range": [
-        115
-      ],
-      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b101_assert_used.html",
-      "test_id": "B101",
-      "test_name": "assert_used"
-    },
-    {
-      "code": "143         self.connect()\n144         assert self.db is not None\n145         try:\n",
-      "col_offset": 8,
-      "end_col_offset": 34,
-      "filename": "app\\vector_store\\lancedb_client.py",
-      "issue_confidence": "HIGH",
-      "issue_cwe": {
-        "id": 703,
-        "link": "https://cwe.mitre.org/data/definitions/703.html"
-      },
-      "issue_severity": "LOW",
-      "issue_text": "Use of assert detected. The enclosed code will be removed when compiling to optimised byte code.",
-      "line_number": 144,
-      "line_range": [
-        144
-      ],
-      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b101_assert_used.html",
-      "test_id": "B101",
-      "test_name": "assert_used"
-    },
-    {
-      "code": "157         self.connect()\n158         assert self.db is not None\n159         try:\n",
-      "col_offset": 8,
-      "end_col_offset": 34,
-      "filename": "app\\vector_store\\lancedb_client.py",
-      "issue_confidence": "HIGH",
-      "issue_cwe": {
-        "id": 703,
-        "link": "https://cwe.mitre.org/data/definitions/703.html"
-      },
-      "issue_severity": "LOW",
-      "issue_text": "Use of assert detected. The enclosed code will be removed when compiling to optimised byte code.",
-      "line_number": 158,
-      "line_range": [
-        158
-      ],
-      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b101_assert_used.html",
-      "test_id": "B101",
-      "test_name": "assert_used"
-    },
-    {
-      "code": "348         self.connect()\n349         assert self.db is not None\n350         loop = asyncio.get_running_loop()\n",
-      "col_offset": 8,
-      "end_col_offset": 34,
-      "filename": "app\\vector_store\\lancedb_client.py",
-      "issue_confidence": "HIGH",
-      "issue_cwe": {
-        "id": 703,
-        "link": "https://cwe.mitre.org/data/definitions/703.html"
-      },
-      "issue_severity": "LOW",
-      "issue_text": "Use of assert detected. The enclosed code will be removed when compiling to optimised byte code.",
-      "line_number": 349,
-      "line_range": [
-        349
-      ],
-      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b101_assert_used.html",
-      "test_id": "B101",
-      "test_name": "assert_used"
-    }
-  ]
+  "results": []
 }

@@ -22,7 +22,7 @@
 import crystalShaderCode from './shaders/crystal.wgsl?raw';
 import bubbleShaderCode from './shaders/bubble.wgsl?raw';
 import pickingShaderCode from './shaders/picking.wgsl?raw';
-import { generateIcosahedron, type MeshData } from './geometry/icosahedron';
+import { generateCrystalShard, type MeshData } from './geometry/icosahedron';
 import { generateIcosphere } from './geometry/icosphere';
 import { NavigationController, NODE_STRIDE, NO_PARENT } from '../interaction/NavigationController';
 
@@ -133,7 +133,7 @@ export class WebGPURenderer {
             usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
         });
 
-        this.crystalMesh = this.uploadMesh(generateIcosahedron(1));
+        this.crystalMesh = this.uploadMesh(generateCrystalShard(2, 1337));
         this.bubbleMesh = this.uploadMesh(generateIcosphere(3));
 
         this.setupPipelines();
@@ -342,10 +342,16 @@ export class WebGPURenderer {
         this.bubbleIndices = v.bubbleIndices.slice();
 
         if (v.crystalCount > 0) {
-            this.device.queue.writeBuffer(this.instanceBuffer, 0, v.crystalData);
+            this.device.queue.writeBuffer(
+                this.instanceBuffer, 0,
+                v.crystalData.buffer, v.crystalData.byteOffset, v.crystalData.byteLength,
+            );
         }
         if (v.bubbleCount > 0) {
-            this.device.queue.writeBuffer(this.instanceBuffer, v.crystalCount * NODE_STRIDE, v.bubbleData);
+            this.device.queue.writeBuffer(
+                this.instanceBuffer, v.crystalCount * NODE_STRIDE,
+                v.bubbleData.buffer, v.bubbleData.byteOffset, v.bubbleData.byteLength,
+            );
         }
         this.visibleDirty = false;
     }

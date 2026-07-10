@@ -200,7 +200,7 @@ chroma/
 .chroma/
 
 # Disconnected assets
-PMA Obsidian/
+PMA Obsidian/files/
 # demo_data/     <-- Tracked now
 # static/        <-- Keep ignored for build assets
 static/
@@ -213,7 +213,7 @@ app/vector_store/lancedb_data/
 .ipynb_checkpoints/
 
 # local/private files
-PMA Obsidian/
+PMA Obsidian/files/
 # scripts/      <-- Tracked
 GEMINI.md
 scripts/Sonar-Scan.bat
@@ -253,3 +253,6 @@ ORIGINAL_REQUEST.md
 progress.md
 security_report.md
 AGENTS.md
+pma_metadata.db*
+/PMA Obsidian/.obsidian/plugins
+/tests/fixtures

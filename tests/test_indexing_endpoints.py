@@ -1,19 +1,21 @@
 import asyncio
-import json
-import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
-from httpx import AsyncClient
 from pathlib import Path
+from unittest.mock import AsyncMock
+
+import pytest
+from httpx import AsyncClient
 
 from app.api.deps import ensure_indexing
-from app.main import app
+
 
 @pytest.mark.asyncio
-async def test_indexing_endpoints_lifecycle(client: AsyncClient, mock_db, mock_emb, mock_lancedb, tmp_path: Path):
+async def test_indexing_endpoints_lifecycle(
+    client: AsyncClient, mock_db, mock_emb, mock_lancedb, tmp_path: Path
+):
     # Setup folders
     test_dir = tmp_path / "target_dir"
     test_dir.mkdir()
-    
+
     # 1. Start indexing
     response = await client.post("/api/index/start", json={"folders": [str(test_dir)]})
     assert response.status_code == 200
@@ -50,7 +52,7 @@ async def test_indexing_endpoints_lifecycle(client: AsyncClient, mock_db, mock_e
     progress.total_files = 10
     progress.processed_files = 3
     progress.status = "idle"
-    
+
     response_stream = await client.get("/api/index/progress-stream")
     assert response_stream.status_code == 200
     assert "event: progress" in response_stream.text
@@ -58,14 +60,16 @@ async def test_indexing_endpoints_lifecycle(client: AsyncClient, mock_db, mock_e
 
     # 5. Cleanup stale files
     # Insert mock file to SQLite first
-    await mock_db.insert_file({
-        "path": str(test_dir / "stale.py"),
-        "size": 100,
-        "modified_at": "2026-03-03T12:00:00",
-        "type": ".py",
-        "folder_tag": "test_tag",
-        "summary": "Stale file summary"
-    })
+    await mock_db.insert_file(
+        {
+            "path": str(test_dir / "stale.py"),
+            "size": 100,
+            "modified_at": "2026-03-03T12:00:00",
+            "type": ".py",
+            "folder_tag": "test_tag",
+            "summary": "Stale file summary",
+        }
+    )
     cleanup_response = await client.post("/api/index/cleanup")
     assert cleanup_response.status_code == 200
     assert "cleaned_paths" in cleanup_response.json()
@@ -78,7 +82,9 @@ async def test_indexing_endpoints_lifecycle(client: AsyncClient, mock_db, mock_e
     assert "files" in export_data
 
     # 7. Remove folder index
-    remove_response = await client.post("/api/index/folder/remove", json={"folders": [str(test_dir)]})
+    remove_response = await client.post(
+        "/api/index/folder/remove", json={"folders": [str(test_dir)]}
+    )
     assert remove_response.status_code == 200
     assert "chunks_removed" in remove_response.json()
 
@@ -87,6 +93,7 @@ async def test_indexing_endpoints_lifecycle(client: AsyncClient, mock_db, mock_e
     clear_response = await client.post("/api/index/clear")
     assert clear_response.status_code == 200
     assert mock_lancedb.clear_all.called
+
 
 @pytest.mark.asyncio
 async def test_indexing_blocked_and_invalid_folders(client: AsyncClient):

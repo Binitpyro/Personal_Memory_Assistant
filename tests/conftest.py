@@ -1,8 +1,8 @@
 import asyncio
 import gc
 import os
-import sys
 import re
+import sys
 from unittest.mock import AsyncMock, MagicMock
 
 # Ensure nltk is mocked to prevent network calls and lookup issues
@@ -20,32 +20,35 @@ nltk.data.find = MagicMock(return_value="mocked/path")
 if not hasattr(nltk, "tokenize"):
     nltk.tokenize = MagicMock()
 
+
 def dummy_sent_tokenize(text, language="english"):
     if not text:
         return []
-    sents = re.split(r'(?<=[.!?])\s+', text)
+    sents = re.split(r"(?<=[.!?])\s+", text)
     return [s for s in sents if s]
+
 
 nltk.tokenize.sent_tokenize = MagicMock(side_effect=dummy_sent_tokenize)
 
-import pytest
-from httpx import ASGITransport, AsyncClient
+import pytest  # noqa: E402
+from httpx import ASGITransport, AsyncClient  # noqa: E402
 
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 os.environ["X_LOCAL_ACCESS_TOKEN"] = "test-token"  # noqa: S105
 
-from app.api.deps import get_db, get_emb, get_lancedb, get_llm
-from app.config import settings
-from app.main import app
-from app.storage.db import DatabaseManager
+from app.api.deps import get_db, get_emb, get_lancedb, get_llm  # noqa: E402
+from app.config import settings  # noqa: E402
+from app.main import app  # noqa: E402
+from app.storage.db import DatabaseManager  # noqa: E402
 
 # Override settings to ensure we don't accidentally write to real disk
 settings.db_path = ":memory:"
 
 # Disable rate limiter during tests
-from app.api.limiter import limiter
+from app.api.limiter import limiter  # noqa: E402
+
 limiter.enabled = False
 
 
@@ -70,7 +73,8 @@ def mock_emb():
     mock.embed_query = AsyncMock(return_value=[0.1] * 384)
 
     async def _embed_texts(texts, *args, **kwargs):
-        return [[0.1] * 384 for _ in texts]
+        import numpy as np
+        return np.array([[0.1] * 384 for _ in texts], dtype=np.float32)
 
     mock.embed_texts = AsyncMock(side_effect=_embed_texts)
     return mock

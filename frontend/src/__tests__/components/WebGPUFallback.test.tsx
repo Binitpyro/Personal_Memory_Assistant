@@ -4,7 +4,7 @@ import { WebGPUFallback } from '../../components/WebGPUFallback';
 import { renderWithProviders } from '../test-utils';
 
 describe('WebGPUFallback Component', () => {
-  it('renders status message and canvas container', () => {
+  it('renders status message and canvas container', async () => {
     renderWithProviders(
       <WebGPUFallback 
         allFiles={{}}
@@ -14,7 +14,8 @@ describe('WebGPUFallback Component', () => {
       />
     );
 
-    // Since navigator.gpu is not available in JSDOM, it transitions immediately to unsupported state
-    expect(screen.getByText("Browser doesn't support WebGPU.")).toBeDefined();
+    // Since navigator.gpu is not available in JSDOM, it transitions to unsupported state
+    const fallbackText = await screen.findByText(/Neither WebGPU nor WebGL2 available./i);
+    expect(fallbackText).toBeDefined();
   });
 });

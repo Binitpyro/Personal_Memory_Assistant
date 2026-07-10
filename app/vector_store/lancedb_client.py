@@ -41,7 +41,7 @@ def _empty_search_result() -> dict[str, Any]:
 def _list_tables(db) -> list[str]:
     res = db.list_tables()
     if hasattr(res, "tables"):
-        return res.tables
+        return res.tables  # type: ignore
     return list(res)
 
 
@@ -98,6 +98,7 @@ class LanceDBClient:
     def __init__(self, persist_directory: str = "lancedb_data"):
         self.persist_directory = persist_directory
         self.db = None
+        self._table_cache = {}
         self._connect_lock = threading.Lock()
         self._write_lock = threading.Lock()
 
@@ -113,20 +114,33 @@ class LanceDBClient:
     def _get_table(self, name: str):
         self.connect()
         assert self.db is not None
-        if name in _list_tables(self.db):
-            return self.db.open_table(name)
+        if name in self._table_cache:
+            return self._table_cache[name]
+        with self._write_lock:
+            if name in self._table_cache:
+                return self._table_cache[name]
+            if name in _list_tables(self.db):
+                tbl = self.db.open_table(name)
+                self._table_cache[name] = tbl
+                return tbl
         return None
 
     def _create_or_open_table(self, name: str, data: Any):
         self.connect()
         assert self.db is not None
         with self._write_lock:
+            if name in self._table_cache:
+                tbl = self._table_cache[name]
+                tbl.add(data)
+                return tbl
             if name in _list_tables(self.db):
                 tbl = self.db.open_table(name)
+                self._table_cache[name] = tbl
                 tbl.add(data)
                 return tbl
             try:
                 tbl = self.db.create_table(name, data=data)
+                self._table_cache[name] = tbl
             except Exception as e:
                 if "already exists" in str(e).lower():
                     logger.debug(
@@ -134,24 +148,20 @@ class LanceDBClient:
                         name,
                     )
                     tbl = self.db.open_table(name)
+                    self._table_cache[name] = tbl
                     tbl.add(data)
                 else:
                     raise
 
-            # P-06: Explicitly set IVF_HNSW_SQ for better recall/latency balance on local data.
-            if name == "pma_chunks":
-                try:
-                    tbl.create_index(metric="cosine", index_type="IVF_HNSW_SQ")
-                except Exception as e:
-                    logger.debug("LanceDB index creation skipped or failed: %s", e)
+            # NOTE: IVF_HNSW_SQ index creation is deferred to the end of ingestion
             return tbl
 
     def get_all_ids(self, table_name: str = "pma_chunks") -> set[str]:
         self.connect()
         assert self.db is not None
         try:
-            if table_name in _list_tables(self.db):
-                tbl = self.db.open_table(table_name)
+            tbl = self._get_table(table_name)
+            if tbl is not None:
                 # We can grab just the id column
                 arrow_col = tbl.search(None).select(["id"]).to_arrow().column("id")
                 return set(str(x.as_py()) for x in arrow_col)
@@ -164,14 +174,15 @@ class LanceDBClient:
         self.connect()
         assert self.db is not None
         try:
-            if table_name in _list_tables(self.db):
-                tbl = self.db.open_table(table_name)
-                # Use PyArrow on just the 'id' column to avoid loading metadata and vectors, fixing O(1) violation.
+            tbl = self._get_table(table_name)
+            if tbl is not None:
+                # Use PyArrow on just the 'id' column to avoid loading metadata and vectors, fixing O(1) violation.  # noqa: E501
                 arrow_tbl = tbl.search(None).select(["id"]).to_arrow()
                 col = arrow_tbl.column("id")
                 if len(col) > 0:
-                    import pyarrow.compute as pc
                     import pyarrow as pa
+                    import pyarrow.compute as pc  # type: ignore
+
                     val = pc.max(col.cast(pa.int64())).as_py()
                     return int(val) if val is not None else 0
         except Exception as exc:
@@ -179,20 +190,48 @@ class LanceDBClient:
         return 0
 
     async def add_documents(
-        self, ids: list[str], embeddings: list[np.ndarray], metadatas: list[dict[str, Any]]
+        self, ids: list[str], embeddings: list[np.ndarray] | np.ndarray, metadatas: list[dict[str, Any]]
     ) -> None:
         self.connect()
-        data = []
-        for i, doc_id in enumerate(ids):
-            row = {"id": doc_id, "vector": embeddings[i], **metadatas[i]}
-            data.append(row)
-
-        if not data:
+        if not ids:
             return
+
+        # Ensure embeddings is a 2D numpy array (float32)
+        if isinstance(embeddings, list):
+            embeddings_np = np.vstack(embeddings).astype(np.float32)
+        elif isinstance(embeddings, np.ndarray):
+            embeddings_np = embeddings.astype(np.float32)
+        else:
+            raise TypeError("embeddings must be a list of numpy arrays or a numpy array")
+
+        if embeddings_np.ndim == 1:
+            embeddings_np = np.expand_dims(embeddings_np, axis=0)
+
+        normalized_meta = _normalize_rows(metadatas)
+
+        cols = {
+            "id": pa.array(ids, type=pa.string()),
+        }
+
+        num_rows, vector_dim = embeddings_np.shape
+        flat_vectors = embeddings_np.flatten()
+        vector_arr = pa.FixedSizeListArray.from_arrays(
+            pa.array(flat_vectors, type=pa.float32()),
+            list_size=vector_dim
+        )
+        cols["vector"] = vector_arr
+
+        if normalized_meta:
+            keys = normalized_meta[0].keys()
+            for key in keys:
+                col_values = [d[key] for d in normalized_meta]
+                cols[key] = pa.array(col_values)
+
+        table = pa.Table.from_pydict(cols)
 
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(
-            None, partial(self._create_or_open_table, "pma_chunks", _normalize_rows(data))
+            None, partial(self._create_or_open_table, "pma_chunks", table)
         )
 
     async def add_summaries_batch(self, summaries: list[dict[str, Any]]) -> None:
@@ -201,14 +240,48 @@ class LanceDBClient:
         if not summaries:
             return
 
-        data = []
+        ids = [s["doc_id"] for s in summaries]
+        embs = []
         for s in summaries:
-            row = {"id": s["doc_id"], "vector": s["embedding"], **s["metadata"]}
-            data.append(row)
+            emb = s["embedding"]
+            if isinstance(emb, list):
+                embs.append(np.array(emb, dtype=np.float32))
+            else:
+                if emb.ndim == 1:
+                    embs.append(np.expand_dims(emb.astype(np.float32), axis=0))
+                else:
+                    embs.append(emb.astype(np.float32))
+
+        embeddings_np = np.vstack(embs).astype(np.float32)
+        if embeddings_np.ndim == 1:
+            embeddings_np = np.expand_dims(embeddings_np, axis=0)
+
+        metadatas = [s["metadata"] for s in summaries]
+        normalized_meta = _normalize_rows(metadatas)
+
+        cols = {
+            "id": pa.array(ids, type=pa.string()),
+        }
+
+        num_rows, vector_dim = embeddings_np.shape
+        flat_vectors = embeddings_np.flatten()
+        vector_arr = pa.FixedSizeListArray.from_arrays(
+            pa.array(flat_vectors, type=pa.float32()),
+            list_size=vector_dim
+        )
+        cols["vector"] = vector_arr
+
+        if normalized_meta:
+            keys = normalized_meta[0].keys()
+            for key in keys:
+                col_values = [d[key] for d in normalized_meta]
+                cols[key] = pa.array(col_values)
+
+        table = pa.Table.from_pydict(cols)
 
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(
-            None, partial(self._create_or_open_table, "pma_summaries", _normalize_rows(data))
+            None, partial(self._create_or_open_table, "pma_summaries", table)
         )
 
     async def semantic_search(
@@ -307,21 +380,37 @@ class LanceDBClient:
         await loop.run_in_executor(None, _delete_impl)
 
     async def add_query_cache(
-        self, query_emb: np.ndarray, query_text: str, response_text: str, timestamp: float
+        self, query_emb: np.ndarray | list[float], query_text: str, response_text: str, timestamp: float
     ) -> None:
         """Add a successful RAG response to the persistent semantic cache."""
         self.connect()
-        data = [
-            {
-                "vector": query_emb,
-                "query_text": query_text,
-                "response_text": response_text,
-                "timestamp": timestamp,
-            }
-        ]
+
+        if isinstance(query_emb, list):
+            query_emb_np = np.array(query_emb, dtype=np.float32)
+        else:
+            query_emb_np = query_emb.astype(np.float32)
+
+        embeddings_np = np.expand_dims(query_emb_np, axis=0) if query_emb_np.ndim == 1 else query_emb_np
+
+        cols = {
+            "query_text": pa.array([query_text], type=pa.string()),
+            "response_text": pa.array([response_text], type=pa.string()),
+            "timestamp": pa.array([timestamp], type=pa.float64()),
+        }
+
+        num_rows, vector_dim = embeddings_np.shape
+        flat_vectors = embeddings_np.flatten()
+        vector_arr = pa.FixedSizeListArray.from_arrays(
+            pa.array(flat_vectors, type=pa.float32()),
+            list_size=vector_dim
+        )
+        cols["vector"] = vector_arr
+
+        table = pa.Table.from_pydict(cols)
+
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(
-            None, partial(self._create_or_open_table, "query_cache", _normalize_rows(data))
+            None, partial(self._create_or_open_table, "query_cache", table)
         )
 
     async def search_cache(self, query_emb: list[float], threshold: float = 0.95) -> dict | None:
@@ -356,6 +445,27 @@ class LanceDBClient:
 
         return await loop.run_in_executor(None, _search)
 
+    async def create_hnsw_index(self, table_name: str = "pma_chunks") -> None:
+        """Create HNSW index on the vector column of the specified table."""
+        self.connect()
+        tbl = self._get_table(table_name)
+        if tbl is not None:
+            loop = asyncio.get_running_loop()
+            def _create():
+                with self._write_lock:
+                    try:
+                        # Attempt to create index with replace=True to overwrite old index
+                        tbl.create_index(metric="cosine", index_type="IVF_HNSW_SQ", replace=True)
+                        logger.info("LanceDB HNSW index created/updated successfully on %s", table_name)
+                    except Exception as e:
+                        try:
+                            # Fallback if replace is not supported or fails
+                            tbl.create_index(metric="cosine", index_type="IVF_HNSW_SQ")
+                            logger.info("LanceDB HNSW index created successfully on %s", table_name)
+                        except Exception as e2:
+                            logger.error("LanceDB HNSW index creation failed: %s (fallback %s)", e, e2)
+            await loop.run_in_executor(None, _create)
+
     async def clear_all(self) -> None:
         self.connect()
         assert self.db is not None
@@ -370,5 +480,6 @@ class LanceDBClient:
                     self.db.drop_table("pma_summaries")
                 if "query_cache" in tables:
                     self.db.drop_table("query_cache")
+                self._table_cache.clear()
 
         await loop.run_in_executor(None, _drop)

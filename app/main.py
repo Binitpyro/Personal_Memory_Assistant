@@ -206,10 +206,6 @@ async def lifespan(fastapi_app: FastAPI):
     state.bg_tasks.add(sync_task)
     sync_task.add_done_callback(state.bg_tasks.discard)
 
-    cleanup_task = asyncio.create_task(_bg_startup_cleanup(db_manager, sync_task))
-    state.bg_tasks.add(cleanup_task)
-    cleanup_task.add_done_callback(state.bg_tasks.discard)
-
     vac_task = asyncio.create_task(_bg_auto_vacuum(db_manager))
     state.bg_tasks.add(vac_task)
     vac_task.add_done_callback(state.bg_tasks.discard)
@@ -347,18 +343,6 @@ async def _split_brain_sync(db_manager, lancedb_client, emb_svc):
         logger.error("Split-brain sync failed: %s", e)
 
 
-async def _bg_startup_cleanup(db_manager, sync_task):
-    """Fire-and-forget: remove stale file records from the DB."""
-    try:
-        await sync_task
-        await asyncio.sleep(5)
-        removed = await db_manager.cleanup_stale_files()
-        if removed:
-            logger.info("Background startup: cleared %d deleted file(s) from index.", len(removed))
-    except Exception as e:
-        logger.warning("Background startup cleanup error: %s", e)
-
-
 async def _bg_auto_vacuum(db_manager):
     """Auto-vacuum if DB hasn't been vacuumed in 7 days and is > 500 MB."""
     try:
@@ -448,8 +432,10 @@ async def security_and_telemetry_middleware(request: Request, call_next):
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     from fastapi.encoders import jsonable_encoder
+
     return JSONResponse(
-        status_code=422, content={"error": "Validation error", "detail": jsonable_encoder(exc.errors())}
+        status_code=422,
+        content={"error": "Validation error", "detail": jsonable_encoder(exc.errors())},
     )
 
 

@@ -1,7 +1,7 @@
 import asyncio
 import contextlib
 import os
-import tempfile
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -18,15 +18,17 @@ from app.utils.metrics import Timer
 
 
 @pytest.fixture
-async def real_db():
-    fd, path = tempfile.mkstemp(suffix=".db")
-    os.close(fd)
-    db = DatabaseManager(path)
+async def real_db(tmp_path):
+    db_path = tmp_path / "test_exhaustive.db"
+    db = DatabaseManager(str(db_path))
     await db.init_db()
     yield db
     await db.close()
-    with contextlib.suppress(BaseException):
-        os.remove(path)
+    for suffix in ["", "-shm", "-wal", "-journal"]:
+        p = Path(str(db_path) + suffix)
+        if p.exists():
+            with contextlib.suppress(BaseException):
+                p.unlink()
 
 
 @pytest.fixture
@@ -34,7 +36,8 @@ def mock_emb():
     m = MagicMock(spec=EmbeddingService)
     m.is_ready = True
     m.embed_query = AsyncMock(return_value=[0.1] * 384)
-    m.embed_texts = AsyncMock(return_value=[[0.1] * 384])
+    import numpy as np
+    m.embed_texts = AsyncMock(return_value=np.array([[0.1] * 384], dtype=np.float32))
     return m
 
 
@@ -178,8 +181,6 @@ def test_api_exhaustive(real_db, mock_emb, mock_lancedb):
     app.dependency_overrides[get_emb] = lambda: mock_emb
     app.dependency_overrides[get_lancedb] = lambda: mock_lancedb
     app.dependency_overrides[get_llm] = MagicMock()
-
-    import os
 
     token = os.environ.get("X_LOCAL_ACCESS_TOKEN", "test-token")
     client = TestClient(app, headers={"X-Local-Access-Token": token})

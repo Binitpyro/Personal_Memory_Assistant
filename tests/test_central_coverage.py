@@ -31,7 +31,8 @@ class MockEmbeddingService:
     async def embed_texts(self, texts, batch_size=None, progress_callback=None):
         if progress_callback:
             progress_callback(1, 1)
-        return [[0.1] * 384 for _ in texts]
+        import numpy as np
+        return np.array([[0.1] * 384 for _ in texts], dtype=np.float32)
 
     def load_model_background(self):
         pass
@@ -75,15 +76,17 @@ class MockLanceDBClient:
 
 
 @pytest.fixture
-async def real_db():
-    db_path = f"test_pma_{os.getpid()}.db"
-    db = DatabaseManager(db_path)
+async def real_db(tmp_path):
+    db_path = tmp_path / f"test_pma_{os.getpid()}.db"
+    db = DatabaseManager(str(db_path))
     await db.init_db()
     yield db
     await db.close()
-    if os.path.exists(db_path):
-        with contextlib.suppress(BaseException):
-            os.remove(db_path)
+    for suffix in ["", "-shm", "-wal", "-journal"]:
+        p = Path(str(db_path) + suffix)
+        if p.exists():
+            with contextlib.suppress(BaseException):
+                p.unlink()
 
 
 @pytest.mark.asyncio
@@ -104,9 +107,9 @@ async def test_db_logic_coverage(real_db):
 
 
 @pytest.mark.asyncio
-async def test_indexing_pipeline_deep(real_db):
+async def test_indexing_pipeline_deep(real_db, tmp_path):
     svc = IndexingService(real_db, MockEmbeddingService(), MockLanceDBClient())
-    test_file = Path("test_index_file.txt")
+    test_file = tmp_path / "test_index_file.txt"
     test_file.write_text("Hello world content.")
     try:
         q = asyncio.Queue()
@@ -132,9 +135,9 @@ async def test_indexing_pipeline_deep(real_db):
 
 
 @pytest.mark.asyncio
-async def test_indexing_folder_walking(real_db):
+async def test_indexing_folder_walking(real_db, tmp_path):
     svc = IndexingService(real_db, MockEmbeddingService(), MockLanceDBClient())
-    test_file = Path("test_walk.txt")
+    test_file = tmp_path / "test_walk.txt"
     test_file.write_text("dummy")
     try:
         mock_entry = MagicMock()
@@ -149,12 +152,12 @@ async def test_indexing_folder_walking(real_db):
 
         with (
             patch("os.scandir", return_value=mock_it),
-            patch("app.indexing.service._resolve_folder_overlaps", return_value=[Path(".")]),
+            patch("app.indexing.service._resolve_folder_overlaps", return_value=[tmp_path]),
             patch(
                 "app.indexing.service.IndexingService._batch_index_pipeline", AsyncMock()
             ) as mock_proc,
         ):
-            await svc.index_folders(["."])
+            await svc.index_folders([str(tmp_path)])
             assert mock_proc.called
     finally:
         if test_file.exists():
@@ -198,9 +201,9 @@ def test_main_endpoints_high_coverage(client):
 
 
 @pytest.mark.asyncio
-async def test_full_rag_logic():
-    db_path = f"test_rag_{os.getpid()}.db"
-    db = DatabaseManager(db_path)
+async def test_full_rag_logic(tmp_path):
+    db_path = tmp_path / f"test_rag_{os.getpid()}.db"
+    db = DatabaseManager(str(db_path))
     await db.init_db()
     # Correct column name is 'text_preview'
     await db.execute_write(
@@ -237,8 +240,11 @@ async def test_full_rag_logic():
             assert res["answer"] == "Ans"
     finally:
         await db.close()
-        if os.path.exists(db_path):
-            os.remove(db_path)
+        for suffix in ["", "-shm", "-wal", "-journal"]:
+            p = Path(str(db_path) + suffix)
+            if p.exists():
+                with contextlib.suppress(BaseException):
+                    p.unlink()
 
 
 def test_context_builder_edge_cases():

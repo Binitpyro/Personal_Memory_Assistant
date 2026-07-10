@@ -84,7 +84,7 @@ class NTFSScanner:
             elapsed = time.perf_counter() - t0
 
             # Create indices after bulk insert for faster querying
-            self.db.execute("CREATE INDEX idx_parent ON mft(parent_ref)")
+            self.db.execute("CREATE INDEX IF NOT EXISTS idx_parent ON mft(parent_ref)")
 
             self.entry_count = self.db.execute("SELECT COUNT(*) FROM mft").fetchone()[0]
             logger.info(

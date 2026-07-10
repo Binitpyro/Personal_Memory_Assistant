@@ -28,11 +28,11 @@
  *     tree.folders so breadcrumbs show real paths instead of "#42".
  */
 
-import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { FileTypeTreemap } from './FileTypeTreemap';
 import { WebGPURenderer } from '../renderer/WebGPURenderer';
 import { WebGL2Renderer } from '../renderer/WebGL2Renderer';
-import { getVisualizerStream, type FileEntry } from '../api';
+import { getVisualizerStream, getVisualizerMeta, type FileEntry, type VisualizerNodeMeta } from '../api';
 import type { NavigationController } from '../interaction/NavigationController';
 
 /** Both renderer classes conform to this shape; the hook is generic over it. */
@@ -57,37 +57,10 @@ export interface WebGPUFallbackProps {
 }
 
 /**
- * Derive a Map<sourceIndex, name> from the folder tree returned by
- * getFileTree(). This assumes Rust's build_tree in rust_core walks the
- * unique folder set in the same BFS order we can reproduce here — root,
- * then depth-1 folders sorted lexicographically, then depth-2, etc.
- *
- * If Rust's order changes, breadcrumbs will show the wrong names but
- * nothing else breaks. Worth double-checking against rust_core::build_tree.
- */
-function deriveNameTable(folders: Record<string, FileEntry[]>): Map<number, string> {
-    // Every unique folder path in the tree, sorted by (depth, lexicographical).
-    const paths = Object.keys(folders);
-    const withDepth = paths.map(p => ({ p, depth: p.split(/[\\/]/).filter(Boolean).length }));
-    withDepth.sort((a, b) => a.depth - b.depth || a.p.localeCompare(b.p));
-
-    const names = new Map<number, string>();
-    // Node index 0 is the root. Subsequent folder indices assigned in the
-    // same BFS order Rust uses. Files (bubbles) get indices after folders.
-    // If Rust interleaves folders/files during BFS, this will not match —
-    // in that case the caller should ignore names and breadcrumbs fall back
-    // to "#index" cleanly.
-    withDepth.forEach(({ p }, i) => {
-        const last = p.split(/[\\/]/).filter(Boolean).pop() ?? p;
-        names.set(i, last || 'Root');
-    });
-    return names;
-}
-
-/**
  * Shared 3D canvas hook. Encapsulates:
  *   - renderer lifecycle (init, resize observer, RAF loop, destroy)
  *   - mouse drag (orbit), wheel (zoom), click (pick + focus)
+ *   - hover pick (throttled GPU readback) for info cards
  *   - forwarding stream errors to onError so the parent can degrade tier
  *
  * The `renderer` factory is passed in so the same hook works for both
@@ -97,7 +70,6 @@ function useDreamscapeCanvas<R extends RendererLike>(
     canvasRef: React.RefObject<HTMLCanvasElement | null>,
     factory: (canvas: HTMLCanvasElement) => R,
     activeFilter: string | null | undefined,
-    allFiles: Record<string, FileEntry[]>,
     onError: (msg: string) => void,
     onNodeSelected?: (sourceIndex: number, name: string) => void,
 ) {
@@ -107,7 +79,11 @@ function useDreamscapeCanvas<R extends RendererLike>(
     const lastPos = useRef({ x: 0, y: 0 });
     const dragStart = useRef({ x: 0, y: 0 });
 
-    const nameTable = useMemo(() => deriveNameTable(allFiles), [allFiles]);
+    // Hover state for info cards
+    const [hover, setHover] = useState<{ x: number; y: number; index: number; name: string; kind: string; size?: number; hits?: number; fileCount?: number } | null>(null);
+    const hoverBusy = useRef(false);
+    const lastHoverTs = useRef(0);
+    const metaRef = useRef<Record<string, VisualizerNodeMeta>>({});
 
     useEffect(() => {
         const canvas = canvasRef.current;
@@ -121,7 +97,11 @@ function useDreamscapeCanvas<R extends RendererLike>(
         (async () => {
             try {
                 await renderer.init();
-                const buffer = await getVisualizerStream(activeFilter);
+                const [buffer, meta] = await Promise.all([
+                    getVisualizerStream(activeFilter),
+                    getVisualizerMeta(activeFilter).catch(() => ({})),
+                ]);
+                metaRef.current = meta;
                 if (buffer.byteLength <= 4) {
                     throw new Error('No 3D data available or filter returned 0 results.');
                 }
@@ -136,7 +116,15 @@ function useDreamscapeCanvas<R extends RendererLike>(
                 if (cancelled) return;
 
                 await renderer.loadData(buffer);
-                renderer.nav.loadNames(nameTable);
+
+                // Real name table: node.typeHash → meta name. This replaces the
+                // BFS-order deriveNameTable heuristic (fixes breadcrumbs too).
+                const names = new Map<number, string>();
+                for (const node of renderer.nav.nodes) {
+                    const m = metaRef.current[String(node.typeHash)];
+                    if (m) names.set(node.index, m.name);
+                }
+                renderer.nav.loadNames(names);
 
                 resizeObserver = new ResizeObserver(entries => {
                     for (const e of entries) {
@@ -168,13 +156,7 @@ function useDreamscapeCanvas<R extends RendererLike>(
     // different buffer). We do NOT want re-init on every allFiles reference
     // change (that fires whenever InsightsPage re-renders). Include only the
     // stable dependencies.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [activeFilter, factory, nameTable, onError]);
-
-    // Also hot-load names when they change without a full re-init.
-    useEffect(() => {
-        rendererRef.current?.nav.loadNames(nameTable);
-    }, [nameTable]);
+    }, [activeFilter, factory, onError]);
 
     const onMouseDown = (e: React.MouseEvent) => {
         setDragging(true);
@@ -182,9 +164,39 @@ function useDreamscapeCanvas<R extends RendererLike>(
         dragStart.current = { x: e.clientX, y: e.clientY };
     };
     const onMouseMove = (e: React.MouseEvent) => {
-        if (!isDragging || !rendererRef.current) return;
-        rendererRef.current.handleMouseMove(e.clientX - lastPos.current.x, e.clientY - lastPos.current.y);
-        lastPos.current = { x: e.clientX, y: e.clientY };
+        if (isDragging && rendererRef.current) {
+            setHover(null);
+            rendererRef.current.handleMouseMove(e.clientX - lastPos.current.x, e.clientY - lastPos.current.y);
+            lastPos.current = { x: e.clientX, y: e.clientY };
+            return;
+        }
+        // Throttled GPU hover-pick (~12/s) — pick() does a 1px readback.
+        const now = performance.now();
+        if (hoverBusy.current || now - lastHoverTs.current < 80) return;
+        lastHoverTs.current = now;
+        const renderer = rendererRef.current;
+        const canvas = canvasRef.current;
+        if (!renderer || !canvas) return;
+        const rect = canvas.getBoundingClientRect();
+        const cx = e.clientX - rect.left;
+        const cy = e.clientY - rect.top;
+        hoverBusy.current = true;
+        renderer.pick(cx, cy)
+            .then(idx => {
+                hoverBusy.current = false;
+                if (idx === null) { setHover(null); return; }
+                const node = renderer.nav.nodes[idx];
+                const m = node ? metaRef.current[String(node.typeHash)] : undefined;
+                setHover({
+                    x: cx, y: cy, index: idx,
+                    name: m?.name ?? `#${idx}`,
+                    kind: m?.is_folder ?? ((node?.flags & 1) === 1) ? 'Folder' : 'File',
+                    size: m?.size,
+                    hits: m?.usage_count,
+                    fileCount: m?.file_count,
+                });
+            })
+            .catch(() => { hoverBusy.current = false; });
     };
     const onMouseUp = async (e: React.MouseEvent) => {
         setDragging(false);
@@ -227,7 +239,7 @@ function useDreamscapeCanvas<R extends RendererLike>(
         return () => canvas.removeEventListener('wheel', onWheel);
     }, [canvasRef]);
 
-    return { rendererRef, onMouseDown, onMouseMove, onMouseUp };
+    return { rendererRef, onMouseDown, onMouseMove, onMouseUp, hover, setHover };
 }
 
 interface CanvasInnerProps extends WebGPUFallbackProps {
@@ -235,7 +247,7 @@ interface CanvasInnerProps extends WebGPUFallbackProps {
     onError: (msg: string) => void;
 }
 
-const DreamscapeCanvas: React.FC<CanvasInnerProps> = ({ allFiles, activeFilter, tier, onError }) => {
+const DreamscapeCanvas: React.FC<CanvasInnerProps> = ({ activeFilter, tier, onError }) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const [selection, setSelection] = useState<{ index: number, name: string } | null>(null);
 
@@ -249,8 +261,8 @@ const DreamscapeCanvas: React.FC<CanvasInnerProps> = ({ allFiles, activeFilter, 
         [tier],
     );
 
-    const { rendererRef, onMouseDown, onMouseMove, onMouseUp } =
-        useDreamscapeCanvas(canvasRef, factory, activeFilter, allFiles, onError,
+    const { rendererRef, onMouseDown, onMouseMove, onMouseUp, hover, setHover } =
+        useDreamscapeCanvas(canvasRef, factory, activeFilter, onError,
             (idx, name) => setSelection({ index: idx, name }));
 
     const breadcrumbs = rendererRef.current?.nav.breadcrumbs ?? [];
@@ -268,6 +280,16 @@ const DreamscapeCanvas: React.FC<CanvasInnerProps> = ({ allFiles, activeFilter, 
     const tierBadge = tier === 'webgpu'
         ? { color: 'bg-accent shadow-[0_0_12px_rgba(142,72,234,0.6)]', label: 'WebGPU' }
         : { color: 'bg-amber-400 shadow-[0_0_12px_rgba(251,191,36,0.6)]', label: 'WebGL2 Fallback' };
+
+    // Helper to format bytes
+    function formatBytes(n?: number): string {
+        if (n === undefined) return '—';
+        if (n < 1024) return `${n} B`;
+        const units = ['KB', 'MB', 'GB', 'TB'];
+        let v = n / 1024, u = 0;
+        while (v >= 1024 && u < units.length - 1) { v /= 1024; u++; }
+        return `${v.toFixed(1)} ${units[u]}`;
+    }
 
     return (
         <div className="w-full h-full min-h-[400px] relative bg-[#02030a] rounded-3xl overflow-hidden border border-white/10 shadow-inner">
@@ -307,6 +329,23 @@ const DreamscapeCanvas: React.FC<CanvasInnerProps> = ({ allFiles, activeFilter, 
                 </div>
             )}
 
+            {/* Hover card — follows the cursor */}
+            {hover && (
+                <div
+                    className="absolute z-20 pointer-events-none bg-black/60 backdrop-blur-md rounded-lg px-3 py-2 border border-white/15 shadow-xl"
+                    style={{ left: hover.x + 14, top: hover.y + 14 }}
+                >
+                    <p className="text-white/90 text-xs font-mono truncate max-w-[36ch]">{hover.name}</p>
+                    <p className="text-white/40 text-[9px] uppercase tracking-widest">
+                        {hover.kind}
+                        {hover.fileCount !== undefined && ` · ${hover.fileCount} files`}
+                    </p>
+                    <p className="text-white/60 text-[10px] font-mono mt-1">
+                        {formatBytes(hover.size)} · {hover.hits ?? 0} hits
+                    </p>
+                </div>
+            )}
+
             <canvas
                 ref={canvasRef}
                 className="w-full h-full cursor-grab active:cursor-grabbing block touch-none"
@@ -314,7 +353,7 @@ const DreamscapeCanvas: React.FC<CanvasInnerProps> = ({ allFiles, activeFilter, 
                 onMouseDown={onMouseDown}
                 onMouseMove={onMouseMove}
                 onMouseUp={onMouseUp}
-                onMouseLeave={onMouseUp}
+                onMouseLeave={(e) => { setHover(null); onMouseUp(e); }}
             />
         </div>
     );

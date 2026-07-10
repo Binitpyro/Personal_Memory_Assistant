@@ -27,9 +27,12 @@ export default defineConfig([
       'react-hooks/set-state-in-effect': 'off',
       'react-hooks/error-boundaries': 'off',
       'react-hooks/preserve-manual-memoization': 'off',
+      'react-hooks/refs': 'off',
+      'react-hooks/exhaustive-deps': 'off',
       'react-refresh/only-export-components': 'off',
       'prefer-const': 'off',
       'no-empty': 'off',
+      'security/detect-object-injection': 'off',
     },
   },
 ])

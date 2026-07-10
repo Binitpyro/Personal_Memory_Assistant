@@ -24,7 +24,7 @@ class EpubExtractor:
         try:
             total_chars = 0
             cumulative_decompressed_bytes = 0
-            MAX_CUMULATIVE_DECOMPRESSED_SIZE = 100 * 1024 * 1024  # 100MB
+            MAX_CUMULATIVE_DECOMPRESSED_SIZE = 100 * 1024 * 1024  # 100MB  # noqa: N806
 
             with zipfile.ZipFile(str(path), "r") as zf:
                 content_files = sorted(
@@ -46,10 +46,13 @@ class EpubExtractor:
                             cumulative_decompressed_bytes += len(raw_bytes)
                             if cumulative_decompressed_bytes > MAX_CUMULATIVE_DECOMPRESSED_SIZE:
                                 logger.warning(
-                                    "EPUB extraction stopped: cumulative decompressed size limit (%d bytes) exceeded for %s",
-                                    MAX_CUMULATIVE_DECOMPRESSED_SIZE, path
+                                    "EPUB extraction stopped: cumulative decompressed size limit (%d bytes) exceeded for %s",  # noqa: E501
+                                    MAX_CUMULATIVE_DECOMPRESSED_SIZE,
+                                    path,
                                 )
-                                raise ValueError("Decompression limit exceeded (potential ZIP bomb)")
+                                raise ValueError(
+                                    "Decompression limit exceeded (potential ZIP bomb)"
+                                )
 
                             raw_html = raw_bytes.decode("utf-8", errors="ignore")
 

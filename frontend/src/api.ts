@@ -194,7 +194,7 @@ export const enableSplitBrain = () =>
 export const purgeHostCache = () =>
   json<{ message: string }>('/system/purge-host-cache', { method: 'POST' });
 
-// â”€â”€ Folder picker â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â”€â”€ Folder picker â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 // P2-2: Use native Tauri dialog when running inside the desktop shell,
 // fall back to legacy HTTP endpoint for browser-based dev mode.
@@ -305,6 +305,23 @@ export const getVisualizerStream = async (filter?: string | null): Promise<Array
   }
   return await res.arrayBuffer();
 };
+
+// ─── Visualizer Meta ────────────────────────────────────────────────────────
+
+export interface VisualizerNodeMeta {
+  name: string;
+  path: string;
+  size: number;
+  usage_count: number;
+  file_count?: number;
+  is_folder: boolean;
+}
+
+export const getVisualizerMeta = (filter?: string | null) =>
+  json<Record<string, VisualizerNodeMeta>>(
+    filter ? `/visualizer/meta?extension=${encodeURIComponent(filter)}` : '/visualizer/meta'
+  );
+
 // â”€â”€ Clear Caches â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export const clearBackendCaches = () =>

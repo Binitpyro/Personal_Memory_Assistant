@@ -20,7 +20,8 @@ class FakeEmb:
     async def embed_texts(self, texts, batch_size=None, progress_callback=None):
         if progress_callback:
             progress_callback(1, 1)
-        return [[float(i + 1)] for i, _ in enumerate(texts)]
+        import numpy as np
+        return np.array([[float(i + 1)] for i, _ in enumerate(texts)], dtype=np.float32)
 
 
 class FakeLanceDB:
@@ -51,6 +52,16 @@ class FakeDB:
         self.next_file_id = 1
         self.file_chunks = {}
         self.profile_rows = []
+        self._in_external_transaction = False
+
+    async def begin_transaction(self):
+        self._in_external_transaction = True
+
+    async def commit_transaction(self):
+        self._in_external_transaction = False
+
+    async def rollback_transaction(self):
+        self._in_external_transaction = False
 
     async def get_files_change_map(self, paths):
         return {p: ("same", "") for p in paths if p.endswith("same.txt")}
@@ -76,13 +87,13 @@ class FakeDB:
         self.file_chunks.setdefault(fid, [])
         return fid
 
-    async def batch_insert_files(self, files_data):
+    async def batch_insert_files(self, files_data, auto_commit=True):
         ids = []
         for fd in files_data:
-            ids.append(await self.insert_file(fd))
+            ids.append(await self.insert_file(fd, auto_commit=auto_commit))
         return ids
 
-    async def insert_chunks_bulk(self, rows):
+    async def insert_chunks_bulk(self, rows, auto_commit=True):
         if not rows:
             return []
         file_id = rows[0]["file_id"]
@@ -92,10 +103,17 @@ class FakeDB:
         current.extend(new_ids)
         return new_ids
 
-    async def insert_chunk_embeddings_bulk(self, rows):
+    async def insert_chunk_embeddings_bulk(self, rows, auto_commit=True):
+        return None
+
+    async def insert_kg_nodes_bulk(self, data, auto_commit=True):
+        return None
+
+    async def insert_kg_edges_bulk(self, data, auto_commit=True):
         return None
 
     async def commit(self):
+        self._in_external_transaction = False
         return None
 
     async def upsert_folder_profile(self, profile, *, auto_commit=True):
@@ -104,7 +122,7 @@ class FakeDB:
     async def get_existing_file_ids(self, paths):
         return {p: fid for p, fid in self.files.items() if p in paths}
 
-    async def execute_write(self, q, p):
+    async def execute_write(self, q, p=None):
         return None
 
     async def wal_checkpoint(self):

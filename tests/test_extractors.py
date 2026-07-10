@@ -246,13 +246,13 @@ class TestXlsxExtractor:
     def test_extract_legacy_xls(self, tmp_path):
         fake_path = tmp_path / "test.xls"
         fake_path.touch()
-        
+
         mock_xlrd = MagicMock()
         mock_wb = MagicMock()
         mock_sheet = MagicMock()
         mock_sheet.name = "LegacySheet"
         mock_sheet.nrows = 2
-        
+
         c1 = MagicMock()
         c1.value = "H1"
         c2 = MagicMock()
@@ -261,11 +261,11 @@ class TestXlsxExtractor:
         c3.value = "H2"
         c4 = MagicMock()
         c4.value = "V2"
-        
+
         mock_sheet.row.side_effect = [[c1, c2], [c3, c4]]
         mock_wb.sheets.return_value = [mock_sheet]
         mock_xlrd.open_workbook.return_value = mock_wb
-        
+
         with patch.dict("sys.modules", {"xlrd": mock_xlrd}):
             result = self.ext.extract(fake_path, MAX_SIZE)
         assert "LegacySheet" in result
@@ -275,7 +275,7 @@ class TestXlsxExtractor:
     def test_extract_legacy_xls_size_truncation(self, tmp_path):
         fake_path = tmp_path / "test.xls"
         fake_path.touch()
-        
+
         mock_xlrd = MagicMock()
         mock_wb = MagicMock()
         mock_sheet = MagicMock()
@@ -286,7 +286,7 @@ class TestXlsxExtractor:
         mock_sheet.row.return_value = [c]
         mock_wb.sheets.return_value = [mock_sheet]
         mock_xlrd.open_workbook.return_value = mock_wb
-        
+
         with patch.dict("sys.modules", {"xlrd": mock_xlrd}):
             result = self.ext.extract(fake_path, 5)
         # Should stop processing sheets
@@ -346,19 +346,26 @@ class TestEpubExtractor:
 
     def test_epub_extraction_success(self, tmp_path):
         fake_epub = tmp_path / "test.epub"
-        
+
         # We can write a real zip file to test real EPUB structure
         import zipfile
+
         with zipfile.ZipFile(fake_epub, "w") as zf:
             zf.writestr("mimetype", "application/epub+zip")
             # Subfolder OEBPS/ or any folder
-            zf.writestr("OEBPS/ch1.xhtml", "<html><body><h1>Introduction</h1><p>Welcome to &amp; standard text. This is a longer text paragraph that contains enough characters to pass the fifty character check in the extractor.</p></body></html>")
-            zf.writestr("OEBPS/ch2.html", "<html><body><p>This is second page. It has a lot of additional characters in order to exceed fifty characters as well.</p></body></html>")
+            zf.writestr(
+                "OEBPS/ch1.xhtml",
+                "<html><body><h1>Introduction</h1><p>Welcome to &amp; standard text. This is a longer text paragraph that contains enough characters to pass the fifty character check in the extractor.</p></body></html>",  # noqa: E501
+            )
+            zf.writestr(
+                "OEBPS/ch2.html",
+                "<html><body><p>This is second page. It has a lot of additional characters in order to exceed fifty characters as well.</p></body></html>",  # noqa: E501
+            )
             # Ignored folder
             zf.writestr("__MACOSX/ch1.xhtml", "ignored")
             # Non-html file suffix
             zf.writestr("OEBPS/image.png", "binarydata")
-            
+
         result = self.ext.extract(fake_epub, MAX_SIZE)
         assert "Introduction" in result
         assert "Welcome to standard text." in result
@@ -371,7 +378,7 @@ class TestEpubExtractor:
 
         mock_zf = MagicMock()
         mock_zf.namelist.return_value = ["ch1.xhtml"]
-        
+
         # mock f.read to return 101MB of text to trigger cumulative size limit
         mock_file = MagicMock()
         mock_file.read.return_value = b"A" * 101_000_000

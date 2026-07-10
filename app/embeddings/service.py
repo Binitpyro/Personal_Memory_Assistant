@@ -21,7 +21,7 @@ class EmbeddingService:
         self._loading = False
         self._load_lock = threading.Lock()
         self._ready = threading.Event()
-        self.optimal_batch_size = 64  # ONNX on CPU is efficient at this size
+        self.optimal_batch_size = 128  # ONNX on CPU is efficient at this size
 
         # LRU cache for query embeddings to avoid redundant computation
         self._query_cache: OrderedDict[str, list[float]] = OrderedDict()
@@ -42,14 +42,36 @@ class EmbeddingService:
         self._tokenizer.enable_truncation(max_length=512)
         self._tokenizer.enable_padding(pad_id=0, pad_token="[PAD]")  # noqa: S106
 
-        # Load ONNX session
-        onnx_file = model_path / "model.onnx"
-        if not onnx_file.exists():
-            onnx_file = model_path / "onnx" / "model.onnx"
+        # Load ONNX session (check for quantized models first)
+        onnx_file = None
+        quantized_names = [
+            "model_quantized.onnx",
+            "model_int8.onnx",
+            "onnx/model_quantized.onnx",
+            "onnx/model_int8.onnx"
+        ]
+        for q_name in quantized_names:
+            candidate = model_path / q_name
+            if candidate.exists():
+                onnx_file = candidate
+                logger.info("Found quantized ONNX model at: %s", onnx_file)
+                break
 
-        if not onnx_file.exists():
-            # If not found locally, we might need a downloader or instructions
-            raise FileNotFoundError(f"ONNX model file not found at {onnx_file}")
+        if not onnx_file:
+            # Search the model directory for any .onnx file containing 'quant' or 'int8'
+            for file in model_path.rglob("*.onnx"):
+                if "quant" in file.name.lower() or "int8" in file.name.lower():
+                    onnx_file = file
+                    logger.info("Found matched quantized ONNX model at: %s", onnx_file)
+                    break
+
+        if not onnx_file:
+            onnx_file = model_path / "model.onnx"
+            if not onnx_file.exists():
+                onnx_file = model_path / "onnx" / "model.onnx"
+
+        if not onnx_file or not onnx_file.exists():
+            raise FileNotFoundError(f"ONNX model file not found at {model_path}")
 
         # Use CPU execution provider for maximum portability and minimum size
         providers = ["CPUExecutionProvider"]
@@ -62,7 +84,7 @@ class EmbeddingService:
 
         options = ort.SessionOptions()
         # Use up to 4 intra-op threads, leave 1 core free for OS/other tasks
-        options.intra_op_num_threads = min(4, max(1, os.cpu_count() - 1))
+        options.intra_op_num_threads = min(4, max(1, (os.cpu_count() or 1) - 1))
         # Use 2 inter-op threads for model-level parallelism
         options.inter_op_num_threads = 2
         # Re-enable CPU memory arena (bounded by fixed tensor shapes from fixed padding)
@@ -74,6 +96,26 @@ class EmbeddingService:
             str(onnx_file), sess_options=options, providers=providers
         )
         logger.info("ONNX InferenceSession initialized for %s (Bounded Memory)", self.model_name)
+
+        # Prewarm the model with a dummy inference batch (batch=1, seq=8)
+        try:
+            dummy_input_ids = np.zeros((1, 8), dtype=np.int64)
+            dummy_attention_mask = np.ones((1, 8), dtype=np.int64)
+            dummy_token_type_ids = np.zeros((1, 8), dtype=np.int64)
+
+            input_names = [i.name for i in self._session.get_inputs()]
+            dummy_inputs = {}
+            if "input_ids" in input_names:
+                dummy_inputs["input_ids"] = dummy_input_ids
+            if "attention_mask" in input_names:
+                dummy_inputs["attention_mask"] = dummy_attention_mask
+            if "token_type_ids" in input_names:
+                dummy_inputs["token_type_ids"] = dummy_token_type_ids
+
+            self._session.run(None, dummy_inputs)
+            logger.info("ONNX Runtime prewarmed successfully with dummy batch (batch=1, seq=8).")
+        except Exception as prewarm_err:
+            logger.warning("Failed to prewarm ONNX session: %s", prewarm_err)
 
     def load_model(self) -> None:
         """Loads the embedding model using ONNX Runtime (blocking)."""
@@ -145,7 +187,7 @@ class EmbeddingService:
         texts: list[str],
         batch_size: int | None = None,
         progress_callback: Callable[[int, int], None] | None = None,
-    ) -> list[list[float]]:
+    ) -> np.ndarray:
         if not self._session:
             if self._loading:
                 await asyncio.get_running_loop().run_in_executor(None, self.wait_until_ready)
@@ -200,16 +242,23 @@ class EmbeddingService:
 
                 all_embeddings.append(sentence_embeddings)
 
-            return np.vstack(all_embeddings).tolist() if all_embeddings else []
+            if all_embeddings:
+                return np.vstack(all_embeddings).astype(np.float32)
+            return np.empty((0, 384), dtype=np.float32)
 
         unique_embeddings = await loop.run_in_executor(None, _run_inference)
-        return [unique_embeddings[original_map[i]] for i in range(len(texts))]
+        if len(unique_embeddings) == 0:
+            return unique_embeddings
+        return unique_embeddings[original_map]
 
     def embed_texts_sync(
         self, texts: list[str], batch_size: int | None = None
-    ) -> list[list[float]]:
+    ) -> np.ndarray:
         if not self._session and not self.wait_until_ready(timeout=60):
             raise RuntimeError("Embedding model not ready.")
+
+        if not texts:
+            return np.empty((0, 384), dtype=np.float32)
 
         unique_texts = list(set(texts))
         text_to_idx = {t: i for i, t in enumerate(unique_texts)}
@@ -234,8 +283,10 @@ class EmbeddingService:
             pooled = self._mean_pooling(out, attention_mask)
             all_embs.append(self._normalize(pooled))
 
-        unique_embeddings = np.vstack(all_embs)
-        return [unique_embeddings[text_to_idx[t]].tolist() for t in texts]
+        unique_embeddings = np.vstack(all_embs).astype(np.float32) if all_embs else np.empty((0, 384), dtype=np.float32)
+        if len(unique_embeddings) == 0:
+            return unique_embeddings
+        return unique_embeddings[[text_to_idx[t] for t in texts]]
 
     async def embed_query(self, query: str) -> list[float]:
         with self._cache_lock:
@@ -244,7 +295,8 @@ class EmbeddingService:
                 return self._query_cache[query]
 
         embeddings = await self.embed_texts([query])
-        result = embeddings[0]
+        raw_emb = embeddings[0]
+        result = raw_emb.tolist() if hasattr(raw_emb, "tolist") else list(raw_emb)
 
         with self._cache_lock:
             if len(self._query_cache) >= self._max_cache_size:

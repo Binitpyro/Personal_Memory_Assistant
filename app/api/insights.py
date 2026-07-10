@@ -110,3 +110,15 @@ async def stream_visualizer_binary(
     except Exception as e:
         logger.error(f"Visualizer stream failed: {e}")
         return JSONResponse(status_code=500, content={"error": "Failed to stream visualizer data"})
+
+
+@router.get("/visualizer/meta")
+async def get_visualizer_meta(extension: str | None = None, db: DatabaseManager = Depends(get_db)):
+    """type_hash → {name, path, size, usage_count} sidecar for the 3D visualizer."""
+    from app.insights.visualizer import get_visualizer_meta_impl
+
+    try:
+        return await get_visualizer_meta_impl(extension, db)
+    except Exception as e:
+        logger.error(f"Visualizer meta failed: {e}")
+        return JSONResponse(status_code=500, content={"error": "Failed to build visualizer meta"})

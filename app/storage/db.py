@@ -30,13 +30,15 @@ def _zlib_decompress_fn(blob: Any) -> str:
         return str(blob)
 
 
-import functools
+import functools  # noqa: E402
+
 
 def serialize_write(func):
     @functools.wraps(func)
     async def wrapper(self: "DatabaseManager", *args, **kwargs):
         async with self._write_lock:
             return await func(self, *args, **kwargs)
+
     return wrapper
 
 
@@ -52,6 +54,7 @@ class DatabaseManager:
         self._pool_initialized = False
         self._pool_lock: asyncio.Lock | None = None
         self._write_lock = asyncio.Lock()
+        self._in_external_transaction = False
 
     async def connect(self) -> None:
         """Establish connection pool to the SQLite database."""
@@ -91,17 +94,17 @@ class DatabaseManager:
         await conn.execute("PRAGMA synchronous = NORMAL;")
         await conn.execute("PRAGMA busy_timeout = 5000;")
         # ── Performance PRAGMAs ──────────────────────────────────
-        await conn.execute("PRAGMA cache_size = -16384;")  # 16 MB page cache for memory constraint
+        await conn.execute("PRAGMA cache_size = -8192;")  # 8 MB page cache
         await conn.execute(
-            "PRAGMA mmap_size = 268435456;"
-        )  # 256 MB memory-mapped I/O (OS managed, doesn't consume app RAM directly)
+            "PRAGMA mmap_size = 1073741824;"
+        )  # 1 GB memory-mapped I/O
         await conn.execute("PRAGMA temp_store = MEMORY;")  # temp tables in RAM
         # NOTE: page_size only affects new databases. Existing ones ignore this until VACUUM.
         await conn.execute("PRAGMA page_size = 32768;")
         await conn.execute("PRAGMA threads = 4;")
         # NOTE: read_uncommitted only has an effect in shared-cache mode (aiosqlite uses private).
         await conn.execute("PRAGMA read_uncommitted = ON;")
-        await conn.execute("PRAGMA wal_autocheckpoint = 1000;")
+        await conn.execute("PRAGMA wal_autocheckpoint = 10000;")
 
     @property
     def conn(self) -> aiosqlite.Connection | None:
@@ -516,11 +519,11 @@ class DatabaseManager:
                 raise RuntimeError(f"INSERT RETURNING id failed for {file_data.get('path')}")
             file_id: int = row[0]
             if auto_commit:
-                await conn.commit()
+                await self._maybe_commit(conn)
             return file_id
 
     @serialize_write
-    async def batch_insert_files(self, files_data: list[dict[str, Any]]) -> list[int]:
+    async def batch_insert_files(self, files_data: list[dict[str, Any]], auto_commit: bool = True) -> list[int]:
         """Inserts multiple file metadata records in a single transaction."""
         if not files_data:
             return []
@@ -549,14 +552,15 @@ class DatabaseManager:
         savepoint_name = None
         try:
             # Try explicit transaction; if already in one, use savepoint
-            try:
-                await conn.execute("BEGIN")
-            except Exception as e:
-                if "cannot start a transaction within a transaction" in str(e):
-                    savepoint_name = f"sp_{uuid.uuid4().hex}"
-                    await conn.execute(f"SAVEPOINT {savepoint_name}")
-                else:
-                    raise
+            if auto_commit:
+                try:
+                    await conn.execute("BEGIN")
+                except Exception as e:
+                    if "cannot start a transaction within a transaction" in str(e):
+                        savepoint_name = f"sp_{uuid.uuid4().hex}"
+                        await conn.execute(f"SAVEPOINT {savepoint_name}")
+                    else:
+                        raise
 
             for fd in files_data:
                 async with conn.execute(query, fd) as cursor:
@@ -565,18 +569,20 @@ class DatabaseManager:
                         file_ids.append(row[0])
 
             # Commit or release savepoint
-            if savepoint_name:
-                await conn.execute(f"RELEASE {savepoint_name}")
-            else:
-                await conn.commit()
+            if auto_commit:
+                if savepoint_name:
+                    await conn.execute(f"RELEASE {savepoint_name}")
+                else:
+                    await self._maybe_commit(conn)
         except Exception:
             # Rollback or rollback to savepoint
-            if savepoint_name:
-                with contextlib.suppress(Exception):
-                    await conn.execute(f"ROLLBACK TO {savepoint_name}")
-            else:
-                with contextlib.suppress(Exception):
-                    await conn.rollback()
+            if auto_commit:
+                if savepoint_name:
+                    with contextlib.suppress(Exception):
+                        await conn.execute(f"ROLLBACK TO {savepoint_name}")
+                else:
+                    with contextlib.suppress(Exception):
+                        await conn.rollback()
             raise
         return file_ids
 
@@ -608,7 +614,7 @@ class DatabaseManager:
             return chunk_id
 
     @serialize_write
-    async def insert_chunks_bulk(self, chunks: list[dict[str, Any]]) -> list[int]:
+    async def insert_chunks_bulk(self, chunks: list[dict[str, Any]], auto_commit: bool = True) -> list[int]:
         """Insert multiple chunks efficiently in a single transaction.
 
         Uses a batch INSERT approach: inserts all rows first,
@@ -646,7 +652,8 @@ class DatabaseManager:
                     row = await cursor.fetchone()
                     if row:
                         ids.append(row[0])
-            await conn.commit()
+            if auto_commit:
+                await self._maybe_commit(conn)
             return ids
 
         # For larger batches, use executemany + read back IDs
@@ -656,14 +663,15 @@ class DatabaseManager:
         savepoint_name = None
         try:
             # Try explicit transaction; if already in one, use savepoint
-            try:
-                await conn.execute("BEGIN IMMEDIATE")
-            except Exception as e:
-                if "cannot start a transaction within a transaction" in str(e):
-                    savepoint_name = f"sp_{uuid.uuid4().hex}"
-                    await conn.execute(f"SAVEPOINT {savepoint_name}")
-                else:
-                    raise
+            if auto_commit:
+                try:
+                    await conn.execute("BEGIN IMMEDIATE")
+                except Exception as e:
+                    if "cannot start a transaction within a transaction" in str(e):
+                        savepoint_name = f"sp_{uuid.uuid4().hex}"
+                        await conn.execute(f"SAVEPOINT {savepoint_name}")
+                    else:
+                        raise
 
             async with conn.execute("SELECT COALESCE(MAX(id), 0) FROM chunks") as cur:
                 row = await cur.fetchone()
@@ -687,23 +695,25 @@ class DatabaseManager:
                 ids = [r[0] for r in rows]
 
             # Commit or release savepoint
-            if savepoint_name:
-                await conn.execute(f"RELEASE {savepoint_name}")
-            else:
-                await conn.commit()
+            if auto_commit:
+                if savepoint_name:
+                    await conn.execute(f"RELEASE {savepoint_name}")
+                else:
+                    await self._maybe_commit(conn)
             return ids
         except Exception:
             # Rollback or rollback to savepoint
-            if savepoint_name:
-                with contextlib.suppress(Exception):
-                    await conn.execute(f"ROLLBACK TO {savepoint_name}")
-            else:
-                with contextlib.suppress(Exception):
-                    await conn.rollback()
+            if auto_commit:
+                if savepoint_name:
+                    with contextlib.suppress(Exception):
+                        await conn.execute(f"ROLLBACK TO {savepoint_name}")
+                else:
+                    with contextlib.suppress(Exception):
+                        await conn.rollback()
             raise
 
     @serialize_write
-    async def insert_chunk_embeddings_bulk(self, data: list[tuple[int, bytes]]) -> None:
+    async def insert_chunk_embeddings_bulk(self, data: list[tuple[int, bytes]], auto_commit: bool = True) -> None:
         """Insert multiple chunk embeddings in a single transaction."""
         if not data:
             return
@@ -713,10 +723,11 @@ class DatabaseManager:
             "ON CONFLICT(chunk_id) DO UPDATE SET embedding=excluded.embedding",
             data,
         )
-        await conn.commit()
+        if auto_commit:
+            await self._maybe_commit(conn)
 
     @serialize_write
-    async def insert_kg_nodes_bulk(self, data: list[tuple[str, str, str, str, int | None]]) -> None:
+    async def insert_kg_nodes_bulk(self, data: list[tuple[str, str, str, str, int | None]], auto_commit: bool = True) -> None:
         """Insert multiple kg_nodes efficiently.
         data format: list of (id, type, label, properties, chunk_id)
         """
@@ -728,10 +739,11 @@ class DatabaseManager:
             "ON CONFLICT(id) DO UPDATE SET type=excluded.type, label=excluded.label, properties=excluded.properties, chunk_id=excluded.chunk_id",  # noqa: E501
             data,
         )
-        await conn.commit()
+        if auto_commit:
+            await self._maybe_commit(conn)
 
     @serialize_write
-    async def insert_kg_edges_bulk(self, data: list[tuple[str, str, str, float, str]]) -> None:
+    async def insert_kg_edges_bulk(self, data: list[tuple[str, str, str, float, str]], auto_commit: bool = True) -> None:
         """Insert multiple kg_edges efficiently.
         data format: list of (source, target, relation, weight, properties)
         """
@@ -745,7 +757,8 @@ class DatabaseManager:
                 "ON CONFLICT(source, target, relation) DO UPDATE SET weight=excluded.weight, properties=excluded.properties",  # noqa: E501
                 data,
             )
-            await conn.commit()
+            if auto_commit:
+                await self._maybe_commit(conn)
         finally:
             await conn.execute("PRAGMA foreign_keys = ON")
 
@@ -774,7 +787,7 @@ class DatabaseManager:
         # 2. Delete unresolved edges to keep the graph clean
         await conn.execute("DELETE FROM kg_edges WHERE target LIKE 'PENDING::%'")
 
-        await conn.commit()
+        await self._maybe_commit(conn)
 
     async def get_chunk_embeddings(self, chunk_ids: list[int]) -> dict[int, bytes]:
         """Fetch embeddings for a list of chunk IDs."""
@@ -895,11 +908,38 @@ class DatabaseManager:
             rows = await cursor.fetchall()
             return [r[0] for r in rows]
 
+    async def _maybe_commit(self, conn: aiosqlite.Connection) -> None:
+        """Commit the connection if not in an external transaction."""
+        if not self._in_external_transaction:
+            await conn.commit()
+
     @serialize_write
     async def commit(self) -> None:
         """Explicitly commits the current transaction."""
         if self.conn:
             await self.conn.commit()
+            self._in_external_transaction = False
+
+    @serialize_write
+    async def begin_transaction(self) -> None:
+        """Begin an external write transaction."""
+        conn = self._get_conn()
+        await conn.execute("BEGIN IMMEDIATE")
+        self._in_external_transaction = True
+
+    @serialize_write
+    async def commit_transaction(self) -> None:
+        """Commit the external write transaction."""
+        conn = self._get_conn()
+        await conn.commit()
+        self._in_external_transaction = False
+
+    @serialize_write
+    async def rollback_transaction(self) -> None:
+        """Rollback the external write transaction."""
+        conn = self._get_conn()
+        await conn.rollback()
+        self._in_external_transaction = False
 
     @serialize_write
     async def delete_file_chunks(self, file_id: int, *, auto_commit: bool = True) -> None:
@@ -910,7 +950,7 @@ class DatabaseManager:
         conn = self._get_conn()
         await conn.execute("DELETE FROM chunks WHERE file_id = ?", (file_id,))
         if auto_commit:
-            await conn.commit()
+            await self._maybe_commit(conn)
 
     async def get_file_chunks(self, file_id: int) -> list[aiosqlite.Row]:
         """Returns all chunks for a given file id, decompressing text_preview."""
@@ -977,13 +1017,29 @@ class DatabaseManager:
                         result[row[0]] = row[1]
         return result
 
-    async def get_files_change_map(self, paths: list[str]) -> dict[str, tuple[str, str]]:
+    async def get_files_change_map(
+        self, paths: list[str], *, conn: aiosqlite.Connection | None = None
+    ) -> dict[str, tuple[str, str]]:
         """Return {path: (modified_at, sha256)} in a SINGLE query.
 
         Replaces separate calls to get_files_modified_map + get_files_sha256_map
         to halve the number of DB round-trips during change detection.
         """
         result: dict[str, tuple[str, str]] = {}
+        if conn is not None:
+            batch_size = 900
+            for i in range(0, len(paths), batch_size):
+                batch = paths[i : i + batch_size]
+                placeholders = ",".join("?" for _ in batch)
+                query = (
+                    f"SELECT path, modified_at, COALESCE(sha256, '') FROM files "  # noqa: S608
+                    f"WHERE path IN ({placeholders})"
+                )
+                async with conn.execute(query, batch) as cursor:
+                    async for row in cursor:
+                        result[row[0]] = (row[1], row[2])
+            return result
+
         async with self._get_read_conn() as conn:
             batch_size = 900
             for i in range(0, len(paths), batch_size):
@@ -1142,7 +1198,7 @@ class DatabaseManager:
         """Execute a write SQL statement via the write connection and commit."""
         conn = self._get_conn()
         await conn.execute(sql, params)
-        await conn.commit()
+        await self._maybe_commit(conn)
 
     @serialize_write
     async def save_query(
@@ -1441,7 +1497,7 @@ class DatabaseManager:
             ),
         )
         if auto_commit:
-            await conn.commit()
+            await self._maybe_commit(conn)
 
     async def get_all_folder_profiles(self) -> list[dict[str, Any]]:
         """Return every stored folder profile."""

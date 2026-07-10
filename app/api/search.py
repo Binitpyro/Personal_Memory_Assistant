@@ -74,7 +74,9 @@ async def query(
 ):
     q = payload.validated_question
     if not q:
-        return JSONResponse(status_code=422, content={"error": "Question cannot be empty or whitespace only"})
+        return JSONResponse(
+            status_code=422, content={"error": "Question cannot be empty or whitespace only"}
+        )
     history = payload.history or []
     full_rag = ensure_rag()
 
@@ -132,7 +134,9 @@ async def query_stream(
 ):
     q = request.validated_question
     if not q:
-        return JSONResponse(status_code=422, content={"error": "Question cannot be empty or whitespace only"})
+        return JSONResponse(
+            status_code=422, content={"error": "Question cannot be empty or whitespace only"}
+        )
     history = request.history or []
     from app.search.retrieval import stream_rag
 

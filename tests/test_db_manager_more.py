@@ -1,7 +1,9 @@
-import asyncio
 import json
+
 import pytest
+
 from app.storage.db import DatabaseManager
+
 
 @pytest.fixture
 async def db():
@@ -10,6 +12,7 @@ async def db():
     await mgr.init_db()
     yield mgr
     await mgr.close()
+
 
 @pytest.mark.asyncio
 async def test_db_vacuum_and_checkpoint(db: DatabaseManager):
@@ -20,16 +23,31 @@ async def test_db_vacuum_and_checkpoint(db: DatabaseManager):
     # Check that health is okay
     assert await db.is_healthy() is True
 
+
 @pytest.mark.asyncio
 async def test_db_batch_operations_and_maps(db: DatabaseManager):
     # batch_insert_files
     files = [
-        {"path": "a.txt", "size": 10, "modified_at": "t1", "type": ".txt", "folder_tag": "T", "sha256": "sha1"},
-        {"path": "b.txt", "size": 20, "modified_at": "t2", "type": ".txt", "folder_tag": "T", "sha256": "sha256_b"},
+        {
+            "path": "a.txt",
+            "size": 10,
+            "modified_at": "t1",
+            "type": ".txt",
+            "folder_tag": "T",
+            "sha256": "sha1",
+        },
+        {
+            "path": "b.txt",
+            "size": 20,
+            "modified_at": "t2",
+            "type": ".txt",
+            "folder_tag": "T",
+            "sha256": "sha256_b",
+        },
     ]
     ids = await db.batch_insert_files(files)
     assert len(ids) == 2
-    
+
     # get_existing_file_ids
     existing_map = await db.get_existing_file_ids(["a.txt", "b.txt", "c.txt"])
     assert "a.txt" in existing_map
@@ -55,15 +73,16 @@ async def test_db_batch_operations_and_maps(db: DatabaseManager):
     file_a = await db.get_file_by_path("a.txt")
     assert file_a[7] == 1  # usage_count is index 7 based on schema order
 
+
 @pytest.mark.asyncio
 async def test_db_graph_rag_flow(db: DatabaseManager):
     # Insert file & chunk to reference in kg_nodes
-    file_id = await db.insert_file({
-        "path": "test.py", "size": 100, "modified_at": "now", "type": ".py", "folder_tag": "tag"
-    })
-    chunk_id = await db.insert_chunk({
-        "file_id": file_id, "start_offset": 0, "end_offset": 50, "text_preview": "preview"
-    })
+    file_id = await db.insert_file(
+        {"path": "test.py", "size": 100, "modified_at": "now", "type": ".py", "folder_tag": "tag"}
+    )
+    chunk_id = await db.insert_chunk(
+        {"file_id": file_id, "start_offset": 0, "end_offset": 50, "text_preview": "preview"}
+    )
 
     # Empty bulk inserts should do nothing and not fail
     await db.insert_kg_nodes_bulk([])
@@ -71,8 +90,20 @@ async def test_db_graph_rag_flow(db: DatabaseManager):
 
     # insert_kg_nodes_bulk
     nodes = [
-        ("node_1", "entity", "MainFunc", json.dumps({"chunk_id": chunk_id, "desc": "main"}), chunk_id),
-        ("node_2", "entity", "HelperFunc", json.dumps({"chunk_id": chunk_id, "desc": "helper"}), chunk_id),
+        (
+            "node_1",
+            "entity",
+            "MainFunc",
+            json.dumps({"chunk_id": chunk_id, "desc": "main"}),
+            chunk_id,
+        ),
+        (
+            "node_2",
+            "entity",
+            "HelperFunc",
+            json.dumps({"chunk_id": chunk_id, "desc": "helper"}),
+            chunk_id,
+        ),
     ]
     await db.insert_kg_nodes_bulk(nodes)
 
@@ -97,7 +128,7 @@ async def test_db_graph_rag_flow(db: DatabaseManager):
     # bfs_from_chunks
     bfs_results = await db.bfs_from_chunks([chunk_id], max_depth=2, limit=5)
     assert chunk_id in bfs_results
-    
+
     # empty bfs_from_chunks
     assert await db.bfs_from_chunks([]) == []
 
@@ -106,7 +137,7 @@ async def test_db_graph_rag_flow(db: DatabaseManager):
     assert len(paths) > 0
     # relational path should show connection MainFunc -> HelperFunc
     assert "calls" in paths[0]
-    
+
     # empty get_relational_paths
     assert await db.get_relational_paths([]) == []
 
@@ -120,6 +151,7 @@ async def test_db_graph_rag_flow(db: DatabaseManager):
     async for node in db.stream_all_nodes():
         nodes_stream.append(node)
     assert len(nodes_stream) == 1
+
 
 @pytest.mark.asyncio
 async def test_db_folder_profiles(db: DatabaseManager):
@@ -138,7 +170,7 @@ async def test_db_folder_profiles(db: DatabaseManager):
         "key_files": "main.py",
     }
     await db.upsert_folder_profile(profile)
-    
+
     # get_all_folder_profiles
     profiles = await db.get_all_folder_profiles()
     assert len(profiles) == 1
@@ -149,12 +181,13 @@ async def test_db_folder_profiles(db: DatabaseManager):
     assert "Indexed Project/Folder Profiles" in prof_text
     assert "tag1" in prof_text
 
+
 @pytest.mark.asyncio
 async def test_db_insert_chunks_bulk_large(db: DatabaseManager):
-    file_id = await db.insert_file({
-        "path": "bulk.py", "size": 100, "modified_at": "now", "type": ".py", "folder_tag": "tag"
-    })
-    
+    file_id = await db.insert_file(
+        {"path": "bulk.py", "size": 100, "modified_at": "now", "type": ".py", "folder_tag": "tag"}
+    )
+
     # Generate 22 chunks (threshold is 20)
     chunks = [
         {
@@ -163,7 +196,7 @@ async def test_db_insert_chunks_bulk_large(db: DatabaseManager):
             "end_offset": (i + 1) * 10,
             "text_preview": f"preview {i}",
             "sentence_offsets": "[]",
-            "segmenter_version": "v1"
+            "segmenter_version": "v1",
         }
         for i in range(22)
     ]

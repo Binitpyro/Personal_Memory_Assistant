@@ -10,6 +10,9 @@ use rayon::prelude::*;
 mod layout;
 
 fn get_sentence_offsets_json(text: &str) -> String {
+    if std::env::var("PMA_SENTENCE_OFFSETS").map(|v| v == "0").unwrap_or(false) {
+        return "[]".to_string();
+    }
     let mut offsets = Vec::new();
     let chars: Vec<char> = text.chars().collect();
     let mut curr = 0;
@@ -80,7 +83,7 @@ fn _calculate_chunk_end(text: &str, start_char: usize, char_indices: &[usize], c
 
 /// Creates overlapping chunks of text, snapping to sentence boundaries.
 #[pyfunction]
-fn create_chunks(py: Python, text: &str, chunk_size_chars: usize, chunk_overlap_chars: usize, prefix: &str, base_offset: usize) -> PyResult<Vec<PyObject>> {
+fn create_chunks(py: Python, text: &str, chunk_size_chars: usize, chunk_overlap_chars: usize, prefix: &str, base_offset: usize) -> PyResult<Vec<Py<PyAny>>> {
     let mut chunks = Vec::new();
     let char_indices: Vec<usize> = text.char_indices().map(|(b, _)| b).collect();
     let total_chars = char_indices.len();
@@ -126,7 +129,7 @@ fn create_chunks(py: Python, text: &str, chunk_size_chars: usize, chunk_overlap_
 
 /// Chunks markdown text by heading sections (up to level 3).
 #[pyfunction]
-fn chunk_markdown(py: Python, text: &str, chunk_size_chars: usize, chunk_overlap_chars: usize, prefix: &str) -> PyResult<Vec<PyObject>> {
+fn chunk_markdown(py: Python, text: &str, chunk_size_chars: usize, chunk_overlap_chars: usize, prefix: &str) -> PyResult<Vec<Py<PyAny>>> {
     let mut chunks = Vec::new();
     let re = regex::Regex::new(r"(?m)^#{1,3}\s").unwrap();
     
@@ -544,9 +547,25 @@ fn extract_text_files(paths: Vec<String>, max_size: usize) -> PyResult<Vec<(Stri
 }
 
 
+/// Hash a path exactly as build_tree does for Node.type_hash, so callers
+/// can join external metadata onto the visualizer binary stream.
+#[pyfunction]
+fn hash_tree_path(path: &str) -> u32 {
+    use std::hash::{Hash, Hasher};
+    let normalized = path.replace("\\", "/");
+    let joined = normalized
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("/");
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    joined.hash(&mut hasher);
+    (hasher.finish() & 0xFFFFFFFF) as u32
+}
+
 /// Python module implemented in Rust using PyO3.
 #[pymodule]
-fn rust_core(_py: Python, m: &PyModule) -> PyResult<()> {
+fn rust_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(scan_folders, m)?)?;
     m.add_function(wrap_pyfunction!(create_chunks, m)?)?;
     m.add_function(wrap_pyfunction!(chunk_markdown, m)?)?;
@@ -554,6 +573,7 @@ fn rust_core(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(get_spatial_binary, m)?)?;
     m.add_function(wrap_pyfunction!(calculate_sha256, m)?)?;
     m.add_function(wrap_pyfunction!(extract_text_files, m)?)?;
+    m.add_function(wrap_pyfunction!(hash_tree_path, m)?)?;
     Ok(())
 }
 

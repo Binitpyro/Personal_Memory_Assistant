@@ -38,30 +38,32 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-_nltk_punkt_downloaded = False
-_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z])")
+def _ensure_nltk_data() -> None:
+    """Download NLTK data at startup, not in the hot path."""
+    import os
+    if os.environ.get("PMA_SENTENCE_OFFSETS", "0") == "0":
+        return
+    try:
+        import nltk
+        nltk.data.find("tokenizers/punkt")
+        nltk.data.find("tokenizers/punkt_tab")
+    except LookupError:
+        nltk.download("punkt", quiet=True)
+        nltk.download("punkt_tab", quiet=True)
 
+_ensure_nltk_data()
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z])")
 
 def _get_sentence_offsets(text: str) -> list[list[int]]:
     """Compute start and end offsets for sentences within a text string."""
     import os
     if os.environ.get("PMA_SENTENCE_OFFSETS", "0") == "0":
         return []
-    global _nltk_punkt_downloaded
     if not text:
         return []
 
     try:
         import nltk
-
-        if not _nltk_punkt_downloaded:
-            try:
-                nltk.data.find("tokenizers/punkt")
-                nltk.data.find("tokenizers/punkt_tab")
-            except LookupError:
-                nltk.download("punkt", quiet=True)
-                nltk.download("punkt_tab", quiet=True)
-            _nltk_punkt_downloaded = True
 
         sentences = nltk.tokenize.sent_tokenize(text)
         offsets = []
@@ -308,18 +310,26 @@ class IndexingService:
                 progress.complete()
                 return
 
-            if not progress.is_cancelled:
-                await self._batch_index_pipeline(
-                    files_to_index, offset=0, total_to_index=len(files_to_index)
-                )
+            use_bulk_mode = len(files_to_index) > 100
+            if use_bulk_mode:
+                await self.db.enter_ingest_mode()
 
-            if progress.is_cancelled:
-                progress.complete()
-                return
+            try:
+                if not progress.is_cancelled:
+                    await self._batch_index_pipeline(
+                        files_to_index, offset=0, total_to_index=len(files_to_index)
+                    )
 
-            # Phase 1: Resolve pending GraphRAG edges
-            progress.set_current_file("Resolving code graph edges…")
-            await self.db.resolve_pending_graph_edges()
+                if progress.is_cancelled:
+                    progress.complete()
+                    return
+
+                # Phase 1: Resolve pending GraphRAG edges
+                progress.set_current_file("Resolving code graph edges…")
+                await self.db.resolve_pending_graph_edges()
+            finally:
+                if use_bulk_mode:
+                    await self.db.exit_ingest_mode()
 
             await self._generate_folder_profiles(all_files, unique_folders)
             from app.search.retrieval import clear_retrieval_cache
@@ -440,12 +450,11 @@ class IndexingService:
     async def _stream_extract_and_prepare(
         self, path: Path, folder_tag: str, pre_text: str | None, queue: asyncio.Queue
     ) -> None:
+        import queue as stdlib_queue
         loop = asyncio.get_running_loop()
         header_sent = False
         try:
-            # H-18: Use dedicated disk executor
             stat = await loop.run_in_executor(_DISK_EXECUTOR, path.stat)
-            sha256 = await loop.run_in_executor(_DISK_EXECUTOR, self._calculate_sha256, path)
 
             header = {
                 "type": "header",
@@ -457,71 +466,75 @@ class IndexingService:
                     "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
                     "type": path.suffix.lower(),
                     "folder_tag": folder_tag,
-                    "sha256": sha256,
+                    "sha256": "",  # placeholder, updated in footer
                 },
             }
             await queue.put(header)
             header_sent = True
 
             prefix = self._build_context_prefix(str(path))
-            is_structured = any(ex.can_handle(path) for ex in EXTRACTORS)
-            is_large_log = path.suffix.lower() == ".log" and stat.st_size > 5 * 1024 * 1024
-
-            full_text_for_summary = ""
-
             logger.info("Started extracting and chunking for file: %s", path)
 
-            if is_structured or is_large_log:
+            bridge = stdlib_queue.Queue(maxsize=64)
+
+            def _extract_and_chunk():
                 chunker = StreamChunker(self.chunk_size, self.chunk_overlap, prefix)
+                hasher = hashlib.sha256()
+                ft_summary = ""
 
-                def _evaluate_stream():
-                    def _get_stream():
-                        for ex in EXTRACTORS:
-                            if ex.can_handle(path):
-                                return ex.extract_stream(path, self.max_file_size)
-                        return self._extract_plain_text_stream(path)
+                def _get_stream():
+                    if pre_text is not None:
+                        yield pre_text
+                        return
+                    for ex in EXTRACTORS:
+                        if ex.can_handle(path):
+                            yield from ex.extract_stream(path, self.max_file_size)
+                            return
+                    yield from self._extract_plain_text_stream(path)
 
-                    stream = _get_stream()
-                    out_chunks = []
-                    ft_summary = ""
-                    for fragment in stream:
-                        out_chunks.extend(chunker.process(fragment))
+                try:
+                    for fragment in _get_stream():
+                        hasher.update(fragment.encode("utf-8") if isinstance(fragment, str) else fragment)
+                        # Skip binary stubs — they pollute the vector index with useless noise
+                        if isinstance(fragment, str) and fragment.startswith("[BINARY:"):
+                            logger.debug("Skipping binary stub for %s — no indexable text.", path)
+                            ft_summary = ""
+                            break
+                        
+                        for c in chunker.process(fragment):
+                            bridge.put(c)
                         if len(ft_summary) < 2000:
-                            ft_summary += fragment
-                    out_chunks.extend(chunker.finalize())
-                    return out_chunks, ft_summary
+                            ft_summary += fragment if isinstance(fragment, str) else fragment.decode("utf-8", errors="replace")
 
-                all_chunks, full_text_for_summary = await loop.run_in_executor(
-                    None, _evaluate_stream
-                )
-                for c in all_chunks:
-                    await queue.put({"type": "chunk", "path": path, "chunk": c})
-            else:
-                text = (
-                    pre_text
-                    if pre_text is not None
-                    else await loop.run_in_executor(None, self._extract_text_monolithic, path)
-                )
-                # Skip binary stubs — they pollute the vector index with useless noise
-                if text and text.startswith("[BINARY:"):
-                    logger.debug("Skipping binary stub for %s — no indexable text.", path)
-                    full_text_for_summary = ""
-                else:
-                    chunks = await loop.run_in_executor(None, self._create_chunks, text, str(path))
-                    for c in chunks:
-                        await queue.put({"type": "chunk", "path": path, "chunk": c})
-                    full_text_for_summary = text
+                    for c in chunker.finalize():
+                        bridge.put(c)
+                    return hasher.hexdigest(), ft_summary
+                finally:
+                    bridge.put(None)  # sentinel
+
+            async def _pump():
+                while True:
+                    try:
+                        item = await loop.run_in_executor(_DISK_EXECUTOR, bridge.get, True, 0.1)
+                    except stdlib_queue.Empty:
+                        continue
+                    if item is None:
+                        break
+                    await queue.put({"type": "chunk", "path": path, "chunk": item})
+
+            extract_future = loop.run_in_executor(_DISK_EXECUTOR, _extract_and_chunk)
+            await _pump()
+            sha256, full_text_for_summary = await extract_future
 
             summary = await loop.run_in_executor(
                 None, self._generate_summary, full_text_for_summary, path
             )
-            await queue.put({"type": "footer", "path": path, "summary": summary})
+            await queue.put({"type": "footer", "path": path, "summary": summary, "sha256": sha256})
 
         except Exception as e:
             logger.error("Streaming extraction failed for %s: %s", path, e)
             if not header_sent:
                 try:
-                    # Send a dummy header so storer has a file_id to associate with the footer
                     dummy_header = {
                         "type": "header",
                         "path": path,
@@ -540,7 +553,7 @@ class IndexingService:
                 except Exception as inner_h:
                     logger.error("Failed to send dummy header for %s: %s", path, inner_h)
             if header_sent:
-                await queue.put({"type": "footer", "path": path, "summary": f"[ERROR: {e!s}]"})
+                await queue.put({"type": "footer", "path": path, "summary": f"[ERROR: {e!s}]", "sha256": "ERROR"})
 
     def _extract_plain_text_stream(self, path: Path) -> Iterator[str]:
         try:
@@ -608,26 +621,49 @@ class IndexingService:
             item["chunk"]["_embedding"] = all_embeddings[idx]
 
     async def _storer_worker(self, store_queue: asyncio.Queue[dict[str, Any] | None]):
+        import time
         active_files: dict[str, dict[str, Any]] = {}
         pending_chunks: list[dict[str, Any]] = []
         use_tx = hasattr(self.db, "begin_transaction")
+        
+        COMMIT_CHUNK_THRESHOLD = 2000
+        COMMIT_TIME_LIMIT = 10.0  # seconds
+        chunks_since_commit = 0
+        last_commit_time = time.monotonic()
+        tx_open = False
+
+        async def _commit_window():
+            nonlocal chunks_since_commit, last_commit_time, tx_open
+            l_ids, l_embs, l_metas = [], [], []
+            if pending_chunks:
+                res = await self._flush_pending_chunks_sqlite(pending_chunks, active_files)
+                if res:
+                    l_ids, l_embs, l_metas = res
+            if tx_open and use_tx:
+                if hasattr(self.db, "commit"):
+                    await self.db.commit()
+                tx_open = False
+            if l_ids:
+                await self._flush_pending_chunks_lancedb(l_ids, l_embs, l_metas)
+            pending_chunks.clear()
+            chunks_since_commit = 0
+            last_commit_time = time.monotonic()
 
         try:
             while True:
                 item = await store_queue.get()
                 if item is None:
-                    if pending_chunks:
-                        await self._flush_pending_chunks(pending_chunks, active_files)
-                        if hasattr(self.db, "commit"):
-                            await self.db.commit()
+                    await _commit_window()
                     break
+
+                if not tx_open and use_tx:
+                    await self.db.begin_transaction()
+                    tx_open = True
 
                 ptype, path_str = item["type"], str(item["path"].absolute())
 
                 if ptype == "header":
-                    # Begin a single transaction for this file's writes
                     if use_tx:
-                        await self.db.begin_transaction()
                         file_id = await self.db.batch_insert_files([item["file_data"]], auto_commit=False)
                     else:
                         file_id = await self.db.batch_insert_files([item["file_data"]])
@@ -643,26 +679,22 @@ class IndexingService:
                         item["file_id"] = file_info["id"]
                         pending_chunks.append(item)
                         file_info["chunk_count"] += 1
-                        if len(pending_chunks) >= 500:  # Raised batch size to 500 chunks
-                            await self._flush_pending_chunks(pending_chunks, active_files)
-                            pending_chunks.clear()
+                        chunks_since_commit += 1
                 elif ptype == "footer":
                     file_info = active_files.pop(path_str, None)
                     if file_info:
-                        # Flush any pending chunks first so they are written in the same transaction
-                        if pending_chunks:
-                            await self._flush_pending_chunks(pending_chunks, active_files)
-                            pending_chunks.clear()
                         await self.db.execute_write(
-                            "UPDATE files SET summary = ? WHERE id = ?",
-                            (item["summary"], file_info["id"]),
+                            "UPDATE files SET summary = ?, sha256 = ? WHERE id = ?",
+                            (item["summary"], item.get("sha256", ""), file_info["id"]),
                         )
                         progress.update(file_info["chunk_count"], current_file=item["path"].name)
                     else:
                         progress.update(0, current_file=item["path"].name)
-                    # Commit transaction once per file
-                    if hasattr(self.db, "commit"):
-                        await self.db.commit()
+                
+                # Check thresholds
+                if chunks_since_commit >= COMMIT_CHUNK_THRESHOLD or time.monotonic() - last_commit_time > COMMIT_TIME_LIMIT:
+                    await _commit_window()
+
         except Exception as e:
             logger.error("Storer worker failed: %s", e)
             if getattr(self.db, "_in_external_transaction", False):
@@ -674,9 +706,9 @@ class IndexingService:
                         logger.error("Failed to rollback transaction: %s", rollback_err)
             raise
 
-    async def _flush_pending_chunks(self, chunks: list[dict[str, Any]], active_files: dict):
+    async def _flush_pending_chunks_sqlite(self, chunks: list[dict[str, Any]], active_files: dict):
         if not chunks:
-            return
+            return None
         import json
 
         import numpy as np
@@ -745,7 +777,11 @@ class IndexingService:
             if kg_edges_data:
                 await self.db.insert_kg_edges_bulk(kg_edges_data)
 
-        await self.lancedb_client.add_documents(l_ids, l_embs, l_metas)
+        return l_ids, l_embs, l_metas
+
+    async def _flush_pending_chunks_lancedb(self, l_ids, l_embs, l_metas):
+        if l_ids:
+            await self.lancedb_client.add_documents(l_ids, l_embs, l_metas)
 
     async def _delete_existing_chunks(self, file_id: int) -> None:
         old_chunks = await self.db.get_file_chunks(file_id)

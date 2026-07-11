@@ -30,6 +30,40 @@ def _zlib_decompress_fn(blob: Any) -> str:
         return str(blob)
 
 
+FTS_TABLE_DDL = """
+CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5(
+    chunks_text, content='', tokenize='trigram', detail=full
+);
+"""
+
+FTS_TRIGGERS_DDL = """
+CREATE TRIGGER IF NOT EXISTS chunk_fts_ai AFTER INSERT ON chunks BEGIN
+  INSERT INTO chunk_fts(rowid, chunks_text)
+  VALUES (new.id, zlib_decompress(new.text_preview));
+END;
+CREATE TRIGGER IF NOT EXISTS chunk_fts_ad AFTER DELETE ON chunks BEGIN
+  INSERT INTO chunk_fts(chunk_fts, rowid, chunks_text)
+  VALUES('delete', old.id, zlib_decompress(old.text_preview));
+END;
+CREATE TRIGGER IF NOT EXISTS chunk_fts_au AFTER UPDATE ON chunks BEGIN
+  INSERT INTO chunk_fts(chunk_fts, rowid, chunks_text)
+  VALUES('delete', old.id, zlib_decompress(old.text_preview));
+  INSERT INTO chunk_fts(rowid, chunks_text)
+  VALUES (new.id, zlib_decompress(new.text_preview));
+END;
+"""
+
+FTS_DROP_TRIGGERS_DDL = """
+DROP TRIGGER IF EXISTS chunk_fts_ai;
+DROP TRIGGER IF EXISTS chunk_fts_ad;
+DROP TRIGGER IF EXISTS chunk_fts_au;
+DROP TRIGGER IF EXISTS chunks_ai;
+DROP TRIGGER IF EXISTS chunks_ad;
+DROP TRIGGER IF EXISTS chunks_au;
+"""
+
+
+
 import functools  # noqa: E402
 
 
@@ -73,26 +107,29 @@ class DatabaseManager:
 
             # 1. Primary write connection
             self._write_conn = await aiosqlite.connect(self.db_path)
-            await self._configure_conn(self._write_conn)
+            await self._configure_conn(self._write_conn, is_write_conn=True)
 
             # 2. Read connection pool
             for _ in range(self.pool_size):
                 conn = await aiosqlite.connect(self.db_path)
-                await self._configure_conn(conn)
+                await self._configure_conn(conn, is_write_conn=False)
                 await self._read_pool.put(conn)
 
             self._pool_initialized = True
 
-    async def _configure_conn(self, conn: aiosqlite.Connection) -> None:
+    async def _configure_conn(self, conn: aiosqlite.Connection, is_write_conn: bool = False) -> None:
         """Apply performance pragmas and custom functions to a connection."""
         conn.row_factory = aiosqlite.Row
         await conn.create_function("zlib_decompress", 1, _zlib_decompress_fn)
 
-        await conn.execute("PRAGMA auto_vacuum = INCREMENTAL;")
-        await conn.execute("PRAGMA journal_mode = WAL;")
         await conn.execute("PRAGMA foreign_keys = ON;")
-        await conn.execute("PRAGMA synchronous = NORMAL;")
         await conn.execute("PRAGMA busy_timeout = 5000;")
+        
+        if is_write_conn:
+            await conn.execute("PRAGMA auto_vacuum = INCREMENTAL;")
+            await conn.execute("PRAGMA journal_mode = WAL;")
+            await conn.execute("PRAGMA synchronous = NORMAL;")
+
         # ── Performance PRAGMAs ──────────────────────────────────
         await conn.execute("PRAGMA cache_size = -8192;")  # 8 MB page cache
         await conn.execute(
@@ -104,7 +141,9 @@ class DatabaseManager:
         await conn.execute("PRAGMA threads = 4;")
         # NOTE: read_uncommitted only has an effect in shared-cache mode (aiosqlite uses private).
         await conn.execute("PRAGMA read_uncommitted = ON;")
-        await conn.execute("PRAGMA wal_autocheckpoint = 10000;")
+        
+        if is_write_conn:
+            await conn.execute("PRAGMA wal_autocheckpoint = 10000;")
 
     @property
     def conn(self) -> aiosqlite.Connection | None:
@@ -396,30 +435,11 @@ class DatabaseManager:
             if row and ("detail=full" not in row[0] or "trigram" not in row[0]):
                 # We use content="" (contentless) because the actual text is compressed
                 # in the source table and decompressed via triggers into the FTS index.
-                await conn.executescript("""
-                    DROP TRIGGER IF EXISTS chunks_ai;
-                    DROP TRIGGER IF EXISTS chunks_ad;
+                await conn.executescript(f"""
+                    {FTS_DROP_TRIGGERS_DDL}
                     DROP TABLE IF EXISTS chunk_fts;
-                    CREATE VIRTUAL TABLE chunk_fts USING fts5(
-                        chunks_text, content='', tokenize='trigram', detail=full
-                    );
-                    CREATE TRIGGER chunk_fts_ai AFTER INSERT ON chunks BEGIN
-                        INSERT INTO chunk_fts(rowid, chunks_text)
-                        VALUES (new.id, zlib_decompress(new.text_preview));
-                    END;
-
-                    CREATE TRIGGER chunks_ad AFTER DELETE ON chunks BEGIN
-                      INSERT INTO chunk_fts(chunk_fts, rowid, chunks_text)
-                      VALUES('delete', old.id, zlib_decompress(old.text_preview));
-                    END;
-
-                    CREATE TRIGGER chunks_au AFTER UPDATE ON chunks BEGIN
-                      INSERT INTO chunk_fts(chunk_fts, rowid, chunks_text)
-                      VALUES('delete', old.id, zlib_decompress(old.text_preview));
-                      INSERT INTO chunk_fts(rowid, chunks_text)
-                      VALUES (new.id, zlib_decompress(new.text_preview));
-                    END;
-
+                    {FTS_TABLE_DDL}
+                    {FTS_TRIGGERS_DDL}
                     INSERT INTO chunk_fts(rowid, chunks_text)
                     SELECT id, zlib_decompress(text_preview) FROM chunks;
                 """)
@@ -427,6 +447,32 @@ class DatabaseManager:
                 logger.info("Storage optimization: Optimized chunk_fts schema.")
         except Exception as exc:
             logger.warning("Failed to rebuild FTS table: %s", exc)
+
+    @serialize_write
+    async def enter_ingest_mode(self) -> None:
+        """Temporarily drop FTS triggers and reduce PRAGMA sync/journaling overhead for bulk ingestion."""
+        conn = self._get_conn()
+        await conn.executescript(FTS_DROP_TRIGGERS_DDL)
+        await conn.execute("PRAGMA synchronous = OFF;")
+        logger.info("Entered ingest mode (FTS triggers dropped, pragmas relaxed).")
+
+    @serialize_write
+    async def exit_ingest_mode(self) -> None:
+        """Restore FTS triggers, rebuild the FTS index, and restore PRAGMA sync/journaling."""
+        conn = self._get_conn()
+        
+        # We need to rebuild chunk_fts because inserts happened while triggers were dropped
+        logger.info("Rebuilding FTS index after bulk ingest...")
+        await conn.executescript(f"""
+            DELETE FROM chunk_fts;
+            INSERT INTO chunk_fts(rowid, chunks_text)
+            SELECT id, zlib_decompress(text_preview) FROM chunks;
+            
+            {FTS_TRIGGERS_DDL}
+        """)
+        
+        await conn.execute("PRAGMA synchronous = NORMAL;")
+        logger.info("Exited ingest mode (FTS triggers restored, index rebuilt).")
 
     @serialize_write
     async def fts_optimize(self) -> None:
@@ -1362,11 +1408,9 @@ class DatabaseManager:
             await cur.close()
 
         conn = self._get_conn()
-        await conn.executescript("""
+        await conn.executescript(f"""
             -- Remove triggers so chunk deletes don't touch FTS
-            DROP TRIGGER IF EXISTS chunks_ai;
-            DROP TRIGGER IF EXISTS chunks_ad;
-            DROP TRIGGER IF EXISTS chunks_au;
+            {FTS_DROP_TRIGGERS_DDL}
 
             -- Drop the FTS virtual table entirely
             DROP TABLE IF EXISTS chunk_fts;
@@ -1378,25 +1422,10 @@ class DatabaseManager:
             DELETE FROM folder_profiles;
             DROP TABLE IF EXISTS unreal_project_facts;
 
-            -- Recreate FTS table with optimized detail=column schema and contentless mode.
+            -- Recreate FTS table with optimized schema and contentless mode.
             -- text_preview is stored zlib-compressed so triggers decompress on the fly.
-            CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5(
-                chunks_text, content='', detail=column
-            );
-            CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
-              INSERT INTO chunk_fts(rowid, chunks_text)
-              VALUES (new.id, zlib_decompress(new.text_preview));
-            END;
-            CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
-              INSERT INTO chunk_fts(chunk_fts, rowid, chunks_text)
-              VALUES('delete', old.id, zlib_decompress(old.text_preview));
-            END;
-            CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
-              INSERT INTO chunk_fts(chunk_fts, rowid, chunks_text)
-              VALUES('delete', old.id, zlib_decompress(old.text_preview));
-              INSERT INTO chunk_fts(rowid, chunks_text)
-              VALUES (new.id, zlib_decompress(new.text_preview));
-            END;
+            {FTS_TABLE_DDL}
+            {FTS_TRIGGERS_DDL}
         """)
 
         logger.info("Cleared all data: %d files, %d chunks", files_count, chunks_count)

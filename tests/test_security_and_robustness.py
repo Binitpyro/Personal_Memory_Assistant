@@ -132,15 +132,15 @@ async def test_rag_pipeline_edge_cases(tmp_path, mock_db, mock_emb, mock_lancedb
 
     queue = asyncio.Queue()
 
-    # Monkeypatch monolithic extract to raise an exception for error.txt
-    original_extract = indexer._extract_text_monolithic
+    # Monkeypatch streaming extract to raise an exception for error.txt
+    original_extract = indexer._extract_plain_text_stream
 
     def mock_extract(path):
         if "error.txt" in str(path):
             raise ValueError("Simulated extraction error")
         return original_extract(path)
 
-    indexer._extract_text_monolithic = mock_extract
+    indexer._extract_plain_text_stream = mock_extract
 
     # Run streaming extraction
     await indexer._stream_extract_and_prepare(error_file, "test_tag", None, queue)

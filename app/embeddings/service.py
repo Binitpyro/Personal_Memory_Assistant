@@ -21,7 +21,8 @@ class EmbeddingService:
         self._loading = False
         self._load_lock = threading.Lock()
         self._ready = threading.Event()
-        self.optimal_batch_size = 128  # ONNX on CPU is efficient at this size
+        self.optimal_batch_size = settings.embedding_batch_size
+        self._embedding_dim = 384  # Default, overwritten during load
 
         # LRU cache for query embeddings to avoid redundant computation
         self._query_cache: OrderedDict[str, list[float]] = OrderedDict()
@@ -113,9 +114,16 @@ class EmbeddingService:
                 dummy_inputs["token_type_ids"] = dummy_token_type_ids
 
             self._session.run(None, dummy_inputs)
-            logger.info("ONNX Runtime prewarmed successfully with dummy batch (batch=1, seq=8).")
+            
+            # Dynamically determine the embedding dimension from a dummy run
+            dummy_emb = self._mean_pooling(
+                self._session.run(None, dummy_inputs), dummy_attention_mask
+            )
+            self._embedding_dim = dummy_emb.shape[1]
+            
+            logger.info("ONNX Runtime prewarmed successfully with dummy batch (batch=1, seq=8). Extracted dim: %d", self._embedding_dim)
         except Exception as prewarm_err:
-            logger.warning("Failed to prewarm ONNX session: %s", prewarm_err)
+            logger.warning("Failed to prewarm ONNX session or extract embedding dimension: %s", prewarm_err)
 
     def load_model(self) -> None:
         """Loads the embedding model using ONNX Runtime (blocking)."""
@@ -212,7 +220,10 @@ class EmbeddingService:
 
         def _run_inference():
             num_batches = (len(unique_texts) + effective_batch_size - 1) // effective_batch_size
-            all_embeddings = []
+            if not unique_texts:
+                return np.empty((0, self._embedding_dim), dtype=np.float32)
+
+            out_array = np.empty((len(unique_texts), self._embedding_dim), dtype=np.float32)
 
             for i in range(0, len(unique_texts), effective_batch_size):
                 if progress_callback:
@@ -240,11 +251,9 @@ class EmbeddingService:
                 # Normalization
                 sentence_embeddings = self._normalize(sentence_embeddings)
 
-                all_embeddings.append(sentence_embeddings)
+                out_array[i : i + effective_batch_size] = sentence_embeddings
 
-            if all_embeddings:
-                return np.vstack(all_embeddings).astype(np.float32)
-            return np.empty((0, 384), dtype=np.float32)
+            return out_array
 
         unique_embeddings = await loop.run_in_executor(None, _run_inference)
         if len(unique_embeddings) == 0:
@@ -258,13 +267,13 @@ class EmbeddingService:
             raise RuntimeError("Embedding model not ready.")
 
         if not texts:
-            return np.empty((0, 384), dtype=np.float32)
+            return np.empty((0, self._embedding_dim), dtype=np.float32)
 
         unique_texts = list(set(texts))
         text_to_idx = {t: i for i, t in enumerate(unique_texts)}
         effective_batch_size = batch_size or self.optimal_batch_size
 
-        all_embs = []
+        out_array = np.empty((len(unique_texts), self._embedding_dim), dtype=np.float32)
         for i in range(0, len(unique_texts), effective_batch_size):
             batch = unique_texts[i : i + effective_batch_size]
             encoded = self._tokenizer.encode_batch(batch)
@@ -281,12 +290,11 @@ class EmbeddingService:
                 },
             )
             pooled = self._mean_pooling(out, attention_mask)
-            all_embs.append(self._normalize(pooled))
+            out_array[i : i + effective_batch_size] = self._normalize(pooled)
 
-        unique_embeddings = np.vstack(all_embs).astype(np.float32) if all_embs else np.empty((0, 384), dtype=np.float32)
-        if len(unique_embeddings) == 0:
-            return unique_embeddings
-        return unique_embeddings[[text_to_idx[t] for t in texts]]
+        if len(out_array) == 0:
+            return out_array
+        return out_array[[text_to_idx[t] for t in texts]]
 
     async def embed_query(self, query: str) -> list[float]:
         with self._cache_lock:

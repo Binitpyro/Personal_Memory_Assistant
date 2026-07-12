@@ -476,11 +476,25 @@ class IndexingService:
             logger.info("Started extracting and chunking for file: %s", path)
 
             bridge = stdlib_queue.Queue(maxsize=64)
+            new_item_event = asyncio.Event()
 
             def _extract_and_chunk():
                 chunker = StreamChunker(self.chunk_size, self.chunk_overlap, prefix)
                 hasher = hashlib.sha256()
                 ft_summary = ""
+
+                hash_failed = False
+                # 1. Consistent raw-byte hashing pass (OS page cache makes extraction pass cheap)
+                try:
+                    with open(path, "rb") as f:
+                        while True:
+                            b = f.read(128 * 1024)
+                            if not b:
+                                break
+                            hasher.update(b)
+                except Exception as e:
+                    logger.debug("Failed to hash %s: %s", path, e)
+                    hash_failed = True
 
                 def _get_stream():
                     if pre_text is not None:
@@ -494,7 +508,9 @@ class IndexingService:
 
                 try:
                     for fragment in _get_stream():
-                        hasher.update(fragment.encode("utf-8") if isinstance(fragment, str) else fragment)
+                        if progress.is_cancelled:
+                            return "", ""
+                        
                         # Skip binary stubs — they pollute the vector index with useless noise
                         if isinstance(fragment, str) and fragment.startswith("[BINARY:"):
                             logger.debug("Skipping binary stub for %s — no indexable text.", path)
@@ -502,27 +518,56 @@ class IndexingService:
                             break
                         
                         for c in chunker.process(fragment):
-                            bridge.put(c)
+                            if progress.is_cancelled:
+                                return "", ""
+                            while True:
+                                try:
+                                    bridge.put(c, timeout=1.0)
+                                    loop.call_soon_threadsafe(new_item_event.set)
+                                    break
+                                except stdlib_queue.Full:
+                                    if progress.is_cancelled:
+                                        return "", ""
                         if len(ft_summary) < 2000:
                             ft_summary += fragment if isinstance(fragment, str) else fragment.decode("utf-8", errors="replace")
 
                     for c in chunker.finalize():
-                        bridge.put(c)
-                    return hasher.hexdigest(), ft_summary
+                        if progress.is_cancelled:
+                            return "", ""
+                        while True:
+                            try:
+                                bridge.put(c, timeout=1.0)
+                                loop.call_soon_threadsafe(new_item_event.set)
+                                break
+                            except stdlib_queue.Full:
+                                if progress.is_cancelled:
+                                    return "", ""
+                    sha256_result = "ERROR" if hash_failed else hasher.hexdigest()
+                    return sha256_result, ft_summary
                 finally:
                     bridge.put(None)  # sentinel
+                    loop.call_soon_threadsafe(new_item_event.set)
 
             async def _pump():
                 while True:
                     try:
-                        item = await loop.run_in_executor(_DISK_EXECUTOR, bridge.get, True, 0.1)
+                        item = bridge.get_nowait()
                     except stdlib_queue.Empty:
-                        continue
+                        new_item_event.clear()
+                        # Double-check after clearing to avoid race conditions
+                        try:
+                            item = bridge.get_nowait()
+                        except stdlib_queue.Empty:
+                            # Safe to wait now
+                            await new_item_event.wait()
+                            continue
+                    
                     if item is None:
                         break
                     await queue.put({"type": "chunk", "path": path, "chunk": item})
 
-            extract_future = loop.run_in_executor(_DISK_EXECUTOR, _extract_and_chunk)
+            # Use default executor (None) so we don't block I/O bound _DISK_EXECUTOR slots for CPU-bound extraction
+            extract_future = loop.run_in_executor(None, _extract_and_chunk)
             await _pump()
             sha256, full_text_for_summary = await extract_future
 

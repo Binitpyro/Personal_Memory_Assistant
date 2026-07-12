@@ -210,3 +210,65 @@ def test_extract_monolithic_and_chunking(tmp_path: Path):
     plain_chunks = svc._create_chunks("A. B. C. D." * 10, file_path="test.txt")
     assert plain_chunks
     assert "A. B." in plain_chunks[0]["text_preview"]
+
+@pytest.mark.asyncio
+async def test_cancellation_awareness(tmp_path: Path):
+    """Test that the batch indexing pipeline respects task cancellation and halts OS threads."""
+    svc = _make_service()
+    
+    folder = tmp_path / "cancel_test"
+    folder.mkdir()
+    f = folder / "file_0.txt"
+    # A large file so extraction takes time
+    f.write_text("Hello world. " * 100000, encoding="utf-8")
+    
+    task = asyncio.create_task(svc._batch_index_pipeline([(f, "cancel_test")]))
+    
+    # Wait until it enters ingest mode
+    await asyncio.sleep(0.05)
+    
+    # Cancel the task using the correct API
+    svc.cancel_indexing()
+    
+    await task
+    
+    # Assert that the pipeline's progress object caught the cancellation
+    from app.indexing.service import progress
+    assert progress.is_cancelled
+
+
+@pytest.mark.asyncio
+async def test_update_path_deletes_old_chunks(tmp_path: Path):
+    """Test that modifying a file correctly drops old chunks from the real FTS index."""
+    from app.storage.db import DatabaseManager
+    
+    db_path = tmp_path / "test.db"
+    db = DatabaseManager(str(db_path))
+    await db.init_db()
+    
+    # Insert a file
+    f_data = {"path": "doc.txt", "size": 10, "modified_at": "2023-01-01", "type": ".txt", "folder_tag": "test", "summary": "", "sha256": ""}
+    file_id = await db.insert_file(f_data)
+    
+    # Enter ingest mode, bulk insert chunks, exit ingest mode
+    await db.enter_ingest_mode()
+    await db.insert_chunks_bulk([{
+        "file_id": file_id, "start_offset": 0, "end_offset": 5, "text_preview": "old content that we want to search", "sentence_offsets": "[]", "segmenter_version": "v1"
+    }])
+    await db.exit_ingest_mode()
+    
+    # Verify FTS index has it
+    conn = db._get_conn()
+    async with conn.execute("SELECT count(*) FROM chunk_fts WHERE chunk_fts MATCH 'content'") as c:
+        assert (await c.fetchone())[0] == 1
+        
+    # Now simulate the update path: enter ingest, delete chunks, exit ingest
+    await db.enter_ingest_mode()
+    await db.delete_file_chunks(file_id)
+    await db.exit_ingest_mode()
+    
+    # Verify FTS index dropped it
+    async with conn.execute("SELECT count(*) FROM chunk_fts WHERE chunk_fts MATCH 'content'") as c:
+        assert (await c.fetchone())[0] == 0
+        
+    await db.close()

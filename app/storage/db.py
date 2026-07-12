@@ -85,6 +85,9 @@ class DatabaseManager:
         self.pool_size = pool_size
         self._write_conn: aiosqlite.Connection | None = None
         self._read_pool: asyncio.Queue[aiosqlite.Connection] | None = None
+        self.conn_factory: Callable[[], aiosqlite.Connection] | None = None
+        self._in_external_transaction = False
+        self._in_ingest_mode = False
         self._pool_initialized = False
         self._pool_lock: asyncio.Lock | None = None
         self._write_lock = asyncio.Lock()
@@ -450,29 +453,43 @@ class DatabaseManager:
 
     @serialize_write
     async def enter_ingest_mode(self) -> None:
-        """Temporarily drop FTS triggers and reduce PRAGMA sync/journaling overhead for bulk ingestion."""
+        """Temporarily drop FTS triggers and track deltas in temp tables for bulk ingestion."""
         conn = self._get_conn()
         await conn.executescript(FTS_DROP_TRIGGERS_DDL)
-        await conn.execute("PRAGMA synchronous = OFF;")
-        logger.info("Entered ingest mode (FTS triggers dropped, pragmas relaxed).")
+        await conn.executescript("""
+            CREATE TEMP TABLE IF NOT EXISTS temp_ingest_chunk_inserts(id INTEGER PRIMARY KEY);
+            CREATE TEMP TABLE IF NOT EXISTS temp_ingest_chunk_deletes(id INTEGER PRIMARY KEY, text_preview BLOB);
+            DELETE FROM temp_ingest_chunk_inserts;
+            DELETE FROM temp_ingest_chunk_deletes;
+        """)
+        self._in_ingest_mode = True
+        logger.info("Entered ingest mode (FTS triggers dropped, tracking temp tables ready).")
 
     @serialize_write
     async def exit_ingest_mode(self) -> None:
-        """Restore FTS triggers, rebuild the FTS index, and restore PRAGMA sync/journaling."""
+        """Apply FTS deltas, cleanup temp tables, and restore FTS triggers."""
         conn = self._get_conn()
         
-        # We need to rebuild chunk_fts because inserts happened while triggers were dropped
-        logger.info("Rebuilding FTS index after bulk ingest...")
+        logger.info("Rebuilding FTS delta after bulk ingest...")
         await conn.executescript(f"""
-            DELETE FROM chunk_fts;
+            -- Deletes MUST run before inserts.
+            -- If SQLite reuses a rowid within the same ingest session, the new rowid
+            -- could theoretically land in both tracking tables. By processing deletes first,
+            -- the subsequent insert will correctly overwrite any stale delete state.
+            INSERT INTO chunk_fts(chunk_fts, rowid, chunks_text)
+            SELECT 'delete', id, zlib_decompress(text_preview) FROM temp_ingest_chunk_deletes;
+            
             INSERT INTO chunk_fts(rowid, chunks_text)
-            SELECT id, zlib_decompress(text_preview) FROM chunks;
+            SELECT id, zlib_decompress(text_preview) FROM chunks 
+            WHERE id IN (SELECT id FROM temp_ingest_chunk_inserts);
+            
+            DROP TABLE IF EXISTS temp_ingest_chunk_inserts;
+            DROP TABLE IF EXISTS temp_ingest_chunk_deletes;
             
             {FTS_TRIGGERS_DDL}
         """)
-        
-        await conn.execute("PRAGMA synchronous = NORMAL;")
-        logger.info("Exited ingest mode (FTS triggers restored, index rebuilt).")
+        self._in_ingest_mode = False
+        logger.info("Exited ingest mode (FTS delta applied, triggers restored).")
 
     @serialize_write
     async def fts_optimize(self) -> None:
@@ -632,32 +649,7 @@ class DatabaseManager:
             raise
         return file_ids
 
-    @serialize_write
-    async def insert_chunk(self, chunk_data: dict[str, Any]) -> int:
-        """Inserts a chunk and returns the new chunk id."""
-        conn = self._get_conn()
-        compressed_text = (
-            zlib.compress(chunk_data["text_preview"].encode("utf-8"))
-            if isinstance(chunk_data["text_preview"], str)
-            else chunk_data["text_preview"]
-        )
-        query = """
-        INSERT INTO chunks (file_id, start_offset, end_offset, text_preview, sentence_offsets, segmenter_version)
-        VALUES (:file_id, :start_offset, :end_offset, :text_preview, :sentence_offsets, :segmenter_version)
-        RETURNING id;
-        """  # noqa: E501
-        data = {
-            **chunk_data,
-            "text_preview": compressed_text,
-            "sentence_offsets": chunk_data.get("sentence_offsets"),
-            "segmenter_version": chunk_data.get("segmenter_version"),
-        }
-        async with conn.execute(query, data) as cursor:
-            row = await cursor.fetchone()
-            if row is None:
-                raise RuntimeError("INSERT RETURNING id failed for chunk")
-            chunk_id: int = row[0]
-            return chunk_id
+
 
     @serialize_write
     async def insert_chunks_bulk(self, chunks: list[dict[str, Any]], auto_commit: bool = True) -> list[int]:
@@ -698,6 +690,13 @@ class DatabaseManager:
                     row = await cursor.fetchone()
                     if row:
                         ids.append(row[0])
+            
+            if self._in_ingest_mode and ids:
+                await conn.executemany(
+                    "INSERT OR IGNORE INTO temp_ingest_chunk_inserts(id) VALUES (?)",
+                    [(i,) for i in ids]
+                )
+                        
             if auto_commit:
                 await self._maybe_commit(conn)
             return ids
@@ -739,6 +738,12 @@ class DatabaseManager:
             ) as cursor:
                 rows = await cursor.fetchall()
                 ids = [r[0] for r in rows]
+
+            if self._in_ingest_mode and ids:
+                await conn.executemany(
+                    "INSERT OR IGNORE INTO temp_ingest_chunk_inserts(id) VALUES (?)",
+                    [(i,) for i in ids]
+                )
 
             # Commit or release savepoint
             if auto_commit:
@@ -994,6 +999,12 @@ class DatabaseManager:
         Set ``auto_commit=False`` when called from a larger batch transaction.
         """
         conn = self._get_conn()
+        if self._in_ingest_mode:
+            await conn.execute(
+                "INSERT OR IGNORE INTO temp_ingest_chunk_deletes(id, text_preview) "
+                "SELECT id, text_preview FROM chunks WHERE file_id = ?",
+                (file_id,)
+            )
         await conn.execute("DELETE FROM chunks WHERE file_id = ?", (file_id,))
         if auto_commit:
             await self._maybe_commit(conn)

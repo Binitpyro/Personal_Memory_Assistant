@@ -53,6 +53,7 @@ dev = [
     "types-PyYAML",
     "types-openpyxl",
     "types-requests",
+    "types-psutil",
 ]
 
 [tool.ruff]
@@ -120,6 +121,7 @@ warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false
 check_untyped_defs = true
+explicit_package_bases = true
 exclude = ['^\.pytest_temp/', '^tests/', '^dist/']
 
 [[tool.mypy.overrides]]

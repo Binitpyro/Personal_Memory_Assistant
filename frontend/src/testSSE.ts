@@ -1,5 +1,7 @@
-// Mock QueryStreamChunk for test
-type QueryStreamChunk = any;
+interface QueryStreamChunk {
+  type: string;
+  text?: string;
+}
 
 async function runTest() {
   // Case 1: split mid-key
@@ -13,7 +15,7 @@ async function runTest() {
   // Case 3: between two complete JSON objects with no newline
   const chunk5 = '{"type":"fast_path", "text":"fast"}{"type":"done"}\n';
   
-  let chunks = [chunk1, chunk2, chunk3, chunk4, chunk5];
+  const chunks = [chunk1, chunk2, chunk3, chunk4, chunk5];
   
   const results: QueryStreamChunk[] = [];
   
@@ -36,7 +38,9 @@ async function runTest() {
       if (buffer.trim()) {
         try {
           results.push(JSON.parse(buffer));
-        } catch { /* ignore */ }
+        } catch {
+          // ignore parsing error for trailing chunk
+        }
       }
       break;
     }
@@ -48,7 +52,9 @@ async function runTest() {
       if (!line.trim()) continue;
       try {
         results.push(JSON.parse(line));
-      } catch (err) {}
+      } catch {
+        // ignore parsing error for chunk line
+      }
     }
   }
 
@@ -72,4 +78,4 @@ async function runTest() {
   }
 }
 
-runTest();
+runTest().catch(console.error);

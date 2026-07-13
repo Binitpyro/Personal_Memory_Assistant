@@ -122,9 +122,14 @@ class CodeChunker:
             return self._chunk_fallback(text, prefix)
 
     def _chunk_javascript(self, text: str, prefix: str, file_path: str) -> list[dict[str, Any]]:
-        # Regex heuristic for TS/JS: exported functions, classes, consts
         pattern = re.compile(
-            r"^(?:export\s+)?(?:async\s+)?(?:function|class|const|let|var)\s+\w+\s*=?\s*(?:\([^)]*\))?\s*(?:=>)?\s*[{]",
+            r"^(?:export\s+)?"
+            r"(?:"
+            r"(?:async\s+)?function\s+\w+\s*\([^)]*\)\s*\{|"
+            r"class\s+\w+(?:\s+extends\s+\w+)?\s*\{|"
+            r"(?:const|let|var)\s+\w+\s*=\s*(?:async\s*)?(?:\([^)]*\))?\s*=>\s*\{|"
+            r"(?:const|let|var)\s+\w+\s*=\s*\{"
+            r")",
             re.MULTILINE,
         )
         extractor = CodeGraphExtractor("js")

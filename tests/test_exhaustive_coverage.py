@@ -37,6 +37,7 @@ def mock_emb():
     m.is_ready = True
     m.embed_query = AsyncMock(return_value=[0.1] * 384)
     import numpy as np
+
     m.embed_texts = AsyncMock(return_value=np.array([[0.1] * 384], dtype=np.float32))
     return m
 

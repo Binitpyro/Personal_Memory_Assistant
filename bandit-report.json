@@ -1,17 +1,17 @@
 {
   "errors": [],
-  "generated_at": "2026-07-09T15:48:50Z",
+  "generated_at": "2026-07-12T19:20:03Z",
   "metrics": {
     "_totals": {
-      "CONFIDENCE.HIGH": 10,
-      "CONFIDENCE.LOW": 15,
+      "CONFIDENCE.HIGH": 11,
+      "CONFIDENCE.LOW": 20,
       "CONFIDENCE.MEDIUM": 4,
       "CONFIDENCE.UNDEFINED": 0,
       "SEVERITY.HIGH": 0,
-      "SEVERITY.LOW": 12,
-      "SEVERITY.MEDIUM": 17,
+      "SEVERITY.LOW": 13,
+      "SEVERITY.MEDIUM": 22,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 8246,
+      "loc": 8664,
       "nosec": 0,
       "skipped_tests": 0
     },
@@ -219,7 +219,7 @@
       "SEVERITY.LOW": 1,
       "SEVERITY.MEDIUM": 1,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 183,
+      "loc": 238,
       "nosec": 0,
       "skipped_tests": 0
     },
@@ -388,7 +388,7 @@
       "SEVERITY.LOW": 0,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 752,
+      "loc": 887,
       "nosec": 0,
       "skipped_tests": 0
     },
@@ -453,7 +453,7 @@
       "SEVERITY.LOW": 0,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 398,
+      "loc": 400,
       "nosec": 0,
       "skipped_tests": 0
     },
@@ -628,14 +628,14 @@
     },
     "app\\storage\\db.py": {
       "CONFIDENCE.HIGH": 1,
-      "CONFIDENCE.LOW": 10,
+      "CONFIDENCE.LOW": 15,
       "CONFIDENCE.MEDIUM": 1,
       "CONFIDENCE.UNDEFINED": 0,
       "SEVERITY.HIGH": 0,
       "SEVERITY.LOW": 1,
-      "SEVERITY.MEDIUM": 11,
+      "SEVERITY.MEDIUM": 16,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 1361,
+      "loc": 1481,
       "nosec": 0,
       "skipped_tests": 0
     },
@@ -666,15 +666,15 @@
       "skipped_tests": 0
     },
     "app\\vector_store\\lancedb_client.py": {
-      "CONFIDENCE.HIGH": 5,
+      "CONFIDENCE.HIGH": 6,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
       "CONFIDENCE.UNDEFINED": 0,
       "SEVERITY.HIGH": 0,
-      "SEVERITY.LOW": 5,
+      "SEVERITY.LOW": 6,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 299,
+      "loc": 405,
       "nosec": 0,
       "skipped_tests": 0
     }

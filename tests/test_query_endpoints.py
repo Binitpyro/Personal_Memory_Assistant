@@ -50,13 +50,15 @@ async def test_api_query_standard(
             "summary": "Main entry point file",
         }
     )
-    await mock_db.insert_chunk(
-        {
-            "file_id": file_id,
-            "start_offset": 0,
-            "end_offset": 100,
-            "text_preview": "import os\ndef main():\n    print('Hello World')\n# End of file content string long enough to satisfy snippet length requirements",  # noqa: E501
-        }
+    await mock_db.insert_chunks_bulk(
+        [
+            {
+                "file_id": file_id,
+                "start_offset": 0,
+                "end_offset": 100,
+                "text_preview": "import os\ndef main():\n    print('Hello World')\n# End of file content string long enough to satisfy snippet length requirements",  # noqa: E501
+            }
+        ]
     )
 
     # Setup LanceDB search mocks
@@ -112,13 +114,15 @@ async def test_api_query_stream_standard(
             "summary": "Main entry point file",
         }
     )
-    await mock_db.insert_chunk(
-        {
-            "file_id": file_id,
-            "start_offset": 0,
-            "end_offset": 100,
-            "text_preview": "import os\ndef main():\n    print('Hello World')\n# End of file content string long enough to satisfy snippet length",  # noqa: E501
-        }
+    await mock_db.insert_chunks_bulk(
+        [
+            {
+                "file_id": file_id,
+                "start_offset": 0,
+                "end_offset": 100,
+                "text_preview": "import os\ndef main():\n    print('Hello World')\n# End of file content string long enough to satisfy snippet length",  # noqa: E501
+            }
+        ]
     )
 
     mock_lancedb.semantic_search = AsyncMock(
@@ -292,13 +296,15 @@ async def test_retrieval_llm_failure_handling(mock_db, mock_emb, mock_lancedb, o
             "summary": "Main entry point file",
         }
     )
-    await mock_db.insert_chunk(
-        {
-            "file_id": file_id,
-            "start_offset": 0,
-            "end_offset": 100,
-            "text_preview": "import os\ndef main():\n    print('Hello World')\n# End of file content string long enough to satisfy snippet length requirements",  # noqa: E501
-        }
+    await mock_db.insert_chunks_bulk(
+        [
+            {
+                "file_id": file_id,
+                "start_offset": 0,
+                "end_offset": 100,
+                "text_preview": "import os\ndef main():\n    print('Hello World')\n# End of file content string long enough to satisfy snippet length requirements",  # noqa: E501
+            }
+        ]
     )
 
     mock_lancedb.semantic_search = AsyncMock(

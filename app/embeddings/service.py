@@ -49,7 +49,7 @@ class EmbeddingService:
             "model_quantized.onnx",
             "model_int8.onnx",
             "onnx/model_quantized.onnx",
-            "onnx/model_int8.onnx"
+            "onnx/model_int8.onnx",
         ]
         for q_name in quantized_names:
             candidate = model_path / q_name
@@ -114,16 +114,22 @@ class EmbeddingService:
                 dummy_inputs["token_type_ids"] = dummy_token_type_ids
 
             self._session.run(None, dummy_inputs)
-            
+
             # Dynamically determine the embedding dimension from a dummy run
             dummy_emb = self._mean_pooling(
                 self._session.run(None, dummy_inputs), dummy_attention_mask
             )
             self._embedding_dim = dummy_emb.shape[1]
-            
-            logger.info("ONNX Runtime prewarmed successfully with dummy batch (batch=1, seq=8). Extracted dim: %d", self._embedding_dim)
+
+            logger.info(
+                "ONNX Runtime prewarmed successfully with dummy batch (batch=1, seq=8). "
+                "Extracted dim: %d",
+                self._embedding_dim,
+            )
         except Exception as prewarm_err:
-            logger.warning("Failed to prewarm ONNX session or extract embedding dimension: %s", prewarm_err)
+            logger.warning(
+                "Failed to prewarm ONNX session or extract embedding dimension: %s", prewarm_err
+            )
 
     def load_model(self) -> None:
         """Loads the embedding model using ONNX Runtime (blocking)."""
@@ -221,9 +227,9 @@ class EmbeddingService:
         def _run_inference():
             num_batches = (len(unique_texts) + effective_batch_size - 1) // effective_batch_size
             if not unique_texts:
-                return np.empty((0, self._embedding_dim), dtype=np.float32)
+                return np.zeros((0, self._embedding_dim), dtype=np.float32)
 
-            out_array = np.empty((len(unique_texts), self._embedding_dim), dtype=np.float32)
+            out_array = np.zeros((len(unique_texts), self._embedding_dim), dtype=np.float32)
 
             for i in range(0, len(unique_texts), effective_batch_size):
                 if progress_callback:
@@ -251,29 +257,28 @@ class EmbeddingService:
                 # Normalization
                 sentence_embeddings = self._normalize(sentence_embeddings)
 
-                out_array[i : i + effective_batch_size] = sentence_embeddings
+                end = i + len(batch)
+                out_array[i:end] = sentence_embeddings
 
             return out_array
 
         unique_embeddings = await loop.run_in_executor(None, _run_inference)
         if len(unique_embeddings) == 0:
-            return unique_embeddings
-        return unique_embeddings[original_map]
+            return unique_embeddings  # type: ignore[no-any-return]
+        return unique_embeddings[original_map]  # type: ignore[no-any-return]
 
-    def embed_texts_sync(
-        self, texts: list[str], batch_size: int | None = None
-    ) -> np.ndarray:
+    def embed_texts_sync(self, texts: list[str], batch_size: int | None = None) -> np.ndarray:
         if not self._session and not self.wait_until_ready(timeout=60):
             raise RuntimeError("Embedding model not ready.")
 
         if not texts:
-            return np.empty((0, self._embedding_dim), dtype=np.float32)
+            return np.zeros((0, self._embedding_dim), dtype=np.float32)
 
         unique_texts = list(set(texts))
         text_to_idx = {t: i for i, t in enumerate(unique_texts)}
         effective_batch_size = batch_size or self.optimal_batch_size
 
-        out_array = np.empty((len(unique_texts), self._embedding_dim), dtype=np.float32)
+        out_array = np.zeros((len(unique_texts), self._embedding_dim), dtype=np.float32)
         for i in range(0, len(unique_texts), effective_batch_size):
             batch = unique_texts[i : i + effective_batch_size]
             encoded = self._tokenizer.encode_batch(batch)
@@ -290,7 +295,8 @@ class EmbeddingService:
                 },
             )
             pooled = self._mean_pooling(out, attention_mask)
-            out_array[i : i + effective_batch_size] = self._normalize(pooled)
+            end = i + len(batch)
+            out_array[i:end] = self._normalize(pooled)
 
         if len(out_array) == 0:
             return out_array

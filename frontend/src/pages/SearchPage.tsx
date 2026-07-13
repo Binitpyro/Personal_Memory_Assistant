@@ -1,7 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { Search, Send, Loader2, Sparkles, Clock, Trash2, RotateCcw } from 'lucide-react';
 import { useApi, invalidateCache } from '../useApi';
-import { getQueryHistory, clearQueryHistory, getFileTree, getAppConfig } from '../api';
+import { getQueryHistory, clearQueryHistory, getFileTree, getAppConfig, type HistoryItem } from '../api';
 import { useChatStream } from '../hooks/useChatStream';
 import { MessageBubble } from '../components/chat/MessageBubble';
 import { FilterBar } from '../components/chat/FilterBar';
@@ -61,8 +61,8 @@ export function SearchPage() {
         forced_chunk_id: forcedChunkId,
         isRetry: !!overrideQuestion || !!forcedChunkId
       });
-    } catch (err: any) {
-      setError(err.message || 'Search failed');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Search failed');
     }
   }, [question, isSearching, executeSearch, selectedFileType, selectedFolderTag, selectedMode, messages]);
 
@@ -161,7 +161,7 @@ export function SearchPage() {
             >
               <div className="px-4 py-2 text-[10px] font-black text-text-secondary border-b border-white/5 uppercase tracking-widest">Recent Searches</div>
               <div className="max-h-48 overflow-y-auto custom-scrollbar">
-                {historyData.history.slice(0, 10).map((h: any) => (
+                {historyData.history.slice(0, 10).map((h: HistoryItem) => (
                   <button
                     key={`${h.created_at}-${h.question}`}
                     role="option"

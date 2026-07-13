@@ -32,6 +32,7 @@ class MockEmbeddingService:
         if progress_callback:
             progress_callback(1, 1)
         import numpy as np
+
         return np.array([[0.1] * 384 for _ in texts], dtype=np.float32)
 
     def load_model_background(self):

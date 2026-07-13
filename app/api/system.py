@@ -183,31 +183,34 @@ async def get_system_info():
     }
 
 
+def _sync_enable_split_brain(env_file: str) -> None:
+    lines = []
+    if os.path.exists(env_file):
+        with open(env_file, encoding="utf-8") as f:
+            lines = f.readlines()
+
+    found = False
+    for i, line in enumerate(lines):
+        if line.startswith("PMA_LANCEDB_MODE="):
+            lines[i] = "PMA_LANCEDB_MODE=split_brain\n"
+            found = True
+            break
+
+    if not found:
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        lines.append("PMA_LANCEDB_MODE=split_brain\n")
+
+    with open(env_file, "w", encoding="utf-8") as f:
+        f.writelines(lines)
+
+
 @router.post("/system/enable-split-brain")
 async def enable_split_brain():
     """Edits the .env file to enable split_brain mode."""
     env_file = ".env"
     try:
-        lines = []
-        if os.path.exists(env_file):
-            with open(env_file, encoding="utf-8") as f:
-                lines = f.readlines()
-
-        found = False
-        for i, line in enumerate(lines):
-            if line.startswith("PMA_LANCEDB_MODE="):
-                lines[i] = "PMA_LANCEDB_MODE=split_brain\n"
-                found = True
-                break
-
-        if not found:
-            if lines and not lines[-1].endswith("\n"):
-                lines[-1] += "\n"
-            lines.append("PMA_LANCEDB_MODE=split_brain\n")
-
-        with open(env_file, "w", encoding="utf-8") as f:
-            f.writelines(lines)
-
+        await asyncio.to_thread(_sync_enable_split_brain, env_file)
         return {"message": "Split-brain mode enabled in .env"}
     except (OSError, PermissionError) as e:
         from fastapi import HTTPException
@@ -216,6 +219,7 @@ async def enable_split_brain():
         raise HTTPException(  # noqa: B904
             status_code=403, detail="Failed to write to .env file. Please edit it manually."
         )
+
 
 
 @router.post("/system/purge-host-cache")

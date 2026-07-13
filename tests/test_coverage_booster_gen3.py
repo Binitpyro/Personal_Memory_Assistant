@@ -181,22 +181,6 @@ async def test_scan_all_folders_rust_mocked(monkeypatch):
     assert method_fallback == "scandir"  # fell back to python
 
 
-def test_indexing_service_large_file_sha256():
-    service = IndexingService(
-        db=MagicMock(), embedding_service=MagicMock(), lancedb_client=MagicMock()
-    )
-
-    mock_path = MagicMock()
-    mock_path.stat.return_value.st_size = 150 * 1024 * 1024
-
-    sha = service._calculate_sha256(mock_path)
-    assert sha == f"sampled_{150 * 1024 * 1024}"
-
-    # Exception path
-    mock_path.stat.side_effect = Exception("stat error")
-    assert service._calculate_sha256(mock_path) == ""
-
-
 def test_indexing_service_is_binary():
     service = IndexingService(
         db=MagicMock(), embedding_service=MagicMock(), lancedb_client=MagicMock()

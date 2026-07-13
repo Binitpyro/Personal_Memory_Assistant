@@ -37,23 +37,23 @@ import type { NavigationController } from '../interaction/NavigationController';
 
 /** Both renderer classes conform to this shape; the hook is generic over it. */
 interface RendererLike {
-    init(): Promise<void>;
-    loadData(buf: ArrayBuffer): Promise<void>;
-    render(): void;
-    pick(x: number, y: number): Promise<number | null>;
-    resize(w: number, h: number): void;
-    destroy(): void;
-    handleMouseMove(dx: number, dy: number): void;
-    handleZoom(delta: number): void;
-    focusOnNode(sourceIndex: number): void;
+    readonly init: () => Promise<void>;
+    readonly loadData: (buf: ArrayBuffer) => Promise<void>;
+    readonly render: () => void;
+    readonly pick: (x: number, y: number) => Promise<number | null>;
+    readonly resize: (w: number, h: number) => void;
+    readonly destroy: () => void;
+    readonly handleMouseMove: (dx: number, dy: number) => void;
+    readonly handleZoom: (delta: number) => void;
+    readonly focusOnNode: (sourceIndex: number) => void;
     readonly nav: NavigationController;
 }
 
 export interface WebGPUFallbackProps {
-    allFiles: Record<string, FileEntry[]>;
-    activeFilter?: string | null;
-    onFilterChange?: (ext: string | null) => void;
-    initialMode?: 'folder' | 'type';
+    readonly allFiles: Record<string, FileEntry[]>;
+    readonly activeFilter?: string | null;
+    readonly onFilterChange?: (ext: string | null) => void;
+    readonly initialMode?: 'folder' | 'type';
 }
 
 /**
@@ -243,8 +243,8 @@ function useDreamscapeCanvas<R extends RendererLike>(
 }
 
 interface CanvasInnerProps extends WebGPUFallbackProps {
-    tier: 'webgpu' | 'webgl2';
-    onError: (msg: string) => void;
+    readonly tier: 'webgpu' | 'webgl2';
+    readonly onError: (msg: string) => void;
 }
 
 const DreamscapeCanvas: React.FC<CanvasInnerProps> = ({ activeFilter, tier, onError }) => {

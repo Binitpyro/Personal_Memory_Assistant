@@ -1,6 +1,6 @@
-import os
 import random
 from pathlib import Path
+
 import docx
 
 # Technical phrases/paragraphs to build natural-looking corpus
@@ -14,28 +14,41 @@ TOPICS = [
     "StreamChunker is designed to handle very large logs and files with limited RAM.",
     "The desktop shell is built on Tauri v2 with system browser authentication flow.",
     "GraphRAG builds a local knowledge graph of entities and code relationships.",
-    "ONNX runtime executes the MiniLM embedding model on CPU with bounded memory config."
+    "ONNX runtime executes the MiniLM embedding model on CPU with bounded memory config.",
 ]
 
+
 def generate_sentence():
-    return random.choice(TOPICS) + " " + " ".join(random.choices([
-        "This enhances retrieval precision.",
-        "Local-first design ensures data privacy.",
-        "Performance optimization reduces peak RSS.",
-        "Vector search uses cosine similarity metric.",
-        "File metadata includes path, size, and modified time.",
-        "Chunking strategy depends on file type.",
-        "Code files use AST parsing for better context.",
-        "Markdown headers provide structural hierarchy.",
-        "Caching results improves user experience.",
-        "Incremental sync minimizes indexing time."
-    ], k=3))
+    return (
+        random.choice(TOPICS)  # noqa: S311
+        + " "
+        + " ".join(
+            random.choices(  # noqa: S311
+                [
+                    "This enhances retrieval precision.",
+                    "Local-first design ensures data privacy.",
+                    "Performance optimization reduces peak RSS.",
+                    "Vector search uses cosine similarity metric.",
+                    "File metadata includes path, size, and modified time.",
+                    "Chunking strategy depends on file type.",
+                    "Code files use AST parsing for better context.",
+                    "Markdown headers provide structural hierarchy.",
+                    "Caching results improves user experience.",
+                    "Incremental sync minimizes indexing time.",
+                ],
+                k=3,
+            )
+        )
+    )
+
 
 def generate_paragraph(num_sentences=4):
     return " ".join(generate_sentence() for _ in range(num_sentences))
 
+
 def generate_text_content(num_paragraphs=3):
     return "\n\n".join(generate_paragraph() for _ in range(num_paragraphs))
+
 
 def generate_code_py(index):
     return f"""# Dummy python file {index}
@@ -60,6 +73,7 @@ def run_retrieval_job_{index}(query: str, limit: int = 5):
     print(f"Retrieving for query: {{query}}, success: {{result}}")
     return [query] * limit
 """
+
 
 def generate_code_js(index):
     return f"""// Dummy javascript file {index}
@@ -90,6 +104,7 @@ function executeQuery_{index}(query) {{
     return store.search(query);
 }}
 """
+
 
 def generate_code_rs(index):
     return f"""// Dummy rust file {index}
@@ -124,65 +139,72 @@ pub fn main_{index}() {{
 }}
 """
 
+
 def create_minimal_pdf(filename, text):
-    lines = text.split('\n')
+    lines = text.split("\n")
     content_parts = ["BT", "/F1 12 Tf", "50 750 Td", "14 TL"]
     for line in lines:
         if not line.strip():
             continue
-        words = line.split(' ')
+        words = line.split(" ")
         chunk = ""
         for word in words:
             if len(chunk) + len(word) + 1 > 80:
-                escaped = chunk.replace('(', '\\(').replace(')', '\\)')
+                escaped = chunk.replace("(", "\\(").replace(")", "\\)")
                 content_parts.append(f"({escaped}) Tj T*")
                 chunk = word
             else:
                 chunk = chunk + " " + word if chunk else word
         if chunk:
-            escaped = chunk.replace('(', '\\(').replace(')', '\\)')
+            escaped = chunk.replace("(", "\\(").replace(")", "\\)")
             content_parts.append(f"({escaped}) Tj T*")
     content_parts.append("ET")
     content = "\n".join(content_parts)
-    content_bytes = content.encode('utf-8', errors='replace')
-    
-    objects = []
-    offsets = []
+    content_bytes = content.encode("utf-8", errors="replace")
+
+    objects: list[bytes] = []
+    offsets: list[int] = []
     header = b"%PDF-1.4\n"
-    
-    def add_object(obj_bytes):
-        offsets.append(len(header) + sum(len(o) for o in objects))
+
+    def add_object(obj_bytes: bytes) -> None:
+        offsets.append(len(header) + sum((len(o) for o in objects), start=0))
         objects.append(obj_bytes)
-        
+
     add_object(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n")
     add_object(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n")
-    add_object(b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R /MediaBox [0 0 612 792] >>\nendobj\n")
+    add_object(
+        b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R /MediaBox [0 0 612 792] >>\nendobj\n"  # noqa: E501
+    )
     add_object(b"4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n")
-    
+
     stream_len = len(content_bytes)
-    obj5_header = f"5 0 obj\n<< /Length {stream_len} >>\nstream\n".encode('latin1')
+    obj5_header = f"5 0 obj\n<< /Length {stream_len} >>\nstream\n".encode("latin1")
     obj5_footer = b"\nendstream\nendobj\n"
     add_object(obj5_header + content_bytes + obj5_footer)
-    
+
     xref_pos = len(header) + sum(len(o) for o in objects)
-    xref = f"xref\n0 {len(offsets) + 1}\n0000000000 65535 f \n".encode('latin1')
+    xref = f"xref\n0 {len(offsets) + 1}\n0000000000 65535 f \n".encode("latin1")
     for offset in offsets:
-        xref += f"{offset:010d} 00000 n \n".encode('latin1')
-        
-    trailer = f"trailer\n<< /Size {len(offsets) + 1} /Root 1 0 R >>\nstartxref\n{xref_pos}\n%%EOF\n".encode('latin1')
-    
-    with open(filename, 'wb') as f:
+        xref += f"{offset:010d} 00000 n \n".encode("latin1")
+
+    trailer = f"trailer\n<< /Size {len(offsets) + 1} /Root 1 0 R >>\nstartxref\n{xref_pos}\n%%EOF\n".encode(  # noqa: E501
+        "latin1"
+    )
+
+    with open(filename, "wb") as f:
         f.write(header)
         for obj in objects:
             f.write(obj)
         f.write(xref)
         f.write(trailer)
 
+
 def create_docx(filename, text):
     doc = docx.Document()
-    for para in text.split('\n\n'):
+    for para in text.split("\n\n"):
         doc.add_paragraph(para)
     doc.save(filename)
+
 
 def main():
     corpus_dir = Path("tests/fixtures/perf_corpus_501")
@@ -238,6 +260,7 @@ def main():
 
     total_files = len(list(corpus_dir.glob("*")))
     print(f"Corpus generation complete. Generated {total_files} files in total.")
+
 
 if __name__ == "__main__":
     main()

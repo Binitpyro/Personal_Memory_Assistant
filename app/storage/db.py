@@ -10,6 +10,7 @@ import os
 import sys
 import uuid
 import zlib
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -63,7 +64,6 @@ DROP TRIGGER IF EXISTS chunks_au;
 """
 
 
-
 import functools  # noqa: E402
 
 
@@ -86,7 +86,6 @@ class DatabaseManager:
         self._write_conn: aiosqlite.Connection | None = None
         self._read_pool: asyncio.Queue[aiosqlite.Connection] | None = None
         self.conn_factory: Callable[[], aiosqlite.Connection] | None = None
-        self._in_external_transaction = False
         self._in_ingest_mode = False
         self._pool_initialized = False
         self._pool_lock: asyncio.Lock | None = None
@@ -120,14 +119,16 @@ class DatabaseManager:
 
             self._pool_initialized = True
 
-    async def _configure_conn(self, conn: aiosqlite.Connection, is_write_conn: bool = False) -> None:
+    async def _configure_conn(
+        self, conn: aiosqlite.Connection, is_write_conn: bool = False
+    ) -> None:
         """Apply performance pragmas and custom functions to a connection."""
         conn.row_factory = aiosqlite.Row
         await conn.create_function("zlib_decompress", 1, _zlib_decompress_fn)
 
         await conn.execute("PRAGMA foreign_keys = ON;")
         await conn.execute("PRAGMA busy_timeout = 5000;")
-        
+
         if is_write_conn:
             await conn.execute("PRAGMA auto_vacuum = INCREMENTAL;")
             await conn.execute("PRAGMA journal_mode = WAL;")
@@ -135,16 +136,14 @@ class DatabaseManager:
 
         # ── Performance PRAGMAs ──────────────────────────────────
         await conn.execute("PRAGMA cache_size = -8192;")  # 8 MB page cache
-        await conn.execute(
-            "PRAGMA mmap_size = 1073741824;"
-        )  # 1 GB memory-mapped I/O
+        await conn.execute("PRAGMA mmap_size = 1073741824;")  # 1 GB memory-mapped I/O
         await conn.execute("PRAGMA temp_store = MEMORY;")  # temp tables in RAM
         # NOTE: page_size only affects new databases. Existing ones ignore this until VACUUM.
         await conn.execute("PRAGMA page_size = 32768;")
         await conn.execute("PRAGMA threads = 4;")
         # NOTE: read_uncommitted only has an effect in shared-cache mode (aiosqlite uses private).
         await conn.execute("PRAGMA read_uncommitted = ON;")
-        
+
         if is_write_conn:
             await conn.execute("PRAGMA wal_autocheckpoint = 10000;")
 
@@ -289,6 +288,38 @@ class DatabaseManager:
             )
         """)
         await conn.commit()
+
+        # Create system_state table if not exists
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS system_state (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
+        await conn.commit()
+
+        # Bug 5 (recreate FTS table and triggers if aborted bulk ingestion)
+        try:
+            async with conn.execute(
+                "SELECT value FROM system_state WHERE key = 'fts_dirty'"
+            ) as cur:
+                row = await cur.fetchone()
+                if row and row[0] == "1":
+                    logger.warning("FTS table left dirty from previous crash, rebuilding...")
+                    query = f"""
+                        DROP TABLE IF EXISTS chunk_fts;
+                        {FTS_TABLE_DDL}
+                        INSERT INTO chunk_fts(rowid, chunks_text)
+                        SELECT id, zlib_decompress(text_preview) FROM chunks;
+                        {FTS_TRIGGERS_DDL}
+                    """  # noqa: S608
+                    await conn.executescript(query)
+                    await conn.execute(
+                        "INSERT OR REPLACE INTO system_state (key, value) VALUES ('fts_dirty', '0')"
+                    )
+                    await conn.commit()
+        except Exception as exc:
+            logger.debug("Failed to recover FTS from dirty state: %s", exc)
 
         await self._apply_column_migrations(conn)
 
@@ -438,14 +469,15 @@ class DatabaseManager:
             if row and ("detail=full" not in row[0] or "trigram" not in row[0]):
                 # We use content="" (contentless) because the actual text is compressed
                 # in the source table and decompressed via triggers into the FTS index.
-                await conn.executescript(f"""
+                query = f"""
                     {FTS_DROP_TRIGGERS_DDL}
                     DROP TABLE IF EXISTS chunk_fts;
                     {FTS_TABLE_DDL}
                     {FTS_TRIGGERS_DDL}
                     INSERT INTO chunk_fts(rowid, chunks_text)
                     SELECT id, zlib_decompress(text_preview) FROM chunks;
-                """)
+                """  # noqa: S608
+                await conn.executescript(query)
                 await conn.commit()
                 logger.info("Storage optimization: Optimized chunk_fts schema.")
         except Exception as exc:
@@ -455,10 +487,16 @@ class DatabaseManager:
     async def enter_ingest_mode(self) -> None:
         """Temporarily drop FTS triggers and track deltas in temp tables for bulk ingestion."""
         conn = self._get_conn()
+        await conn.execute(
+            "INSERT OR REPLACE INTO system_state (key, value) VALUES ('fts_dirty', '1')"
+        )
+        await conn.commit()
         await conn.executescript(FTS_DROP_TRIGGERS_DDL)
         await conn.executescript("""
             CREATE TEMP TABLE IF NOT EXISTS temp_ingest_chunk_inserts(id INTEGER PRIMARY KEY);
-            CREATE TEMP TABLE IF NOT EXISTS temp_ingest_chunk_deletes(id INTEGER PRIMARY KEY, text_preview BLOB);
+            CREATE TEMP TABLE IF NOT EXISTS temp_ingest_chunk_deletes(
+                id INTEGER PRIMARY KEY, text_preview BLOB
+            );
             DELETE FROM temp_ingest_chunk_inserts;
             DELETE FROM temp_ingest_chunk_deletes;
         """)
@@ -469,25 +507,30 @@ class DatabaseManager:
     async def exit_ingest_mode(self) -> None:
         """Apply FTS deltas, cleanup temp tables, and restore FTS triggers."""
         conn = self._get_conn()
-        
+
         logger.info("Rebuilding FTS delta after bulk ingest...")
-        await conn.executescript(f"""
+        query = f"""
             -- Deletes MUST run before inserts.
             -- If SQLite reuses a rowid within the same ingest session, the new rowid
             -- could theoretically land in both tracking tables. By processing deletes first,
             -- the subsequent insert will correctly overwrite any stale delete state.
             INSERT INTO chunk_fts(chunk_fts, rowid, chunks_text)
             SELECT 'delete', id, zlib_decompress(text_preview) FROM temp_ingest_chunk_deletes;
-            
+
             INSERT INTO chunk_fts(rowid, chunks_text)
-            SELECT id, zlib_decompress(text_preview) FROM chunks 
+            SELECT id, zlib_decompress(text_preview) FROM chunks
             WHERE id IN (SELECT id FROM temp_ingest_chunk_inserts);
-            
+
             DROP TABLE IF EXISTS temp_ingest_chunk_inserts;
             DROP TABLE IF EXISTS temp_ingest_chunk_deletes;
-            
+
             {FTS_TRIGGERS_DDL}
-        """)
+        """  # noqa: S608
+        await conn.executescript(query)
+        await conn.execute(
+            "INSERT OR REPLACE INTO system_state (key, value) VALUES ('fts_dirty', '0')"
+        )
+        await conn.commit()
         self._in_ingest_mode = False
         logger.info("Exited ingest mode (FTS delta applied, triggers restored).")
 
@@ -586,7 +629,9 @@ class DatabaseManager:
             return file_id
 
     @serialize_write
-    async def batch_insert_files(self, files_data: list[dict[str, Any]], auto_commit: bool = True) -> list[int]:
+    async def batch_insert_files(
+        self, files_data: list[dict[str, Any]], auto_commit: bool = True
+    ) -> list[int]:
         """Inserts multiple file metadata records in a single transaction."""
         if not files_data:
             return []
@@ -649,10 +694,10 @@ class DatabaseManager:
             raise
         return file_ids
 
-
-
     @serialize_write
-    async def insert_chunks_bulk(self, chunks: list[dict[str, Any]], auto_commit: bool = True) -> list[int]:
+    async def insert_chunks_bulk(
+        self, chunks: list[dict[str, Any]], auto_commit: bool = True
+    ) -> list[int]:
         """Insert multiple chunks efficiently in a single transaction.
 
         Uses a batch INSERT approach: inserts all rows first,
@@ -690,13 +735,13 @@ class DatabaseManager:
                     row = await cursor.fetchone()
                     if row:
                         ids.append(row[0])
-            
+
             if self._in_ingest_mode and ids:
                 await conn.executemany(
                     "INSERT OR IGNORE INTO temp_ingest_chunk_inserts(id) VALUES (?)",
-                    [(i,) for i in ids]
+                    [(i,) for i in ids],
                 )
-                        
+
             if auto_commit:
                 await self._maybe_commit(conn)
             return ids
@@ -742,7 +787,7 @@ class DatabaseManager:
             if self._in_ingest_mode and ids:
                 await conn.executemany(
                     "INSERT OR IGNORE INTO temp_ingest_chunk_inserts(id) VALUES (?)",
-                    [(i,) for i in ids]
+                    [(i,) for i in ids],
                 )
 
             # Commit or release savepoint
@@ -764,7 +809,9 @@ class DatabaseManager:
             raise
 
     @serialize_write
-    async def insert_chunk_embeddings_bulk(self, data: list[tuple[int, bytes]], auto_commit: bool = True) -> None:
+    async def insert_chunk_embeddings_bulk(
+        self, data: list[tuple[int, bytes]], auto_commit: bool = True
+    ) -> None:
         """Insert multiple chunk embeddings in a single transaction."""
         if not data:
             return
@@ -778,7 +825,9 @@ class DatabaseManager:
             await self._maybe_commit(conn)
 
     @serialize_write
-    async def insert_kg_nodes_bulk(self, data: list[tuple[str, str, str, str, int | None]], auto_commit: bool = True) -> None:
+    async def insert_kg_nodes_bulk(
+        self, data: list[tuple[str, str, str, str, int | None]], auto_commit: bool = True
+    ) -> None:
         """Insert multiple kg_nodes efficiently.
         data format: list of (id, type, label, properties, chunk_id)
         """
@@ -794,7 +843,9 @@ class DatabaseManager:
             await self._maybe_commit(conn)
 
     @serialize_write
-    async def insert_kg_edges_bulk(self, data: list[tuple[str, str, str, float, str]], auto_commit: bool = True) -> None:
+    async def insert_kg_edges_bulk(
+        self, data: list[tuple[str, str, str, float, str]], auto_commit: bool = True
+    ) -> None:
         """Insert multiple kg_edges efficiently.
         data format: list of (source, target, relation, weight, properties)
         """
@@ -960,37 +1011,32 @@ class DatabaseManager:
             return [r[0] for r in rows]
 
     async def _maybe_commit(self, conn: aiosqlite.Connection) -> None:
-        """Commit the connection if not in an external transaction."""
-        if not self._in_external_transaction:
-            await conn.commit()
+        """Commit the connection."""
+        await conn.commit()
 
     @serialize_write
     async def commit(self) -> None:
         """Explicitly commits the current transaction."""
         if self.conn:
             await self.conn.commit()
-            self._in_external_transaction = False
 
     @serialize_write
     async def begin_transaction(self) -> None:
         """Begin an external write transaction."""
         conn = self._get_conn()
         await conn.execute("BEGIN IMMEDIATE")
-        self._in_external_transaction = True
 
     @serialize_write
     async def commit_transaction(self) -> None:
         """Commit the external write transaction."""
         conn = self._get_conn()
         await conn.commit()
-        self._in_external_transaction = False
 
     @serialize_write
     async def rollback_transaction(self) -> None:
         """Rollback the external write transaction."""
         conn = self._get_conn()
         await conn.rollback()
-        self._in_external_transaction = False
 
     @serialize_write
     async def delete_file_chunks(self, file_id: int, *, auto_commit: bool = True) -> None:
@@ -1003,7 +1049,7 @@ class DatabaseManager:
             await conn.execute(
                 "INSERT OR IGNORE INTO temp_ingest_chunk_deletes(id, text_preview) "
                 "SELECT id, text_preview FROM chunks WHERE file_id = ?",
-                (file_id,)
+                (file_id,),
             )
         await conn.execute("DELETE FROM chunks WHERE file_id = ?", (file_id,))
         if auto_commit:
@@ -1419,7 +1465,7 @@ class DatabaseManager:
             await cur.close()
 
         conn = self._get_conn()
-        await conn.executescript(f"""
+        query = f"""
             -- Remove triggers so chunk deletes don't touch FTS
             {FTS_DROP_TRIGGERS_DDL}
 
@@ -1437,7 +1483,8 @@ class DatabaseManager:
             -- text_preview is stored zlib-compressed so triggers decompress on the fly.
             {FTS_TABLE_DDL}
             {FTS_TRIGGERS_DDL}
-        """)
+        """  # noqa: S608
+        await conn.executescript(query)
 
         logger.info("Cleared all data: %d files, %d chunks", files_count, chunks_count)
         return {"files_removed": files_count, "chunks_removed": chunks_count}

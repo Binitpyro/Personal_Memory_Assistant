@@ -74,6 +74,7 @@ def mock_emb():
 
     async def _embed_texts(texts, *args, **kwargs):
         import numpy as np
+
         return np.array([[0.1] * 384 for _ in texts], dtype=np.float32)
 
     mock.embed_texts = AsyncMock(side_effect=_embed_texts)

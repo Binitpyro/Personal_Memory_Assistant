@@ -127,3 +127,9 @@ CREATE TABLE IF NOT EXISTS pma_metrics (
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY(query_id) REFERENCES query_history(id) ON DELETE SET NULL
 );
+
+-- System state table for persisting internal flags (e.g. crash recovery)
+CREATE TABLE IF NOT EXISTS system_state (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);

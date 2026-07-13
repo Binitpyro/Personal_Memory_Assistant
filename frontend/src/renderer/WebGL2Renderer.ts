@@ -68,9 +68,9 @@ export class WebGL2Renderer {
 
     /** Persistent Object3D used to compose per-instance matrices. Reusing a
      *  single one is a standard three.js idiom to avoid GC churn. */
-    private dummy = new THREE.Object3D();
-    private raycaster = new THREE.Raycaster();
-    private pointerNDC = new THREE.Vector2();
+    private readonly dummy = new THREE.Object3D();
+    private readonly raycaster = new THREE.Raycaster();
+    private readonly pointerNDC = new THREE.Vector2();
 
     /** Source-index arrays maintained per-frame, matching the InstancedMesh
      *  slot order — used to translate a raycast hit's instanceId back to

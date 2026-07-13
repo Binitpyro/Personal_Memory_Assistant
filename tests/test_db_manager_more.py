@@ -80,9 +80,11 @@ async def test_db_graph_rag_flow(db: DatabaseManager):
     file_id = await db.insert_file(
         {"path": "test.py", "size": 100, "modified_at": "now", "type": ".py", "folder_tag": "tag"}
     )
-    chunk_id = await db.insert_chunk(
-        {"file_id": file_id, "start_offset": 0, "end_offset": 50, "text_preview": "preview"}
-    )
+    chunk_id = (
+        await db.insert_chunks_bulk(
+            [{"file_id": file_id, "start_offset": 0, "end_offset": 50, "text_preview": "preview"}]
+        )
+    )[0]
 
     # Empty bulk inserts should do nothing and not fail
     await db.insert_kg_nodes_bulk([])

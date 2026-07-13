@@ -33,9 +33,18 @@ async def test_file_and_chunk_crud_and_counts(db: DatabaseManager, tmp_path: Pat
     file_id = await db.insert_file(_file_data(p1, "A"))
     assert file_id > 0
 
-    single_chunk_id = await db.insert_chunk(
-        {"file_id": file_id, "start_offset": 0, "end_offset": 5, "text_preview": "hello"}
-    )
+    single_chunk_id = (
+        await db.insert_chunks_bulk(
+            [
+                {
+                    "file_id": file_id,
+                    "start_offset": 0,
+                    "end_offset": 100,
+                    "text_preview": "Some chunk text.",
+                }
+            ]
+        )
+    )[0]
     assert single_chunk_id > 0
 
     bulk_ids = await db.insert_chunks_bulk(
@@ -165,9 +174,18 @@ async def test_cascading_deletes(db: DatabaseManager, tmp_path: Path):
     assert file_id > 0
 
     # 2. Insert a chunk
-    chunk_id = await db.insert_chunk(
-        {"file_id": file_id, "start_offset": 0, "end_offset": 10, "text_preview": "cascade chunk"}
-    )
+    chunk_id = (
+        await db.insert_chunks_bulk(
+            [
+                {
+                    "file_id": file_id,
+                    "start_offset": 0,
+                    "end_offset": 50,
+                    "text_preview": "Chunk for cascading delete",
+                }
+            ]
+        )
+    )[0]
     assert chunk_id > 0
 
     # 3. Insert chunk embedding

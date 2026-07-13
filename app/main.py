@@ -227,9 +227,7 @@ async def lifespan(fastapi_app: FastAPI):
 
 async def _split_brain_sync(db_manager, lancedb_client, emb_svc):
     if settings.lancedb_mode != "split_brain":
-        state.split_brain_sync_status = "idle"
         return
-
     if os.environ.get("UVICORN_WORKER_ID", "0") != "0":
         state.split_brain_sync_status = "idle"
         return
@@ -323,18 +321,35 @@ async def _split_brain_sync(db_manager, lancedb_client, emb_svc):
             if len(sqlite_data) < batch_size:
                 break
 
-        # Phase B.5: Clear ghost vectors
-        ldb_ids = await loop.run_in_executor(None, lancedb_client.get_all_ids, "pma_chunks")
-        if ldb_ids:
-            async with conn.execute("SELECT id FROM chunks") as cur:
-                rows = await cur.fetchall()
-                sql_ids = {str(r[0]) for r in rows}
+        # Phase B.5: Clear ghost vectors (O(1) fast-path)
+        async with conn.execute("SELECT COUNT(*) FROM chunks") as cur:
+            current_chunk_count = (await cur.fetchone())[0]
 
-            ghost_ids = list(ldb_ids - sql_ids)
-            if ghost_ids:
-                logger.info("Split-brain: Removing %d ghost vectors from cache...", len(ghost_ids))
-                for i in range(0, len(ghost_ids), 5000):
-                    await lancedb_client.delete_documents(ghost_ids[i : i + 5000])
+        ldb_count = await loop.run_in_executor(None, lancedb_client.count_rows, "pma_chunks")
+        if ldb_count != current_chunk_count:
+            logger.info(
+                "Split-brain: Row counts differ (SQLite %d vs Lance %d). Reconciling orphans...",
+                current_chunk_count,
+                ldb_count,
+            )
+            ldb_ids = await loop.run_in_executor(None, lancedb_client.get_all_ids, "pma_chunks")
+            if ldb_ids:
+                async with conn.execute("SELECT id FROM chunks") as cur:
+                    rows = await cur.fetchall()
+                    sql_ids = {str(r[0]) for r in rows}
+
+                ghost_ids = list(ldb_ids - sql_ids)
+                if ghost_ids:
+                    logger.info(
+                        "Split-brain: Removing %d ghost vectors from cache...", len(ghost_ids)
+                    )
+                    for i in range(0, len(ghost_ids), 5000):
+                        await lancedb_client.delete_documents(ghost_ids[i : i + 5000])
+        else:
+            logger.info(
+                "Split-brain: Row counts match (%d). Skipping orphan reconciliation.",
+                current_chunk_count,
+            )
 
         state.split_brain_sync_status = "done"
         logger.info("Split-brain sync complete. %d new vectors cached.", total_synced)

@@ -98,7 +98,9 @@ class LanceDBClient:
     def __init__(self, persist_directory: str = "lancedb_data"):
         self.persist_directory = persist_directory
         self.db = None
-        self._table_cache = {}
+        from typing import Any
+
+        self._table_cache: dict[str, Any] = {}
         self._connect_lock = threading.Lock()
         self._write_lock = threading.Lock()
 
@@ -189,8 +191,24 @@ class LanceDBClient:
             logger.error("Failed to get max id from %s: %s", table_name, exc)
         return 0
 
+    def count_rows(self, table_name: str = "pma_chunks") -> int:
+        """Efficiently count total rows in a LanceDB table."""
+        self.connect()
+        assert self.db is not None
+        try:
+            tbl = self._get_table(table_name)
+            if tbl is not None:
+                # O(1) metadata read from underlying Lance fragment metadata
+                return tbl.count_rows()
+        except Exception as exc:
+            logger.error("Failed to count rows in %s: %s", table_name, exc)
+        return 0
+
     async def add_documents(
-        self, ids: list[str], embeddings: list[np.ndarray] | np.ndarray, metadatas: list[dict[str, Any]]
+        self,
+        ids: list[str],
+        embeddings: list[np.ndarray] | np.ndarray,
+        metadatas: list[dict[str, Any]],
     ) -> None:
         self.connect()
         if not ids:
@@ -213,11 +231,10 @@ class LanceDBClient:
             "id": pa.array(ids, type=pa.string()),
         }
 
-        num_rows, vector_dim = embeddings_np.shape
+        _num_rows, vector_dim = embeddings_np.shape
         flat_vectors = embeddings_np.flatten()
         vector_arr = pa.FixedSizeListArray.from_arrays(
-            pa.array(flat_vectors, type=pa.float32()),
-            list_size=vector_dim
+            pa.array(flat_vectors, type=pa.float32()), list_size=vector_dim
         )
         cols["vector"] = vector_arr
 
@@ -230,9 +247,7 @@ class LanceDBClient:
         table = pa.Table.from_pydict(cols)
 
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(
-            None, partial(self._create_or_open_table, "pma_chunks", table)
-        )
+        await loop.run_in_executor(None, partial(self._create_or_open_table, "pma_chunks", table))
 
     async def add_summaries_batch(self, summaries: list[dict[str, Any]]) -> None:
         """Add a batch of document summaries to the LanceDB summary table."""
@@ -263,11 +278,10 @@ class LanceDBClient:
             "id": pa.array(ids, type=pa.string()),
         }
 
-        num_rows, vector_dim = embeddings_np.shape
+        _num_rows, vector_dim = embeddings_np.shape
         flat_vectors = embeddings_np.flatten()
         vector_arr = pa.FixedSizeListArray.from_arrays(
-            pa.array(flat_vectors, type=pa.float32()),
-            list_size=vector_dim
+            pa.array(flat_vectors, type=pa.float32()), list_size=vector_dim
         )
         cols["vector"] = vector_arr
 
@@ -380,7 +394,11 @@ class LanceDBClient:
         await loop.run_in_executor(None, _delete_impl)
 
     async def add_query_cache(
-        self, query_emb: np.ndarray | list[float], query_text: str, response_text: str, timestamp: float
+        self,
+        query_emb: np.ndarray | list[float],
+        query_text: str,
+        response_text: str,
+        timestamp: float,
     ) -> None:
         """Add a successful RAG response to the persistent semantic cache."""
         self.connect()
@@ -390,7 +408,9 @@ class LanceDBClient:
         else:
             query_emb_np = query_emb.astype(np.float32)
 
-        embeddings_np = np.expand_dims(query_emb_np, axis=0) if query_emb_np.ndim == 1 else query_emb_np
+        embeddings_np = (
+            np.expand_dims(query_emb_np, axis=0) if query_emb_np.ndim == 1 else query_emb_np
+        )
 
         cols = {
             "query_text": pa.array([query_text], type=pa.string()),
@@ -398,20 +418,17 @@ class LanceDBClient:
             "timestamp": pa.array([timestamp], type=pa.float64()),
         }
 
-        num_rows, vector_dim = embeddings_np.shape
+        _num_rows, vector_dim = embeddings_np.shape
         flat_vectors = embeddings_np.flatten()
         vector_arr = pa.FixedSizeListArray.from_arrays(
-            pa.array(flat_vectors, type=pa.float32()),
-            list_size=vector_dim
+            pa.array(flat_vectors, type=pa.float32()), list_size=vector_dim
         )
         cols["vector"] = vector_arr
 
         table = pa.Table.from_pydict(cols)
 
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(
-            None, partial(self._create_or_open_table, "query_cache", table)
-        )
+        await loop.run_in_executor(None, partial(self._create_or_open_table, "query_cache", table))
 
     async def search_cache(self, query_emb: list[float], threshold: float = 0.95) -> dict | None:
         """Search the persistent cache for similar past queries."""
@@ -451,19 +468,25 @@ class LanceDBClient:
         tbl = self._get_table(table_name)
         if tbl is not None:
             loop = asyncio.get_running_loop()
+
             def _create():
                 with self._write_lock:
                     try:
                         # Attempt to create index with replace=True to overwrite old index
                         tbl.create_index(metric="cosine", index_type="IVF_HNSW_SQ", replace=True)
-                        logger.info("LanceDB HNSW index created/updated successfully on %s", table_name)
+                        logger.info(
+                            "LanceDB HNSW index created/updated successfully on %s", table_name
+                        )
                     except Exception as e:
                         try:
                             # Fallback if replace is not supported or fails
                             tbl.create_index(metric="cosine", index_type="IVF_HNSW_SQ")
                             logger.info("LanceDB HNSW index created successfully on %s", table_name)
                         except Exception as e2:
-                            logger.error("LanceDB HNSW index creation failed: %s (fallback %s)", e, e2)
+                            logger.error(
+                                "LanceDB HNSW index creation failed: %s (fallback %s)", e, e2
+                            )
+
             await loop.run_in_executor(None, _create)
 
     async def clear_all(self) -> None:

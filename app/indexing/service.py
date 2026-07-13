@@ -1,9 +1,8 @@
 import asyncio
-import os
-import aiosqlite
 import hashlib
 import json
 import logging
+import os
 import re
 import threading
 from collections.abc import Iterator
@@ -11,6 +10,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+import aiosqlite
 
 from app.config import settings
 from app.embeddings.service import EmbeddingService
@@ -38,25 +39,31 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+
 def _ensure_nltk_data() -> None:
     """Download NLTK data at startup, not in the hot path."""
     import os
+
     if os.environ.get("PMA_SENTENCE_OFFSETS", "0") == "0":
         return
     try:
         import nltk
+
         nltk.data.find("tokenizers/punkt")
         nltk.data.find("tokenizers/punkt_tab")
     except LookupError:
         nltk.download("punkt", quiet=True)
         nltk.download("punkt_tab", quiet=True)
 
+
 _ensure_nltk_data()
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z])")
+
 
 def _get_sentence_offsets(text: str) -> list[list[int]]:
     """Compute start and end offsets for sentences within a text string."""
     import os
+
     if os.environ.get("PMA_SENTENCE_OFFSETS", "0") == "0":
         return []
     if not text:
@@ -147,6 +154,7 @@ indexing_lock = asyncio.Lock()
 
 # H-18: Dedicated pool for disk-heavy operations to avoid default pool starvation.
 _DISK_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="pma-disk")
+_EXTRACT_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pma-extract")
 
 
 class StreamChunker:
@@ -186,7 +194,9 @@ class StreamChunker:
                     "start_offset": self.total_offset,
                     "end_offset": self.total_offset + end,
                     "text_preview": preview,
-                    "sentence_offsets": "[]" if os.environ.get("PMA_SENTENCE_OFFSETS", "0") == "0" else json.dumps(_get_sentence_offsets(preview)),
+                    "sentence_offsets": "[]"
+                    if os.environ.get("PMA_SENTENCE_OFFSETS", "0") == "0"
+                    else json.dumps(_get_sentence_offsets(preview)),
                     "segmenter_version": "py_v1",
                 }
             )
@@ -217,7 +227,9 @@ class StreamChunker:
                     "start_offset": self.total_offset,
                     "end_offset": self.total_offset + len(self.buffer),
                     "text_preview": preview,
-                    "sentence_offsets": "[]" if os.environ.get("PMA_SENTENCE_OFFSETS", "0") == "0" else json.dumps(_get_sentence_offsets(preview)),
+                    "sentence_offsets": "[]"
+                    if os.environ.get("PMA_SENTENCE_OFFSETS", "0") == "0"
+                    else json.dumps(_get_sentence_offsets(preview)),
                     "segmenter_version": "py_v1",
                 }
             )
@@ -288,6 +300,7 @@ class IndexingService:
 
             # Create a dedicated reader connection for the scanner / change detection
             import aiosqlite
+
             reader_conn = await aiosqlite.connect(self.db.db_path)
             try:
                 await self.db._configure_conn(reader_conn)
@@ -369,9 +382,7 @@ class IndexingService:
         try:
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(
-                    self._extractor_worker(
-                        files_to_index, embed_queue, total_so_far, grand_total
-                    )
+                    self._extractor_worker(files_to_index, embed_queue, total_so_far, grand_total)
                 )
                 tg.create_task(self._embedder_worker(embed_queue, store_queue))
                 tg.create_task(self._storer_worker(store_queue))
@@ -405,9 +416,7 @@ class IndexingService:
                 logger.warning("Rust bulk extraction failed: %s", e)
         return pre_extracted
 
-    async def _extractor_worker(
-        self, files_to_index, embed_queue, total_so_far, grand_total
-    ):
+    async def _extractor_worker(self, files_to_index, embed_queue, total_so_far, grand_total):
         extracted_count = 0
         extracted_lock = asyncio.Lock()
         semaphore = asyncio.Semaphore(self._concurrency * 2)
@@ -451,6 +460,7 @@ class IndexingService:
         self, path: Path, folder_tag: str, pre_text: str | None, queue: asyncio.Queue
     ) -> None:
         import queue as stdlib_queue
+
         loop = asyncio.get_running_loop()
         header_sent = False
         try:
@@ -475,8 +485,8 @@ class IndexingService:
             prefix = self._build_context_prefix(str(path))
             logger.info("Started extracting and chunking for file: %s", path)
 
-            bridge = stdlib_queue.Queue(maxsize=64)
-            new_item_event = asyncio.Event()
+            bridge: stdlib_queue.Queue[Any] = stdlib_queue.Queue(maxsize=64)
+            sentinel = object()
 
             def _extract_and_chunk():
                 chunker = StreamChunker(self.chunk_size, self.chunk_overlap, prefix)
@@ -509,71 +519,66 @@ class IndexingService:
                 try:
                     for fragment in _get_stream():
                         if progress.is_cancelled:
-                            return "", ""
-                        
+                            return "CANCELLED", ""
+
                         # Skip binary stubs — they pollute the vector index with useless noise
                         if isinstance(fragment, str) and fragment.startswith("[BINARY:"):
                             logger.debug("Skipping binary stub for %s — no indexable text.", path)
                             ft_summary = ""
                             break
-                        
+
                         for c in chunker.process(fragment):
                             if progress.is_cancelled:
-                                return "", ""
+                                return "CANCELLED", ""
                             while True:
                                 try:
                                     bridge.put(c, timeout=1.0)
-                                    loop.call_soon_threadsafe(new_item_event.set)
                                     break
                                 except stdlib_queue.Full:
                                     if progress.is_cancelled:
-                                        return "", ""
+                                        return "CANCELLED", ""
                         if len(ft_summary) < 2000:
-                            ft_summary += fragment if isinstance(fragment, str) else fragment.decode("utf-8", errors="replace")
+                            ft_summary += (
+                                fragment
+                                if isinstance(fragment, str)
+                                else fragment.decode("utf-8", errors="replace")
+                            )
 
                     for c in chunker.finalize():
                         if progress.is_cancelled:
-                            return "", ""
+                            return "CANCELLED", ""
                         while True:
                             try:
                                 bridge.put(c, timeout=1.0)
-                                loop.call_soon_threadsafe(new_item_event.set)
                                 break
                             except stdlib_queue.Full:
                                 if progress.is_cancelled:
-                                    return "", ""
+                                    return "CANCELLED", ""
                     sha256_result = "ERROR" if hash_failed else hasher.hexdigest()
                     return sha256_result, ft_summary
                 finally:
-                    bridge.put(None)  # sentinel
-                    loop.call_soon_threadsafe(new_item_event.set)
+                    bridge.put(sentinel)
 
             async def _pump():
                 while True:
                     try:
                         item = bridge.get_nowait()
+                        if item is sentinel:
+                            break
+                        await queue.put({"type": "chunk", "path": path, "chunk": item})
                     except stdlib_queue.Empty:
-                        new_item_event.clear()
-                        # Double-check after clearing to avoid race conditions
-                        try:
-                            item = bridge.get_nowait()
-                        except stdlib_queue.Empty:
-                            # Safe to wait now
-                            await new_item_event.wait()
-                            continue
-                    
-                    if item is None:
-                        break
-                    await queue.put({"type": "chunk", "path": path, "chunk": item})
+                        await asyncio.sleep(0.01)
 
-            # Use default executor (None) so we don't block I/O bound _DISK_EXECUTOR slots for CPU-bound extraction
-            extract_future = loop.run_in_executor(None, _extract_and_chunk)
+            extract_future = loop.run_in_executor(_EXTRACT_EXECUTOR, _extract_and_chunk)
             await _pump()
             sha256, full_text_for_summary = await extract_future
 
             summary = await loop.run_in_executor(
                 None, self._generate_summary, full_text_for_summary, path
             )
+            # Send footer with CANCELLED if extraction was cancelled, otherwise actual sha256
+            if progress.is_cancelled and sha256 != "CANCELLED":
+                sha256 = "CANCELLED"
             await queue.put({"type": "footer", "path": path, "summary": summary, "sha256": sha256})
 
         except Exception as e:
@@ -598,7 +603,14 @@ class IndexingService:
                 except Exception as inner_h:
                     logger.error("Failed to send dummy header for %s: %s", path, inner_h)
             if header_sent:
-                await queue.put({"type": "footer", "path": path, "summary": f"[ERROR: {e!s}]", "sha256": "ERROR"})
+                await queue.put(
+                    {
+                        "type": "footer",
+                        "path": path,
+                        "summary": f"[ERROR: {e!s}]",
+                        "sha256": "ERROR",
+                    }
+                )
 
     def _extract_plain_text_stream(self, path: Path) -> Iterator[str]:
         try:
@@ -667,12 +679,13 @@ class IndexingService:
 
     async def _storer_worker(self, store_queue: asyncio.Queue[dict[str, Any] | None]):
         import time
+
         active_files: dict[str, dict[str, Any]] = {}
         pending_chunks: list[dict[str, Any]] = []
         use_tx = hasattr(self.db, "begin_transaction")
-        
-        COMMIT_CHUNK_THRESHOLD = 2000
-        COMMIT_TIME_LIMIT = 10.0  # seconds
+
+        commit_chunk_threshold = 2000
+        commit_time_limit = 10.0  # seconds
         chunks_since_commit = 0
         last_commit_time = time.monotonic()
         tx_open = False
@@ -709,7 +722,9 @@ class IndexingService:
 
                 if ptype == "header":
                     if use_tx:
-                        file_id = await self.db.batch_insert_files([item["file_data"]], auto_commit=False)
+                        file_id = await self.db.batch_insert_files(
+                            [item["file_data"]], auto_commit=False
+                        )
                     else:
                         file_id = await self.db.batch_insert_files([item["file_data"]])
                     active_files[path_str] = {
@@ -735,20 +750,22 @@ class IndexingService:
                         progress.update(file_info["chunk_count"], current_file=item["path"].name)
                     else:
                         progress.update(0, current_file=item["path"].name)
-                
+
                 # Check thresholds
-                if chunks_since_commit >= COMMIT_CHUNK_THRESHOLD or time.monotonic() - last_commit_time > COMMIT_TIME_LIMIT:
+                if (
+                    chunks_since_commit >= commit_chunk_threshold
+                    or time.monotonic() - last_commit_time >= commit_time_limit
+                ):
                     await _commit_window()
 
         except Exception as e:
             logger.error("Storer worker failed: %s", e)
-            if getattr(self.db, "_in_external_transaction", False):
-                if hasattr(self.db, "rollback_transaction"):
-                    try:
-                        await self.db.rollback_transaction()
-                        logger.info("Rolled back active transaction due to storer error.")
-                    except Exception as rollback_err:
-                        logger.error("Failed to rollback transaction: %s", rollback_err)
+            if tx_open and hasattr(self.db, "rollback_transaction"):
+                try:
+                    await self.db.rollback_transaction()
+                    logger.info("Rolled back active transaction due to storer error.")
+                except Exception as rollback_err:
+                    logger.error("Failed to rollback transaction: %s", rollback_err)
             raise
 
     async def _flush_pending_chunks_sqlite(self, chunks: list[dict[str, Any]], active_files: dict):
@@ -827,6 +844,10 @@ class IndexingService:
     async def _flush_pending_chunks_lancedb(self, l_ids, l_embs, l_metas):
         if l_ids:
             await self.lancedb_client.add_documents(l_ids, l_embs, l_metas)
+
+            import gc
+
+            gc.collect()
 
     async def _delete_existing_chunks(self, file_id: int) -> None:
         old_chunks = await self.db.get_file_chunks(file_id)
@@ -968,7 +989,7 @@ class IndexingService:
                 continue
             mtime = stat_map.get(key, "")
             stored = change_map.get(key)
-            if stored and stored[0] == mtime:
+            if stored and stored[0] == mtime and stored[1] not in ("ERROR", "CANCELLED"):
                 skipped += 1
             elif stored:
                 changed_c += 1
@@ -977,19 +998,6 @@ class IndexingService:
                 new_c += 1
                 to_index.append((fp, tag))
         return to_index, skipped, new_c, changed_c
-
-    def _calculate_sha256(self, path: Path) -> str:
-        try:
-            stat = path.stat()
-            if stat.st_size > 100 * 1024 * 1024:
-                return f"sampled_{stat.st_size}"
-            hasher = hashlib.sha256()
-            with open(path, "rb") as f:
-                for chunk in iter(lambda: f.read(1048576), b""):
-                    hasher.update(chunk)
-            return hasher.hexdigest()
-        except Exception:
-            return ""
 
     def _is_binary(self, path: Path) -> bool:
         try:
@@ -1010,13 +1018,17 @@ class IndexingService:
         if RUST_CORE_AVAILABLE and ext in (".txt", ".md", ".markdown", ".log"):
             try:
                 # Offload to create_chunks PyO3 binding
-                chunks = rust_core.create_chunks(text, self.chunk_size, self.chunk_overlap, prefix, 0)
+                chunks = rust_core.create_chunks(
+                    text, self.chunk_size, self.chunk_overlap, prefix, 0
+                )
                 if os.environ.get("PMA_SENTENCE_OFFSETS", "0") == "0":
                     for c in chunks:
                         c["sentence_offsets"] = "[]"
-                return chunks
+                return chunks  # type: ignore[no-any-return]
             except Exception as e:
-                logger.warning("Rust create_chunks failed for %s (%s), falling back to Python.", file_path, e)
+                logger.warning(
+                    "Rust create_chunks failed for %s (%s), falling back to Python.", file_path, e
+                )
         chunks = self.code_chunker.chunk_code(text, file_path=file_path, prefix=prefix)
         for c in chunks:
             if "start_offset" not in c:

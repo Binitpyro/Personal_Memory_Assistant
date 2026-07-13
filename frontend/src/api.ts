@@ -8,13 +8,14 @@ import { isTauri, initTauriConnection as _initTauri } from './utils/tauriShell';
 import { getGoogleAuthStartUrl as _getGoogleAuthStartUrl, launchGoogleAuth as _launchGoogleAuth } from './utils/auth';
 
 const BASE = '/api'; 
-export let ENDPOINT = (import.meta as any).env.VITE_API_URL || "http://127.0.0.1:8000";
+const metaEnv = (import.meta as unknown as { env: Record<string, string | undefined> }).env;
+export let ENDPOINT = metaEnv.VITE_API_URL || "http://127.0.0.1:8000";
 
 // ─── Security Token Injection ─────────────────────────────────────────────
 
 const params = new URLSearchParams(globalThis.location.search);
 const tokenFromUrl = params.get('token');
-const envToken = (import.meta as any).env.VITE_DEV_TOKEN || '';
+const envToken = metaEnv.VITE_DEV_TOKEN || '';
 export let localToken = tokenFromUrl || envToken || sessionStorage.getItem('pma_token') || '';
 
 if (tokenFromUrl) {
@@ -41,7 +42,7 @@ export async function launchGoogleAuth(): Promise<void> {
 export async function json<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    ...(options.headers as any),
+    ...(options.headers as Record<string, string>),
   };
   if (localToken) headers['X-Local-Access-Token'] = localToken;
 

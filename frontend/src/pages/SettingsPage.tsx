@@ -25,11 +25,11 @@ function AuthSection({
   authStatus,
   onConnect,
   onDisconnect
-}: {
+}: Readonly<{
   authStatus?: AuthStatus;
   onConnect: () => void;
   onDisconnect: () => void;
-}) {
+}>) {
   const isConnected = !!authStatus?.connected
   return (
     <div className="glass p-6 rounded-2xl border border-primary/10">
@@ -88,7 +88,7 @@ function AuthSection({
   )
 }
 
-function LocalModelsSection({ localModels }: { localModels?: LocalModelDetection }) {
+function LocalModelsSection({ localModels }: Readonly<{ localModels?: LocalModelDetection }>) {
   return (
     <div className="glass p-6 rounded-2xl border border-primary/10">
       <div className="flex items-start gap-4 mb-6">
@@ -179,11 +179,11 @@ function LLMPreferencesSection({
   localModels,
   onSave,
   saving
-}: {
+}: Readonly<{
   localModels?: LocalModelDetection;
   onSave: (prefs: LLMPreferences) => void;
   saving: boolean;
-}) {
+}>) {
   const { data: llmPrefs } = useApi(getLLMPreferences, { cacheKey: 'llm-prefs' })
   const [provider, setProvider] = useState<LLMPreferences['provider']>('auto')
   const [geminiModel, setGeminiModel] = useState('gemini-2.5-flash-lite')
@@ -216,7 +216,7 @@ function LLMPreferencesSection({
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <label className="text-sm text-text-secondary flex flex-col gap-1">
           Provider
-          <select value={provider} onChange={(e) => setProvider(e.target.value as any)} className="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-text-primary">
+          <select value={provider} onChange={(e) => setProvider(e.target.value as LLMPreferences['provider'])} className="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-text-primary">
             <option value="auto">Auto (recommended)</option>
             <option value="gemini">Gemini</option>
             <option value="ollama">Ollama</option>
@@ -259,7 +259,7 @@ function LLMPreferencesSection({
   )
 }
 
-function StorageSection({ sysInfo }: { sysInfo?: SystemInfo }) {
+function StorageSection({ sysInfo }: Readonly<{ sysInfo?: SystemInfo }>) {
   const getProgressColor = (pct: number) => {
     if (pct > 90) return 'bg-error'
     if (pct > 75) return 'bg-warning'
@@ -307,11 +307,11 @@ function SplitBrainSection({
   driveInfo,
   onPurge,
   purging
-}: {
+}: Readonly<{
   driveInfo?: DriveInfo;
   onPurge: () => void;
   purging: boolean;
-}) {
+}>) {
   if (!driveInfo) return null
 
   const isAtRisk = driveInfo.is_portable_fs && driveInfo.lancedb_mode !== 'split_brain'
@@ -386,7 +386,7 @@ function SplitBrainSection({
   )
 }
 
-function ResetSection({ onRestartOnboarding, onFullReset }: { onRestartOnboarding: () => void; onFullReset: () => void }) {
+function ResetSection({ onRestartOnboarding, onFullReset }: Readonly<{ onRestartOnboarding: () => void; onFullReset: () => void }>) {
   return (
     <div className="glass p-6 rounded-2xl border border-error/10 bg-error/5">
       <div className="flex items-start gap-4 mb-6">

@@ -115,7 +115,7 @@ async def main() -> None:
         )
 
         # Embed — uses the synchronous path because we're already in an async context
-        embeddings_list: list[list[float]] = await embedding_svc.embed_texts(texts)
+        embeddings_list: np.ndarray = await embedding_svc.embed_texts(texts)
         embeddings_np = [np.array(e, dtype=np.float32) for e in embeddings_list]
 
         # ── Write to chunk_embeddings (portable BLOB store) ──────────────────────

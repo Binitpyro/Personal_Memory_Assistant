@@ -7,7 +7,7 @@ import { type Message } from '../../hooks/useChatStream';
 import { type QuerySource } from '../../api';
 import { CrystalGraphTrace } from '../CrystalGraphTrace';
 
-const GraphTraceViewer = ({ traceData }: { traceData: string }) => {
+const GraphTraceViewer = ({ traceData }: Readonly<{ traceData: string }>) => {
   const [isOpen, setIsOpen] = useState(false);
   return (
     <div className="mt-3 border border-primary/20 rounded-xl overflow-hidden bg-surface-dark/30">
@@ -30,7 +30,7 @@ const GraphTraceViewer = ({ traceData }: { traceData: string }) => {
   );
 };
 
-const SourceViewer = ({ src, onForceInclude }: { src: QuerySource, onForceInclude?: () => void }) => {
+const SourceViewer = ({ src, onForceInclude }: Readonly<{ src: QuerySource, onForceInclude?: () => void }>) => {
   const [isOpen, setIsOpen] = useState(false);
   
   let content = <>{src.text}</>;
@@ -90,11 +90,11 @@ const SourceViewer = ({ src, onForceInclude }: { src: QuerySource, onForceInclud
 };
 
 export interface MessageBubbleProps {
-  message: Message;
-  onNearMissClick: (suggestion: string, forcedChunkId?: number) => void;
+  readonly message: Message;
+  readonly onNearMissClick: (suggestion: string, forcedChunkId?: number) => void;
 }
 
-export function MessageBubble({ message: msg, onNearMissClick }: MessageBubbleProps) {
+export function MessageBubble({ message: msg, onNearMissClick }: Readonly<MessageBubbleProps>) {
   const [annotationsOpen, setAnnotationsOpen] = useState(true);
 
   return (
@@ -121,7 +121,7 @@ export function MessageBubble({ message: msg, onNearMissClick }: MessageBubblePr
                 remarkPlugins={[remarkGfm]}
                 rehypePlugins={[rehypeRaw]}
                 components={{
-                  claim: ({node, ...props}: any) => {
+                  claim: ({ ...props }: Readonly<Record<string, any>>) => {
                     const sourcesStr = String(props.sources || "");
                     const isInference = sourcesStr.toLowerCase().includes("inference");
                     const numSources = (sourcesStr.match(/\[\d+\]/g) || []).length;
@@ -136,8 +136,8 @@ export function MessageBubble({ message: msg, onNearMissClick }: MessageBubblePr
                     
                     return <span className="underline decoration-primary-light/40 decoration-1 underline-offset-4 hover:bg-primary/5 px-1 rounded transition-colors cursor-help" title={`Sources: ${sourcesStr}`} {...props} />;
                   },
-                  inference: ({node, ...props}: any) => <span className="bg-amber-500/10 text-amber-200/90 px-1 rounded border-b border-amber-500/30" title="Inference (Ungrounded)" {...props} />
-                } as any}
+                  inference: ({ ...props }: Readonly<Record<string, any>>) => <span className="bg-amber-500/10 text-amber-200/90 px-1 rounded border-b border-amber-500/30" title="Inference (Ungrounded)" {...props} />
+                } as Record<string, React.ComponentType<any>>}
               >
                 {msg.content}
               </ReactMarkdown>

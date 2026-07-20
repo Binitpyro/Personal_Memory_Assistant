@@ -22,6 +22,8 @@ class Settings(BaseSettings):
 
     lancedb_mode: str = "portable"  # "portable" or "split_brain"
     lancedb_persist_dir: str = "data/lancedb"
+    # Split-brain always keeps this recovery copy; portable mode may opt in.
+    sqlite_embedding_backup: bool = False
 
     @model_validator(mode="after")
     def compute_paths(self):
@@ -76,6 +78,18 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-2.5-flash-lite"
     gemini_max_output_tokens: int = 4096
     gemini_timeout: float = 90.0
+
+    openai_api_key: str = ""
+    openai_base_url: str = ""
+
+    anthropic_api_key: str = ""
+
+    groq_api_key: str = ""
+
+    openrouter_api_key: str = ""
+
+    openai_compatible_api_key: str = ""
+    openai_compatible_base_url: str = ""
 
     ollama_url: str = "http://localhost:11434/api/generate"
     ollama_model: str = "llama3"

@@ -1,4 +1,6 @@
 import asyncio
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -178,6 +180,100 @@ async def test_stream_extract_and_prepare(tmp_path: Path):
     footer = await q.get()
     assert footer["type"] == "footer"
     assert "Hello" in chunk["chunk"]["text_preview"]
+
+
+@pytest.mark.asyncio
+async def test_stream_pump_unblocks_on_cancellation(monkeypatch, tmp_path: Path):
+    svc = _make_service()
+    waiting_file = tmp_path / "waiting.wait"
+    waiting_file.write_text("waiting", encoding="utf-8")
+    started = threading.Event()
+
+    class BlockingExtractor:
+        def can_handle(self, path: Path) -> bool:
+            return path.suffix == ".wait"
+
+        def extract_stream(self, path: Path, max_file_size: int):
+            started.set()
+            while not idx.progress.is_cancelled:
+                time.sleep(0.01)
+            yield "This fragment is discarded after cancellation."
+
+    monkeypatch.setattr(idx, "EXTRACTORS", [BlockingExtractor()])
+    monkeypatch.setattr(svc, "_generate_summary", lambda _text, _path: "")
+    idx.progress.reset(0)
+    queue = asyncio.Queue()
+    task = asyncio.create_task(svc._stream_extract_and_prepare(waiting_file, "tmp", None, queue))
+
+    try:
+        assert await asyncio.wait_for(asyncio.to_thread(started.wait), timeout=1)
+        svc.cancel_indexing()
+        await asyncio.wait_for(task, timeout=2)
+    finally:
+        idx.progress.reset(0)
+
+    items = []
+    while not queue.empty():
+        items.append(queue.get_nowait())
+    assert [item["type"] for item in items] == ["header", "footer"]
+    assert items[-1]["sha256"] == "CANCELLED"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("lancedb_mode", "sqlite_embedding_backup", "expects_backup"),
+    [
+        ("portable", False, False),
+        ("split_brain", False, True),
+        ("portable", True, True),
+    ],
+)
+async def test_flush_pending_chunks_releases_source_payloads(
+    monkeypatch,
+    tmp_path: Path,
+    lancedb_mode: str,
+    sqlite_embedding_backup: bool,
+    expects_backup: bool,
+):
+    import numpy as np
+
+    svc = _make_service()
+    embedding_writes = []
+
+    async def record_embedding_write(rows, auto_commit=True):
+        embedding_writes.append((rows, auto_commit))
+
+    svc.db.insert_chunk_embeddings_bulk = record_embedding_write
+    monkeypatch.setattr(idx.settings, "lancedb_mode", lancedb_mode)
+    monkeypatch.setattr(idx.settings, "sqlite_embedding_backup", sqlite_embedding_backup)
+
+    path = tmp_path / "payload.py"
+    embedding = np.array([0.25, 0.5], dtype=np.float32)
+    chunk = {
+        "start_offset": 0,
+        "end_offset": 10,
+        "text_preview": "large source payload",
+        "_embedding": embedding,
+        "kg_nodes": [{"id": "node-1", "label": "Node", "start_line": 1, "end_line": 1}],
+        "kg_edges": [{"src_id": "node-1", "dst_id": "node-2", "rel_type": "uses"}],
+    }
+    item = {"path": path, "file_id": 1, "chunk": chunk}
+    active_files = {str(path.absolute()): {"data": {"folder_tag": "tmp"}}}
+
+    _ids, l_embs, _metas = await svc._flush_pending_chunks_sqlite([item], active_files)
+
+    assert l_embs[0] is embedding
+    assert "_embedding" not in chunk
+    assert "kg_nodes" not in chunk
+    assert "kg_edges" not in chunk
+    assert "text_preview" not in chunk
+    if expects_backup:
+        assert len(embedding_writes) == 1
+        rows, auto_commit = embedding_writes[0]
+        assert auto_commit is False
+        assert rows == [(1, np.array(embedding, dtype=np.float16).tobytes())]
+    else:
+        assert embedding_writes == []
 
 
 @pytest.mark.asyncio

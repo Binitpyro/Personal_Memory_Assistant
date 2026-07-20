@@ -147,7 +147,7 @@ export function MessageBubble({ message: msg, onNearMissClick }: Readonly<Messag
 
         {/* Mode Badge */}
         {msg.role === 'assistant' && !msg.isStreaming && msg.mode && (
-          <div className="flex items-center gap-2 mt-1">
+          <div className="flex flex-wrap items-center gap-2 mt-1">
             <span className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full border ${
               msg.mode === 'fast_path'
                 ? 'bg-amber-500/10 text-amber-400 border-amber-500/20'
@@ -157,11 +157,27 @@ export function MessageBubble({ message: msg, onNearMissClick }: Readonly<Messag
               }`}>
               {msg.mode === 'fast_path' ? '⚡ Fast Answer' : msg.mode === 'degraded_rag' ? '⚠️ Degraded RAG' : '🔍 RAG Answer'}
             </span>
+            {msg.fallbackTo && (
+              <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full border bg-red-500/10 text-red-400 border-red-500/20">
+                ⚠️ Backup: {msg.fallbackTo}
+              </span>
+            )}
             {msg.latency_ms != null && msg.latency_ms > 0 && (
               <span className="text-[10px] text-text-secondary/50">{msg.latency_ms.toFixed(0)}ms</span>
             )}
+            {(msg.prompt_tokens != null || msg.completion_tokens != null) && (
+              <span className="text-[10px] text-text-secondary/50">
+                • {((msg.prompt_tokens || 0) + (msg.completion_tokens || 0)).toLocaleString()} tokens
+              </span>
+            )}
+            {msg.cost != null && msg.cost > 0 && (
+              <span className="text-[10px] text-success/80 font-semibold" title={msg.isEstimatedCost ? 'Estimated cost' : 'Token usage cost'}>
+                • {msg.isEstimatedCost ? '~' : ''}${msg.cost.toFixed(5)}
+              </span>
+            )}
           </div>
         )}
+
 
         {/* Contradictions Banner */}
         {msg.role === 'assistant' && msg.contradictions_found && (

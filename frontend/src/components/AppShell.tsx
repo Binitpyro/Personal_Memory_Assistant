@@ -4,6 +4,7 @@ import { useApi } from '../useApi'
 import { getAppConfig, getHealth } from '../api'
 import { useEffect, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
+import { useSessionProvider } from '../context/SessionProviderContext'
 
 const navItems = [
   { to: '/library', label: 'Library', icon: BookOpen },
@@ -17,6 +18,7 @@ export function AppShell() {
   const navigate = useNavigate()
   const location = useLocation()
   const queryClient = useQueryClient()
+  const { weeklyCost } = useSessionProvider()
 
   const isSyncing =
     (queryClient.getQueryData<{ split_brain_sync_status?: string }>(['health'])
@@ -100,7 +102,7 @@ export function AppShell() {
         </nav>
 
         {/* Footer */}
-        <div className="px-5 py-4 border-t border-primary/10">
+        <div className="px-5 py-4 border-t border-primary/10 flex flex-col gap-1">
           <span className="text-xs text-text-secondary opacity-0 group-hover:opacity-100 transition-opacity duration-300 whitespace-nowrap">
             v{appConfig?.app_version ?? health?.version ?? '—'}
             {appConfig?.gemini_model ? (
@@ -109,6 +111,10 @@ export function AppShell() {
               </span>
             ) : null}
           </span>
+          {/* Weekly Cost Roll-up */}
+          <div className="text-[10px] text-text-secondary font-medium opacity-0 group-hover:opacity-100 transition-opacity duration-300 mt-2 whitespace-nowrap overflow-hidden">
+            This week: ${weeklyCost.toFixed(3)}
+          </div>
         </div>
       </aside>
 

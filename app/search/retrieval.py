@@ -847,7 +847,10 @@ async def stream_rag(
     mode: str | None = None,
     forced_chunk_ids: list[int] | None = None,
     history: list[dict[str, str]] | None = None,
+    override_provider: str | None = None,
+    override_model: str | None = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
+
     """NDJSON stream events for /api/query/stream (match SearchPage chunk types)."""
     t_start = time.perf_counter()
 
@@ -1018,7 +1021,7 @@ async def stream_rag(
 
     from app.search.context_builder import compute_context_budget
 
-    model_class = llm_client.get_model_class()
+    model_class = llm_client.get_model_class(override_provider, override_model)
     history_turns = len(history) if history else 0
     budget = compute_context_budget(model_class, history_turns)
 
@@ -1033,9 +1036,33 @@ async def stream_rag(
 
     full_answer = ""
     with Timer("llm_generation"):
-        async for chunk in llm_client.stream_answer(query, context, history=history, mode=mode):
-            full_answer += chunk
-            yield {"type": "content", "text": chunk}
+        async for chunk in llm_client.stream_answer(
+            query,
+            context,
+            history=history,
+            mode=mode,
+            override_provider=override_provider,
+            override_model=override_model,
+        ):
+            if chunk.startswith('{"control":'):
+                try:
+                    control_data = json.loads(chunk)
+                    ctrl_type = control_data.get("control")
+                    if ctrl_type == "fallback":
+                        yield {"type": "fallback", "to": control_data.get("to")}
+                    elif ctrl_type == "usage":
+                        yield {
+                            "type": "usage",
+                            "prompt_tokens": control_data.get("prompt_tokens"),
+                            "completion_tokens": control_data.get("completion_tokens"),
+                        }
+                except Exception:
+                    # Fallback to normal text if JSON fails to parse
+                    full_answer += chunk
+                    yield {"type": "content", "text": chunk}
+            else:
+                full_answer += chunk
+                yield {"type": "content", "text": chunk}
 
     # Phase 5: Personal Pattern Annotator
     pattern_annotations = []
@@ -1046,7 +1073,13 @@ async def stream_rag(
             f"{full_answer}\n"
             "Return them as a simple comma-separated list."
         )
-        annotations_raw = await llm_client.generate_answer(annotation_query, annotation_context)
+        annotations_raw = await llm_client.generate_answer(
+            annotation_query,
+            annotation_context,
+            override_provider=override_provider,
+            override_model=override_model,
+        )
+
         if annotations_raw:
             pattern_annotations = [a.strip() for a in annotations_raw.split(",") if a.strip()]
     except Exception as e:

@@ -5,7 +5,6 @@
  */
 
 import { isTauri, initTauriConnection as _initTauri } from './utils/tauriShell';
-import { getGoogleAuthStartUrl as _getGoogleAuthStartUrl, launchGoogleAuth as _launchGoogleAuth } from './utils/auth';
 
 const BASE = '/api'; 
 const metaEnv = (import.meta as unknown as { env: Record<string, string | undefined> }).env;
@@ -26,14 +25,6 @@ if (tokenFromUrl) {
 
 export async function initTauriConnection() {
   await _initTauri((e) => ENDPOINT = e, (t) => localToken = t);
-}
-
-export function getGoogleAuthStartUrl(): string {
-  return _getGoogleAuthStartUrl(ENDPOINT, localToken);
-}
-
-export async function launchGoogleAuth(): Promise<void> {
-  return _launchGoogleAuth(ENDPOINT, localToken);
 }
 
 // â”€â”€ API Wrappers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -344,11 +335,11 @@ export const getInsightsByType = (typeFilter: string) =>
 export const seedDemo = () =>
   json<{ message: string; folder: string }>('/demo/seed', { method: 'POST' });
 
-// â”€â”€ Stream Tracking â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Stream Tracking ─────────────────────────────────────────────────────────
 
-// â”€â”€ Stream Tracking (Removed in favor of local hook state) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Stream Tracking (Removed in favor of local hook state) ──────────────────
 
-// â”€â”€ SSE Progress Stream â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── SSE Progress Stream ─────────────────────────────────────────────────────
 
 export function subscribeProgress(onData: (data: IndexStatus & { current_file: string }) => void): () => void {
   let es: EventSource | null = null;
@@ -390,7 +381,7 @@ export function subscribeProgress(onData: (data: IndexStatus & { current_file: s
 // â”€â”€ SSE Query Stream â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export interface QueryStreamChunk {
-  type: 'content' | 'sources' | 'fast_path' | 'error' | 'cached_full' | 'metadata' | 'done' | 'ping';
+  type: 'content' | 'sources' | 'fast_path' | 'error' | 'cached_full' | 'metadata' | 'done' | 'ping' | 'fallback' | 'usage';
   mode?: string;
   text?: string;
   answer?: string;
@@ -404,7 +395,11 @@ export interface QueryStreamChunk {
   knowledge_gaps?: string[];
   pattern_annotations?: string[];
   answer_evolution_diff?: string;
+  to?: string;
+  prompt_tokens?: number;
+  completion_tokens?: number;
 }
+
 
 export function subscribeQuery(
   payload: any,
@@ -474,28 +469,6 @@ export function subscribeQuery(
   };
 }
 
-// â”€â”€ Auth â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-export interface AuthStatus {
-  connected: boolean;
-  method?: 'oauth' | 'env';
-}
-
-export const getAuthStatus = () => json<AuthStatus>('/auth/google/status');
-export const disconnectAuth = () => json<{ message: string }>('/auth/google/disconnect', { method: 'POST' });
-
-export interface ApiKeyStatus {
-  provider: string;
-  is_set: boolean;
-  preview?: string;
-}
-
-export const getApiKeyStatus = (provider: string) => json<ApiKeyStatus>(`/auth/google/keys/${provider}`);
-export const setApiKey = (provider: string, api_key: string) => json<{ status: string }>('/auth/google/keys', {
-  method: 'POST',
-  body: JSON.stringify({ provider, api_key })
-});
-export const deleteApiKey = (provider: string) => json<{ status: string }>(`/auth/google/keys/${provider}`, { method: 'DELETE' });
 
 // â”€â”€ Models â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -521,3 +494,85 @@ export const setLLMPreferences = (prefs: LLMPreferences) =>
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(prefs)
   });
+
+export interface ProviderSpec {
+  id: string;
+  display_name: string;
+  kind: 'cloud' | 'local' | 'aggregator' | 'custom';
+  default_base_url: string | null;
+  base_url_editable: boolean;
+  auth: 'bearer' | 'x-api-key' | 'x-goog-api-key' | 'none';
+  models_endpoint: string;
+  models_parser: string;
+  api_key_pattern: string | null;
+  api_key_docs_url: string;
+  supports_streaming: boolean;
+  supports_tools: boolean;
+  supports_vision: boolean;
+  supported_features: string[];
+}
+
+export interface ProviderStatus {
+  spec: ProviderSpec;
+  is_set: boolean;
+  preview: string | null;
+  stored_in: 'env' | 'keyring' | 'unset';
+  base_url: string | null;
+  default_model: string | null;
+  last_validation?: ValidationResponse | null;
+}
+
+
+export interface ModelInfo {
+  id: string;
+  context_length: number;
+  pricing_hint: number;
+  family: string;
+}
+
+export interface ValidationResponse {
+  ok: boolean;
+  latency_ms: number;
+  models: ModelInfo[];
+  error: string | null;
+  error_code: string | null;
+  server_time: string | null;
+}
+
+export const getProviders = () => json<ProviderStatus[]>('/providers');
+export const validateProvider = (id: string, body: { api_key?: string | null; base_url?: string | null }) =>
+  json<ValidationResponse>(`/providers/${id}/validate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+export const selfTestProvider = (id: string) => json<ValidationResponse>(`/providers/${id}/self_test`, { method: 'POST' });
+export const setProviderKey = (id: string, api_key: string) =>
+  json<{ status: string }>(`/providers/${id}/key`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ api_key })
+  });
+export const deleteProviderKey = (id: string) => json<{ status: string }>(`/providers/${id}/key`, { method: 'DELETE' });
+export const setProviderDefaultModel = (id: string, model: string) =>
+  json<{ status: string }>(`/providers/${id}/default_model`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model })
+  });
+export const getCurrentProvider = () => json<{ provider: string; model: string }>('/providers/current');
+
+export interface ProviderRoutingSettings {
+  provider: string;
+  fallback_chain: string[];
+}
+
+export const getProviderSettings = () => json<ProviderRoutingSettings>('/providers/settings');
+export const setProviderSettings = (settings: ProviderRoutingSettings) =>
+  json<ProviderRoutingSettings>('/providers/settings', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(settings)
+  });
+
+

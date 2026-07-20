@@ -25,13 +25,13 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
 from app import state
-from app.api.auth import auth_router
 from app.api.debug import router as debug_router
 from app.api.deps import get_db, get_emb
 from app.api.indexing import router as indexing_router
 from app.api.insights import router as insights_router
 from app.api.limiter import limiter
 from app.api.models import models_router
+from app.api.providers import providers_router
 from app.api.modules import router as modules_router
 from app.api.search import router as search_router
 from app.api.system import router as system_router
@@ -456,8 +456,8 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 api_router = APIRouter()
 
-api_router.include_router(auth_router)
 api_router.include_router(models_router)
+api_router.include_router(providers_router)
 api_router.include_router(modules_router)
 api_router.include_router(indexing_router, prefix="/index", tags=["indexing"])
 api_router.include_router(search_router, prefix="/query", tags=["search"])

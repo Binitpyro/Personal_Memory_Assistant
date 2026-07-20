@@ -14,7 +14,7 @@ class PdfExtractor:
         try:
             from pypdf import PdfReader  # type: ignore
 
-            reader = PdfReader(str(path))
+            reader = PdfReader(str(path), strict=False)
             total = 0
             if reader.is_encrypted:
                 yield (

@@ -561,13 +561,10 @@ class IndexingService:
 
             async def _pump():
                 while True:
-                    try:
-                        item = bridge.get_nowait()
-                        if item is sentinel:
-                            break
-                        await queue.put({"type": "chunk", "path": path, "chunk": item})
-                    except stdlib_queue.Empty:
-                        await asyncio.sleep(0.01)
+                    item = await loop.run_in_executor(_DISK_EXECUTOR, bridge.get)
+                    if item is sentinel:
+                        break
+                    await queue.put({"type": "chunk", "path": path, "chunk": item})
 
             extract_future = loop.run_in_executor(_EXTRACT_EXECUTOR, _extract_and_chunk)
             await _pump()
@@ -791,14 +788,20 @@ class IndexingService:
         else:
             chunk_ids_int = await self.db.insert_chunks_bulk(chunk_rows)
 
-        l_ids, l_embs, l_metas, emb_blobs = [], [], [], []
+        backup_enabled = (
+            settings.lancedb_mode == "split_brain" or settings.sqlite_embedding_backup
+        )
+        l_ids, l_embs, l_metas = [], [], []
+        emb_blobs = []
         kg_nodes_data = []
         kg_edges_data = []
 
         for chunk_id, item in zip(chunk_ids_int, chunks, strict=True):
+            chunk = item["chunk"]
             cid_str = str(chunk_id)
             l_ids.append(cid_str)
-            l_embs.append(item["chunk"]["_embedding"])
+            emb = chunk.pop("_embedding")
+            l_embs.append(emb)
             l_metas.append(
                 {
                     "chunk_id": cid_str,
@@ -808,11 +811,10 @@ class IndexingService:
                     .get("folder_tag", ""),
                 }
             )
-            emb_blobs.append(
-                (chunk_id, np.array(item["chunk"]["_embedding"], dtype=np.float16).tobytes())
-            )
+            if backup_enabled:
+                emb_blobs.append((chunk_id, np.array(emb, dtype=np.float16).tobytes()))
 
-            for node in item["chunk"].get("kg_nodes", []):
+            for node in chunk.get("kg_nodes", []):
                 props = json.dumps(
                     {
                         "chunk_id": chunk_id,
@@ -822,18 +824,25 @@ class IndexingService:
                 )
                 kg_nodes_data.append((node["id"], "entity", node["label"], props, chunk_id))
 
-            for edge in item["chunk"].get("kg_edges", []):
+            for edge in chunk.get("kg_edges", []):
                 props = json.dumps({"chunk_id": chunk_id})
                 kg_edges_data.append((edge["src_id"], edge["dst_id"], edge["rel_type"], 1.0, props))
 
+            # The SQLite row and KG payloads are ready; release the large source fields.
+            chunk.pop("kg_nodes", None)
+            chunk.pop("kg_edges", None)
+            chunk.pop("text_preview", None)
+
         if use_tx:
-            await self.db.insert_chunk_embeddings_bulk(emb_blobs, auto_commit=False)
+            if backup_enabled:
+                await self.db.insert_chunk_embeddings_bulk(emb_blobs, auto_commit=False)
             if kg_nodes_data:
                 await self.db.insert_kg_nodes_bulk(kg_nodes_data, auto_commit=False)  # type: ignore
             if kg_edges_data:
                 await self.db.insert_kg_edges_bulk(kg_edges_data, auto_commit=False)
         else:
-            await self.db.insert_chunk_embeddings_bulk(emb_blobs)
+            if backup_enabled:
+                await self.db.insert_chunk_embeddings_bulk(emb_blobs)
             if kg_nodes_data:
                 await self.db.insert_kg_nodes_bulk(kg_nodes_data)  # type: ignore
             if kg_edges_data:

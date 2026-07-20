@@ -130,6 +130,7 @@ class TestPdfExtractor:
         with patch.dict("sys.modules", {"pypdf": mock_pypdf}):
             result = self.ext.extract(fake_path, MAX_SIZE)
         assert "Hello world" in result
+        mock_pypdf.PdfReader.assert_called_once_with(str(fake_path), strict=False)
 
     def test_encrypted_pdf(self, tmp_path):
         fake_path = tmp_path / "encrypted.pdf"
@@ -377,17 +378,15 @@ class TestEpubExtractor:
         fake_epub.touch()
 
         mock_zf = MagicMock()
+        mock_zf.__enter__.return_value = mock_zf
         mock_zf.namelist.return_value = ["ch1.xhtml"]
-
-        # mock f.read to return 101MB of text to trigger cumulative size limit
-        mock_file = MagicMock()
-        mock_file.read.return_value = b"A" * 101_000_000
-        mock_zf.open.return_value = mock_file
+        mock_zf.getinfo.return_value.file_size = 101 * 1024 * 1024
 
         with patch("zipfile.ZipFile", return_value=mock_zf):
             result = self.ext.extract(fake_epub, MAX_SIZE)
-        # Should raise ValueError inside, catch and abort, returning empty/truncated string
+        # Oversized entries are rejected before they are decompressed.
         assert result == ""
+        mock_zf.open.assert_not_called()
 
 
 # ── EXTRACTORS registry ───────────────────────────────────────────────────────

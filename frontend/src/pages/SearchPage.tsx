@@ -1,12 +1,15 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { Search, Send, Loader2, Sparkles, Clock, Trash2, RotateCcw } from 'lucide-react';
 import { useApi, invalidateCache } from '../useApi';
-import { getQueryHistory, clearQueryHistory, getFileTree, getAppConfig, type HistoryItem } from '../api';
+import { getQueryHistory, clearQueryHistory, getFileTree, type HistoryItem } from '../api';
+
 import { useChatStream } from '../hooks/useChatStream';
 import { MessageBubble } from '../components/chat/MessageBubble';
 import { FilterBar } from '../components/chat/FilterBar';
+import { ModelPicker } from '../components/providers/ModelPicker';
 
 export function SearchPage() {
+
   const [question, setQuestion] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [showHistory, setShowHistory] = useState(false);
@@ -24,7 +27,7 @@ export function SearchPage() {
   const isSearching = messages.at(-1)?.isStreaming ?? false;
 
   const { data: fileTree } = useApi(getFileTree, { cacheKey: 'files-tree', refetchInterval: isSearching ? 0 : 15_000 });
-  const { data: appConfig } = useApi(getAppConfig, { cacheKey: 'app-config' });
+
 
   const inputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -218,7 +221,8 @@ export function SearchPage() {
           
           <div className="flex items-center justify-between px-2">
             <div className="flex gap-4 text-[10px] text-text-secondary font-bold uppercase tracking-widest">
-              <span className="flex items-center gap-1"><Sparkles className="w-3 h-3 text-primary" /> {appConfig?.gemini_model ?? 'AI Model'}</span>
+              <ModelPicker />
+
               <button
                 onClick={() => setShowHistory(v => !v)}
                 className={`flex items-center gap-1 hover:text-text-primary transition-colors ${showHistory ? 'text-primary' : ''}`}

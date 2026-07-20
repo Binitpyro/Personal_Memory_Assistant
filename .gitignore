@@ -256,3 +256,4 @@ AGENTS.md
 pma_metadata.db*
 /PMA Obsidian/.obsidian/plugins
 /tests/fixtures
+/PMA Obsidian/.obsidian

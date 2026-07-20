@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import httpx
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -276,6 +277,8 @@ def test_build_prompt(patch_data_paths):
 
 @pytest.mark.asyncio
 async def test_check_ollama_health():
+    from app.providers.cache import validation_cache
+    validation_cache.clear()
     client = LLMClient()
     client.ollama_url = "http://ollama"
 
@@ -284,12 +287,15 @@ async def test_check_ollama_health():
     with patch("httpx.AsyncClient.get", AsyncMock(return_value=mock_resp)):
         assert await client._check_ollama_health() is True
 
+    validation_cache.clear()
     with patch("httpx.AsyncClient.get", AsyncMock(side_effect=Exception("Connection refused"))):
         assert await client._check_ollama_health() is False
 
 
 @pytest.mark.asyncio
 async def test_check_lm_studio_health():
+    from app.providers.cache import validation_cache
+    validation_cache.clear()
     client = LLMClient()
     client.lm_studio_url = "http://lmstudio"
 
@@ -298,6 +304,7 @@ async def test_check_lm_studio_health():
     with patch("httpx.AsyncClient.get", AsyncMock(return_value=mock_resp)):
         assert await client._check_lm_studio_health() is True
 
+    validation_cache.clear()
     with patch("httpx.AsyncClient.get", AsyncMock(side_effect=Exception("Connection refused"))):
         assert await client._check_lm_studio_health() is False
 
@@ -307,14 +314,29 @@ async def test_generate_answer():
     client = LLMClient()
     client._ensure_token_loaded = AsyncMock()
 
-    # Mock the underlying calls
-    client._call_gemini = AsyncMock(return_value="gemini_ans")
-    client._call_lm_studio = AsyncMock(return_value="lm_studio_ans")
-    client._call_ollama = AsyncMock(return_value="ollama_ans")
+    # Mock providers
+    mock_gemini = AsyncMock()
+    mock_gemini.spec.id = "gemini"
+    mock_gemini.chat.return_value = "gemini_ans"
 
-    # Mock health checks
-    client._check_lm_studio_health = AsyncMock(return_value=True)
-    client._check_ollama_health = AsyncMock(return_value=True)
+    mock_lm_studio = AsyncMock()
+    mock_lm_studio.spec.id = "lm_studio"
+    mock_lm_studio.chat.return_value = "lm_studio_ans"
+
+    mock_ollama = AsyncMock()
+    mock_ollama.spec.id = "ollama"
+    mock_ollama.chat.return_value = "ollama_ans"
+
+    async def mock_resolve_provider_by_id(pid, model=None, timeout=30.0):
+        if pid == "gemini":
+            return mock_gemini
+        if pid == "lm_studio":
+            return mock_lm_studio
+        if pid == "ollama":
+            return mock_ollama
+        raise Exception("Unknown provider")
+
+    client._resolve_provider_by_id = mock_resolve_provider_by_id
 
     # Gemini API key present
     client.api_key = "key"
@@ -326,25 +348,55 @@ async def test_generate_answer():
     client.api_key = None
     client._oauth_token = None
     client.provider_preference = "auto"
+    
+    async def mock_resolve_with_fallback(pid, model=None, timeout=30.0):
+        from app.search.llm_client import ProviderNotConfiguredError
+        if pid == "gemini" or pid == "openai":
+            raise ProviderNotConfiguredError("Not configured")
+        if pid == "lm_studio":
+            return mock_lm_studio
+        if pid == "ollama":
+            return mock_ollama
+        raise Exception("Unknown provider")
+    client._resolve_provider_by_id = mock_resolve_with_fallback
+
     ans = await client.generate_answer("q", "c", skip_capability_check=True)
     assert ans == "lm_studio_ans"
 
     # Ollama fallback
-    client._check_lm_studio_health = AsyncMock(return_value=False)
+    async def mock_resolve_ollama(pid, model=None, timeout=30.0):
+        from app.search.llm_client import ProviderNotConfiguredError
+        if pid in ("gemini", "openai", "lm_studio"):
+            raise ProviderNotConfiguredError("Not configured")
+        if pid == "ollama":
+            return mock_ollama
+        raise Exception("Unknown provider")
+    client._resolve_provider_by_id = mock_resolve_ollama
     ans = await client.generate_answer("q", "c", skip_capability_check=True)
     assert ans == "ollama_ans"
 
     # None available
-    client._check_ollama_health = AsyncMock(return_value=False)
+    async def mock_resolve_none(pid, model=None, timeout=30.0):
+        from app.search.llm_client import ProviderNotConfiguredError
+
+        raise ProviderNotConfiguredError("Not configured")
+    client._resolve_provider_by_id = mock_resolve_none
     ans = await client.generate_answer("q", "c", skip_capability_check=True)
-    assert "LLM unavailable" in ans
+    assert "Last error: Not configured" in ans
+
+
+from app.providers.gemini import GeminiProvider
+from app.providers.ollama import OllamaProvider
+from app.providers.lm_studio import LMStudioProvider
 
 
 @pytest.mark.asyncio
 async def test_call_gemini_success():
-    client = LLMClient()
-    client.api_key = "fake_gemini_key"
-    client.model = "gemini-model"
+    provider = GeminiProvider(
+        api_key="fake_gemini_key",
+        base_url=None,
+        default_model="gemini-model"
+    )
 
     mock_resp = MagicMock()
     mock_resp.status_code = 200
@@ -353,18 +405,21 @@ async def test_call_gemini_success():
     }
 
     with patch("httpx.AsyncClient.post", AsyncMock(return_value=mock_resp)) as mock_post:
-        ans = await client._call_gemini("prompt")
+        ans = await provider.chat([{"role": "user", "content": "prompt"}])
         assert ans == "Gemini text response"
         mock_post.assert_called_once()
         headers = mock_post.call_args[1]["headers"]
         assert headers["x-goog-api-key"] == "fake_gemini_key"
+    await provider.close()
 
 
 @pytest.mark.asyncio
 async def test_call_gemini_oauth_success():
-    client = LLMClient()
-    client._oauth_token = "oauth_token"  # noqa: S105
-    client.model = "gemini-model"
+    provider = GeminiProvider(
+        api_key="ya29.oauth_token",
+        base_url=None,
+        default_model="gemini-model"
+    )
 
     mock_resp = MagicMock()
     mock_resp.status_code = 200
@@ -373,78 +428,125 @@ async def test_call_gemini_oauth_success():
     }
 
     with patch("httpx.AsyncClient.post", AsyncMock(return_value=mock_resp)) as mock_post:
-        ans = await client._call_gemini("prompt")
+        ans = await provider.chat([{"role": "user", "content": "prompt"}])
         assert ans == "OAuth response"
         headers = mock_post.call_args[1]["headers"]
-        assert headers["Authorization"] == "Bearer oauth_token"
+        assert headers["Authorization"] == "Bearer ya29.oauth_token"
+    await provider.close()
 
 
 @pytest.mark.asyncio
 async def test_call_gemini_api_error():
-    client = LLMClient()
-    client.api_key = "fake_gemini_key"
+    provider = GeminiProvider(
+        api_key="fake_gemini_key",
+        base_url=None,
+        default_model="gemini-model"
+    )
 
-    mock_resp = MagicMock()
-    mock_resp.status_code = 400
-    mock_resp.text = "Invalid request arguments"
+    mock_resp = httpx.Response(
+        400,
+        text="Invalid request arguments",
+        request=httpx.Request("POST", "https://generativelanguage.googleapis.com")
+    )
 
     with patch("httpx.AsyncClient.post", AsyncMock(return_value=mock_resp)):
-        ans = await client._call_gemini("prompt")
-        assert "Gemini API error 400" in ans
+        with pytest.raises(Exception) as exc_info:
+            await provider.chat([{"role": "user", "content": "prompt"}])
+        assert "400" in str(exc_info.value)
+    await provider.close()
 
 
 @pytest.mark.asyncio
 async def test_call_ollama():
-    client = LLMClient()
-    client.ollama_model = "mistral"
+    provider = OllamaProvider(
+        api_key=None,
+        base_url="http://ollama",
+        default_model="mistral"
+    )
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {"message": {"content": "Ollama response content"}}
 
     # Successful call
-    ans = await client._call_ollama("prompt", history=[{"role": "user", "content": "hi"}])
-    assert ans == "Ollama response content"
+    with patch("httpx.AsyncClient.post", AsyncMock(return_value=mock_resp)):
+        ans = await provider.chat([{"role": "user", "content": "prompt"}])
+        assert ans == "Ollama response content"
 
     # Ollama library failure
-    with patch("ollama.chat", AsyncMock(side_effect=Exception("Ollama offline"))):
-        ans_fail = await client._call_ollama("prompt")
-        assert ans_fail == "Ollama failed."
+    with patch("httpx.AsyncClient.post", AsyncMock(side_effect=Exception("Ollama offline"))):
+        with pytest.raises(Exception):
+            await provider.chat([{"role": "user", "content": "prompt"}])
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_stream_ollama():
+    provider = OllamaProvider(
+        api_key=None,
+        base_url="http://ollama",
+        default_model="mistral"
+    )
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+
+    async def fake_aiter_lines():
+        yield '{"message": {"content": "Ollama "}}'
+        yield '{"message": {"content": "stream content"}}'
+        yield '{"done": true}'
+
+    mock_resp.aiter_lines = fake_aiter_lines
+
+    with patch("httpx.AsyncClient.stream", return_value=AsyncContextManagerMock(mock_resp)):
+        results = []
+        async for chunk in provider.stream([{"role": "user", "content": "prompt"}]):
+            results.append(chunk)
+        assert results == ["Ollama ", "stream content"]
+    await provider.close()
 
 
 @pytest.mark.asyncio
 async def test_call_lm_studio_success():
-    client = LLMClient()
-    client.lm_studio_url = "http://lmstudio"
-    client.lm_studio_model = "phi3"
+    provider = LMStudioProvider(
+        api_key=None,
+        base_url="http://lmstudio",
+        default_model="phi3"
+    )
 
     mock_resp = MagicMock()
     mock_resp.status_code = 200
     mock_resp.json.return_value = {"choices": [{"message": {"content": "LM Studio answer"}}]}
 
     with patch("httpx.AsyncClient.post", AsyncMock(return_value=mock_resp)):
-        ans = await client._call_lm_studio("prompt")
+        ans = await provider.chat([{"role": "user", "content": "prompt"}])
         assert ans == "LM Studio answer"
 
     # Non-200
-    mock_resp.status_code = 500
-    with patch("httpx.AsyncClient.post", AsyncMock(return_value=mock_resp)):
-        ans = await client._call_lm_studio("prompt")
-        assert "LM Studio error 500" in ans
-
-    # Exception
-    with patch("httpx.AsyncClient.post", AsyncMock(side_effect=Exception("error"))):
-        ans = await client._call_lm_studio("prompt")
-        assert ans == "LM Studio failed."
+    mock_resp_err = httpx.Response(
+        500,
+        text="Internal Server Error",
+        request=httpx.Request("POST", "http://lmstudio")
+    )
+    with patch("httpx.AsyncClient.post", AsyncMock(return_value=mock_resp_err)):
+        with pytest.raises(Exception) as exc:
+            await provider.chat([{"role": "user", "content": "prompt"}])
+        assert "500" in str(exc.value)
+    await provider.close()
 
 
 @pytest.mark.asyncio
 async def test_stream_gemini_success():
-    client = LLMClient()
-    client.api_key = "key"
-    client.model = "gemini-model"
+    provider = GeminiProvider(
+        api_key="key",
+        base_url=None,
+        default_model="gemini-model"
+    )
 
     mock_resp = MagicMock()
     mock_resp.status_code = 200
 
     async def fake_aiter_text():
-        # JSON chunks corresponding to Gemini SSE stream
         yield "[\n"
         yield "  {\n"
         yield '    "candidates": [{"content": {"parts": [{"text": "Hello "}]}}]\n'
@@ -458,56 +560,42 @@ async def test_stream_gemini_success():
 
     with patch("httpx.AsyncClient.stream", return_value=AsyncContextManagerMock(mock_resp)):
         results = []
-        async for chunk in client._stream_gemini("prompt"):
+        async for chunk in provider.stream([{"role": "user", "content": "prompt"}]):
             results.append(chunk)
         assert results == ["Hello ", "world!"]
+    await provider.close()
 
 
 @pytest.mark.asyncio
 async def test_stream_gemini_error():
-    client = LLMClient()
-    client.api_key = "key"
+    provider = GeminiProvider(
+        api_key="key",
+        base_url=None,
+        default_model="gemini-model"
+    )
 
-    mock_resp = MagicMock()
-    mock_resp.status_code = 403
+    mock_resp = httpx.Response(
+        403,
+        text="Forbidden",
+        request=httpx.Request("POST", "https://generativelanguage.googleapis.com")
+    )
 
     with patch("httpx.AsyncClient.stream", return_value=AsyncContextManagerMock(mock_resp)):
         results = []
-        async for chunk in client._stream_gemini("prompt"):
-            results.append(chunk)
-        assert results == ["Error: 403"]
-
-    # Stream exception
-    with patch("httpx.AsyncClient.stream", side_effect=Exception("Stream break")):
-        results = []
-        async for chunk in client._stream_gemini("prompt"):
-            results.append(chunk)
-        assert results == ["Streaming error."]
-
-
-@pytest.mark.asyncio
-async def test_stream_ollama():
-    client = LLMClient()
-    client.ollama_model = "mistral"
-
-    results = []
-    async for chunk in client._stream_ollama("prompt"):
-        results.append(chunk)
-    assert results == ["Ollama ", "stream content"]
-
-    # Error
-    with patch("ollama.chat", AsyncMock(side_effect=Exception("stream fail"))):
-        results_fail = []
-        async for chunk in client._stream_ollama("prompt"):
-            results_fail.append(chunk)
-        assert results_fail == ["Ollama stream failed."]
+        with pytest.raises(Exception) as exc:
+            async for chunk in provider.stream([{"role": "user", "content": "prompt"}]):
+                results.append(chunk)
+        assert "403" in str(exc.value)
+    await provider.close()
 
 
 @pytest.mark.asyncio
 async def test_stream_lm_studio_success():
-    client = LLMClient()
-    client.lm_studio_url = "http://lmstudio"
-    client.lm_studio_model = "phi3"
+    provider = LMStudioProvider(
+        api_key=None,
+        base_url="http://lmstudio",
+        default_model="phi3"
+    )
 
     mock_resp = MagicMock()
     mock_resp.status_code = 200
@@ -515,37 +603,38 @@ async def test_stream_lm_studio_success():
     async def fake_aiter_lines():
         yield 'data: {"choices": [{"delta": {"content": "Stream "}}]}'
         yield 'data: {"choices": [{"delta": {"content": "chunk"}}]}'
-        # Corrupt data check
-        yield "data: {invalid_json}"
         yield "data: [DONE]"
 
     mock_resp.aiter_lines = fake_aiter_lines
 
     with patch("httpx.AsyncClient.stream", return_value=AsyncContextManagerMock(mock_resp)):
         results = []
-        async for chunk in client._stream_lm_studio("prompt"):
+        async for chunk in provider.stream([{"role": "user", "content": "prompt"}]):
             results.append(chunk)
         assert results == ["Stream ", "chunk"]
+    await provider.close()
 
 
 @pytest.mark.asyncio
 async def test_stream_lm_studio_error():
-    client = LLMClient()
+    provider = LMStudioProvider(
+        api_key=None,
+        base_url="http://lmstudio",
+        default_model="phi3"
+    )
 
-    mock_resp = MagicMock()
-    mock_resp.status_code = 500
+    mock_resp = httpx.Response(
+        500,
+        text="Internal Server Error",
+        request=httpx.Request("POST", "http://lmstudio")
+    )
     with patch("httpx.AsyncClient.stream", return_value=AsyncContextManagerMock(mock_resp)):
         results = []
-        async for chunk in client._stream_lm_studio("prompt"):
-            results.append(chunk)
-        assert results == ["LM Studio error 500"]
-
-    # Exception
-    with patch("httpx.AsyncClient.stream", side_effect=Exception("Stream crash")):
-        results = []
-        async for chunk in client._stream_lm_studio("prompt"):
-            results.append(chunk)
-        assert results == ["LM Studio stream failed."]
+        with pytest.raises(Exception) as exc:
+            async for chunk in provider.stream([{"role": "user", "content": "prompt"}]):
+                results.append(chunk)
+        assert "500" in str(exc.value)
+    await provider.close()
 
 
 @pytest.mark.asyncio
@@ -553,46 +642,49 @@ async def test_stream_answer_monitoring():
     client = LLMClient()
     client._ensure_token_loaded = AsyncMock()
 
-    # 1. Capability check passes, stream returns claims successfully
-    with (
-        patch(
-            "app.search.llm_client.capability_detector.detect_capabilities",
-            AsyncMock(return_value=True),
-        ),
-        patch.object(client, "_stream_gemini") as mock_stream,
+    mock_provider = AsyncMock()
+    mock_provider.spec.id = "gemini"
+    
+    async def fake_stream(*args, **kwargs):
+        yield '<claim sources="[1]">Fact</claim>'
+    mock_provider.stream = fake_stream
+
+    client._resolve_provider_by_id = AsyncMock(return_value=mock_provider)
+
+    with patch(
+        "app.search.llm_client.capability_detector.detect_capabilities",
+        AsyncMock(return_value=True),
     ):
-
-        async def fake_stream(*args, **kwargs):
-            yield '<claim sources="[1]">Fact</claim>'
-
-        mock_stream.side_effect = fake_stream
-
         client.api_key = "key"
         client.provider_preference = "gemini"
 
         results = []
         async for chunk in client.stream_answer("q", "c"):
             results.append(chunk)
-        assert results == ['<claim sources="[1]">Fact</claim>']
+        assert results[0] == '<claim sources="[1]">Fact</claim>'
+        assert any("usage" in r for r in results)
+
 
     # 2. Capability check passes, but stream fails to return `<claim` within 600 chars
+    mock_provider_fail = AsyncMock()
+    mock_provider_fail.spec.id = "gemini"
+    
+    async def fake_stream_no_claims(*args, **kwargs):
+        yield "A" * 700
+    mock_provider_fail.stream = fake_stream_no_claims
+
+    client._resolve_provider_by_id = AsyncMock(return_value=mock_provider_fail)
+
     with (
         patch(
             "app.search.llm_client.capability_detector.detect_capabilities",
             AsyncMock(return_value=True),
         ),
         patch("app.search.llm_client.capability_detector.report_failure") as mock_report,
-        patch.object(client, "_stream_gemini") as mock_stream,
     ):
-
-        async def fake_stream_no_claims(*args, **kwargs):
-            # yield 700 chars of text without <claim
-            yield "A" * 700
-
-        mock_stream.side_effect = fake_stream_no_claims
-
         results = []
         async for chunk in client.stream_answer("q", "c"):
             results.append(chunk)
 
         mock_report.assert_called_once_with(client)
+

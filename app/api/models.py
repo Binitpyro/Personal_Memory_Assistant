@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import APIRouter
+from fastapi import APIRouter, Response
 from pydantic import BaseModel
 
 from app.api.deps import get_llm
@@ -42,7 +42,9 @@ def _write_settings(data: dict[str, Any]) -> None:
 
 
 @models_router.get("/preferences")
-async def get_preferences() -> dict[str, Any]:
+async def get_preferences(response: Response = None) -> dict[str, Any]:
+    if response:
+        response.headers["X-Deprecated"] = "true"
     data = await asyncio.to_thread(_read_settings)
     llm_prefs = data.get("llm", {})
     return {
@@ -54,7 +56,9 @@ async def get_preferences() -> dict[str, Any]:
 
 
 @models_router.post("/preferences")
-async def set_preferences(payload: LLMPreferences) -> dict[str, Any]:
+async def set_preferences(payload: LLMPreferences, response: Response = None) -> dict[str, Any]:
+    if response:
+        response.headers["X-Deprecated"] = "true"
     normalized_provider = (payload.provider or "auto").lower()
     if normalized_provider not in {"auto", "gemini", "ollama", "lm_studio"}:
         normalized_provider = "auto"
@@ -81,11 +85,13 @@ async def set_preferences(payload: LLMPreferences) -> dict[str, Any]:
 
 
 @models_router.get("/detect")
-async def detect_local_models() -> dict[str, Any]:
+async def detect_local_models(response: Response = None) -> dict[str, Any]:
     """
     Rapidly probes standard local ports to detect active LLM providers.
     Returns the list of available models for each provider.
     """
+    if response:
+        response.headers["X-Deprecated"] = "true"
     results = {
         "ollama": {"detected": False, "models": []},
         "lm_studio": {"detected": False, "models": []},

@@ -1,19 +1,16 @@
 import { useState, useEffect } from 'react'
-import { Settings, Shield, Key, CheckCircle2, AlertCircle, LogOut, Cpu, HardDrive, RefreshCcw, Trash2, AlertTriangle, DatabaseZap } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
+import { Settings, CheckCircle2, AlertCircle, Cpu, HardDrive, RefreshCcw, Trash2, AlertTriangle, DatabaseZap } from 'lucide-react'
 import { useApi, invalidateCache } from '../useApi'
 import {
-  getAuthStatus,
-  disconnectAuth,
   getLocalModels,
   getSystemInfo,
   getLLMPreferences,
   setLLMPreferences,
   clearIndex,
-  launchGoogleAuth,
   getDriveInfo,
   purgeHostCache,
   type LLMPreferences,
-  type AuthStatus,
   type LocalModelDetection,
   type SystemInfo,
   type DriveInfo
@@ -21,72 +18,6 @@ import {
 
 // ── Sub-components for lower cognitive complexity ───────────────────
 
-function AuthSection({
-  authStatus,
-  onConnect,
-  onDisconnect
-}: Readonly<{
-  authStatus?: AuthStatus;
-  onConnect: () => void;
-  onDisconnect: () => void;
-}>) {
-  const isConnected = !!authStatus?.connected
-  return (
-    <div className="glass p-6 rounded-2xl border border-primary/10">
-      <div className="flex items-start justify-between">
-        <div className="flex items-start gap-4">
-          <div className="p-3 bg-primary/10 rounded-xl">
-            <Shield className="w-6 h-6 text-primary" />
-          </div>
-          <div>
-            <h2 className="text-lg font-bold text-text-primary">Google Gemini Account</h2>
-            <p className="text-sm text-text-secondary mt-1 max-w-lg">
-              Connect your Google Account to use the Gemini AI natively without needing an API key.
-              Your token is stored safely on your local machine.
-            </p>
-
-            <div className="mt-4 flex items-center gap-2">
-              <span className="text-sm font-medium text-text-primary">Status:</span>
-              {isConnected ? (
-                <span className="inline-flex items-center justify-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-success/15 text-success">
-                  <span className="w-1.5 h-1.5 rounded-full bg-success animate-pulse"></span>
-                  {authStatus?.method === 'env' ? 'Connected (.env)' : 'Connected'}
-                </span>
-              ) : (
-                <span className="inline-flex items-center justify-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-text-secondary/15 text-text-secondary">
-                  <span className="w-1.5 h-1.5 rounded-full bg-text-secondary"></span>
-                  Not Connected
-                </span>
-              )}
-            </div>
-          </div>
-        </div>
-
-        <div className="shrink-0 flex flex-col gap-2">
-          {isConnected ? (
-            authStatus?.method !== 'env' && (
-              <button
-                onClick={onDisconnect}
-                className="glass-button text-error hover:bg-error/10 !py-2 !px-4 gap-2 border border-error/20"
-              >
-                <LogOut className="w-4 h-4" />
-                Disconnect
-              </button>
-            )
-          ) : (
-            <button
-              onClick={onConnect}
-              className="glass-button !bg-primary !text-white hover:!bg-primary-h !py-2 !px-4 gap-2"
-            >
-              <Key className="w-4 h-4" />
-              Connect with Google
-            </button>
-          )}
-        </div>
-      </div>
-    </div>
-  )
-}
 
 function LocalModelsSection({ localModels }: Readonly<{ localModels?: LocalModelDetection }>) {
   return (
@@ -184,6 +115,7 @@ function LLMPreferencesSection({
   onSave: (prefs: LLMPreferences) => void;
   saving: boolean;
 }>) {
+  const navigate = useNavigate()
   const { data: llmPrefs } = useApi(getLLMPreferences, { cacheKey: 'llm-prefs' })
   const [provider, setProvider] = useState<LLMPreferences['provider']>('auto')
   const [geminiModel, setGeminiModel] = useState('gemini-2.5-flash-lite')
@@ -246,13 +178,19 @@ function LLMPreferencesSection({
         </label>
       </div>
 
-      <div className="mt-4">
+      <div className="mt-4 flex items-center gap-3">
         <button
           onClick={() => onSave({ provider, gemini_model: geminiModel, ollama_model: ollamaModel, lm_studio_model: lmStudioModel })}
           disabled={saving}
           className="glass-button !bg-primary !text-white hover:!bg-primary-h !py-2 !px-4"
         >
           {saving ? 'Saving...' : 'Save LLM Preferences'}
+        </button>
+        <button
+          onClick={() => navigate('/settings/providers')}
+          className="glass-button !bg-primary/10 border border-primary/20 text-primary hover:!bg-primary/20 !py-2 !px-4"
+        >
+          Manage Providers & Keys
         </button>
       </div>
     </div>
@@ -424,7 +362,6 @@ function ResetSection({ onRestartOnboarding, onFullReset }: Readonly<{ onRestart
 // ── Main Page Component ──────────────────────────────────────────────
 
 export function SettingsPage() {
-  const { data: authStatus, refetch: refetchAuth } = useApi(getAuthStatus, { cacheKey: 'auth-status' })
   const { data: localModels } = useApi(getLocalModels, { cacheKey: 'local-models' })
   const { data: sysInfo } = useApi(getSystemInfo, { cacheKey: 'system-info' })
   const { refetch: refetchPrefs } = useApi(getLLMPreferences, { cacheKey: 'llm-prefs' })
@@ -434,44 +371,7 @@ export function SettingsPage() {
   const [savingPrefs, setSavingPrefs] = useState(false)
   const [purgingCache, setPurgingCache] = useState(false)
 
-  useEffect(() => {
-    const refreshAuth = () => {
-      void refetchAuth()
-    }
 
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible') {
-        refreshAuth()
-      }
-    }
-
-    globalThis.addEventListener('focus', refreshAuth)
-    document.addEventListener('visibilitychange', handleVisibilityChange)
-    return () => {
-      globalThis.removeEventListener('focus', refreshAuth)
-      document.removeEventListener('visibilitychange', handleVisibilityChange)
-    }
-  }, [refetchAuth])
-
-  const handleConnectGoogle = async () => {
-    try {
-      setMessage({ type: 'ok', text: 'Google sign-in opened in your browser. Return here when it finishes.' })
-      await launchGoogleAuth()
-    } catch (e) {
-      setMessage({ type: 'err', text: e instanceof Error ? e.message : 'Could not launch Google sign-in' })
-    }
-  }
-
-  const handleDisconnect = async () => {
-    try {
-      await disconnectAuth()
-      invalidateCache('auth-status')
-      refetchAuth()
-      setMessage({ type: 'ok', text: 'Disconnected account.' })
-    } catch (e) {
-      setMessage({ type: 'err', text: e instanceof Error ? e.message : 'Disconnection failed' })
-    }
-  }
 
   const handleSavePrefs = async (prefs: LLMPreferences) => {
     setSavingPrefs(true)
@@ -540,11 +440,7 @@ export function SettingsPage() {
         </div>
       )}
 
-      <AuthSection
-        authStatus={authStatus}
-        onConnect={handleConnectGoogle}
-        onDisconnect={handleDisconnect}
-      />
+
 
       <LocalModelsSection localModels={localModels} />
 

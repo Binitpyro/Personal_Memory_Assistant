@@ -1,6 +1,8 @@
 import { useReducer, useCallback, useRef, useEffect } from 'react';
-import { subscribeQuery, type QueryStreamChunk, type QuerySource } from '../api';
+import { subscribeQuery, type QueryStreamChunk, type QuerySource, type ProviderStatus } from '../api';
 import { useStreamActivity } from '../context/StreamActivityContext';
+import { useSessionProvider } from '../context/SessionProviderContext';
+import { queryClient } from '../queryClient';
 
 export interface Message {
   id: string; // generated using crypto.randomUUID()
@@ -16,6 +18,11 @@ export interface Message {
   knowledge_gaps?: string[];
   pattern_annotations?: string[];
   answer_evolution_diff?: string;
+  fallbackTo?: string;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  cost?: number;
+  isEstimatedCost?: boolean;
 }
 
 type ChatAction =
@@ -26,6 +33,8 @@ type ChatAction =
   | { type: 'SET_FAST_PATH'; payload: { content: string; sources?: QuerySource[]; latency_ms?: number; graph_hops?: string } }
   | { type: 'SET_SOURCES'; payload: { sources: QuerySource[]; near_misses: QuerySource[]; latency_ms: number; mode: 'fast_path' | 'full_rag' | 'degraded_rag'; graph_hops?: string; contradictions_found?: boolean; knowledge_gaps?: string[] } }
   | { type: 'SET_METADATA'; payload: { pattern_annotations?: string[]; answer_evolution_diff?: string } }
+  | { type: 'SET_FALLBACK'; payload: { to: string } }
+  | { type: 'SET_USAGE'; payload: { prompt_tokens: number; completion_tokens: number; cost: number; isEstimatedCost: boolean } }
   | { type: 'SET_ERROR'; payload: { text: string } }
   | { type: 'RESET' };
 
@@ -96,6 +105,29 @@ function chatReducer(state: Message[], action: ChatAction): Message[] {
       }
       return state;
     }
+    case 'SET_FALLBACK': {
+      const last = state.at(-1);
+      if (last?.role === 'assistant') {
+        return [...state.slice(0, -1), { 
+          ...last, 
+          fallbackTo: action.payload.to 
+        }];
+      }
+      return state;
+    }
+    case 'SET_USAGE': {
+      const last = state.at(-1);
+      if (last?.role === 'assistant') {
+        return [...state.slice(0, -1), { 
+          ...last, 
+          prompt_tokens: action.payload.prompt_tokens,
+          completion_tokens: action.payload.completion_tokens,
+          cost: action.payload.cost,
+          isEstimatedCost: action.payload.isEstimatedCost
+        }];
+      }
+      return state;
+    }
     case 'SET_ERROR': {
         const last = state.at(-1);
         if (last?.role === 'assistant') {
@@ -108,9 +140,37 @@ function chatReducer(state: Message[], action: ChatAction): Message[] {
   }
 }
 
+
+const STATIC_PRICING_HINTS: Record<string, number> = {
+  'gemini-2.5-flash-lite': 0.075,
+  'gemini-2.5-flash': 0.075,
+  'gemini-2.5-pro': 1.25,
+  'gpt-4o-mini': 0.15,
+  'gpt-4o': 2.50,
+  'claude-3-5-sonnet-20241022': 3.00,
+  'claude-3-5-haiku-20241022': 0.80,
+};
+
+function calculateCost(
+  providerId: string,
+  modelId: string,
+  promptTokens: number,
+  completionTokens: number
+): number {
+  const providers = queryClient.getQueryData<ProviderStatus[]>(['providers-list']);
+  const p = providers?.find((prov) => prov.spec.id === providerId);
+  const m = p?.last_validation?.models?.find((mdl: { id: string }) => mdl.id === modelId);
+
+  
+  const pricingHint = m?.pricing_hint ?? STATIC_PRICING_HINTS[modelId] ?? 0;
+  const totalTokens = promptTokens + completionTokens;
+  return (totalTokens / 1_000_000) * pricingHint;
+}
+
 export function useChatStream(onHistoryUpdate: () => void) {
   const [messages, dispatch] = useReducer(chatReducer, []);
   const { setIsStreamActive } = useStreamActivity();
+  const { sessionModelOverride, addSessionCost } = useSessionProvider();
   
   const streamBufferRef = useRef('');
   const lastUpdateRef = useRef(0);
@@ -161,6 +221,15 @@ export function useChatStream(onHistoryUpdate: () => void) {
     let currentSources: QuerySource[] = [];
     let currentLatency = 0;
 
+    // Resolve initial active provider and model
+    const providers = queryClient.getQueryData<ProviderStatus[]>(['providers-list']);
+    const primaryProvider = sessionModelOverride?.provider || providers?.find(p => p.is_set)?.spec.id || 'gemini';
+    const primaryModel = sessionModelOverride?.model || providers?.find(p => p.is_set)?.default_model || 'gemini-2.5-flash-lite';
+
+    let currentProviderId = primaryProvider;
+    let currentModelId = primaryModel;
+    let receivedUsage = false;
+
     return new Promise<void>((resolve, reject) => {
       subscribeQuery({
         question: userMsg,
@@ -168,7 +237,9 @@ export function useChatStream(onHistoryUpdate: () => void) {
         file_type: options.file_type || null,
         folder_tag: options.folder_tag || null,
         mode: options.mode || null,
-        forced_chunk_ids: options.forced_chunk_id ? [options.forced_chunk_id] : null
+        forced_chunk_ids: options.forced_chunk_id ? [options.forced_chunk_id] : null,
+        override_provider: sessionModelOverride?.provider || null,
+        override_model: sessionModelOverride?.model || null
       }, (chunk: QueryStreamChunk) => {
         
         if (chunk.type === 'error') {
@@ -176,6 +247,31 @@ export function useChatStream(onHistoryUpdate: () => void) {
           setIsStreamActive(false);
           reject(new Error(chunk.text || 'Search failed'));
           return;
+        }
+
+        if (chunk.type === 'fallback') {
+          currentProviderId = chunk.to || 'openai';
+          const fallbackProviderStatus = providers?.find(p => p.spec.id === currentProviderId);
+          currentModelId = fallbackProviderStatus?.default_model || (currentProviderId === 'openai' ? 'gpt-4o-mini' : 'gemini-2.5-flash-lite');
+          dispatch({ type: 'SET_FALLBACK', payload: { to: currentProviderId } });
+        }
+
+        if (chunk.type === 'usage') {
+          receivedUsage = true;
+          const pTokens = chunk.prompt_tokens || 0;
+          const cTokens = chunk.completion_tokens || 0;
+          const cost = calculateCost(currentProviderId, currentModelId, pTokens, cTokens);
+          
+          addSessionCost(cost);
+          dispatch({
+            type: 'SET_USAGE',
+            payload: {
+              prompt_tokens: pTokens,
+              completion_tokens: cTokens,
+              cost,
+              isEstimatedCost: false
+            }
+          });
         }
 
         if (chunk.type === 'sources') {
@@ -229,6 +325,28 @@ export function useChatStream(onHistoryUpdate: () => void) {
           }
           flushStreamBuffer();
           dispatch({ type: 'FINISH_STREAM', payload: { graph_hops: chunk.graph_hops } });
+          
+          // Estimate usage if we didn't receive the usage chunk (e.g. abort or network drop)
+          if (!receivedUsage) {
+            const text = streamBufferRef.current;
+            const cTokens = Math.max(Math.ceil(text.length / 4), Math.ceil(text.trim().split(/\s+/).length * 1.3));
+            
+            const promptText = userMessageContent + "\n" + JSON.stringify(historyForApi);
+            const pTokens = Math.max(Math.ceil(promptText.length / 4), Math.ceil(promptText.trim().split(/\s+/).length * 1.3));
+            
+            const cost = calculateCost(currentProviderId, currentModelId, pTokens, cTokens);
+            addSessionCost(cost);
+            dispatch({
+              type: 'SET_USAGE',
+              payload: {
+                prompt_tokens: pTokens,
+                completion_tokens: cTokens,
+                cost,
+                isEstimatedCost: true
+              }
+            });
+          }
+
           setIsStreamActive(false);
           onHistoryUpdate();
           resolve();
@@ -246,7 +364,8 @@ export function useChatStream(onHistoryUpdate: () => void) {
 
       });
     });
-  }, [messages, flushStreamBuffer, setIsStreamActive, onHistoryUpdate]);
+  }, [messages, flushStreamBuffer, setIsStreamActive, onHistoryUpdate, sessionModelOverride, addSessionCost]);
 
   return { messages, executeSearch, resetChat };
 }
+

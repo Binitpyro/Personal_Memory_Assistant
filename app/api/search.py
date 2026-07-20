@@ -23,9 +23,12 @@ class QueryRequest(BaseModel):
     folder_tag: str | None = Field(None, max_length=100)
     mode: str | None = Field(None, max_length=50)
     forced_chunk_ids: list[int] | None = Field(None, max_length=500)
+    override_provider: str | None = Field(None, max_length=50)
+    override_model: str | None = Field(None, max_length=150)
     history: list[dict[str, str]] | None = Field(
         None
     )  # List of {"role": "user/assistant", "content": "..."}
+
 
     @field_validator("history")
     @classmethod
@@ -155,7 +158,10 @@ async def query_stream(
                     mode=request.mode,
                     forced_chunk_ids=request.forced_chunk_ids,
                     history=history,
+                    override_provider=request.override_provider,
+                    override_model=request.override_model,
                 )
+
                 while True:
                     try:
                         chunk = await asyncio.wait_for(anext(agen), timeout=15.0)

@@ -19,10 +19,12 @@
 struct CameraUniform {
     viewProj: mat4x4<f32>,
     eyePosition: vec3<f32>,
-    _pad: f32,
+    currentVariant: u32,
     time: f32,
     screenWidth: f32,
     screenHeight: f32,
+    fogDensity: f32,
+    fogColor: vec3<f32>,
     _pad2: f32,
 };
 

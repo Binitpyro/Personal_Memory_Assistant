@@ -179,3 +179,16 @@ export function generateCrystalShard(subdivisions = 1, seed = 1337): MeshData {
     }
     return { vertices: vertArray, indices: idxArray, vertexCount: vi, indexCount: vi };
 }
+
+/**
+ * Generates multiple distinct crystal mesh variants.
+ */
+export function generateCrystalVariants(count: number): MeshData[] {
+    const seeds = [1337, 42, 7919];
+    const variants: MeshData[] = [];
+    for (let i = 0; i < count; i++) {
+        // Use subdivisions = 2 to give enough geometry for the jagged shards
+        variants.push(generateCrystalShard(2, seeds[i % seeds.length]));
+    }
+    return variants;
+}

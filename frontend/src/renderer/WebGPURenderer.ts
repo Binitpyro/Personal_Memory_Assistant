@@ -27,11 +27,10 @@ import outlineShaderCode from './shaders/outline.wgsl?raw';
 import { generateCrystalVariants, type MeshData } from './geometry/icosahedron';
 import { generateIcosphereLOD } from './geometry/icosphere';
 import { NavigationController, NODE_STRIDE, NO_PARENT } from '../interaction/NavigationController';
-import { paletteWGSL } from './palette';
 
 /** CameraUniform in crystal/bubble/picking.wgsl:
- *  mat4x4 viewProj (64) + eyePosition vec4 (16) + fogCol vec4 (16) + currentVariant/time/w/h (16) + fogDen/pad1/pad2/pad3 (16) = 128 bytes. */
-const CAMERA_UNIFORM_SIZE = 128;
+ *  mat4x4 viewProj (64) + eyePosition vec3 + currentVariant u32 (16) + time/w/h/fogDen (16) + fogCol/pad2 (16) = 112 bytes. */
+const CAMERA_UNIFORM_SIZE = 112;
 
 /** Background: dark void matching the WebGL2 tier and the page chrome (#02030a). */
 const CLEAR_COLOR: GPUColor = [0.008, 0.012, 0.039, 1];
@@ -65,19 +64,16 @@ export class WebGPURenderer {
     private crystalIndices: Uint32Array = new Uint32Array(0);
     private bubbleIndices: Uint32Array = new Uint32Array(0);
 
-    private crystalVariantCounts: number[] = new Array(8).fill(0);
-    private crystalVariantOffsets: number[] = new Array(8).fill(0);
-
     // Render targets
     private depthTexture!: GPUTexture;
     private pickingTexture!: GPUTexture;
 
-    private cameraBuffer!: GPUBuffer;
+    private cameraBuffers: GPUBuffer[] = [];
     private pickBuffer!: GPUBuffer;
 
     // Explicit layouts so all pipelines share ONE camera bind group.
     private cameraBGL!: GPUBindGroupLayout;
-    private cameraBindGroup!: GPUBindGroup;
+    private cameraBindGroups: GPUBindGroup[] = [];
 
     private outlineBGL!: GPUBindGroupLayout;
     private outlinePipeline!: GPURenderPipeline;
@@ -130,17 +126,19 @@ export class WebGPURenderer {
         this.canvas.width = Math.max(1, this.canvas.clientWidth);
         this.canvas.height = Math.max(1, this.canvas.clientHeight);
 
-        this.cameraBuffer = this.device.createBuffer({
-            size: CAMERA_UNIFORM_SIZE,
-            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-        });
+        for (let i = 0; i < 3; i++) {
+            this.cameraBuffers.push(this.device.createBuffer({
+                size: CAMERA_UNIFORM_SIZE,
+                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+            }));
+        }
 
         this.pickBuffer = this.device.createBuffer({
             size: 256,
             usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
         });
 
-        const variants = generateCrystalVariants(8);
+        const variants = generateCrystalVariants(3);
         this.crystalMeshes = variants.map(v => this.uploadMesh(v));
         this.bubbleMesh = this.uploadMesh(generateIcosphereLOD(3));
 
@@ -149,10 +147,10 @@ export class WebGPURenderer {
         this.setupPipelines();
         this.setupTextures();
 
-        this.cameraBindGroup = this.device.createBindGroup({
+        this.cameraBindGroups = this.cameraBuffers.map(buffer => this.device.createBindGroup({
             layout: this.cameraBGL,
-            entries: [{ binding: 0, resource: { buffer: this.cameraBuffer } }],
-        });
+            entries: [{ binding: 0, resource: { buffer } }],
+        }));
     }
 
     private uploadMesh(mesh: MeshData): GpuMesh {
@@ -217,7 +215,7 @@ export class WebGPURenderer {
         const cameraOnlyLayout = this.device.createPipelineLayout({ bindGroupLayouts: [this.cameraBGL] });
         const buffers = this.vertexLayouts();
 
-        const fullCrystalShader = paletteWGSL() + '\n' + commonShaderCode + '\n' + crystalShaderCode;
+        const fullCrystalShader = commonShaderCode + '\n' + crystalShaderCode;
         const crystalModule = this.device.createShaderModule({ code: fullCrystalShader });
         
         // Crystals: opaque, depth-writing.
@@ -225,13 +223,13 @@ export class WebGPURenderer {
             layout: cameraOnlyLayout,
             vertex: { module: crystalModule, entryPoint: 'vs_main', buffers },
             fragment: { module: crystalModule, entryPoint: 'fs_main', targets: [{ format: this.format }] },
-            primitive: { topology: 'triangle-list', cullMode: 'none' },
-            depthStencil: { depthWriteEnabled: true, depthCompare: 'greater', format: 'depth32float' },
+            primitive: { topology: 'triangle-list', cullMode: 'back' },
+            depthStencil: { depthWriteEnabled: true, depthCompare: 'less', format: 'depth24plus' },
         });
 
         // Bubbles: transparent, no depth write, two passes (interior back
         // faces first, then exterior front faces) per bubble.wgsl's contract.
-        const fullBubbleShader = paletteWGSL() + '\n' + commonShaderCode + '\n' + bubbleShaderCode;
+        const fullBubbleShader = commonShaderCode + '\n' + bubbleShaderCode;
         const bubbleModule = this.device.createShaderModule({ code: fullBubbleShader });
         const bubbleBlend: GPUBlendState = {
             color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
@@ -242,14 +240,14 @@ export class WebGPURenderer {
             vertex: { module: bubbleModule, entryPoint: 'vs_main', buffers },
             fragment: { module: bubbleModule, entryPoint: 'fs_main', targets: [{ format: this.format, blend: bubbleBlend }] },
             primitive: { topology: 'triangle-list', cullMode: 'front' }, // Back faces
-            depthStencil: { depthWriteEnabled: false, depthCompare: 'greater', format: 'depth32float' },
+            depthStencil: { depthWriteEnabled: false, depthCompare: 'less', format: 'depth24plus' },
         });
         this.bubbleFrontPipeline = this.device.createRenderPipeline({
             layout: cameraOnlyLayout,
             vertex: { module: bubbleModule, entryPoint: 'vs_main', buffers },
             fragment: { module: bubbleModule, entryPoint: 'fs_main', targets: [{ format: this.format, blend: bubbleBlend }] },
             primitive: { topology: 'triangle-list', cullMode: 'back' }, // Front faces
-            depthStencil: { depthWriteEnabled: false, depthCompare: 'greater', format: 'depth32float' },
+            depthStencil: { depthWriteEnabled: false, depthCompare: 'less', format: 'depth24plus' },
         });
 
         // Outline post-process pipeline
@@ -285,7 +283,7 @@ export class WebGPURenderer {
             vertex: { module: pickingModule, entryPoint: 'vs_main', buffers },
             fragment: { module: pickingModule, entryPoint: 'fs_main', targets: [{ format: 'r32uint' }] },
             primitive: { topology: 'triangle-list', cullMode: 'back' },
-            depthStencil: { depthWriteEnabled: true, depthCompare: 'greater', format: 'depth32float' },
+            depthStencil: { depthWriteEnabled: true, depthCompare: 'less', format: 'depth24plus' },
         });
     }
 
@@ -293,7 +291,7 @@ export class WebGPURenderer {
         const size = [this.canvas.width, this.canvas.height];
         
         this.depthTexture = this.device.createTexture({
-            size, format: 'depth32float',
+            size, format: 'depth24plus',
             usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
         });
         
@@ -305,7 +303,7 @@ export class WebGPURenderer {
         this.outlineBindGroup = this.device.createBindGroup({
             layout: this.outlineBGL,
             entries: [
-                { binding: 0, resource: { buffer: this.cameraBuffer } },
+                { binding: 0, resource: { buffer: this.cameraBuffers[0] } },
                 { binding: 1, resource: this.depthTexture.createView() },
                 { binding: 2, resource: this.nearestSampler },
             ],
@@ -313,14 +311,8 @@ export class WebGPURenderer {
     }
 
     public resize(width: number, height: number): void {
-        const dpr = window.devicePixelRatio || 1;
-        const w = Math.max(1, Math.floor(width * dpr));
-        const h = Math.max(1, Math.floor(height * dpr));
-        
-        // Ensure CSS width/height stays at logical pixels
-        this.canvas.style.width = `${width}px`;
-        this.canvas.style.height = `${height}px`;
-
+        const w = Math.max(1, Math.floor(width));
+        const h = Math.max(1, Math.floor(height));
         if (this.canvas.width === w && this.canvas.height === h) return;
         this.canvas.width = w;
         this.canvas.height = h;
@@ -377,108 +369,9 @@ export class WebGPURenderer {
         if (!this.instanceBuffer) return;
         const v = this.nav.buildVisibleSet();
         this.crystalCount = v.crystalCount;
-        
-        // Bucket crystals by variant (type_hash % 8)
-        this.crystalVariantCounts.fill(0);
-        if (this.crystalCount > 0) {
-            const dv = new DataView(v.crystalData.buffer, v.crystalData.byteOffset, v.crystalData.byteLength);
-            interface CrystalInfo {
-                index: number;
-                dataIndex: number;
-                variant: number;
-            }
-            const crystals: CrystalInfo[] = [];
-            for (let i = 0; i < this.crystalCount; i++) {
-                const off = i * NODE_STRIDE;
-                const typeHash = dv.getUint32(off + 24, true);
-                const variant = typeHash % 8;
-                crystals.push({ index: v.crystalIndices[i], dataIndex: i, variant });
-                this.crystalVariantCounts[variant]++;
-            }
-            
-            // Calculate offsets
-            let offset = 0;
-            for (let i = 0; i < 8; i++) {
-                this.crystalVariantOffsets[i] = offset;
-                offset += this.crystalVariantCounts[i];
-            }
-            
-            // Sort crystals by variant
-            crystals.sort((a, b) => a.variant - b.variant);
-            
-            const newData = new Uint8Array(this.crystalCount * NODE_STRIDE);
-            const newIndices = new Uint32Array(this.crystalCount);
-            for (let i = 0; i < this.crystalCount; i++) {
-                const c = crystals[i];
-                const off = c.dataIndex * NODE_STRIDE;
-                newData.set(v.crystalData.subarray(off, off + NODE_STRIDE), i * NODE_STRIDE);
-                newIndices[i] = c.index;
-            }
-            
-            this.crystalIndices = newIndices;
-            v.crystalData = newData; // For the writeBuffer call below
-        } else {
-            this.crystalIndices = new Uint32Array(0);
-        }
-
-        
-        // Top-K Bubble Culling (cap at 500 largest on-screen)
-        const MAX_BUBBLES = 500;
-        if (v.bubbleCount > MAX_BUBBLES) {
-            const dv = new DataView(v.bubbleData.buffer, v.bubbleData.byteOffset, v.bubbleData.byteLength);
-            
-            interface BubbleInfo {
-                index: number;
-                dataIndex: number;
-                score: number;
-            }
-            
-            const bubbles: BubbleInfo[] = [];
-            for (let i = 0; i < v.bubbleCount; i++) {
-                const off = i * NODE_STRIDE;
-                const px = dv.getFloat32(off, true);
-                const py = dv.getFloat32(off + 4, true);
-                const pz = dv.getFloat32(off + 8, true);
-                const r = dv.getFloat32(off + 12, true);
-                
-                const dx = px - this.cameraPosition[0];
-                const dy = py - this.cameraPosition[1];
-                const dz = pz - this.cameraPosition[2];
-                const distSq = dx*dx + dy*dy + dz*dz;
-                
-                // score = r^2 / distSq
-                const score = (r * r) / (distSq + 0.0001);
-                
-                bubbles.push({
-                    index: v.bubbleIndices[i],
-                    dataIndex: i,
-                    score
-                });
-            }
-            
-            // Sort by projected radius descending
-            bubbles.sort((a, b) => b.score - a.score);
-            const keep = bubbles.slice(0, MAX_BUBBLES);
-            
-            // Re-sort by original dataIndex to preserve strict pre-order!
-            keep.sort((a, b) => a.dataIndex - b.dataIndex);
-            
-            const newData = new Uint8Array(MAX_BUBBLES * NODE_STRIDE);
-            const newIndices = new Uint32Array(MAX_BUBBLES);
-            for (let i = 0; i < MAX_BUBBLES; i++) {
-                const b = keep[i];
-                const off = b.dataIndex * NODE_STRIDE;
-                newData.set(v.bubbleData.subarray(off, off + NODE_STRIDE), i * NODE_STRIDE);
-                newIndices[i] = b.index;
-            }
-            
-            this.bubbleCount = MAX_BUBBLES;
-            this.bubbleIndices = newIndices;
-            v.bubbleData = newData; // For the writeBuffer call below
-        } else {
-            this.bubbleCount = v.bubbleCount;
-            this.bubbleIndices = v.bubbleIndices.slice();
-        }
+        this.bubbleCount = v.bubbleCount;
+        this.crystalIndices = v.crystalIndices.slice();
+        this.bubbleIndices = v.bubbleIndices.slice();
 
         if (v.crystalCount > 0) {
             this.device.queue.writeBuffer(
@@ -528,21 +421,24 @@ export class WebGPURenderer {
         const view = this.lookAt(this.cameraPosition, [t[0], t[1], t[2]], [0, 1, 0]);
         const vpMatrix = this.multiply(projection, view);
 
-        // Update the single camera buffer
-        const uniformData = new Float32Array(32);
-        uniformData.set(vpMatrix, 0);
-        uniformData.set([this.cameraPosition[0], this.cameraPosition[1], this.cameraPosition[2], 0], 16);
-        uniformData.set([0.05, 0.03, 0.12, 0], 20);                    // fogColor (indigo)
-        
-        const uniformDataU32 = new Uint32Array(uniformData.buffer);
-        uniformDataU32[24] = 0;                                        // currentVariant (unused)
+        // Update all 3 camera variant buffers
+        for (let i = 0; i < 3; i++) {
+            // 28 floats = 112 bytes
+            const uniformData = new Float32Array(28);
+            uniformData.set(vpMatrix, 0);
+            uniformData.set([this.cameraPosition[0], this.cameraPosition[1], this.cameraPosition[2]], 16);
+            // currentVariant at byte offset 76 (index 19 as Float32 alias, better to write as Uint32)
+            const uniformDataU32 = new Uint32Array(uniformData.buffer);
+            uniformDataU32[19] = i;
 
-        uniformData[25] = (performance.now() - this.startTime) / 1000; // time
-        uniformData[26] = this.canvas.width;                           // screenWidth
-        uniformData[27] = this.canvas.height;                          // screenHeight
-        uniformData[28] = 0.0005;                                      // fogDensity
+            uniformData[20] = (performance.now() - this.startTime) / 1000; // time
+            uniformData[21] = this.canvas.width;                           // screenWidth
+            uniformData[22] = this.canvas.height;                          // screenHeight
+            uniformData[23] = 0.0005;                                      // fogDensity
+            uniformData.set([0.05, 0.03, 0.12, 0], 24);                    // fogColor (indigo) + _pad2
 
-        this.device.queue.writeBuffer(this.cameraBuffer, 0, uniformData);
+            this.device.queue.writeBuffer(this.cameraBuffers[i], 0, uniformData);
+        }
     }
 
     public render(): void {
@@ -578,30 +474,30 @@ export class WebGPURenderer {
             }],
             depthStencilAttachment: {
                 view: this.depthTexture.createView(),
-                depthClearValue: 0,
+                depthClearValue: 1,
                 depthLoadOp: 'clear',
                 depthStoreOp: 'store',
             },
         });
 
-        pass.setBindGroup(0, this.cameraBindGroup);
+        pass.setBindGroup(0, this.cameraBindGroups[0]);
 
         // 1) Opaque crystals (collapsed folders).
         if (this.crystalCount > 0) {
             pass.setPipeline(this.crystalPipeline);
+            pass.setVertexBuffer(1, this.instanceBuffer, 0, this.crystalCount * NODE_STRIDE);
             
-            for (let i = 0; i < 8; i++) {
-                if (this.crystalVariantCounts[i] === 0) continue;
+            for (let i = 0; i < 3; i++) {
+                pass.setBindGroup(0, this.cameraBindGroups[i]);
                 pass.setVertexBuffer(0, this.crystalMeshes[i].vertexBuffer);
-                pass.setVertexBuffer(1, this.instanceBuffer, this.crystalVariantOffsets[i] * NODE_STRIDE, this.crystalVariantCounts[i] * NODE_STRIDE);
                 pass.setIndexBuffer(this.crystalMeshes[i].indexBuffer, 'uint16');
-                pass.drawIndexed(this.crystalMeshes[i].indexCount, this.crystalVariantCounts[i]);
+                pass.drawIndexed(this.crystalMeshes[i].indexCount, this.crystalCount);
             }
         }
 
         // 2) Transparent bubbles (files) — back faces then front faces.
         if (this.bubbleCount > 0) {
-            pass.setBindGroup(0, this.cameraBindGroup);
+            pass.setBindGroup(0, this.cameraBindGroups[0]);
             pass.setVertexBuffer(0, this.bubbleMesh.vertexBuffer);
             pass.setVertexBuffer(1, this.instanceBuffer, this.crystalCount * NODE_STRIDE, this.bubbleCount * NODE_STRIDE);
             pass.setIndexBuffer(this.bubbleMesh.indexBuffer, 'uint16');
@@ -664,7 +560,7 @@ export class WebGPURenderer {
             }],
             depthStencilAttachment: {
                 view: this.depthTexture.createView(),
-                depthClearValue: 0,
+                depthClearValue: 1,
                 depthLoadOp: 'clear',
                 depthStoreOp: 'store',
             },
@@ -672,7 +568,7 @@ export class WebGPURenderer {
 
         pass.setPipeline(this.pickingPipeline);
         pass.setScissorRect(px, py, 1, 1);
-        pass.setBindGroup(0, this.cameraBindGroup);
+        pass.setBindGroup(0, this.cameraBindGroups[0]);
         pass.setVertexBuffer(1, this.instanceBuffer);
 
         if (this.crystalCount > 0) {
@@ -707,10 +603,10 @@ export class WebGPURenderer {
 
     // ── Matrix helpers ──────────────────────────────────────────────────
 
-    private perspective(fovy: number, aspect: number, near: number, _far: number): Float32Array {
+    private perspective(fovy: number, aspect: number, near: number, far: number): Float32Array {
         const f = 1 / Math.tan(fovy / 2);
         const out = new Float32Array(16);
-        out[0] = f / aspect; out[5] = f; out[10] = 0; out[11] = -1; out[14] = near;
+        out[0] = f / aspect; out[5] = f; out[10] = far / (near - far); out[11] = -1; out[14] = (near * far) / (near - far);
         return out;
     }
 
@@ -754,7 +650,7 @@ export class WebGPURenderer {
     public destroy(): void {
         this.depthTexture?.destroy();
         this.pickingTexture?.destroy();
-        this.cameraBuffer?.destroy();
+        for (const b of this.cameraBuffers) b?.destroy();
         this.pickBuffer?.destroy();
         this.instanceBuffer?.destroy();
         for (const m of this.crystalMeshes) {

@@ -156,35 +156,13 @@ export class NavigationController {
 
         // Compute depth via BFS from root. Depth is used by shaders (via VBO stream) later
         // and could gate LOD thresholds; keeping it as a field for cheap read.
-        // We also apply two safeguards during this pass:
-        // 1. Anomaly Coercion: Any node with children must be marked as a folder.
-        // 2. Radius Clamping: Child radius must be <= parent.radius * 0.42 to prevent facet clipping.
         if (this.rootIndex !== -1) {
-            if (this.nodes[this.rootIndex].children.length > 0 && (this.nodes[this.rootIndex].flags & FLAG_FOLDER) === 0) {
-                this.nodes[this.rootIndex].flags |= FLAG_FOLDER;
-                dataView.setUint32(this.rootIndex * NODE_STRIDE + NODE_OFF_FLAGS, this.nodes[this.rootIndex].flags, true);
-            }
-
             const queue: number[] = [this.rootIndex];
             this.nodes[this.rootIndex].depth = 0;
             while (queue.length > 0) {
                 const cur = queue.shift()!;
-                const parentRadius = dataView.getFloat32(cur * NODE_STRIDE + NODE_OFF_RADIUS, true);
-                const maxChildRadius = parentRadius * 0.42;
-
                 for (const c of this.nodes[cur].children) {
                     this.nodes[c].depth = this.nodes[cur].depth + 1;
-                    
-                    if (this.nodes[c].children.length > 0 && (this.nodes[c].flags & FLAG_FOLDER) === 0) {
-                        this.nodes[c].flags |= FLAG_FOLDER;
-                        dataView.setUint32(c * NODE_STRIDE + NODE_OFF_FLAGS, this.nodes[c].flags, true);
-                    }
-
-                    const childRadius = dataView.getFloat32(c * NODE_STRIDE + NODE_OFF_RADIUS, true);
-                    if (childRadius > maxChildRadius) {
-                        dataView.setFloat32(c * NODE_STRIDE + NODE_OFF_RADIUS, maxChildRadius, true);
-                    }
-                    
                     queue.push(c);
                 }
             }

@@ -7,16 +7,14 @@
 
 struct CameraUniform {
     viewProj: mat4x4<f32>,
-    eyePosition: vec4<f32>,
-    fogColor: vec4<f32>,
+    eyePosition: vec3<f32>,
     currentVariant: u32,
     time: f32,
     screenWidth: f32,
     screenHeight: f32,
     fogDensity: f32,
-    _pad1: f32,
+    fogColor: vec3<f32>,
     _pad2: f32,
-    _pad3: f32,
 };
 
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
@@ -89,62 +87,44 @@ struct FragOutput {
 };
 
 @fragment
-fn fs_main(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragOutput {
-    let raw_N = normalize(in.world_normal);
-    let N = select(-raw_N, raw_N, is_front);
-    let V = normalize(camera.eyePosition.xyz - in.world_pos);
+fn fs_main(in: VertexOutput) -> FragOutput {
+    let N = normalize(in.world_normal);
+    let V = normalize(camera.eyePosition - in.world_pos);
     let NdotV = max(dot(N, V), 0.0);
 
-    // Base color for bubbles
+    // Base color for bubbles: Warm pink hue, varied slightly by hash
     let hue_shift = hash_to_hue(in.type_hash) * 0.1 - 0.05; // ±5% shift
     // e8a0bf (232, 160, 191) -> ~ vec3(0.91, 0.63, 0.75)
     let base = vec3<f32>(0.91 + hue_shift, 0.63, 0.75 - hue_shift);
 
-    // Iridescence based on viewing angle
-    let iri = iridescence(NdotV, hash_to_hue(in.type_hash));
-
     // Toon diffuse
     let L = normalize(vec3<f32>(0.5, 1.2, 0.7));
     let NdotL = max(dot(N, L), 0.0);
-    let derivative = fwidth(NdotL);
-    let toonLightColor = toon_lighting(NdotL, derivative);
+    let toonDiffuse = toon_lighting(NdotL);
+
+    // Warm pink rim glow
+    let rim_tint = vec3<f32>(1.0, 0.56, 0.67); // ff8fab
+    let rim = rim_glow(NdotV, rim_tint, 2.5, 0.8);
 
     // Toon specular
     let H = normalize(L + V);
     let NdotH = max(dot(N, H), 0.0);
-    let specDerivative = fwidth(NdotH);
-    
-    var final_rgb: vec3<f32>;
-    var alpha: f32;
+    let spec = toon_specular(NdotH, 0.85) * 1.2;
 
-    if (is_front) {
-        let spec = toon_specular(NdotH, 0.85, specDerivative) * 1.5;
-        let rim = rim_glow(NdotV, vec3<f32>(1.0, 0.56, 0.67), 2.5, 0.8);
-        // Mix base with iridescence
-        let body = (base * 0.7 + iri * 0.3) * toonLightColor;
-        let inner = vec3<f32>(1.0, 0.84, 0.88) * (pow(NdotV, 2.0) * 0.4);
-        
-        final_rgb = body + rim + vec3<f32>(spec) + inner;
-        
-        // Alpha for front faces: stronger at rims, slightly transparent in center
-        let rim_factor = pow(1.0 - NdotV, 2.0);
-        alpha = clamp(rim_factor * 0.7 + 0.1, 0.0, 1.0);
-    } else {
-        // Back face (interior)
-        let spec = toon_specular(NdotH, 0.90, specDerivative) * 0.5; // weaker specular
-        let rim = rim_glow(NdotV, vec3<f32>(1.0, 0.56, 0.67), 2.0, 0.4); // weaker rim
-        let body = (base * 0.5 + iri * 0.2) * toonLightColor;
-        let inner = vec3<f32>(1.0, 0.84, 0.88) * (pow(NdotV, 3.0) * 0.2); // weaker inner
-        
-        final_rgb = body + rim + vec3<f32>(spec) + inner;
-        
-        // Alpha for back faces: much lower opacity, giving it a translucent layer feel
-        let rim_factor = pow(1.0 - NdotV, 3.0);
-        alpha = clamp(rim_factor * 0.4 + 0.05, 0.0, 1.0);
-    }
+    // Inner glow (emissive at sphere center)
+    // ffd6e0 (255, 214, 224)
+    let inner_tint = vec3<f32>(1.0, 0.84, 0.88);
+    let inner = inner_tint * (pow(NdotV, 2.0) * 0.4);
+
+    let body = mix(base * 0.3, base, toonDiffuse);
+    let rgb = body + rim + vec3<f32>(spec) + inner;
+
+    // Simplified alpha model: more uniform transparency
+    let rim_factor = pow(1.0 - NdotV, 2.5);
+    let alpha = clamp(rim_factor * 0.6 + 0.15, 0.0, 1.0);
 
     // Distance-based atmospheric fog
-    let fogged_rgb = atmospheric_fog(final_rgb, in.view_depth, camera.fogDensity, camera.fogColor.xyz);
+    let fogged_rgb = atmospheric_fog(rgb, in.view_depth, camera.fogDensity, camera.fogColor);
 
     var out: FragOutput;
     out.color = vec4<f32>(clamp(fogged_rgb, vec3<f32>(0.0), vec3<f32>(2.0)), alpha);

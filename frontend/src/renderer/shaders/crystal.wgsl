@@ -26,16 +26,14 @@
 
 struct CameraUniform {
     viewProj: mat4x4<f32>,
-    eyePosition: vec4<f32>,
-    fogColor: vec4<f32>,
+    eyePosition: vec3<f32>,
     currentVariant: u32,
     time: f32,
     screenWidth: f32,
     screenHeight: f32,
     fogDensity: f32,
-    _pad1: f32,
+    fogColor: vec3<f32>,
     _pad2: f32,
-    _pad3: f32,
 };
 
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
@@ -78,6 +76,11 @@ fn rotate_axis(v: vec3<f32>, k: vec3<f32>, theta: f32) -> vec3<f32> {
 fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
 
+    // Cull if this instance doesn't belong to the current variant pass
+    if (in.inst_type_hash % 3u != camera.currentVariant) {
+        out.clip_pos = vec4<f32>(2.0, 2.0, 2.0, 1.0); // Outside NDC (culled)
+        return out;
+    }
 
     // Per-instance rotation seeded by type_hash. Golden-ratio multipliers keep
     // adjacent hashes visually distinct (this is a standard trick from procedural
@@ -126,57 +129,41 @@ fn hash_to_crystal_color(h: u32) -> vec3<f32> {
 struct FragOutput { @location(0) color: vec4<f32> };
 
 @fragment
-fn fs_main(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragOutput {
-    let raw_N = in.face_normal;
-    // Flip normal for back faces so lighting works correctly on the inside
-    let N = select(-raw_N, raw_N, is_front);
-    let V = normalize(camera.eyePosition.xyz - in.world_pos);
+fn fs_main(in: VertexOutput) -> FragOutput {
+    let N = in.face_normal;
+    let V = normalize(camera.eyePosition - in.world_pos);
     let NdotV = max(dot(N, V), 0.0);
+
+    // Schlick Fresnel — steep exponent for subtle sparkle edge highlight
+    let fresnel = 0.04 + 0.96 * pow(1.0 - NdotV, 5.0);
 
     let base = hash_to_crystal_color(in.type_hash);
 
     // Toon diffuse lighting
     let L = normalize(vec3<f32>(0.6, 1.0, 0.8));
     let NdotL = max(dot(N, L), 0.0);
-    let derivative = fwidth(NdotL);
-    let toonLightColor = toon_lighting(NdotL, derivative);
+    let toonDiffuse = toon_lighting(NdotL);
+
+    // Toon specular highlight
+    let H = normalize(L + V);
+    let NdotH = max(dot(N, H), 0.0);
+    let spec = toon_specular(NdotH, 0.92) * 1.5;
 
     // Emissive pulse (breathing glow)
     let type_hash_f = f32(in.type_hash % 100u);
     let pulse = (sin(camera.time * 0.5 + type_hash_f * 0.1) * 0.5 + 0.5) * 0.15;
     let glow = base * pulse;
 
-    var final_rgb: vec3<f32>;
+    // Rim glow: Cool cyan edge glow
+    let rim = rim_glow(NdotV, vec3<f32>(0.4, 0.8, 1.0), 3.0, 0.8);
 
-    if (is_front) {
-        // Outer shell
-        let fresnel = 0.04 + 0.96 * pow(1.0 - NdotV, 5.0);
-        let H = normalize(L + V);
-        let NdotH = max(dot(N, H), 0.0);
-        let spec = toon_specular(NdotH, 0.92, fwidth(NdotH)) * 1.5;
-        
-        let rim = rim_glow(NdotV, vec3<f32>(0.4, 0.8, 1.0), 3.0, 0.8);
-        
-        // Multiply base by the Gooch-shifted light color
-        let body = (base * toonLightColor) + (vec3<f32>(1.0) * fresnel * 0.2);
-        final_rgb = clamp(body + vec3<f32>(spec) + glow + rim, vec3<f32>(0.0), vec3<f32>(2.0));
-    } else {
-        // Inner shell
-        // Darker base to contrast with the bright bubbles inside
-        let body = (base * 0.5) * toonLightColor;
-        
-        // Inner rim (glows towards the edge from inside)
-        let rim = rim_glow(NdotV, PAL_CORE, 2.0, 0.5);
-        
-        // Dense core emission (gets brighter as NdotV approaches 1, meaning looking straight through the center)
-        let core = PAL_CORE * pow(NdotV, 4.0) * 0.6;
-        
-        final_rgb = clamp(body + glow + rim + core, vec3<f32>(0.0), vec3<f32>(2.0));
-    }
+    // Composite: Toon diffuse, specular, and glow
+    let body = mix(base * 0.2, base, toonDiffuse) + vec3<f32>(1.0) * fresnel * 0.2;
+    let final_rgb = clamp(body + vec3<f32>(spec) + glow + rim, vec3<f32>(0.0), vec3<f32>(2.0));
 
     // Distance-based atmospheric fog
     let view_depth = in.clip_pos.w;
-    let fogged_rgb = atmospheric_fog(final_rgb, view_depth, camera.fogDensity, camera.fogColor.xyz);
+    let fogged_rgb = atmospheric_fog(final_rgb, view_depth, camera.fogDensity, camera.fogColor);
 
     var out: FragOutput;
     out.color = vec4<f32>(fogged_rgb, 1.0);

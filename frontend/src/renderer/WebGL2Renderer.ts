@@ -44,7 +44,13 @@ const crystalVert = `
 varying vec3 vViewPosition;
 varying vec3 vNormal;
 varying vec3 vWorldPosition;
+#ifdef USE_INSTANCING_COLOR
+    varying vec3 vInstanceColor;
+#endif
 void main() {
+    #ifdef USE_INSTANCING_COLOR
+        vInstanceColor = instanceColor;
+    #endif
     vec4 instancePos = instanceMatrix * vec4(position, 1.0);
     vec4 mvPosition = viewMatrix * modelMatrix * instancePos;
     gl_Position = projectionMatrix * mvPosition;
@@ -61,7 +67,9 @@ const crystalFrag = `
 varying vec3 vViewPosition;
 varying vec3 vNormal;
 varying vec3 vWorldPosition;
-uniform vec3 uColor;
+#ifdef USE_INSTANCING_COLOR
+    varying vec3 vInstanceColor;
+#endif
 uniform vec3 uLightDir;
 uniform float uTime;
 void main() {
@@ -69,21 +77,34 @@ void main() {
     vec3 V = normalize(vViewPosition);
     vec3 L = normalize(uLightDir);
     
-    float NdotL = dot(N, L);
-    float diff = max(NdotL, 0.0);
-    float band = 0.2;
-    if (diff > 0.5) band = 1.0;
-    else if (diff > 0.1) band = 0.6;
+    vec3 baseColor = vec3(0.62, 0.50, 1.0);
+    #ifdef USE_INSTANCING_COLOR
+        baseColor = vInstanceColor;
+    #endif
     
-    vec3 baseColor = uColor * band;
+    float NdotL = max(dot(N, L), 0.0);
+    float NdotV = max(dot(N, V), 0.0);
     
-    float rim = 1.0 - max(dot(V, N), 0.0);
-    rim = smoothstep(0.6, 1.0, rim);
-    vec3 rimColor = vec3(0.5, 0.7, 1.0) * rim * 1.5;
+    // Gooch-like toon diffuse
+    vec3 cool = vec3(0.05, 0.03, 0.12);
+    vec3 warm = vec3(0.6, 1.0, 0.8);
+    float toon = step(0.5, NdotL);
+    vec3 toonLight = mix(cool, warm, toon);
     
-    float pulse = (sin(uTime * 2.0 + vWorldPosition.x + vWorldPosition.y) * 0.5 + 0.5) * 0.15;
+    vec3 bodyColor = baseColor * toonLight;
     
-    gl_FragColor = vec4(baseColor + rimColor + vec3(pulse), 1.0);
+    // Specular
+    vec3 H = normalize(L + V);
+    float NdotH = max(dot(N, H), 0.0);
+    float spec = step(0.92, NdotH) * 1.5;
+    
+    float rim = pow(1.0 - NdotV, 3.0);
+    vec3 rimColor = vec3(0.4, 0.8, 1.0) * rim * 0.8;
+    
+    float pulse = (sin(uTime * 0.5 + vWorldPosition.x * 0.1) * 0.5 + 0.5) * 0.15;
+    vec3 glow = baseColor * pulse;
+    
+    gl_FragColor = vec4(bodyColor + vec3(spec) + rimColor + glow, 1.0);
     
     #include <fog_fragment>
 }
@@ -126,21 +147,72 @@ void main() {
     vec3 V = normalize(vViewPosition);
     vec3 L = normalize(uLightDir);
     
-    float NdotL = dot(N, L);
-    float diff = max(NdotL, 0.0);
-    float band = 0.3;
-    if (diff > 0.5) band = 1.0;
-    else if (diff > 0.1) band = 0.7;
+    float NdotV = max(dot(N, V), 0.0);
+    float NdotL = max(dot(N, L), 0.0);
     
-    vec3 baseColor = uColor * band;
+    vec3 cool = vec3(0.05, 0.03, 0.12);
+    vec3 warm = vec3(0.6, 1.0, 0.8);
+    float toon = step(0.5, NdotL);
+    vec3 toonLight = mix(cool, warm, toon);
     
-    float rim = 1.0 - max(dot(V, N), 0.0);
-    rim = smoothstep(0.4, 1.0, rim);
-    vec3 rimColor = vec3(0.6, 0.8, 1.0) * rim * 2.0;
+    // Iridescence (simplified for WebGL2)
+    vec3 iridescence = vec3(
+        0.5 + 0.5 * cos(3.0 * NdotV + 0.0),
+        0.5 + 0.5 * cos(3.0 * NdotV + 2.0),
+        0.5 + 0.5 * cos(3.0 * NdotV + 4.0)
+    );
     
-    gl_FragColor = vec4(baseColor + rimColor, 0.35 + rim * 0.5);
+    vec3 baseColor = mix(uColor, iridescence, 0.4) * toonLight;
+    
+    float rim = pow(1.0 - NdotV, 3.0);
+    vec3 rimColor = vec3(0.4, 0.8, 1.0) * rim * 2.0;
+    
+    float alpha = mix(0.1, 0.7, pow(1.0 - NdotV, 2.0));
+    
+    gl_FragColor = vec4(baseColor + rimColor, alpha);
     
     #include <fog_fragment>
+}
+`;
+
+const outlineVert = `
+varying vec2 vUv;
+void main() {
+    vUv = uv;
+    gl_Position = vec4(position, 1.0);
+}
+`;
+
+const outlineFrag = `
+varying vec2 vUv;
+uniform sampler2D tDiffuse;
+uniform sampler2D tDepth;
+uniform vec2 uResolution;
+uniform float uCameraNear;
+uniform float uCameraFar;
+
+float readDepth(sampler2D depthSampler, vec2 coord) {
+    float fragCoordZ = texture2D(depthSampler, coord).x;
+    float viewZ = (2.0 * uCameraNear * uCameraFar) / (uCameraFar + uCameraNear - fragCoordZ * (uCameraFar - uCameraNear));
+    return viewZ;
+}
+
+void main() {
+    vec4 baseColor = texture2D(tDiffuse, vUv);
+    
+    vec2 offset = 1.0 / uResolution;
+    float d0 = readDepth(tDepth, vUv);
+    float dx = readDepth(tDepth, vUv + vec2(offset.x, 0.0)) - d0;
+    float dy = readDepth(tDepth, vUv + vec2(0.0, offset.y)) - d0;
+    
+    // Simple edge detection
+    float edge = min(1.0, abs(dx) + abs(dy));
+    edge = step(0.5, edge * 100.0); // Threshold to get hard lines
+    
+    vec3 outlineColor = vec3(0.0);
+    vec3 finalColor = mix(baseColor.rgb, outlineColor, edge);
+    
+    gl_FragColor = vec4(finalColor, 1.0);
 }
 `;
 
@@ -161,6 +233,12 @@ export class WebGL2Renderer {
      *  intersecting the instanced glass meshes, which need to consider
      *  material.side. Kept in sync with visible crystal + bubble positions. */
     private pickMesh!: THREE.InstancedMesh;
+
+    // Post-processing
+    public enableOutline: boolean = true;
+    private renderTarget!: THREE.WebGLRenderTarget;
+    private postQuad!: THREE.Mesh;
+    private postMaterial!: THREE.ShaderMaterial;
 
     public readonly nav = new NavigationController();
     private nodeCount = 0;
@@ -205,6 +283,29 @@ export class WebGL2Renderer {
         this.scene = new THREE.Scene();
         this.camera = new THREE.PerspectiveCamera(45, w / h, 0.1, 100000);
 
+        this.renderTarget = new THREE.WebGLRenderTarget(w * this.renderer.getPixelRatio(), h * this.renderer.getPixelRatio(), {
+            format: THREE.RGBAFormat,
+            depthBuffer: true,
+        });
+        this.renderTarget.depthTexture = new THREE.DepthTexture(w * this.renderer.getPixelRatio(), h * this.renderer.getPixelRatio(), THREE.FloatType);
+
+        this.postMaterial = new THREE.ShaderMaterial({
+            vertexShader: outlineVert,
+            fragmentShader: outlineFrag,
+            uniforms: {
+                tDiffuse: { value: this.renderTarget.texture },
+                tDepth: { value: this.renderTarget.depthTexture },
+                uResolution: { value: new THREE.Vector2(w * this.renderer.getPixelRatio(), h * this.renderer.getPixelRatio()) },
+                uCameraNear: { value: this.camera.near },
+                uCameraFar: { value: this.camera.far },
+            },
+            depthWrite: false,
+            depthTest: false,
+        });
+
+        this.postQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.postMaterial);
+        this.postQuad.frustumCulled = false;
+
         this.scene.fog = new THREE.FogExp2(0x02030a, 0.0005);
 
         // Uniforms for shaders
@@ -245,7 +346,7 @@ export class WebGL2Renderer {
         });
 
         // Base geometries (allocated once, shared across instances).
-        const crystalVariants = generateCrystalVariants(3);
+        const crystalVariants = generateCrystalVariants(8);
         const bubbleData = generateIcosphereLOD(3);
         
         const createGeo = (data: MeshData, flat: boolean) => {
@@ -276,9 +377,11 @@ export class WebGL2Renderer {
         const bubbleGeo = createGeo(bubbleData, false);
 
         // Zero-capacity placeholders — resized in loadData once we know node count.
-        for (let i = 0; i < 3; i++) {
+        for (let i = 0; i < 8; i++) {
             const mesh = new THREE.InstancedMesh(createGeo(crystalVariants[i], true), crystalMat, 1);
             mesh.count = 0;
+            // Tell three.js we will provide instance color
+            mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(3), 3);
             this.crystalMeshes.push(mesh);
             this.scene.add(mesh);
         }
@@ -306,6 +409,12 @@ export class WebGL2Renderer {
         this.renderer.setSize(Math.max(1, width), Math.max(1, height), false);
         this.camera.aspect = Math.max(1, width) / Math.max(1, height);
         this.camera.updateProjectionMatrix();
+
+        const pixelRatio = this.renderer.getPixelRatio();
+        const rw = Math.max(1, width * pixelRatio);
+        const rh = Math.max(1, height * pixelRatio);
+        this.renderTarget.setSize(rw, rh);
+        this.postMaterial.uniforms.uResolution.value.set(rw, rh);
     }
 
     public async loadData(data: ArrayBuffer): Promise<void> {
@@ -344,7 +453,7 @@ export class WebGL2Renderer {
 
         const cap = Math.max(1, this.nodeCount);
         
-        const crystalVariants = generateCrystalVariants(3);
+        const crystalVariants = generateCrystalVariants(8);
         const createGeo = (data: MeshData, flat: boolean) => {
             const geo = new THREE.BufferGeometry();
             const positions = new Float32Array(data.vertexCount * 3);
@@ -368,9 +477,10 @@ export class WebGL2Renderer {
             return geo;
         };
 
-        for (let i = 0; i < 3; i++) {
+        for (let i = 0; i < 8; i++) {
             const mesh = new THREE.InstancedMesh(createGeo(crystalVariants[i], true), crystalMat, cap);
             mesh.count = 0;
+            mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(cap * 3), 3);
             this.crystalMeshes.push(mesh);
             this.scene.add(mesh);
         }
@@ -434,12 +544,32 @@ export class WebGL2Renderer {
         if (!rawSrc) return;
 
         this.crystalSourceIndices = [];
-        const variantCounts = [0, 0, 0];
+        const variantCounts = [0, 0, 0, 0, 0, 0, 0, 0];
+        const tempColor = new THREE.Color();
+        
+        // Helper to match the WGSL hash_to_crystal_color
+        const hashToColor = (h: number, out: THREE.Color) => {
+            const hue = ((h % 360) / 360.0 * 0.33 + 0.5) % 1.0;
+            const c = 0.55;
+            const x = c * (1.0 - Math.abs((hue * 6.0) % 2.0 - 1.0));
+            const m = 0.35;
+            const seg = Math.floor(hue * 6.0) % 6;
+            let r=0, g=0, b=0;
+            switch(seg) {
+                case 0: r=c; g=x; b=0; break;
+                case 1: r=x; g=c; b=0; break;
+                case 2: r=0; g=c; b=x; break;
+                case 3: r=0; g=x; b=c; break;
+                case 4: r=x; g=0; b=c; break;
+                case 5: r=c; g=0; b=x; break;
+            }
+            out.setRGB(Math.min(1, r+m), Math.min(1, g+m), Math.min(1, b+m));
+        };
         
         for (let i = 0; i < v.crystalCount; i++) {
             const src = v.crystalIndices[i] * NODE_STRIDE;
             const hash = rawSrc.getUint32(src + 24, true);
-            const variantIdx = hash % 3;
+            const variantIdx = hash % 8;
             
             const x = rawSrc.getFloat32(src + 0,  true);
             const y = rawSrc.getFloat32(src + 4,  true);
@@ -457,6 +587,8 @@ export class WebGL2Renderer {
             
             const mesh = this.crystalMeshes[variantIdx];
             mesh.setMatrixAt(variantCounts[variantIdx], this.dummy.matrix);
+            hashToColor(hash, tempColor);
+            mesh.setColorAt(variantCounts[variantIdx], tempColor);
             variantCounts[variantIdx]++;
             
             // To make picking map to the correct source, we need to map per-variant.
@@ -466,9 +598,10 @@ export class WebGL2Renderer {
             this.crystalSourceIndices.push(v.crystalIndices[i]);
         }
         
-        for (let i = 0; i < 3; i++) {
+        for (let i = 0; i < 8; i++) {
             this.crystalMeshes[i].count = variantCounts[i];
             this.crystalMeshes[i].instanceMatrix.needsUpdate = true;
+            if (this.crystalMeshes[i].instanceColor) this.crystalMeshes[i].instanceColor!.needsUpdate = true;
         }
 
         // Bubbles — both back and front share the same matrix set.
@@ -525,7 +658,18 @@ export class WebGL2Renderer {
         const bMat = this.bubbleFront.material as THREE.ShaderMaterial;
         if (bMat.uniforms.uTime) bMat.uniforms.uTime.value = time;
         
-        this.renderer.render(this.scene, this.camera);
+        if (this.enableOutline) {
+            // Render scene to offscreen target
+            this.renderer.setRenderTarget(this.renderTarget);
+            this.renderer.clear();
+            this.renderer.render(this.scene, this.camera);
+            
+            // Render full screen quad to canvas
+            this.renderer.setRenderTarget(null);
+            this.renderer.render(this.postQuad, this.camera); // camera doesn't matter for postQuad
+        } else {
+            this.renderer.render(this.scene, this.camera);
+        }
     }
 
     /**

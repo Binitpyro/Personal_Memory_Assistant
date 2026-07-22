@@ -127,7 +127,7 @@ function mulberry32(seed: number) {
 
 /**
  * Jagged, rock-like crystal shard: subdivided icosahedron with per-vertex
- * radial jitter, occasional long spikes, and elongation along Y.
+ * radial noise and flat plateaus ("fractured geode" look) created by random clipping planes.
  * Re-normalized so the furthest vertex sits at radius 1.0 — keeps instance
  * scaling and the picking pass consistent with a unit bounding sphere.
  */
@@ -142,18 +142,51 @@ export function generateCrystalShard(subdivisions = 1, seed = 1337): MeshData {
     }
 
     const rand = mulberry32(seed);
+    
+    // Generate 4-7 random clipping planes for the "fractured geode" look
+    const numPlanes = 4 + Math.floor(rand() * 4);
+    const planes: { n: [number, number, number], dist: number }[] = [];
+    
+    // Always add top and bottom clipping planes to flatten poles
+    planes.push({ n: [0, 1, 0], dist: 0.8 + rand() * 0.1 });
+    planes.push({ n: [0, -1, 0], dist: 0.8 + rand() * 0.1 });
+    
+    for (let i = 0; i < numPlanes; i++) {
+        let nx = rand() - 0.5;
+        let ny = rand() - 0.5;
+        let nz = rand() - 0.5;
+        const len = Math.hypot(nx, ny, nz);
+        planes.push({ 
+            n: [nx / len, ny / len, nz / len], 
+            dist: 0.65 + rand() * 0.25 // Cut distance from center
+        });
+    }
+
     let maxLen = 0;
     verts = verts.map((v) => {
-        let r = 0.6 + rand() * 0.5;                    // rough rocky surface
-        if (rand() < 0.14) r += 0.5 + rand() * 0.4;    // occasional spike
-        const p: [number, number, number] = [
-            v[0] * r * 0.8,   // pinch X/Z
-            v[1] * r * 1.45,  // elongate Y → shard profile
-            v[2] * r * 0.8,
+        let r = 0.8 + rand() * 0.4; // rough rocky surface
+        let p: [number, number, number] = [
+            v[0] * r * 0.9,   // pinch X/Z
+            v[1] * r * 1.35,  // elongate Y → shard profile
+            v[2] * r * 0.9,
         ];
+        
+        // Apply clipping planes (flattening)
+        for (const plane of planes) {
+            const dot = p[0]*plane.n[0] + p[1]*plane.n[1] + p[2]*plane.n[2];
+            if (dot > plane.dist) {
+                // Project onto the plane
+                const excess = dot - plane.dist;
+                p[0] -= plane.n[0] * excess;
+                p[1] -= plane.n[1] * excess;
+                p[2] -= plane.n[2] * excess;
+            }
+        }
+
         maxLen = Math.max(maxLen, Math.hypot(p[0], p[1], p[2]));
         return p;
     });
+    
     const inv = 1 / maxLen;
     verts = verts.map(v => [v[0] * inv, v[1] * inv, v[2] * inv] as [number, number, number]);
 
@@ -184,11 +217,11 @@ export function generateCrystalShard(subdivisions = 1, seed = 1337): MeshData {
  * Generates multiple distinct crystal mesh variants.
  */
 export function generateCrystalVariants(count: number): MeshData[] {
-    const seeds = [1337, 42, 7919];
     const variants: MeshData[] = [];
     for (let i = 0; i < count; i++) {
         // Use subdivisions = 2 to give enough geometry for the jagged shards
-        variants.push(generateCrystalShard(2, seeds[i % seeds.length]));
+        // Use a consistent seed per variant
+        variants.push(generateCrystalShard(2, 1337 + i * 42));
     }
     return variants;
 }

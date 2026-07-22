@@ -194,12 +194,12 @@ impl Octree {
         (center, total_mass)
     }
 
-    pub fn compute_repulsion(&self, target_pos: [f32; 3], config: &LayoutConfig) -> [f32; 3] {
+    pub fn compute_repulsion(&self, target_pos: [f32; 3], target_radius: f32, bodies: &[Node], config: &LayoutConfig) -> [f32; 3] {
         if self.nodes.is_empty() { return [0.0; 3]; }
-        self.repulse_recursive(0, target_pos, config)
+        self.repulse_recursive(0, target_pos, target_radius, bodies, config)
     }
     
-    fn repulse_recursive(&self, node_idx: u32, pos: [f32; 3], config: &LayoutConfig) -> [f32; 3] {
+    fn repulse_recursive(&self, node_idx: u32, pos: [f32; 3], target_radius: f32, bodies: &[Node], config: &LayoutConfig) -> [f32; 3] {
         let node = &self.nodes[node_idx as usize];
         if node.mass == 0.0 { return [0.0; 3]; }
         
@@ -213,7 +213,20 @@ impl Octree {
         if node.is_leaf {
             if dist_sq > 0.0001 {
                 let dist = dist_sq.sqrt();
-                let f = -config.repulsion_strength * node.mass / (dist_sq + 1.0);
+                let mut f = -config.repulsion_strength * node.mass / (dist_sq + 1.0);
+                
+                if node.body_idx != u32::MAX {
+                    let other_radius = bodies[node.body_idx as usize].radius;
+                    let min_dist = target_radius + other_radius + 5.0; // padding to prevent geometric intersection
+                    if dist < min_dist {
+                        let overlap = min_dist - dist;
+                        f -= overlap * 50.0; // gentle collision spring, not an explosion
+                    }
+                }
+                
+                let dx = node.center_of_mass[0] - pos[0];
+                let dy = node.center_of_mass[1] - pos[1];
+                let dz = node.center_of_mass[2] - pos[2];
                 force[0] = f * (dx / dist);
                 force[1] = f * (dy / dist);
                 force[2] = f * (dz / dist);
@@ -222,8 +235,9 @@ impl Octree {
         }
         
         let width = (node.max[0] - node.min[0]).max(node.max[1] - node.min[1]).max(node.max[2] - node.min[2]);
-        if width * width / dist_sq < config.theta * config.theta {
-            let dist = dist_sq.sqrt();
+        let dist = dist_sq.sqrt();
+        
+        if width * width / dist_sq < config.theta * config.theta && dist > target_radius + width {
             let f = -config.repulsion_strength * node.mass / (dist_sq + 1.0);
             force[0] = f * (dx / dist);
             force[1] = f * (dy / dist);
@@ -231,7 +245,7 @@ impl Octree {
         } else {
             for &child in &node.children {
                 if child != u32::MAX {
-                    let cf = self.repulse_recursive(child, pos, config);
+                    let cf = self.repulse_recursive(child, pos, target_radius, bodies, config);
                     force[0] += cf[0];
                     force[1] += cf[1];
                     force[2] += cf[2];
@@ -248,8 +262,9 @@ pub fn simulate_layout(nodes: &mut [Node], config: &LayoutConfig) {
     for _iter in 0..config.iterations {
         let tree = Octree::build(nodes);
         
-        let mut forces: Vec<[f32; 3]> = nodes.par_iter().map(|node| {
-            let mut force = tree.compute_repulsion(node.position, config);
+        let nodes_ref = &*nodes;
+        let mut forces: Vec<[f32; 3]> = nodes_ref.par_iter().map(|node| {
+            let mut force = tree.compute_repulsion(node.position, node.radius, nodes_ref, config);
             force[0] += -0.01 * node.position[0];
             force[1] += -0.01 * node.position[1];
             force[2] += -0.01 * node.position[2];

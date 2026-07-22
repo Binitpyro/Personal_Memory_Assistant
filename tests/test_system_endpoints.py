@@ -277,9 +277,21 @@ async def test_demo_seed_endpoint(client, tmp_path):
 
 @pytest.mark.asyncio
 async def test_pick_folder_mocked(client):
-    # The endpoint now always returns empty path and an error message telling users to use Tauri native dialog.
-    response = await client.get("/api/pick/folder")
-    assert response.status_code == 200
-    data = response.json()
-    assert data["path"] == ""
-    assert "error" in data and "Use the native Tauri dialog instead." in data["error"]
+    # Case 1: Dialog returns path
+    with patch("app.api.system.asyncio.get_running_loop") as mock_loop:
+        mock_executor = AsyncMock(return_value="/my/selected/folder")
+        mock_loop.return_value.run_in_executor = mock_executor
+
+        response = await client.get("/api/pick/folder")
+        assert response.status_code == 200
+        assert response.json()["path"] == "/my/selected/folder"
+
+    # Case 2: Dialog raises Exception (e.g. GUI library missing or closed)
+    with patch("app.api.system.asyncio.get_running_loop") as mock_loop:
+        mock_executor = AsyncMock(side_effect=Exception("tkinter error"))
+        mock_loop.return_value.run_in_executor = mock_executor
+
+        response = await client.get("/api/pick/folder")
+        assert response.status_code == 200
+        assert response.json()["path"] == ""
+        assert "Use the native Tauri dialog instead." in response.json()["error"]

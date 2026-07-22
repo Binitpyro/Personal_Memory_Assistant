@@ -100,10 +100,3 @@ export function generateIcosphere(subdivisions = 3): MeshData {
         indexCount,
     };
 }
-
-/**
- * Alias for generateIcosphere to explicitly indicate it's used for generating different LODs.
- * LOD 0 (distant): subdivisions = 1 (42 verts)
- * LOD 1 (near): subdivisions = 3 (642 verts)
- */
-export const generateIcosphereLOD = generateIcosphere;

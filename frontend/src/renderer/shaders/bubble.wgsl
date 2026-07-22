@@ -8,12 +8,10 @@
 struct CameraUniform {
     viewProj: mat4x4<f32>,
     eyePosition: vec3<f32>,
-    currentVariant: u32,
+    _pad: f32,
     time: f32,
     screenWidth: f32,
     screenHeight: f32,
-    fogDensity: f32,
-    fogColor: vec3<f32>,
     _pad2: f32,
 };
 
@@ -45,21 +43,16 @@ struct VertexOutput {
 fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
 
+    // Slow idle drift: sinusoidal wobble seeded by instance index + type_hash
     let seed = f32(in.inst_idx * 1234u + in.inst_type_hash % 100u);
-    let time_val = camera.time;
-
-    // Slow idle drift: sinusoidal wobble
     let drift_amp = in.inst_radius * 0.015;
     let drift = vec3<f32>(
-        sin(time_val * 0.4 + seed * 0.11) * drift_amp,
-        cos(time_val * 0.3 + seed * 0.13) * drift_amp,
-        sin(time_val * 0.5 + seed * 0.09) * drift_amp,
+        sin(camera.time * 0.4 + seed * 0.11) * drift_amp,
+        cos(camera.time * 0.3 + seed * 0.13) * drift_amp,
+        sin(camera.time * 0.5 + seed * 0.09) * drift_amp,
     );
 
-    // Breathing size wobble (vertex position scaled)
-    let breathe = 1.0 + sin(time_val * 1.5 + seed * 0.2) * 0.02;
-
-    let world_pos = (in.local_pos * breathe) * in.inst_radius + in.inst_position + drift;
+    let world_pos = in.local_pos * in.inst_radius + in.inst_position + drift;
     out.clip_pos = camera.viewProj * vec4<f32>(world_pos, 1.0);
     out.world_pos = world_pos;
     out.world_normal = normalize(in.local_normal);
@@ -92,41 +85,26 @@ fn fs_main(in: VertexOutput) -> FragOutput {
     let V = normalize(camera.eyePosition - in.world_pos);
     let NdotV = max(dot(N, V), 0.0);
 
-    // Base color for bubbles: Warm pink hue, varied slightly by hash
-    let hue_shift = hash_to_hue(in.type_hash) * 0.1 - 0.05; // ±5% shift
-    // e8a0bf (232, 160, 191) -> ~ vec3(0.91, 0.63, 0.75)
-    let base = vec3<f32>(0.91 + hue_shift, 0.63, 0.75 - hue_shift);
+    // Schlick Fresnel — pronounced rim effect for glass bubble
+    let fresnel = 0.02 + 0.98 * pow(1.0 - NdotV, 4.0);
 
-    // Toon diffuse
+    // Thin-film iridescence on the rim
+    let base_hue = hash_to_hue(in.type_hash);
+    let irid = iridescence(NdotV, base_hue);
+
+    // Specular highlight
     let L = normalize(vec3<f32>(0.5, 1.2, 0.7));
-    let NdotL = max(dot(N, L), 0.0);
-    let toonDiffuse = toon_lighting(NdotL);
-
-    // Warm pink rim glow
-    let rim_tint = vec3<f32>(1.0, 0.56, 0.67); // ff8fab
-    let rim = rim_glow(NdotV, rim_tint, 2.5, 0.8);
-
-    // Toon specular
     let H = normalize(L + V);
-    let NdotH = max(dot(N, H), 0.0);
-    let spec = toon_specular(NdotH, 0.85) * 1.2;
+    let spec = pow(max(dot(N, H), 0.0), 64.0) * 0.8;
 
-    // Inner glow (emissive at sphere center)
-    // ffd6e0 (255, 214, 224)
-    let inner_tint = vec3<f32>(1.0, 0.84, 0.88);
-    let inner = inner_tint * (pow(NdotV, 2.0) * 0.4);
+    // Interior face gets a warm tint
+    let interior_tint = mix(irid * 0.3, vec3<f32>(0.9, 0.95, 1.0), 0.5);
 
-    let body = mix(base * 0.3, base, toonDiffuse);
-    let rgb = body + rim + vec3<f32>(spec) + inner;
-
-    // Simplified alpha model: more uniform transparency
-    let rim_factor = pow(1.0 - NdotV, 2.5);
-    let alpha = clamp(rim_factor * 0.6 + 0.15, 0.0, 1.0);
-
-    // Distance-based atmospheric fog
-    let fogged_rgb = atmospheric_fog(rgb, in.view_depth, camera.fogDensity, camera.fogColor);
+    let rgb = irid * fresnel * 1.2 + vec3<f32>(spec) + interior_tint * 0.1;
+    // Alpha: strong at rim, almost invisible in center (true soap-bubble look)
+    let alpha = clamp(fresnel * 0.85 + 0.04, 0.0, 0.92);
 
     var out: FragOutput;
-    out.color = vec4<f32>(clamp(fogged_rgb, vec3<f32>(0.0), vec3<f32>(2.0)), alpha);
+    out.color = vec4<f32>(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.5)), alpha);
     return out;
 }

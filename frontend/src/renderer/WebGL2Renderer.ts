@@ -35,114 +35,6 @@
 
 import * as THREE from 'three';
 import { NavigationController, NODE_STRIDE } from '../interaction/NavigationController';
-import { generateCrystalVariants, type MeshData } from './geometry/icosahedron';
-import { generateIcosphereLOD } from './geometry/icosphere';
-
-const crystalVert = `
-#include <common>
-#include <fog_pars_vertex>
-varying vec3 vViewPosition;
-varying vec3 vNormal;
-varying vec3 vWorldPosition;
-void main() {
-    vec4 instancePos = instanceMatrix * vec4(position, 1.0);
-    vec4 mvPosition = viewMatrix * modelMatrix * instancePos;
-    gl_Position = projectionMatrix * mvPosition;
-    vViewPosition = -mvPosition.xyz;
-    vWorldPosition = (modelMatrix * instancePos).xyz;
-    vNormal = normalMatrix * mat3(instanceMatrix) * normal; 
-    #include <fog_vertex>
-}
-`;
-
-const crystalFrag = `
-#include <common>
-#include <fog_pars_fragment>
-varying vec3 vViewPosition;
-varying vec3 vNormal;
-varying vec3 vWorldPosition;
-uniform vec3 uColor;
-uniform vec3 uLightDir;
-uniform float uTime;
-void main() {
-    vec3 N = normalize(vNormal);
-    vec3 V = normalize(vViewPosition);
-    vec3 L = normalize(uLightDir);
-    
-    float NdotL = dot(N, L);
-    float diff = max(NdotL, 0.0);
-    float band = 0.2;
-    if (diff > 0.5) band = 1.0;
-    else if (diff > 0.1) band = 0.6;
-    
-    vec3 baseColor = uColor * band;
-    
-    float rim = 1.0 - max(dot(V, N), 0.0);
-    rim = smoothstep(0.6, 1.0, rim);
-    vec3 rimColor = vec3(0.5, 0.7, 1.0) * rim * 1.5;
-    
-    float pulse = (sin(uTime * 2.0 + vWorldPosition.x + vWorldPosition.y) * 0.5 + 0.5) * 0.15;
-    
-    gl_FragColor = vec4(baseColor + rimColor + vec3(pulse), 1.0);
-    
-    #include <fog_fragment>
-}
-`;
-
-const bubbleVert = `
-#include <common>
-#include <fog_pars_vertex>
-varying vec3 vViewPosition;
-varying vec3 vNormal;
-varying vec3 vWorldPosition;
-uniform float uTime;
-void main() {
-    vec4 instancePos = instanceMatrix * vec4(position, 1.0);
-    vec4 worldPos = modelMatrix * instancePos;
-    
-    vec3 wobble = sin(uTime * 3.0 + worldPos.x * 2.0) * 0.05 * position;
-    vec4 wobbledPos = instanceMatrix * vec4(position + wobble, 1.0);
-    vec4 mvPosition = viewMatrix * modelMatrix * wobbledPos;
-    
-    gl_Position = projectionMatrix * mvPosition;
-    vViewPosition = -mvPosition.xyz;
-    vWorldPosition = (modelMatrix * wobbledPos).xyz;
-    vNormal = normalMatrix * mat3(instanceMatrix) * normal; 
-    #include <fog_vertex>
-}
-`;
-
-const bubbleFrag = `
-#include <common>
-#include <fog_pars_fragment>
-varying vec3 vViewPosition;
-varying vec3 vNormal;
-varying vec3 vWorldPosition;
-uniform vec3 uColor;
-uniform vec3 uLightDir;
-uniform float uTime;
-void main() {
-    vec3 N = normalize(vNormal);
-    vec3 V = normalize(vViewPosition);
-    vec3 L = normalize(uLightDir);
-    
-    float NdotL = dot(N, L);
-    float diff = max(NdotL, 0.0);
-    float band = 0.3;
-    if (diff > 0.5) band = 1.0;
-    else if (diff > 0.1) band = 0.7;
-    
-    vec3 baseColor = uColor * band;
-    
-    float rim = 1.0 - max(dot(V, N), 0.0);
-    rim = smoothstep(0.4, 1.0, rim);
-    vec3 rimColor = vec3(0.6, 0.8, 1.0) * rim * 2.0;
-    
-    gl_FragColor = vec4(baseColor + rimColor, 0.35 + rim * 0.5);
-    
-    #include <fog_fragment>
-}
-`;
 
 export class WebGL2Renderer {
     private readonly canvas: HTMLCanvasElement;
@@ -150,7 +42,7 @@ export class WebGL2Renderer {
     private scene!: THREE.Scene;
     private camera!: THREE.PerspectiveCamera;
 
-    private crystalMeshes: THREE.InstancedMesh[] = [];
+    private crystalMesh!: THREE.InstancedMesh;
     /** Bubbles get TWO InstancedMesh instances so we can render back faces then
      *  front faces with the same instance matrices — the same trick as the
      *  WebGPU tier. */
@@ -205,83 +97,74 @@ export class WebGL2Renderer {
         this.scene = new THREE.Scene();
         this.camera = new THREE.PerspectiveCamera(45, w / h, 0.1, 100000);
 
-        this.scene.fog = new THREE.FogExp2(0x02030a, 0.0005);
+        // Lighting: one key + one fill + a subtle rim from behind so
+        // Fresnel effects on the bubbles read as glass.
+        this.scene.add(new THREE.AmbientLight(0xffffff, 0.35));
+        const key = new THREE.DirectionalLight(0xffffff, 0.9);
+        key.position.set(200, 300, 100);
+        this.scene.add(key);
+        const rim = new THREE.DirectionalLight(0x88aaff, 0.6);
+        rim.position.set(-150, -50, -200);
+        this.scene.add(rim);
 
-        // Uniforms for shaders
-        const uniforms = {
-            uTime: { value: 0 },
-            uLightDir: { value: new THREE.Vector3(1, 1, 0.5).normalize() },
-            uColor: { value: new THREE.Color(0xa080ff) },
-            ...THREE.UniformsLib['fog']
-        };
+        // Base geometries (allocated once, shared across instances).
+        const crystalGeo = new THREE.IcosahedronGeometry(1, 1); // matches WebGPU's subdivision-1
+        // three.js smooths per-vertex normals by default. For flat facets we
+        // clear the vertex normals and rely on IcosahedronGeometry's face-based
+        // shading via toNonIndexed + computeVertexNormals.
+        const crystalGeoFlat = crystalGeo.toNonIndexed();
+        crystalGeoFlat.computeVertexNormals();
 
-        const crystalMat = new THREE.ShaderMaterial({
-            vertexShader: crystalVert,
-            fragmentShader: crystalFrag,
-            uniforms: THREE.UniformsUtils.clone(uniforms),
-            fog: true,
+        const bubbleGeo = new THREE.IcosahedronGeometry(1, 3);
+
+        // Materials
+        const crystalMat = new THREE.MeshPhysicalMaterial({
+            color: 0xa080ff,          // violet gem base
+            metalness: 0.0,
+            roughness: 0.15,
+            transmission: 0.55,        // some refraction, not full glass
+            thickness: 1.2,
+            ior: 1.55,
+            iridescence: 0.2,
+            iridescenceIOR: 1.4,
+            flatShading: true,
+            envMapIntensity: 1.4,
         });
 
-        const bubbleUniforms = THREE.UniformsUtils.clone(uniforms);
-        bubbleUniforms.uColor.value = new THREE.Color(0xaaddff);
-
-        const bubbleMatBack = new THREE.ShaderMaterial({
-            vertexShader: bubbleVert,
-            fragmentShader: bubbleFrag,
-            uniforms: bubbleUniforms,
-            fog: true,
+        const bubbleMatBack = new THREE.MeshPhysicalMaterial({
+            color: 0xaaddff,
+            metalness: 0.0,
+            roughness: 0.05,
+            transmission: 1.0,
+            thickness: 0.3,
+            ior: 1.33,
+            iridescence: 1.0,
+            iridescenceIOR: 1.3,
+            iridescenceThicknessRange: [100, 400],
             transparent: true,
+            opacity: 0.35,
             side: THREE.BackSide,
             depthWrite: false,
         });
-        const bubbleMatFront = new THREE.ShaderMaterial({
-            vertexShader: bubbleVert,
-            fragmentShader: bubbleFrag,
-            uniforms: bubbleUniforms,
-            fog: true,
+        const bubbleMatFront = new THREE.MeshPhysicalMaterial({
+            color: 0xaaddff,
+            metalness: 0.0,
+            roughness: 0.05,
+            transmission: 1.0,
+            thickness: 0.3,
+            ior: 1.33,
+            iridescence: 1.0,
+            iridescenceIOR: 1.3,
+            iridescenceThicknessRange: [100, 400],
             transparent: true,
+            opacity: 0.45,
             side: THREE.FrontSide,
             depthWrite: false,
         });
 
-        // Base geometries (allocated once, shared across instances).
-        const crystalVariants = generateCrystalVariants(3);
-        const bubbleData = generateIcosphereLOD(3);
-        
-        const createGeo = (data: MeshData, flat: boolean) => {
-            const geo = new THREE.BufferGeometry();
-            const positions = new Float32Array(data.vertexCount * 3);
-            const normals = new Float32Array(data.vertexCount * 3);
-            for (let i = 0; i < data.vertexCount; i++) {
-                positions[i*3+0] = data.vertices[i*6+0];
-                positions[i*3+1] = data.vertices[i*6+1];
-                positions[i*3+2] = data.vertices[i*6+2];
-                normals[i*3+0] = data.vertices[i*6+3];
-                normals[i*3+1] = data.vertices[i*6+4];
-                normals[i*3+2] = data.vertices[i*6+5];
-            }
-            geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-            geo.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
-            if (data.indices) {
-                geo.setIndex(new THREE.BufferAttribute(data.indices, 1));
-            }
-            if (flat) {
-                const nonIndexed = geo.toNonIndexed();
-                nonIndexed.computeVertexNormals();
-                return nonIndexed;
-            }
-            return geo;
-        };
-        
-        const bubbleGeo = createGeo(bubbleData, false);
-
         // Zero-capacity placeholders — resized in loadData once we know node count.
-        for (let i = 0; i < 3; i++) {
-            const mesh = new THREE.InstancedMesh(createGeo(crystalVariants[i], true), crystalMat, 1);
-            mesh.count = 0;
-            this.crystalMeshes.push(mesh);
-            this.scene.add(mesh);
-        }
+        this.crystalMesh = new THREE.InstancedMesh(crystalGeoFlat, crystalMat, 1);
+        this.crystalMesh.count = 0;
         this.bubbleBack   = new THREE.InstancedMesh(bubbleGeo,     bubbleMatBack,  1);
         this.bubbleBack.count = 0;
         this.bubbleFront  = new THREE.InstancedMesh(bubbleGeo,     bubbleMatFront, 1);
@@ -292,6 +175,7 @@ export class WebGL2Renderer {
         this.pickMesh = new THREE.InstancedMesh(bubbleGeo, pickMat, 1);
         this.pickMesh.count = 0;
 
+        this.scene.add(this.crystalMesh);
         // Ordering matters for three.js's own transparent-sort — but because
         // depthWrite is false on both bubble meshes and their materials are
         // marked transparent, three.js will sort by centroid distance anyway.
@@ -325,65 +209,32 @@ export class WebGL2Renderer {
         // Reallocate InstancedMeshes with worst-case capacity = nodeCount.
         // three.js's InstancedMesh doesn't grow dynamically; capacity is fixed
         // at construction. We recreate them here on load.
-        const crystalMat = this.crystalMeshes[0].material as THREE.Material;
+        const crystalGeo = this.crystalMesh.geometry;
+        const bubbleGeo  = this.bubbleBack.geometry;
+        const crystalMat = this.crystalMesh.material as THREE.Material;
         const backMat    = this.bubbleBack.material  as THREE.Material;
         const frontMat   = this.bubbleFront.material as THREE.Material;
         const pickMat    = this.pickMesh.material    as THREE.Material;
 
-        for (const m of this.crystalMeshes) {
-            this.scene.remove(m);
-            m.dispose();
-        }
-        this.crystalMeshes = [];
-        
+        this.scene.remove(this.crystalMesh);
         this.scene.remove(this.bubbleBack);
         this.scene.remove(this.bubbleFront);
+        this.crystalMesh.dispose();
         this.bubbleBack.dispose();
         this.bubbleFront.dispose();
         this.pickMesh.dispose();
 
         const cap = Math.max(1, this.nodeCount);
-        
-        const crystalVariants = generateCrystalVariants(3);
-        const createGeo = (data: MeshData, flat: boolean) => {
-            const geo = new THREE.BufferGeometry();
-            const positions = new Float32Array(data.vertexCount * 3);
-            const normals = new Float32Array(data.vertexCount * 3);
-            for (let i = 0; i < data.vertexCount; i++) {
-                positions[i*3+0] = data.vertices[i*6+0];
-                positions[i*3+1] = data.vertices[i*6+1];
-                positions[i*3+2] = data.vertices[i*6+2];
-                normals[i*3+0] = data.vertices[i*6+3];
-                normals[i*3+1] = data.vertices[i*6+4];
-                normals[i*3+2] = data.vertices[i*6+5];
-            }
-            geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-            geo.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
-            if (data.indices) geo.setIndex(new THREE.BufferAttribute(data.indices, 1));
-            if (flat) {
-                const nonIdx = geo.toNonIndexed();
-                nonIdx.computeVertexNormals();
-                return nonIdx;
-            }
-            return geo;
-        };
-
-        for (let i = 0; i < 3; i++) {
-            const mesh = new THREE.InstancedMesh(createGeo(crystalVariants[i], true), crystalMat, cap);
-            mesh.count = 0;
-            this.crystalMeshes.push(mesh);
-            this.scene.add(mesh);
-        }
-
-        const bubbleGeo = createGeo(generateIcosphereLOD(3), false);
-        
+        this.crystalMesh = new THREE.InstancedMesh(crystalGeo, crystalMat, cap);
         this.bubbleBack  = new THREE.InstancedMesh(bubbleGeo,  backMat,  cap);
         this.bubbleFront = new THREE.InstancedMesh(bubbleGeo,  frontMat, cap);
         this.pickMesh    = new THREE.InstancedMesh(bubbleGeo,  pickMat,  cap);
+        this.crystalMesh.count = 0;
         this.bubbleBack.count = 0;
         this.bubbleFront.count = 0;
         this.pickMesh.count = 0;
 
+        this.scene.add(this.crystalMesh);
         this.scene.add(this.bubbleBack);
         this.scene.add(this.bubbleFront);
 
@@ -433,43 +284,30 @@ export class WebGL2Renderer {
         const rawSrc = this.nav.getSourceView();
         if (!rawSrc) return;
 
-        this.crystalSourceIndices = [];
-        const variantCounts = [0, 0, 0];
-        
+        // Crystals
+        this.crystalSourceIndices = Array.from(v.crystalIndices);
+        this.crystalMesh.count = v.crystalCount;
         for (let i = 0; i < v.crystalCount; i++) {
             const src = v.crystalIndices[i] * NODE_STRIDE;
-            const hash = rawSrc.getUint32(src + 24, true);
-            const variantIdx = hash % 3;
-            
             const x = rawSrc.getFloat32(src + 0,  true);
             const y = rawSrc.getFloat32(src + 4,  true);
             const z = rawSrc.getFloat32(src + 8,  true);
             const r = rawSrc.getFloat32(src + 12, true);
-            
+            const hash = rawSrc.getUint32(src + 24, true);
             this.dummy.position.set(x, y, z);
             this.dummy.scale.set(r, r, r);
+            // Per-instance rotation seeded by hash — matches the WebGPU tier's
+            // in-shader rotation trick. Keeps silhouettes varied without any
+            // per-instance geometry variation.
             this.dummy.rotation.set(
                 (hash % 360) * 0.017453,
                 ((hash >> 8) % 360) * 0.017453,
                 ((hash >> 16) % 360) * 0.017453,
             );
             this.dummy.updateMatrix();
-            
-            const mesh = this.crystalMeshes[variantIdx];
-            mesh.setMatrixAt(variantCounts[variantIdx], this.dummy.matrix);
-            variantCounts[variantIdx]++;
-            
-            // To make picking map to the correct source, we need to map per-variant.
-            // But raycaster returns instanceId which corresponds to the mesh.
-            // The pick mesh doesn't have variants! We populate pickMesh with ALL crystals
-            // linearly in [0, crystalCount). So crystalSourceIndices maps directly to pickMesh.
-            this.crystalSourceIndices.push(v.crystalIndices[i]);
+            this.crystalMesh.setMatrixAt(i, this.dummy.matrix);
         }
-        
-        for (let i = 0; i < 3; i++) {
-            this.crystalMeshes[i].count = variantCounts[i];
-            this.crystalMeshes[i].instanceMatrix.needsUpdate = true;
-        }
+        this.crystalMesh.instanceMatrix.needsUpdate = true;
 
         // Bubbles — both back and front share the same matrix set.
         this.bubbleSourceIndices = Array.from(v.bubbleIndices);
@@ -510,21 +348,10 @@ export class WebGL2Renderer {
         this.visibleDirty = false;
     }
 
-    private startTime = performance.now();
-
     public render(): void {
         if (this.nodeCount === 0) return;
         if (this.visibleDirty) this.rebuildInstances();
         this.updateCamera();
-        
-        const time = (performance.now() - this.startTime) / 1000;
-        if (this.crystalMeshes.length > 0) {
-            const mat = this.crystalMeshes[0].material as THREE.ShaderMaterial;
-            if (mat.uniforms.uTime) mat.uniforms.uTime.value = time;
-        }
-        const bMat = this.bubbleFront.material as THREE.ShaderMaterial;
-        if (bMat.uniforms.uTime) bMat.uniforms.uTime.value = time;
-        
         this.renderer.render(this.scene, this.camera);
     }
 
@@ -571,8 +398,7 @@ export class WebGL2Renderer {
     }
 
     public destroy(): void {
-        for (const m of this.crystalMeshes) m?.dispose();
-
+        this.crystalMesh?.dispose();
         this.bubbleBack?.dispose();
         this.bubbleFront?.dispose();
         this.pickMesh?.dispose();

@@ -22,22 +22,19 @@ class LatencyTracker:
             self._history[stage].append(duration_ms)
 
     def get_stats(self) -> dict[str, dict[str, float]]:
-        import statistics
         stats = {}
         with self._lock:
             for stage, values in self._history.items():
                 if not values:
                     continue
-                v = list(values)
-                # quantiles(n=100) returns 99 cut points: index 49 is p50, 94 is p95, 98 is p99
-                q = statistics.quantiles(v, n=100) if len(v) > 1 else [v[0]] * 99
+                sorted_vals = sorted(values)
                 stats[stage] = {
-                    "avg": round(statistics.mean(v), 2),
-                    "p50": round(q[49], 2),
-                    "p95": round(q[94], 2),
-                    "p99": round(q[98], 2),
-                    "max": round(max(v), 2),
-                    "count": len(v),
+                    "avg": round(sum(sorted_vals) / len(sorted_vals), 2),
+                    "p50": round(sorted_vals[len(sorted_vals) // 2], 2),
+                    "p95": round(sorted_vals[max(0, math.ceil(len(sorted_vals) * 0.95) - 1)], 2),
+                    "p99": round(sorted_vals[max(0, math.ceil(len(sorted_vals) * 0.99) - 1)], 2),
+                    "max": round(sorted_vals[-1], 2),
+                    "count": len(sorted_vals),
                 }
         return stats
 

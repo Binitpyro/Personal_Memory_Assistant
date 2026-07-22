@@ -2,7 +2,7 @@ import { Outlet, NavLink, useNavigate, useLocation } from 'react-router-dom'
 import { BookOpen, Search, FolderTree, BarChart3, Brain, Settings, RefreshCw } from 'lucide-react'
 import { useApi } from '../useApi'
 import { getAppConfig, getHealth } from '../api'
-import { useEffect, useState } from 'react'
+import { useEffect } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useSessionProvider } from '../context/SessionProviderContext'
 
@@ -24,22 +24,14 @@ export function AppShell() {
     (queryClient.getQueryData<{ split_brain_sync_status?: string }>(['health'])
       ?.split_brain_sync_status) === 'syncing'
 
-  const [isGlobalStreamActive, setIsGlobalStreamActive] = useState(false)
-  useEffect(() => {
-    const handler = (e: any) => setIsGlobalStreamActive(e.detail)
-    globalThis.addEventListener('stream-activity', handler)
-    return () => globalThis.removeEventListener('stream-activity', handler)
-  }, [])
-
-  // Poll faster while a sync is in progress so the banner dismisses quickly,
-  // but drop to a slow failsafe rate if an SSE stream is active to prevent network starvation.
+  // Poll faster while a sync is in progress so the banner dismisses quickly
   const { data: health } = useApi(getHealth, {
     cacheKey: 'health',
-    refetchInterval: isGlobalStreamActive ? 120_000 : (isSyncing ? 5_000 : 60_000),
+    refetchInterval: isSyncing ? 5_000 : 60_000,
   })
   const { data: appConfig } = useApi(getAppConfig, { 
     cacheKey: 'app-config', 
-    refetchInterval: isGlobalStreamActive ? 120_000 : 60_000 
+    refetchInterval: 60_000 
   })
 
   const syncStatus = health?.split_brain_sync_status

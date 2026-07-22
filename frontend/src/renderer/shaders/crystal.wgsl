@@ -27,16 +27,17 @@
 struct CameraUniform {
     viewProj: mat4x4<f32>,
     eyePosition: vec3<f32>,
-    _pad: f32,
+    currentVariant: u32,
     time: f32,
     screenWidth: f32,
     screenHeight: f32,
+    fogDensity: f32,
+    fogColor: vec3<f32>,
     _pad2: f32,
 };
 
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
-@group(1) @binding(0) var prevFrameTex: texture_2d<f32>;
-@group(1) @binding(1) var linearSampler: sampler;
+
 
 // Per-vertex layout (interleaved, stride 24 bytes):
 struct VertexInput {
@@ -74,6 +75,12 @@ fn rotate_axis(v: vec3<f32>, k: vec3<f32>, theta: f32) -> vec3<f32> {
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
+
+    // Cull if this instance doesn't belong to the current variant pass
+    if (in.inst_type_hash % 3u != camera.currentVariant) {
+        out.clip_pos = vec4<f32>(2.0, 2.0, 2.0, 1.0); // Outside NDC (culled)
+        return out;
+    }
 
     // Per-instance rotation seeded by type_hash. Golden-ratio multipliers keep
     // adjacent hashes visually distinct (this is a standard trick from procedural
@@ -127,45 +134,38 @@ fn fs_main(in: VertexOutput) -> FragOutput {
     let V = normalize(camera.eyePosition - in.world_pos);
     let NdotV = max(dot(N, V), 0.0);
 
-    // Schlick Fresnel — steep exponent for that sharp gem edge highlight.
+    // Schlick Fresnel — steep exponent for subtle sparkle edge highlight
     let fresnel = 0.04 + 0.96 * pow(1.0 - NdotV, 5.0);
 
     let base = hash_to_crystal_color(in.type_hash);
 
-    // Fake refraction: sample previous frame at an offset UV. clip_pos in the
-    // fragment shader is in framebuffer coordinates (WGSL spec) so dividing
-    // by (screenWidth, screenHeight) gives us [0,1] UVs directly.
-    //
-    // Refraction direction: the vector -V refracted through N with η=1/1.5
-    // (air→glass), projected onto the screen plane by taking .xy.
-    let uv = in.clip_pos.xy / vec2<f32>(camera.screenWidth, camera.screenHeight);
-    let refr_dir = refract(-V, N, 0.67);
-    // Scale by clip depth so distant crystals distort less than near ones
-    // (bigger perspective foreshortening for near objects).
-    let offset_scale = 0.02 * in.clip_pos.w;
-    let refr_uv = uv + refr_dir.xy * offset_scale;
-
-    // Chromatic dispersion: shift R and B channels by ±1px.
-    let px = vec2<f32>(1.0 / camera.screenWidth, 0.0);
-    let refr_r = textureSample(prevFrameTex, linearSampler, refr_uv + px).r;
-    let refr_g = textureSample(prevFrameTex, linearSampler, refr_uv     ).g;
-    let refr_b = textureSample(prevFrameTex, linearSampler, refr_uv - px).b;
-    let refr = vec3<f32>(refr_r, refr_g, refr_b);
-
-    // Blinn-Phong specular for a sharp key light highlight.
+    // Toon diffuse lighting
     let L = normalize(vec3<f32>(0.6, 1.0, 0.8));
+    let NdotL = max(dot(N, L), 0.0);
+    let toonDiffuse = toon_lighting(NdotL);
+
+    // Toon specular highlight
     let H = normalize(L + V);
-    let spec = pow(max(dot(N, H), 0.0), 128.0) * 2.5;
+    let NdotH = max(dot(N, H), 0.0);
+    let spec = toon_specular(NdotH, 0.92) * 1.5;
 
-    // Faint emissive core so crystals glow even against a dark scene.
-    let glow = base * (f32(in.type_hash % 100u) / 100.0) * 0.12;
+    // Emissive pulse (breathing glow)
+    let type_hash_f = f32(in.type_hash % 100u);
+    let pulse = (sin(camera.time * 0.5 + type_hash_f * 0.1) * 0.5 + 0.5) * 0.15;
+    let glow = base * pulse;
 
-    // Composite: refraction tinted by the crystal's own hue at low fresnel,
-    // washed out to white at grazing angles for the sparkle rim.
-    let body = mix(refr, base, 0.35) * (1.0 - fresnel) + vec3<f32>(1.0) * fresnel;
-    let final_rgb = clamp(body + vec3<f32>(spec) + glow, vec3<f32>(0.0), vec3<f32>(2.0));
+    // Rim glow: Cool cyan edge glow
+    let rim = rim_glow(NdotV, vec3<f32>(0.4, 0.8, 1.0), 3.0, 0.8);
+
+    // Composite: Toon diffuse, specular, and glow
+    let body = mix(base * 0.2, base, toonDiffuse) + vec3<f32>(1.0) * fresnel * 0.2;
+    let final_rgb = clamp(body + vec3<f32>(spec) + glow + rim, vec3<f32>(0.0), vec3<f32>(2.0));
+
+    // Distance-based atmospheric fog
+    let view_depth = in.clip_pos.w;
+    let fogged_rgb = atmospheric_fog(final_rgb, view_depth, camera.fogDensity, camera.fogColor);
 
     var out: FragOutput;
-    out.color = vec4<f32>(final_rgb, 1.0);
+    out.color = vec4<f32>(fogged_rgb, 1.0);
     return out;
 }

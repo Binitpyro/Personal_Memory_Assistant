@@ -1,6 +1,5 @@
 import { useReducer, useCallback, useRef, useEffect } from 'react';
 import { subscribeQuery, type QueryStreamChunk, type QuerySource, type ProviderStatus } from '../api';
-import { useStreamActivity } from '../context/StreamActivityContext';
 import { useSessionProvider } from '../context/SessionProviderContext';
 import { queryClient } from '../queryClient';
 
@@ -169,7 +168,6 @@ function calculateCost(
 
 export function useChatStream(onHistoryUpdate: () => void) {
   const [messages, dispatch] = useReducer(chatReducer, []);
-  const { setIsStreamActive } = useStreamActivity();
   const { sessionModelOverride, addSessionCost } = useSessionProvider();
   
   const streamBufferRef = useRef('');
@@ -208,8 +206,6 @@ export function useChatStream(onHistoryUpdate: () => void) {
 
     streamBufferRef.current = '';
     lastUpdateRef.current = 0;
-    
-    setIsStreamActive(true);
 
     const userMessageContent = options.isRetry ? `(Retrying) ${userMsg}` : userMsg;
     dispatch({ type: 'ADD_USER_MESSAGE', payload: { id: crypto.randomUUID(), content: userMessageContent } });
@@ -244,7 +240,6 @@ export function useChatStream(onHistoryUpdate: () => void) {
         
         if (chunk.type === 'error') {
           dispatch({ type: 'SET_ERROR', payload: { text: chunk.text || 'Search failed' } });
-          setIsStreamActive(false);
           reject(new Error(chunk.text || 'Search failed'));
           return;
         }
@@ -347,7 +342,6 @@ export function useChatStream(onHistoryUpdate: () => void) {
             });
           }
 
-          setIsStreamActive(false);
           onHistoryUpdate();
           resolve();
         }
@@ -364,7 +358,7 @@ export function useChatStream(onHistoryUpdate: () => void) {
 
       });
     });
-  }, [messages, flushStreamBuffer, setIsStreamActive, onHistoryUpdate, sessionModelOverride, addSessionCost]);
+  }, [messages, flushStreamBuffer, onHistoryUpdate, sessionModelOverride, addSessionCost]);
 
   return { messages, executeSearch, resetChat };
 }

@@ -1,6 +1,6 @@
 [package]
 name = "pma-desktop"
-version = "0.0.70"
+version = "0.0.71"
 description = "Personal Memory Assistant Tauri desktop shell"
 authors = ["PMA contributors"]
 license = "MIT"

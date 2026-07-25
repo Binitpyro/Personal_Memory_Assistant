@@ -10,7 +10,7 @@ vi.mock('../../useApi', () => ({
       return { data: { watch_dirs: [], google_drive_sync: false }, loading: false, error: null, refetch: vi.fn() };
     }
     if (opts?.cacheKey === 'health') {
-      return { data: { version: '0.0.70', status: 'ok', db: 'connected', split_brain_sync_status: 'idle' }, loading: false, error: null, refetch: vi.fn() };
+      return { data: { version: '0.0.71', status: 'ok', db: 'connected', split_brain_sync_status: 'idle' }, loading: false, error: null, refetch: vi.fn() };
     }
     return { data: undefined, loading: false, error: null, refetch: vi.fn() };
   }),

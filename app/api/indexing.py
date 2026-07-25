@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Request
 from fastapi.responses import JSONResponse
@@ -12,6 +13,9 @@ from app.api.limiter import limiter
 from app.storage.db import DatabaseManager
 
 logger = logging.getLogger(__name__)
+
+# Single-worker pool to prevent out-of-memory spikes during concurrent encodes
+_ENCODE_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pma-encode")
 
 router = APIRouter()
 
@@ -63,17 +67,6 @@ class IndexRequest(BaseModel):
         return cleaned
 
 
-class UnrealImportRequest(BaseModel):
-    json_path: str = Field(..., min_length=1)
-    folder_tag: str | None = Field(None)
-
-    @property
-    def validated_json_path(self) -> str:
-        import os
-
-        return os.path.realpath(self.json_path.strip().strip('"').strip("'"))
-
-
 @router.post("/start")
 @limiter.limit("3/minute")
 async def index_start(
@@ -100,13 +93,34 @@ async def index_start(
     async def _index_then_compact():
         await service.index_folders(folders)
         try:
-            await db.vacuum()
-            logger.info("Auto-compact completed after indexing.")
+            # FTS optimize via aiosqlite (non-blocking)
+            await db.fts_optimize()
+            logger.info("FTS optimization completed after indexing.")
         except Exception as e:
-            logger.warning("Auto-compact after indexing failed: %s", e)
+            logger.warning("FTS optimization after indexing failed: %s", e)
 
     background_tasks.add_task(_index_then_compact)
     return {"message": "Indexing started"}
+
+
+@router.post("/cancel")
+async def index_cancel():
+    _indexing_service_cls, progress = ensure_indexing()
+
+    if progress.status != "running":
+        return JSONResponse(
+            status_code=400, content={"error": "Indexing is not currently running."}
+        )
+
+    # We don't need db, emb, etc to just set the cancel flag.
+    # We can instantiate a dummy service just to call cancel_indexing
+    # or just set it on the progress singleton directly, but let's use the service method
+    # for encapsulation if we can, or just set the flag directly since we have `progress`.
+    with progress._lock:
+        progress.is_cancelled = True
+        progress.status = "cancelling"
+
+    return {"message": "Cancellation requested. Finishing current files..."}
 
 
 @router.get("/status")
@@ -134,8 +148,13 @@ async def progress_stream(db: DatabaseManager = Depends(get_db)):
     _, progress = ensure_indexing()
 
     async def event_generator():
+        tick = 0
+        chunk_count = 0
         while True:
-            _, chunk_count = await db.get_counts()
+            # Debounce DB round-trips: only re-query counts every 5 ticks (~2.5s)
+            if tick % 5 == 0:
+                _, chunk_count = await db.get_counts()
+            tick += 1
             pct = (
                 int((progress.processed_files / progress.total_files) * 100)
                 if progress.total_files > 0
@@ -202,18 +221,29 @@ async def export_index(db: DatabaseManager = Depends(get_db)):
         return JSONResponse(status_code=500, content={"error": "Export failed."})
 
 
-@router.post("/remove-folder")
+@router.post("/folder/remove")
 async def remove_folder_index(
     request: IndexRequest,
     db: DatabaseManager = Depends(get_db),
     lancedb_client=Depends(get_lancedb),
 ):
+    import os
+
     from app.state import file_tree_cache as _file_tree_cache
     from app.state import insights_cache as _insights_cache
 
-    folders = request.validated_folders
+    folders = []
+    for f in request.folders:
+        p = f.strip().strip('"').strip("'")
+        if p and ".." not in p.replace("\\", "/").split("/"):
+            # C-02: Don't check isdir, just normalize so we can remove deleted folders
+            folders.append(os.path.abspath(os.path.normpath(p)))
+
     if not folders:
-        return JSONResponse(status_code=400, content={"error": "No valid folder paths provided."})
+        return JSONResponse(
+            status_code=200,
+            content={"message": "No valid folder paths provided.", "chunks_removed": 0},
+        )
 
     folder = folders[0]
     try:
@@ -235,61 +265,4 @@ async def remove_folder_index(
         return {"message": f"Removed {folder}", "chunks_removed": len(chunk_ids_to_remove)}
     except Exception as e:
         logger.error("Failed to remove folder: %s", e)
-        return JSONResponse(status_code=500, content={"error": str(e)})
-
-
-@router.post("/unreal-import")
-async def unreal_import(
-    request: UnrealImportRequest,
-    db: DatabaseManager = Depends(get_db),
-    emb=Depends(get_emb),
-    lancedb_client=Depends(get_lancedb),
-):
-    try:
-        from app.insights.unreal_import import parse_unreal_metadata
-
-        jpath = request.validated_json_path
-        tag = request.folder_tag or "unreal_import"
-        stats = await asyncio.to_thread(parse_unreal_metadata, jpath)
-        if stats:
-            await db.upsert_unreal_project_facts(
-                {
-                    "folder_path": jpath,
-                    "folder_tag": tag,
-                    "project_name": stats.get("ProjectName", ""),
-                    "engine_version": stats.get("EngineVersion", ""),
-                    "total_assets": stats.get("AssetCount", 0),
-                    "map_count": stats.get("MapCount", 0),
-                    "character_blueprints": stats.get("CharacterBPCount", 0),
-                    "pawn_blueprints": stats.get("PawnBPCount", 0),
-                    "skeletal_meshes": stats.get("SkeletalMeshCount", 0),
-                    "material_count": stats.get("MaterialCount", 0),
-                    "niagara_systems": stats.get("NiagaraCount", 0),
-                    "environment_assets": stats.get("EnvAssetCount", 0),
-                    "metadata_source": jpath,
-                }
-            )
-
-        import os
-
-        from sentence_transformers import SentenceTransformer
-
-        model: SentenceTransformer = emb.model
-        doc = f"Unreal Engine Metadata Import: {stats}"
-        embedding = model.encode(doc).tolist()
-        batch_ids = [f"unreal_{os.path.basename(jpath)}"]
-        batch_metas = [{"source": jpath, "text": doc}]
-        batch_embs = [embedding]
-
-        await lancedb_client.add_documents(
-            ids=batch_ids, embeddings=batch_embs, metadatas=batch_metas
-        )
-
-        from app.state import file_tree_cache as _file_tree_cache
-        from app.state import insights_cache as _insights_cache
-
-        _file_tree_cache["data"] = _insights_cache["data"] = None
-        return {"message": "Unreal Engine metadata imported successfully.", "stats": stats}
-    except Exception as e:
-        logger.error("Unreal import failed: %s", e)
         return JSONResponse(status_code=500, content={"error": str(e)})

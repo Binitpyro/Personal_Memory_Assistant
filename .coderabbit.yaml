@@ -1,17 +1,2 @@
-# yaml-language-server: $schema=https://coderabbit.ai/coderabbit-schema.json
 language: "en-US"
-reviews:
-  ignore_patterns:
-    - "PMA Obsidian/**"
-    - "static/**"
-    - "demo_data/**"
-    - "logs/**"
-    - "data/**"
-    - "tests/**"
-    - "*.xml"
-    - "*.exe"
-    - "*.msi"
-    - "*.spec"
-    - "test_list.txt"
-    - "dist_readme.txt"
-    - "pylint_results.txt"
+reviews: {profile: "chill", request_changes_workflow: false, high_level_summary: true, path_filters: ["app/**/*.py", "!**/__pycache__/**", "!**/*.pyc", "!**/migrations/**"]}

@@ -14,6 +14,13 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+_NAMED_ENTITY_RE = re.compile(r"&[a-zA-Z]+;")
+_NUMERIC_ENTITY_RE = re.compile(r"&#\d+;")
+_WHITESPACE_RE = re.compile(r"\s+")
+_MAX_ENTRY_READ_BYTES = 10_000_000
+_MAX_CUMULATIVE_DECOMPRESSED_SIZE = 100 * 1024 * 1024
+
 
 class EpubExtractor:
     def can_handle(self, path: Path) -> bool:
@@ -23,6 +30,8 @@ class EpubExtractor:
         """Yield text from an EPUB by streaming its internal XHTML documents."""
         try:
             total_chars = 0
+            cumulative_decompressed_bytes = 0
+
             with zipfile.ZipFile(str(path), "r") as zf:
                 content_files = sorted(
                     name
@@ -36,24 +45,51 @@ class EpubExtractor:
                         break
 
                     try:
-                        # P10-2: Protect against ZIP bombs by reading in chunks
-                        with zf.open(file_name) as f:
-                            # Read internal member in up to 10MB chunks for safety
-                            raw_bytes = f.read(10_000_000)
+                        entry_info = zf.getinfo(file_name)
+                        if (
+                            cumulative_decompressed_bytes + entry_info.file_size
+                            > _MAX_CUMULATIVE_DECOMPRESSED_SIZE
+                        ):
+                            logger.warning(
+                                "EPUB extraction stopped: cumulative decompressed size limit "
+                                "(%d bytes) would be exceeded for %s",
+                                _MAX_CUMULATIVE_DECOMPRESSED_SIZE,
+                                path,
+                            )
+                            raise ValueError("Decompression limit exceeded (potential ZIP bomb)")
+
+                        # Read at most 10 MB from a safe entry.
+                        with zf.open(entry_info) as f:
+                            raw_bytes = f.read(min(entry_info.file_size, _MAX_ENTRY_READ_BYTES))
+                            cumulative_decompressed_bytes += len(raw_bytes)
+                            if cumulative_decompressed_bytes > _MAX_CUMULATIVE_DECOMPRESSED_SIZE:
+                                logger.warning(
+                                    "EPUB extraction stopped: cumulative decompressed size limit (%d bytes) exceeded for %s",
+                                    _MAX_CUMULATIVE_DECOMPRESSED_SIZE,
+                                    path,
+                                )
+                                raise ValueError(
+                                    "Decompression limit exceeded (potential ZIP bomb)"
+                                )
+
                             raw_html = raw_bytes.decode("utf-8", errors="ignore")
 
                             # Strip XML/HTML tags and collapse whitespace
-                            text = re.sub(r"<[^>]+>", " ", raw_html)
-                            text = re.sub(r"&[a-zA-Z]+;", " ", text)
-                            text = re.sub(r"&#\d+;", " ", text)
-                            text = re.sub(r"\s+", " ", text).strip()
+                            text = _HTML_TAG_RE.sub(" ", raw_html)
+                            text = _NAMED_ENTITY_RE.sub(" ", text)
+                            text = _NUMERIC_ENTITY_RE.sub(" ", text)
+                            text = _WHITESPACE_RE.sub(" ", text).strip()
 
                             if len(text) > 50:
                                 yield text
                                 total_chars += len(text)
+                    except ValueError as ve:
+                        raise ve
                     except Exception as inner_e:
                         logger.debug("Skipping EPUB entry %s: %s", file_name, inner_e)
                         continue
+        except ValueError as ve:
+            logger.warning("EPUB extraction aborted: %s", ve)
         except Exception as e:
             logger.warning("Failed to extract EPUB %s: %s", path, e)
 

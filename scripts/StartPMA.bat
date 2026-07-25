@@ -26,10 +26,11 @@ if exist "%~dp0..\frontend\src-tauri" (
     echo.
 )
 
-:: 1. Define Paths
+:: 1. Define Paths & Global Vars
 set "SCRIPT_DIR=%~dp0"
 for %%I in ("%SCRIPT_DIR%..") do set "PROJECT_DIR=%%~fI"
 set "SONAR_DIR=C:\sonarqube\bin\windows-x86-64"
+set "VITE_DEV_TOKEN=dev_token_pma_local"
 
 if not exist "%PROJECT_DIR%" (
     echo [ERROR] Project directory not found: %PROJECT_DIR%
@@ -44,7 +45,12 @@ echo [INFO] Working directory: %CD%
 if exist ".venv\Scripts\activate.bat" goto activate_venv
 
 echo [INFO] Creating virtual environment with Python 3.12...
-py -3.12 -m venv .venv 2>nul || python3.12 -m venv .venv 2>nul || python -m venv .venv
+where uv >nul 2>&1
+if %ERRORLEVEL% == 0 (
+    uv venv --python 3.12 --clear .venv
+) else (
+    py -3.12 -m venv .venv 2>nul || python3.12 -m venv .venv 2>nul || python -m venv .venv
+)
 
 if not exist ".venv\Scripts\activate.bat" (
     echo [ERROR] Failed to create .venv. Ensure Python is installed and in PATH.
@@ -60,7 +66,7 @@ call ".venv\Scripts\activate.bat"
 where uv >nul 2>&1
 if %ERRORLEVEL% == 0 (
     echo [INFO] Syncing dependencies with uv...
-    uv sync --all-extras --quiet
+    uv sync --all-extras
 ) else (
     echo [WARN] uv not found — falling back to pip editable install...
     pip install -e . --quiet
@@ -103,7 +109,7 @@ if exist "sonar-project.properties" (
 )
 
 if "%HAS_SONAR%"=="1" (
-    echo [INFO] Tab 1: API (Main) + Sonar (Right) + Vite (Bottom Left)
+    echo [INFO] Tab 1: API - Sonar - Vite
     echo [INFO] Tab 2: Virtual Environment Terminal
     echo.
 
@@ -122,15 +128,15 @@ if "%HAS_SONAR%"=="1" (
     )
 ) else (
     echo [INFO] SonarQube not found or not configured for this project. Skipping...
-    echo [INFO] Tab 1: API (Main) + Vite (Bottom)
+    echo [INFO] Tab 1: API - Vite
     echo [INFO] Tab 2: Virtual Environment Terminal
     echo.
 )
 
 :: Windows Terminal Command Construction
-set "API_CMD=title PMA API && cd /d %PROJECT_DIR% && call .venv\Scripts\activate.bat && uvicorn app.main:app --reload --port 8000"
+set "API_CMD=title PMA API && cd /d %PROJECT_DIR% && call .venv\Scripts\activate.bat && set X_LOCAL_ACCESS_TOKEN=dev_token_pma_local&& uvicorn app.main:app --reload --port 8000"
 set "SONAR_CMD=title SonarQube && cd /d %SONAR_DIR% && call StartSonar.bat"
-set "VITE_CMD=title Vite Frontend && cd /d %PROJECT_DIR%\frontend && npm run dev"
+set "VITE_CMD=title Vite Frontend && cd /d %PROJECT_DIR%\frontend && set VITE_DEV_TOKEN=dev_token_pma_local&& npm run dev"
 set "TERM_CMD=title PMA Terminal && cd /d %PROJECT_DIR% && call .venv\Scripts\activate.bat"
 
 :: Launch WT with appropriate tabs:

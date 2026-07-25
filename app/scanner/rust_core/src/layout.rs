@@ -1,3 +1,4 @@
+#[cfg(not(miri))]
 use rayon::prelude::*;
 
 #[repr(C, align(32))]
@@ -248,7 +249,12 @@ pub fn simulate_layout(nodes: &mut [Node], config: &LayoutConfig) {
     for _iter in 0..config.iterations {
         let tree = Octree::build(nodes);
         
-        let mut forces: Vec<[f32; 3]> = nodes.par_iter().map(|node| {
+        #[cfg(not(miri))]
+        let node_iter = nodes.par_iter();
+        #[cfg(miri)]
+        let node_iter = nodes.iter();
+
+        let mut forces: Vec<[f32; 3]> = node_iter.map(|node| {
             let mut force = tree.compute_repulsion(node.position, config);
             force[0] += -0.01 * node.position[0];
             force[1] += -0.01 * node.position[1];
@@ -298,3 +304,101 @@ pub fn simulate_layout(nodes: &mut [Node], config: &LayoutConfig) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_layout_config_default() {
+        let config = LayoutConfig::default();
+        assert_eq!(config.iterations, 150);
+        assert_eq!(config.repulsion_strength, 1000.0);
+        assert_eq!(config.spring_stiffness, 0.1);
+        assert_eq!(config.damping, 0.8);
+        assert_eq!(config.theta, 0.5);
+    }
+
+    #[test]
+    fn test_octree_build_empty() {
+        let tree = Octree::build(&[]);
+        assert!(tree.nodes.is_empty());
+    }
+
+    #[test]
+    fn test_octree_build_single() {
+        let node = Node {
+            position: [1.0, 2.0, 3.0],
+            radius: 5.0,
+            parent_index: u32::MAX,
+            flags: 0,
+            type_hash: 0,
+            pad: 0,
+        };
+        let tree = Octree::build(&[node]);
+        assert_eq!(tree.nodes.len(), 1);
+        assert_eq!(tree.nodes[0].mass, 1.0);
+        assert_eq!(tree.nodes[0].center_of_mass, [1.0, 2.0, 3.0]);
+        assert!(tree.nodes[0].is_leaf);
+        assert_eq!(tree.nodes[0].body_idx, 0);
+    }
+
+    #[test]
+    fn test_octree_build_multiple() {
+        let nodes = vec![
+            Node {
+                position: [0.0, 0.0, 0.0],
+                radius: 1.0,
+                parent_index: u32::MAX,
+                flags: 0,
+                type_hash: 0,
+                pad: 0,
+            },
+            Node {
+                position: [10.0, 10.0, 10.0],
+                radius: 1.0,
+                parent_index: u32::MAX,
+                flags: 0,
+                type_hash: 0,
+                pad: 0,
+            },
+        ];
+        let tree = Octree::build(&nodes);
+        assert!(!tree.nodes.is_empty());
+        assert_eq!(tree.nodes[0].mass, 2.0);
+        assert_eq!(tree.nodes[0].center_of_mass, [5.0, 5.0, 5.0]);
+    }
+
+    #[test]
+    fn test_simulate_layout_positions() {
+        let mut nodes = vec![
+            Node {
+                position: [0.0, 0.0, 0.0],
+                radius: 1.0,
+                parent_index: 1,
+                flags: 0,
+                type_hash: 0,
+                pad: 0,
+            },
+            Node {
+                position: [2.0, 0.0, 0.0],
+                radius: 1.0,
+                parent_index: u32::MAX,
+                flags: 0,
+                type_hash: 0,
+                pad: 0,
+            },
+        ];
+        let config = LayoutConfig {
+            iterations: 5,
+            ..Default::default()
+        };
+        let orig_pos_0 = nodes[0].position;
+        let orig_pos_1 = nodes[1].position;
+        simulate_layout(&mut nodes, &config);
+        
+        assert_ne!(nodes[0].position, orig_pos_0);
+        assert_ne!(nodes[1].position, orig_pos_1);
+    }
+}
+

@@ -1,64 +1,154 @@
 import { useState, useEffect } from 'react'
-import { Brain, Shield, ArrowRight, CheckCircle2, ChevronRight, Key, HardDrive, AlertTriangle } from 'lucide-react'
+import { Brain, Shield, ArrowRight, CheckCircle2, ChevronRight, HardDrive, AlertTriangle, Save, Loader2 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { useApi } from '../useApi'
-import { getAuthStatus, getLocalModels, launchGoogleAuth, getDriveInfo } from '../api'
+import { getLocalModels, getDriveInfo, enableSplitBrain, getProviders, setProviderKey } from '../api'
+
+const PROVIDERS = [
+    { id: 'gemini', name: 'Google Gemini', icon: '✨' },
+    { id: 'groq', name: 'Groq', icon: '⚡' },
+    { id: 'nvidia_nim', name: 'NVIDIA NIM', icon: '🟢' },
+    { id: 'openrouter', name: 'OpenRouter', icon: '🌐' }
+]
+
+function ApiKeyInput({ provider }: { provider: typeof PROVIDERS[0] }) {
+    const { data: providers, refetch } = useApi(getProviders, { cacheKey: 'providers-list' })
+    const pData = providers?.find(p => p.spec.id === provider.id)
+    const [key, setKey] = useState('')
+    const [saving, setSaving] = useState(false)
+    const [saveError, setSaveError] = useState<string | null>(null)
+
+    const handleSave = async () => {
+        if (!key) return
+        setSaving(true)
+        setSaveError(null)
+        try {
+            await setProviderKey(provider.id, key)
+            setKey('')
+            await refetch()
+        } catch (e: any) {
+            setSaveError(e.message || 'Failed to save API key')
+        } finally {
+            setSaving(false)
+        }
+    }
+
+    return (
+        <div className={`p-4 rounded-xl border flex items-center justify-between gap-4 ${pData?.is_set ? 'border-success bg-success/5' : 'border-primary/10 bg-white/50'}`}>
+            <div className="flex items-center gap-3 w-1/3">
+                <span className="text-xl">{provider.icon}</span>
+                <span className="font-semibold">{provider.name}</span>
+            </div>
+            
+            {pData?.is_set ? (
+                <div className="flex-1 flex justify-end items-center gap-4">
+                    <span className="text-xs font-mono text-success opacity-80 bg-success/10 px-2 py-1 rounded">
+                        {pData.stored_in === 'keyring' ? 'Stored in Keyring' : 'Stored in Env'}
+                    </span>
+                    <span className="text-success text-sm flex items-center gap-1 font-medium">
+                        <CheckCircle2 className="w-4 h-4" /> Ready
+                    </span>
+                    <button onClick={() => { setKey(''); setSaving(false) }} className="text-xs text-text-secondary hover:text-primary transition-colors">
+                        Update
+                    </button>
+                </div>
+            ) : (
+                <div className="flex-1 flex flex-col gap-2">
+                    <div className="flex items-center gap-2">
+                        <input 
+                            type="password"
+                            placeholder="Enter API Key..."
+                            value={key}
+                            onChange={e => setKey(e.target.value)}
+                            className="flex-1 bg-background/50 border border-primary/20 rounded-lg px-3 py-1.5 text-sm outline-none focus:border-primary/50 transition-colors"
+                        />
+                        <button 
+                            onClick={handleSave} 
+                            disabled={saving || !key}
+                            className="glass-button !bg-primary/10 !text-primary hover:!bg-primary/20 px-3 py-1.5 rounded-lg text-sm disabled:opacity-50 flex items-center gap-1"
+                        >
+                            {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+                            Save
+                        </button>
+                    </div>
+                    {saveError && (
+                        <div className="text-xs text-danger font-medium animate-fade-in">
+                            {saveError}
+                        </div>
+                    )}
+                </div>
+            )}
+        </div>
+    )
+}
 
 export function SetupPage() {
     const navigate = useNavigate()
-    const { data: authStatus, refetch: refetchAuth } = useApi(getAuthStatus, { cacheKey: 'auth-status' })
-    const { data: localModels } = useApi(getLocalModels, { cacheKey: 'local-models' })
-    const { data: driveInfo } = useApi(getDriveInfo, { cacheKey: 'drive-info' })
+    const { data: providers, refetch: refetchProviders, loading: providersLoading } = useApi(getProviders, { cacheKey: 'providers-list' })
+    const { data: localModels, loading: localModelsLoading } = useApi(getLocalModels, { cacheKey: 'local-models' })
+    const { data: driveInfo, loading: driveLoading } = useApi(getDriveInfo, { cacheKey: 'drive-info' })
+
+    const isLoading = providersLoading || localModelsLoading || driveLoading
 
     const [step, setStep] = useState(1)
 
+    const [isEnablingSplitBrain, setIsEnablingSplitBrain] = useState(false)
+    const [requiresRestart, setRequiresRestart] = useState(false)
+    const [splitBrainError, setSplitBrainError] = useState<string | null>(null)
+
     useEffect(() => {
-        const refreshAuth = () => {
-            void refetchAuth()
+        const refreshProviders = () => {
+            void refetchProviders()
         }
 
         const handleVisibilityChange = () => {
             if (document.visibilityState === 'visible') {
-                refreshAuth()
+                refreshProviders()
             }
         }
 
-        window.addEventListener('focus', refreshAuth)
+        window.addEventListener('focus', refreshProviders)
         document.addEventListener('visibilitychange', handleVisibilityChange)
         return () => {
-            window.removeEventListener('focus', refreshAuth)
+            window.removeEventListener('focus', refreshProviders)
             document.removeEventListener('visibilitychange', handleVisibilityChange)
         }
-    }, [refetchAuth])
+    }, [refetchProviders])
 
-    useEffect(() => {
-        if (authStatus?.connected) {
-            setStep(2)
+
+
+
+    const handleEnableSplitBrain = async () => {
+        setIsEnablingSplitBrain(true)
+        setSplitBrainError(null)
+        try {
+            await enableSplitBrain()
+            setRequiresRestart(true)
+        } catch (error: any) {
+            setSplitBrainError(error.message || 'Failed to enable Split-Brain mode')
+        } finally {
+            setIsEnablingSplitBrain(false)
         }
-    }, [authStatus?.connected])
-
-    const handleConnectGoogle = async () => {
-        await launchGoogleAuth()
     }
 
-    const isConnected = authStatus?.connected
+    const isConnected = providers?.some(p => p.is_set)
     const hasLocalModels = localModels?.ollama.detected || localModels?.lm_studio.detected
 
-    // Block setup if drive is exFAT/FAT32 but mode is not split_brain
+    // Block setup if drive is exFAT/FAT32 but mode is not split_brain, or if restart is required
     const isDriveConfigSafe = driveInfo
         ? !(driveInfo.is_portable_fs && driveInfo.lancedb_mode !== 'split_brain')
         : true
 
-    const canProceed = (isConnected || hasLocalModels) && isDriveConfigSafe
+    const canProceed = (isConnected || hasLocalModels) && isDriveConfigSafe && !requiresRestart
 
     return (
-        <div className="fixed inset-0 bg-background flex flex-col items-center justify-center p-6 z-50 overflow-hidden">
+        <div className="fixed inset-0 bg-background flex flex-col items-center p-6 z-50 overflow-y-auto">
 
             {/* Background glow effects */}
             <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-primary/20 blur-[120px] rounded-full mix-blend-screen pointer-events-none" />
             <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-accent-blue/20 blur-[120px] rounded-full mix-blend-screen pointer-events-none" />
 
-            <div className="w-full max-w-2xl glass rounded-3xl p-10 animate-fade-in-up border border-primary/10 shadow-2xl relative z-10 flex flex-col">
+            <div className="my-auto w-full max-w-2xl glass rounded-3xl p-6 sm:p-10 animate-fade-in-up border border-primary/10 shadow-2xl relative z-10 flex flex-col shrink-0">
 
                 {/* Header */}
                 <div className="flex flex-col items-center text-center mb-10">
@@ -81,26 +171,66 @@ export function SetupPage() {
                 {step === 1 && (
                     <div className="flex flex-col gap-4 animate-fade-in-right">
 
-                        {/* Drive Compatibility Warning */}
-                        {!isDriveConfigSafe && driveInfo && (
-                            <div className="p-4 rounded-xl border border-warning bg-warning/10 flex items-start gap-3">
-                                <AlertTriangle className="w-5 h-5 text-warning flex-shrink-0 mt-0.5" />
+                        {isLoading && (!providers || !localModels) && (
+                            <div className="flex flex-col gap-4 animate-pulse">
+                                <div className="h-40 bg-primary/5 rounded-2xl border border-primary/10" />
+                                <div className="grid grid-cols-2 gap-4">
+                                    <div className="h-16 bg-primary/5 rounded-xl border border-primary/10" />
+                                    <div className="h-16 bg-primary/5 rounded-xl border border-primary/10" />
+                                </div>
+                            </div>
+                        )}
+
+                        {!isLoading && !isDriveConfigSafe && driveInfo && !requiresRestart && (
+                            <div className="p-4 rounded-xl border border-warning bg-warning/10 flex flex-col gap-3">
+                                <div className="flex items-start gap-3">
+                                    <AlertTriangle className="w-5 h-5 text-warning flex-shrink-0 mt-0.5" />
+                                    <div>
+                                        <h4 className="font-semibold text-warning flex items-center gap-2">
+                                            <HardDrive className="w-4 h-4" /> Incompatible Storage Detected
+                                        </h4>
+                                        <p className="text-sm text-text-secondary mt-1">
+                                            Drive <strong>{driveInfo.drive}</strong> is formatted as{' '}
+                                            <strong>{driveInfo.fs_type}</strong>. LanceDB is unstable on portable filesystems.
+                                        </p>
+                                    </div>
+                                </div>
+                                
+                                <div className="ml-8 border-t border-warning/20 pt-3 mt-1">
+                                    <button 
+                                        onClick={handleEnableSplitBrain}
+                                        disabled={isEnablingSplitBrain}
+                                        className="glass-button !bg-warning/20 !text-warning border border-warning/50 hover:!bg-warning/30 px-4 py-2 text-sm disabled:opacity-50 transition-colors"
+                                    >
+                                        {isEnablingSplitBrain ? 'Enabling...' : 'Enable Split-Brain Mode'}
+                                    </button>
+                                    {splitBrainError && (
+                                        <p className="text-red-500 text-xs mt-2">{splitBrainError}</p>
+                                    )}
+                                    <p className="text-xs text-text-secondary mt-2">
+                                        This will configure PMA to safely store its cache on your local computer, allowing the portable drive to function correctly.
+                                    </p>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Restart Required Banner */}
+                        {requiresRestart && (
+                            <div className="p-4 rounded-xl border border-success bg-success/10 flex items-start gap-3 animate-fade-in">
+                                <CheckCircle2 className="w-5 h-5 text-success flex-shrink-0 mt-0.5" />
                                 <div>
-                                    <h4 className="font-semibold text-warning flex items-center gap-2">
-                                        <HardDrive className="w-4 h-4" /> Incompatible Storage Detected
+                                    <h4 className="font-semibold text-success flex items-center gap-2">
+                                        Split-Brain Mode Enabled
                                     </h4>
                                     <p className="text-sm text-text-secondary mt-1">
-                                        Drive <strong>{driveInfo.drive}</strong> is formatted as{' '}
-                                        <strong>{driveInfo.fs_type}</strong>. LanceDB is unstable on portable filesystems.
-                                        Set <code className="bg-warning/20 px-1 rounded text-xs">PMA_LANCEDB_MODE=split_brain</code> in
-                                        your <code className="bg-warning/20 px-1 rounded text-xs">.env</code> and restart to continue.
+                                        The configuration has been updated successfully. Please <strong>fully close and restart the application</strong> to apply the changes.
                                     </p>
                                 </div>
                             </div>
                         )}
 
                         {/* Drive OK badge — shown when split_brain is active on portable drive */}
-                        {isDriveConfigSafe && driveInfo?.is_portable_fs && (
+                        {!isLoading && isDriveConfigSafe && driveInfo?.is_portable_fs && (
                             <div className="p-3 rounded-xl border border-success bg-success/5 flex items-center gap-3">
                                 <CheckCircle2 className="w-4 h-4 text-success flex-shrink-0" />
                                 <p className="text-sm text-success font-medium">
@@ -109,57 +239,57 @@ export function SetupPage() {
                             </div>
                         )}
 
-                        <div className={`p-5 rounded-2xl border transition-all duration-300 ${isConnected ? 'border-success bg-success/5' : 'border-primary/10 bg-white/50'}`}>
-                            <div className="flex items-center justify-between">
-                                <div>
-                                    <h3 className="font-bold text-lg flex items-center gap-2">
-                                        Google Gemini Account <span className="text-xs ml-2 bg-primary/10 text-primary px-2 py-0.5 rounded-full">Recommended</span>
-                                    </h3>
-                                    <p className="text-sm text-text-secondary mt-1">Free, instant intelligence with no setup required.</p>
-                                </div>
-                                {isConnected ? (
-                                    <div className="flex items-center gap-2 text-success font-medium">
-                                        <CheckCircle2 className="w-5 h-5" /> 
-                                        {authStatus?.method === 'env' ? 'Connected via .env' : 'Connected'}
+                        {(!isLoading || providers) && (
+                            <>
+                                <div className={`p-5 rounded-2xl border transition-all duration-300 ${isConnected ? 'border-success bg-success/5' : 'border-primary/10 bg-white/50'}`}>
+                                    <div className="flex items-center justify-between mb-4">
+                                        <div>
+                                            <h3 className="font-bold text-lg flex items-center gap-2">
+                                                Cloud Intelligence <span className="text-xs ml-2 bg-primary/10 text-primary px-2 py-0.5 rounded-full">Secure Keyring</span>
+                                            </h3>
+                                            <p className="text-sm text-text-secondary mt-1">Provide API keys for your preferred cloud models.</p>
+                                        </div>
                                     </div>
-                                ) : (
-                                    <button onClick={handleConnectGoogle} className="glass-button !bg-primary !text-white hover:!bg-primary-h gap-2 text-sm px-5 py-2">
-                                        <Key className="w-4 h-4" /> Connect Google
-                                    </button>
-                                )}
-                            </div>
-                        </div>
 
-                        <div className="flex items-center gap-4 my-2">
-                            <div className="flex-1 h-px bg-primary/10" />
-                            <span className="text-xs text-text-secondary font-medium uppercase tracking-wider">or auto-detected locals</span>
-                            <div className="flex-1 h-px bg-primary/10" />
-                        </div>
+                                    <div className="flex flex-col gap-3">
+                                        {PROVIDERS.map(p => <ApiKeyInput key={p.id} provider={p} />)}
+                                    </div>
+                                </div>
 
-                        <div className="grid grid-cols-2 gap-4">
-                            <div className={`p-4 rounded-xl border ${localModels?.ollama.detected ? 'border-success bg-success/5' : 'border-primary/10 bg-white/50'}`}>
-                                <h4 className="font-semibold mb-1 flex items-center gap-2">🦙 Ollama</h4>
-                                {localModels?.ollama.detected ? (
-                                    <span className="text-success text-sm flex items-center gap-1"><CheckCircle2 className="w-4 h-4" /> Detected</span>
-                                ) : (
-                                    <span className="text-text-secondary text-sm">Not detected on port 11434</span>
-                                )}
-                            </div>
-                            <div className={`p-4 rounded-xl border ${localModels?.lm_studio.detected ? 'border-success bg-success/5' : 'border-primary/10 bg-white/50'}`}>
-                                <h4 className="font-semibold mb-1 flex items-center gap-2">🖥️ LM Studio</h4>
-                                {localModels?.lm_studio.detected ? (
-                                    <span className="text-success text-sm flex items-center gap-1"><CheckCircle2 className="w-4 h-4" /> Detected</span>
-                                ) : (
-                                    <span className="text-text-secondary text-sm">Not detected on port 1234</span>
-                                )}
-                            </div>
-                        </div>
+                                <div className="flex items-center gap-4 my-2">
+                                    <div className="flex-1 h-px bg-primary/10" />
+                                    <span className="text-xs text-text-secondary font-medium uppercase tracking-wider">or auto-detected locals</span>
+                                    <div className="flex-1 h-px bg-primary/10" />
+                                </div>
+
+                                <div className="grid grid-cols-2 gap-4">
+                                    <div className={`p-4 rounded-xl border ${localModels?.ollama.detected ? 'border-success bg-success/5' : 'border-primary/10 bg-white/50'}`}>
+                                        <h4 className="font-semibold mb-1 flex items-center gap-2">🦙 Ollama</h4>
+                                        {localModels?.ollama.detected ? (
+                                            <span className="text-success text-sm flex items-center gap-1"><CheckCircle2 className="w-4 h-4" /> Detected</span>
+                                        ) : (
+                                            <span className="text-text-secondary text-sm">Not detected on port 11434</span>
+                                        )}
+                                    </div>
+                                    <div className={`p-4 rounded-xl border ${localModels?.lm_studio.detected ? 'border-success bg-success/5' : 'border-primary/10 bg-white/50'}`}>
+                                        <h4 className="font-semibold mb-1 flex items-center gap-2">🖥️ LM Studio</h4>
+                                        {localModels?.lm_studio.detected ? (
+                                            <span className="text-success text-sm flex items-center gap-1"><CheckCircle2 className="w-4 h-4" /> Detected</span>
+                                        ) : (
+                                            <span className="text-text-secondary text-sm">Not detected on port 1234</span>
+                                        )}
+                                    </div>
+                                </div>
+                            </>
+                        )}
 
                         <div className="mt-8 flex justify-end">
                             <button
                                 onClick={() => setStep(2)}
                                 disabled={!canProceed}
-                                className="glass-button !bg-text-primary !text-white hover:opacity-90 gap-2 px-8 py-3 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                                className={`glass-button !bg-text-primary !text-white hover:opacity-90 gap-2 px-8 py-3 disabled:opacity-50 disabled:cursor-not-allowed transition-all ${
+                                    canProceed && isConnected ? 'animate-pulse ring-2 ring-primary ring-offset-2 ring-offset-background' : ''
+                                }`}
                             >
                                 Continue <ArrowRight className="w-5 h-5" />
                             </button>

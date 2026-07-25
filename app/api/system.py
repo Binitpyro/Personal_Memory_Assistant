@@ -21,9 +21,16 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # P0-4: Real vacuum state tracking (replaces hardcoded mock)
-_vacuum_running: bool = False
+_vacuum_lock: asyncio.Lock | None = None
 _vacuum_last_run: str | None = None
 _vacuum_last_error: str | None = None
+
+
+def get_vacuum_lock() -> asyncio.Lock:
+    global _vacuum_lock
+    if _vacuum_lock is None:
+        _vacuum_lock = asyncio.Lock()
+    return _vacuum_lock
 
 
 @router.get("/system/config")
@@ -76,7 +83,8 @@ async def get_drive_info():
         drive = os.path.splitdrive(os.getcwd())[0]
         if not drive:
             drive = "C:"
-        fs_type = get_drive_fs_type(drive)
+        # get_drive_fs_type uses blocking ctypes kernel32 call — offload it.
+        fs_type = await asyncio.to_thread(get_drive_fs_type, drive)
         is_portable_fs = fs_type.lower() in ("exfat", "fat32")
 
     return {
@@ -164,13 +172,53 @@ async def get_system_info():
             is_admin = False
 
     scan_method = "MFT (fast)" if (plat.system() == "Windows" and is_admin) else "scandir"
+    # _get_volumes() uses shutil.disk_usage — blocking I/O, offload it.
+    volumes = await asyncio.to_thread(_get_volumes)
 
     return {
         "os": _get_os_string(),
         "is_admin": is_admin,
         "scan_method": scan_method,
-        "volumes": _get_volumes(),
+        "volumes": volumes,
     }
+
+
+def _sync_enable_split_brain(env_file: str) -> None:
+    lines = []
+    if os.path.exists(env_file):
+        with open(env_file, encoding="utf-8") as f:
+            lines = f.readlines()
+
+    found = False
+    for i, line in enumerate(lines):
+        if line.startswith("PMA_LANCEDB_MODE="):
+            lines[i] = "PMA_LANCEDB_MODE=split_brain\n"
+            found = True
+            break
+
+    if not found:
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        lines.append("PMA_LANCEDB_MODE=split_brain\n")
+
+    with open(env_file, "w", encoding="utf-8") as f:
+        f.writelines(lines)
+
+
+@router.post("/system/enable-split-brain")
+async def enable_split_brain():
+    """Edits the .env file to enable split_brain mode."""
+    env_file = ".env"
+    try:
+        await asyncio.to_thread(_sync_enable_split_brain, env_file)
+        return {"message": "Split-brain mode enabled in .env"}
+    except (OSError, PermissionError) as e:
+        from fastapi import HTTPException
+
+        logger.error("Failed to write to .env file: %s", e)
+        raise HTTPException(  # noqa: B904
+            status_code=403, detail="Failed to write to .env file. Please edit it manually."
+        )
 
 
 @router.post("/system/purge-host-cache")
@@ -197,25 +245,39 @@ async def purge_host_cache():
 
 @router.post("/system/compact-db")
 async def compact_db(db: DatabaseManager = Depends(get_db)):
-    global _vacuum_running, _vacuum_last_run, _vacuum_last_error
-    if _vacuum_running:
+    if get_vacuum_lock().locked():
         return {"message": "Compaction already in progress."}
 
-    async def _do_vacuum():
-        global _vacuum_running, _vacuum_last_run, _vacuum_last_error
-        _vacuum_running = True
-        _vacuum_last_error = None
-        try:
-            await db.vacuum()
-            from datetime import datetime
+    # H-08: Multi-worker safety: Only allow worker 0 to run maintenance tasks.
+    if int(os.environ.get("UVICORN_WORKER_ID", "0")) != 0:
+        return {"message": "Compaction can only be triggered by the primary worker."}
 
-            _vacuum_last_run = datetime.now(UTC).isoformat()
-            logger.info("DB vacuum completed.")
-        except Exception as e:
-            _vacuum_last_error = str(e)
-            logger.error("Vacuum failed: %s", e)
-        finally:
-            _vacuum_running = False
+    async def _do_vacuum():
+        global _vacuum_last_run, _vacuum_last_error
+        async with get_vacuum_lock():
+            _vacuum_last_error = None
+            try:
+                # FTS optimize via aiosqlite (non-blocking in event loop terms)
+                await db.fts_optimize()
+                # VACUUM cannot run inside an active transaction and is CPU-bound.
+                # Open a separate sync connection to avoid blocking the event loop
+                # and to sidestep aiosqlite's implicit transaction wrapping.
+                import sqlite3
+
+                def _vacuum_sync():
+                    con = sqlite3.connect(db.db_path, timeout=60)
+                    con.isolation_level = None  # autocommit mode
+                    con.execute("PRAGMA incremental_vacuum(100)")
+                    con.close()
+
+                await asyncio.to_thread(_vacuum_sync)
+                from datetime import datetime
+
+                _vacuum_last_run = datetime.now(UTC).isoformat()
+                logger.info("DB vacuum completed.")
+            except Exception as e:
+                _vacuum_last_error = str(e)
+                logger.error("Vacuum failed: %s", e)
 
     from app.state import bg_tasks as _bg_tasks
 
@@ -228,7 +290,7 @@ async def compact_db(db: DatabaseManager = Depends(get_db)):
 @router.get("/system/compact-db/status")
 async def compact_status():
     return {
-        "is_running": _vacuum_running,
+        "is_running": get_vacuum_lock().locked(),
         "last_run": _vacuum_last_run,
         "error": _vacuum_last_error,
     }
@@ -278,7 +340,16 @@ async def demo_seed(
     async def _demo_index_then_compact():
         await service.index_folders([demo_folder])
         try:
-            await db.vacuum()
+            await db.fts_optimize()
+            import sqlite3
+
+            def _vacuum_sync():
+                con = sqlite3.connect(db.db_path, timeout=60)
+                con.isolation_level = None
+                con.execute("PRAGMA incremental_vacuum(100)")
+                con.close()
+
+            await asyncio.to_thread(_vacuum_sync)
             logger.info("Auto-compact completed after demo indexing.")
         except Exception as e:
             logger.warning("Auto-compact after demo indexing failed: %s", e)
@@ -290,42 +361,5 @@ async def demo_seed(
 @router.get("/pick/folder")
 async def pick_folder():
     # P2-2: This endpoint is deprecated in Tauri context.
-    # Folder picking should be done via the native Tauri dialog plugin in the frontend.
-    # Keeping for browser-mode dev compatibility only.
-    def _dialog():
-        import tkinter as tk
-        from tkinter import filedialog
-
-        root = tk.Tk()
-        root.withdraw()
-        root.wm_attributes("-topmost", 1)
-        return filedialog.askdirectory(parent=root, title="Select Folder") or ""
-
-    try:
-        path = await asyncio.get_running_loop().run_in_executor(None, _dialog)
-    except Exception as e:
-        logger.warning("tkinter folder picker failed (expected in Tauri mode): %s", e)
-        return {"path": "", "error": "Use the native Tauri dialog instead."}
-    return {"path": path}
-
-
-@router.post("/debug/query-plan")
-async def debug_query_plan(payload: dict):
-    """Dev endpoint: inspect which planner mode a query would use.
-    Only active when dev_mode=True in settings.
-    """
-    if not settings.dev_mode:
-        from fastapi import HTTPException
-
-        raise HTTPException(status_code=404, detail="Not found")
-    from app.search.planner import QueryPlanner
-
-    query = payload.get("query", "")
-    planner = QueryPlanner()
-    plan = planner.plan(query)
-    return {
-        "mode": plan.mode,
-        "intents": plan.intents,
-        "keywords": plan.keywords,
-        "original_query": plan.original_query,
-    }
+    # Folder picking must be done via the native Tauri dialog plugin in the frontend.
+    return {"path": "", "error": "Use the native Tauri dialog instead."}

@@ -1,2 +1,5 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Force LF for Rust files to prevent Sonar scanner parsing errors on Windows
+*.rs text eol=lf

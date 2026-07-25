@@ -1,4 +1,5 @@
 import difflib
+import functools
 import re
 from typing import Any
 
@@ -29,12 +30,21 @@ def _get_encoding() -> Any:
     return _ENCODING
 
 
+@functools.lru_cache(maxsize=1024)
+def _get_tokens(text: str) -> list[int]:
+    """Tokenize text using tiktoken with caching (P-03)."""
+    enc = _get_encoding()
+    if not enc:
+        return []
+    return enc.encode(text)  # type: ignore
+
+
 def _token_count(text: str) -> int:
     enc = _get_encoding()
     if not enc:
         # Conservative fallback when tiktoken is unavailable.
         return max(1, len(text) // 4)
-    return len(enc.encode(text))
+    return len(_get_tokens(text))
 
 
 def _truncate_to_tokens(text: str, max_tokens: int) -> str:
@@ -78,19 +88,53 @@ def _format_file_stats(stats: dict[str, Any]) -> str:
 def _semantic_deduplicate(
     results: list[dict[str, Any]], similarity_threshold: float = 0.85
 ) -> list[dict[str, Any]]:
-    """Drop snippets that are semantically (textually) >85% similar to already selected chunks."""
+    """Drop snippets that are semantically >85% similar using O(n) MinHash (P-02)."""
+    try:
+        from datasketch import MinHash, MinHashLSH
+    except ImportError:
+        # Fallback to current O(n^2) if datasketch is not installed
+        return _semantic_deduplicate_fallback(results, similarity_threshold)
+
+    lsh = MinHashLSH(threshold=similarity_threshold, num_perm=128)
     deduped: list[dict[str, Any]] = []
-    for res in results:
-        # P10-1: Added safety cap to prevent O(N²) CPU spikes on huge result sets.
-        if len(deduped) > 100:
-            deduped.append(res)
-            continue
+
+    for i, res in enumerate(results):
+        if len(deduped) >= 100:
+            break
 
         text = res.get("text", "")
         if len(text) < 50:
             deduped.append(res)
             continue
 
+        # Create MinHash for current text
+        m = MinHash(num_perm=128)
+        # Use 3-shingles for comparison
+        shingles = {text[j : j + 3] for j in range(len(text) - 2)}
+        for s in shingles:
+            m.update(s.encode("utf-8"))
+
+        # Query LSH for existing duplicates
+        matches = lsh.query(m)
+        if not matches:
+            lsh.insert(f"res_{i}", m)
+            deduped.append(res)
+
+    return deduped
+
+
+def _semantic_deduplicate_fallback(
+    results: list[dict[str, Any]], similarity_threshold: float = 0.85
+) -> list[dict[str, Any]]:
+    """O(n^2) fallback for deduplication."""
+    deduped: list[dict[str, Any]] = []
+    for res in results:
+        if len(deduped) >= 100:
+            break
+        text = res.get("text", "")
+        if len(text) < 50:
+            deduped.append(res)
+            continue
         is_duplicate = False
         for saved in deduped:
             saved_text = saved.get("text", "")
@@ -100,26 +144,9 @@ def _semantic_deduplicate(
                 if sim > similarity_threshold:
                     is_duplicate = True
                     break
-
         if not is_duplicate:
             deduped.append(res)
     return deduped
-
-
-def append_unreal_fact_lines(lines: list[str], unreal_facts: list[dict[str, Any]]) -> None:
-    lines.append("Unreal project summary:")
-    for uf in unreal_facts:
-        lines.append(
-            f"  - {uf['project_name']} (UE {uf['engine_version']}): "
-            f"{uf['total_assets']} assets, {uf['map_count']} maps, "
-            f"{uf['character_blueprints']} char BPs, {uf['material_count']} materials."
-        )
-
-
-def append_unreal_profile_hint(lines: list[str], unreal_profiles: list[dict[str, Any]]) -> None:
-    lines.append("Unreal Engine projects detected:")
-    for up in unreal_profiles:
-        lines.append(f"  - {up['folder_tag']} ({up['file_count']} files)")
 
 
 def append_project_profile_lines(lines: list[str], folder_profiles: list[dict[str, Any]]) -> None:
@@ -185,7 +212,8 @@ def _format_snippets(
         if snippet_budget <= 0:
             break
 
-        label = f"Snippet {snippet_id} [{path}]:\n"
+        chunk_id = res.get("chunk_id", snippet_id)
+        label = f"Snippet {snippet_id} [ID: {chunk_id}] [{path}]:\n"
         label_tokens = _token_count(label)
         if label_tokens >= snippet_budget:
             continue
@@ -244,13 +272,46 @@ def _add_file_stats(
     return 0
 
 
+def _add_graph_paths(context_parts: list[str], text: str, max_tokens: int, used_tokens: int) -> int:
+    if text and used_tokens < max_tokens:
+        header = "### GRAPH RELATIONSHIPS (Dependencies and Calls)\n"
+        h_tokens = _token_count(header)
+        body = _truncate_to_tokens(text, max_tokens - used_tokens - h_tokens)
+        if body:
+            part = f"{header}<graph_relationships>\n{body}\n</graph_relationships>\n\n"
+            context_parts.append(part)
+            return _token_count(part)
+    return 0
+
+
+def compute_context_budget(model_class: str, history_turns: int) -> int:
+    """Adaptive context budget based on model's effective capacity."""
+    EFFECTIVE_CEILINGS = {  # noqa: N806
+        "cloud": 100_000,
+        "7b_local": 10_000,
+        "3b_local": 4_000,
+    }
+    ceiling = EFFECTIVE_CEILINGS.get(model_class, 8000)
+
+    # Fixed costs
+    system_prompt = 400
+    output_reserve = min(1000, ceiling // 4)
+    query_overhead = 80
+    history_cost = history_turns * 400
+
+    context_budget = ceiling - system_prompt - output_reserve - query_overhead - history_cost
+    return max(1000, context_budget)
+
+
 def build_context(
     retrieved_results: list[dict[str, Any]],
     max_tokens: int = 0,
     file_stats: dict[str, Any] | None = None,
     folder_profiles_text: str = "",
     metadata_insights: str | None = None,
-) -> str:
+    graph_paths_text: str = "",
+    model_class: str = "cloud",
+) -> tuple[str, int]:
     """Formats retrieved snippets into a single context string for the LLM.
 
     Optimisations:
@@ -264,10 +325,23 @@ def build_context(
         and not folder_profiles_text
         and not metadata_insights
     ):
-        return "No relevant context found."
+        msg = "No relevant context found."
+        return msg, _token_count(msg)
 
     if max_tokens <= 0:
         max_tokens = settings.context_max_tokens
+
+    # Adaptive changes for 3b_local
+    if model_class == "3b_local":
+        folder_profiles_text = ""
+        graph_paths_text = ""
+        max_per_file = 1
+        score_multiplier = 0.4
+        max_chunks = 3
+    else:
+        max_per_file = 2
+        score_multiplier = 0.2
+        max_chunks = 15
 
     context_parts: list[str] = []
     used_tokens = 0
@@ -281,7 +355,10 @@ def build_context(
         context_parts, folder_profiles_text, max_tokens, used_tokens
     )
 
-    # 3. Implementation Details (Chunks)
+    # 3. Graph Relationships
+    used_tokens += _add_graph_paths(context_parts, graph_paths_text, max_tokens, used_tokens)
+
+    # 4. Implementation Details (Chunks)
     if retrieved_results and used_tokens < max_tokens:
         header = "### IMPLEMENTATION DETAILS (Specific Code/Text Chunks)\n"
         h_tokens = _token_count(header)
@@ -289,18 +366,22 @@ def build_context(
             context_parts.append(header)
             used_tokens += h_tokens
 
-            deduplicated = _deduplicate_by_file(retrieved_results)
+            deduplicated = _deduplicate_by_file(retrieved_results, max_per_file=max_per_file)
 
             if deduplicated:
                 top_score = deduplicated[0].get("score", 1.0)
                 if top_score > 0:
-                    score_threshold = top_score * 0.2
+                    score_threshold = top_score * score_multiplier
                     deduplicated = [
                         r for r in deduplicated if r.get("score", 1.0) >= score_threshold
                     ]
+
+            # Keep only top max_chunks
+            deduplicated = deduplicated[:max_chunks]
 
             snippet_parts = _format_snippets(deduplicated, max(0, max_tokens - used_tokens))
             context_parts.extend(snippet_parts)
 
     final_context = _compress_text("\n".join(context_parts))
-    return _truncate_to_tokens(final_context, max_tokens)
+    truncated = _truncate_to_tokens(final_context, max_tokens)
+    return truncated, _token_count(truncated)

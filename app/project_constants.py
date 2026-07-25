@@ -4,6 +4,8 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+PYPROJECT_FILE = "pyproject.toml"
+
 
 def _get_app_version() -> str:
     try:
@@ -55,11 +57,31 @@ LARGEST_RE = re.compile(
 FTS5_OPERATOR_RE = re.compile(r'["*^]|\bAND\b|\bOR\b|\bNOT\b|\bNEAR\b', re.IGNORECASE)
 
 
+_GRAPH_PHRASES = (
+    "what calls",
+    "who calls",
+    "where is",
+    "depends on",
+    "dependencies of",
+    "what does",
+    "how is",
+    "relates to",
+    "connection between",
+    "impact of",
+)
+
+_GRAPH_RE = re.compile(
+    r"\b(?:what calls|who calls|where is .* called|depends on|dependencies of|"
+    r"what does .* use|how is .* used|relates to|connection between|impact of)\b",
+    re.IGNORECASE,
+)
+
+
 def is_metadata_intent(query: str) -> bool:
     return bool(
         re.search(
-            r"\b(project summary|summary of project|unreal project overview|"
-            r"unreal summary|show project summary|project overview)\b",
+            r"\b(project summary|summary of project|"
+            r"show project summary|project overview)\b",
             query.lower(),
         )
     )
@@ -72,23 +94,19 @@ def determine_query_intent(query: str) -> dict[str, bool]:
             LATEST_RE.search(query) or LARGEST_RE.search(query) or "how many files" in q
         ),
         "project": "project" in q or "overview" in q or "summary" in q,
-        "unreal": "unreal" in q or "ue5" in q or "uproject" in q,
         "latest": bool(LATEST_RE.search(query)),
         "largest": bool(LARGEST_RE.search(query)),
         "metadata_intent": is_metadata_intent(query),
+        "graph": bool(_GRAPH_RE.search(query)),
     }
 
 
 # Project Signatures for Indexing
-UNREAL_PROJECT_EXT = ".uproject"
 UNITY_SCENE_EXT = ".unity"
-PYPROJECT_FILE = "pyproject.toml"
 NODE_PACKAGE_FILE = "package.json"
 PYTHON_PROJECT_LABEL = "Python project"
 
 PROJECT_SIGNATURES = [
-    ("Unreal Engine", "Unreal Engine game/application project", [("ext", UNREAL_PROJECT_EXT)]),
-    ("Unreal Engine (assets only)", "Unreal Engine asset folder (Content)", [("ext", ".uasset")]),
     ("Unity", "Unity game/application project", [("dir", "Assets"), ("ext", UNITY_SCENE_EXT)]),
     ("Unity", "Unity game/application project", [("ext", UNITY_SCENE_EXT)]),
     ("Godot", "Godot engine project", [("file", "project.godot")]),
@@ -134,8 +152,6 @@ TEXT_EXTENSIONS = frozenset(
         "",
     }
 )
-UNREAL_BINARY_EXTENSIONS = frozenset({".uasset", ".umap"})
-UNREAL_PROJECT_EXTENSIONS = frozenset({".uproject", ".uplugin"})
 
 KEY_NAMES = {
     "readme.md",
@@ -155,4 +171,4 @@ KEY_NAMES = {
     "dockerfile",
     "docker-compose.yml",
 }
-KEY_EXTS = {UNREAL_PROJECT_EXT, ".sln", ".csproj", UNITY_SCENE_EXT}
+KEY_EXTS = {".sln", ".csproj", UNITY_SCENE_EXT}

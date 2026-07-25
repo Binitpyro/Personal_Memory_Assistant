@@ -2,10 +2,9 @@ import ctypes
 import ctypes.wintypes as wintypes
 import logging
 import platform as _platform
+import sqlite3
 import struct
 import time
-from collections import defaultdict
-from dataclasses import dataclass
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -29,33 +28,30 @@ else:
     kernel32 = None  # type: ignore[assignment]
 
 
-@dataclass
-class MFTEntry:
-    """A single Master File Table entry (file or directory)."""
-
-    file_ref: int
-    parent_ref: int
-    name: str
-    is_dir: bool
-
-
 class NTFSScanner:
     """
     Reads the NTFS MFT to enumerate files without directory traversal.
-
-    Usage::
-
-        scanner = NTFSScanner()
-        paths = scanner.scan_folder(Path("D:/Projects"), {".txt", ".md"})
-        if paths is None:
+    Uses a temporary SQLite database to avoid memory bloat.
     """
 
     def __init__(self) -> None:
         if kernel32 is None:
             raise RuntimeError("NTFSScanner requires Windows (kernel32 not available)")
         self._k32 = kernel32
-        self.entries: dict[int, MFTEntry] = {}
-        self.children_map: dict[int, list[MFTEntry]] = defaultdict(list)
+        # Use a temporary on-disk database to stay within the 60MB RAM ceiling
+        self.db = sqlite3.connect("")
+        self.db.execute("PRAGMA synchronous = OFF")
+        self.db.execute("PRAGMA journal_mode = MEMORY")
+        self.db.execute(
+            """
+            CREATE TABLE mft (
+                file_ref INTEGER PRIMARY KEY,
+                parent_ref INTEGER,
+                name TEXT,
+                is_dir INTEGER
+            )
+            """
+        )
         self.entry_count: int = 0
 
     def scan_folder(
@@ -65,9 +61,6 @@ class NTFSScanner:
     ) -> list[Path] | None:
         """
         Enumerate files under *folder* whose suffix is in *extensions*.
-
-        Returns ``None`` when MFT access is unavailable (e.g. not admin,
-        not NTFS).  The caller should fall back to ``os.scandir``.
         """
         volume = folder.drive  # e.g. "C:"
         if not volume:
@@ -89,7 +82,11 @@ class NTFSScanner:
             t0 = time.perf_counter()
             self._enumerate_mft(handle)
             elapsed = time.perf_counter() - t0
-            self.entry_count = len(self.entries)
+
+            # Create indices after bulk insert for faster querying
+            self.db.execute("CREATE INDEX IF NOT EXISTS idx_parent ON mft(parent_ref)")
+
+            self.entry_count = self.db.execute("SELECT COUNT(*) FROM mft").fetchone()[0]
             logger.info(
                 "MFT enumeration: %s entries in %.2fs",
                 f"{self.entry_count:,}",
@@ -97,8 +94,6 @@ class NTFSScanner:
             )
         finally:
             self._k32.CloseHandle(handle)
-
-        self._build_children_map()
 
         target_ref = self._find_folder_ref(folder)
         if target_ref is None:
@@ -114,7 +109,6 @@ class NTFSScanner:
         return file_paths
 
     def _open_volume(self, volume: str) -> int:
-        """Open a raw volume handle (requires admin)."""
         return int(
             self._k32.CreateFileW(
                 f"\\\\.\\{volume}",
@@ -128,25 +122,13 @@ class NTFSScanner:
         )
 
     def _enumerate_mft(self, handle: int) -> None:
-        """
-        Read every MFT entry via ``FSCTL_ENUM_USN_DATA``.
-
-        The input buffer is an ``MFT_ENUM_DATA_V0`` struct::
-
-            StartFileReferenceNumber  DWORDLONG   (8 bytes)
-            LowUsn                    LONGLONG    (8 bytes)
-            HighUsn                   LONGLONG    (8 bytes)
-
-        The output buffer starts with the *next* file-reference number
-        (8 bytes), followed by a stream of ``USN_RECORD_V2`` entries.
-        """
         med = struct.pack("<Qqq", 0, 0, 0x7FFFFFFFFFFFFFFF)
 
         buf_size = _MFT_BUF_SIZE
         buf = ctypes.create_string_buffer(buf_size)
         bytes_returned = wintypes.DWORD()
 
-        self.entries.clear()
+        self.db.execute("DELETE FROM mft")
 
         while True:
             ok = self._k32.DeviceIoControl(
@@ -161,8 +143,10 @@ class NTFSScanner:
             )
             if not ok:
                 err = ctypes.get_last_error()  # type: ignore[attr-defined]
-                if err == _ERROR_HANDLE_EOF or err != 0:
-                    logger.debug("DeviceIoControl ended (Win32 error %d)", err)
+                if err == _ERROR_HANDLE_EOF:
+                    logger.debug("DeviceIoControl ended normally (EOF)")
+                elif err != 0:
+                    logger.warning("DeviceIoControl ended with Win32 error %d", err)
                 break
 
             returned = bytes_returned.value
@@ -174,8 +158,8 @@ class NTFSScanner:
             med = struct.pack("<Qqq", next_ref, 0, 0x7FFFFFFFFFFFFFFF)
 
     def _parse_usn_records(self, raw: bytes, returned: int) -> None:
-        """Parse USN_RECORD_V2 entries from a DeviceIoControl output buffer."""
         offset = 8
+        records = []
         while offset + 60 <= returned:
             rec_len = struct.unpack_from("<I", raw, offset)[0]
             if rec_len == 0 or offset + rec_len > returned:
@@ -183,13 +167,18 @@ class NTFSScanner:
 
             entry = self._parse_single_record(raw, offset, returned)
             if entry is not None:
-                self.entries[entry.file_ref] = entry
+                records.append(entry)
 
             offset += rec_len
 
+        if records:
+            self.db.executemany("INSERT OR IGNORE INTO mft VALUES (?, ?, ?, ?)", records)
+            self.db.commit()
+
     @staticmethod
-    def _parse_single_record(raw: bytes, offset: int, returned: int) -> MFTEntry | None:
-        """Decode a single USN_RECORD_V2 at *offset*. Returns None if unreadable."""
+    def _parse_single_record(
+        raw: bytes, offset: int, returned: int
+    ) -> tuple[int, int, str, int] | None:
         file_ref = struct.unpack_from("<Q", raw, offset + 8)[0] & 0x0000FFFFFFFFFFFF
         parent_ref = struct.unpack_from("<Q", raw, offset + 16)[0] & 0x0000FFFFFFFFFFFF
         attrs = struct.unpack_from("<I", raw, offset + 52)[0]
@@ -202,37 +191,22 @@ class NTFSScanner:
             return None
 
         name = raw[name_start:name_end].decode("utf-16-le", errors="replace")
-        is_dir = bool(attrs & FILE_ATTRIBUTE_DIRECTORY)
-        return MFTEntry(
-            file_ref=file_ref,
-            parent_ref=parent_ref,
-            name=name,
-            is_dir=is_dir,
-        )
-
-    def _build_children_map(self) -> None:
-        """Index every entry by its parent reference."""
-        self.children_map.clear()
-        for entry in self.entries.values():
-            self.children_map[entry.parent_ref].append(entry)
+        is_dir = 1 if (attrs & FILE_ATTRIBUTE_DIRECTORY) else 0
+        return (file_ref, parent_ref, name, is_dir)
 
     def _find_folder_ref(self, folder: Path) -> int | None:
-        """
-        Walk from the NTFS root (ref 5) down the path components
-        to find the target folder's MFT reference number.
-        """
         parts = folder.parts[1:]
         current_ref = NTFS_ROOT_REF
 
         for part in parts:
             part_lower = part.lower()
-            found = False
-            for child in self.children_map.get(current_ref, []):
-                if child.is_dir and child.name.lower() == part_lower:
-                    current_ref = child.file_ref
-                    found = True
-                    break
-            if not found:
+            row = self.db.execute(
+                "SELECT file_ref FROM mft WHERE parent_ref = ? AND is_dir = 1 AND LOWER(name) = ?",
+                (current_ref, part_lower),
+            ).fetchone()
+            if row:
+                current_ref = row[0]
+            else:
                 return None
 
         return current_ref
@@ -243,20 +217,17 @@ class NTFSScanner:
         extensions: set[str],
         base_path: Path,
     ) -> list[Path]:
-        """
-        BFS from *folder_ref*, building full paths top-down.
-
-        Only files whose extension is in *extensions* are returned.
-        """
         results: list[Path] = []
         stack = [(folder_ref, base_path)]
 
         while stack:
             ref, current_path = stack.pop()
-            for child in self.children_map.get(ref, []):
-                child_path = current_path / child.name
-                if child.is_dir:
-                    stack.append((child.file_ref, child_path))
+            for child_ref, name, is_dir in self.db.execute(
+                "SELECT file_ref, name, is_dir FROM mft WHERE parent_ref = ?", (ref,)
+            ):
+                child_path = current_path / name
+                if is_dir:
+                    stack.append((child_ref, child_path))
                 else:
                     if not extensions or child_path.suffix.lower() in extensions:
                         results.append(child_path)

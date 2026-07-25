@@ -9,6 +9,7 @@ import {
   pickFolder,
   startIndexing,
   clearIndex,
+  cancelIndexing,
   seedDemo,
   subscribeProgress,
   clearBackendCaches,
@@ -18,6 +19,7 @@ import {
 export function LibraryPage() {
   const [folderPath, setFolderPath] = useState('')
   const [indexing, setIndexing] = useState(false)
+  const [cancelling, setCancelling] = useState(false)
   const [liveProgress, setLiveProgress] = useState<(IndexStatus & { current_file: string }) | null>(null)
   const [message, setMessage] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
 
@@ -49,8 +51,9 @@ export function LibraryPage() {
     if (!isRunning) return
     const unsub = subscribeProgress((data) => {
       setLiveProgress(data)
-      if (data.status !== 'running') {
+      if (data.status !== 'running' && data.status !== 'cancelling') {
         setIndexing(false)
+        setCancelling(false)
         setLiveProgress(null)
         invalidateCache()
         refetchHealth()
@@ -80,6 +83,18 @@ export function LibraryPage() {
       setMessage({ type: 'err', text: e instanceof Error ? e.message : 'Indexing failed' })
     }
   }, [folderPath])
+
+  const handleCancel = useCallback(async () => {
+    if (!isRunning || cancelling) return
+    try {
+      setCancelling(true)
+      await cancelIndexing()
+      setMessage({ type: 'ok', text: 'Cancelling... Please wait for current files to finish.' })
+    } catch (e) {
+      setMessage({ type: 'err', text: e instanceof Error ? e.message : 'Cancel failed' })
+      setCancelling(false)
+    }
+  }, [isRunning, cancelling])
 
   const handleClear = useCallback(async () => {
     if (isRunning) return
@@ -226,11 +241,21 @@ export function LibraryPage() {
           <button
             onClick={handleIndex}
             disabled={!folderPath.trim() || isRunning}
-            className="btn bg-primary hover:bg-primary-dark text-white rounded-xl px-6 gap-2 disabled:opacity-40 shadow-lg"
+            className={`flex items-center justify-center gap-2 bg-primary hover:brightness-110 text-white font-bold rounded-xl px-6 py-3 shadow-lg transition-all active:scale-95 disabled:opacity-40 ${isRunning ? 'hidden' : ''}`}
           >
             {isRunning ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
             Index
           </button>
+          {isRunning && (
+            <button
+              onClick={handleCancel}
+              disabled={cancelling}
+              className="flex items-center justify-center gap-2 bg-error hover:brightness-110 text-white font-bold rounded-xl px-6 py-3 shadow-lg transition-all active:scale-95 disabled:opacity-40"
+            >
+              {cancelling ? <Loader2 className="w-4 h-4 animate-spin" /> : <AlertCircle className="w-4 h-4" />}
+              {cancelling ? 'Cancelling...' : 'Cancel'}
+            </button>
+          )}
         </div>
       </div>
 

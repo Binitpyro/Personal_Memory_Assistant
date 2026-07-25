@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "personal-memory-assistant",
-  "version": "0.0.70",
+  "version": "0.0.71",
   "identifier": "com.pma.app",
   "build": {
     "frontendDist": "../../static/react",
@@ -37,8 +37,6 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": {
-      "../../dist/PMA-sidecar.zip": "python/PMA-sidecar.zip"
-    }
+    "resources": {}
   }
 }

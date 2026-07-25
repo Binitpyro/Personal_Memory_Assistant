@@ -12,6 +12,7 @@ class PlanMode(Enum):
     FAST_METADATA = "FAST_METADATA"
     FAST_PROJECT = "FAST_PROJECT"
     FULL_RAG = "FULL_RAG"
+    GRAPH_SEARCH = "GRAPH_SEARCH"
 
 
 @dataclass
@@ -20,6 +21,11 @@ class QueryPlan:
     original_query: str
     intents: dict[str, bool]
     keywords: list[str] = field(default_factory=list)
+
+
+@dataclass
+class GraphSearchPlan(QueryPlan):
+    pass
 
 
 class QueryPlanner:
@@ -160,7 +166,7 @@ class QueryPlanner:
             )
 
         # 2. Specific project context fast path
-        if intents["metadata_intent"] and (intents["unreal"] or intents["project"]):
+        if intents["metadata_intent"] and intents["project"]:
             return QueryPlan(
                 mode=PlanMode.FAST_PROJECT, original_query=query, intents=intents, keywords=keywords
             )
@@ -169,7 +175,13 @@ class QueryPlanner:
         is_arch = any(p in query_lower for p in self._ARCH_PHRASES)
         intents["architectural"] = is_arch
 
-        # 4. Default to full generative RAG pipeline
+        # 4. Graph Intent
+        if intents.get("graph", False):
+            return GraphSearchPlan(
+                mode=PlanMode.GRAPH_SEARCH, original_query=query, intents=intents, keywords=keywords
+            )
+
+        # 5. Default to full generative RAG pipeline
         return QueryPlan(
             mode=PlanMode.FULL_RAG, original_query=query, intents=intents, keywords=keywords
         )

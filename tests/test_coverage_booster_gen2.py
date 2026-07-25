@@ -1,6 +1,6 @@
 import struct
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -257,21 +257,14 @@ def test_ntfs_scanner_mocked_execution(monkeypatch, tmp_path):
     # mock get_last_error to return ERROR_HANDLE_EOF (38)
     monkeypatch.setattr("ctypes.get_last_error", lambda: 38)
 
-    def mock_drive(path):
-        # ``Path.parts`` and ``str(path)`` both read ``Path.drive``; use the
-        # internal parsed/raw components so this replacement remains non-recursive.
-        raw_parts = getattr(path, "_parts", None) or getattr(path, "_raw_paths", ())
-        return "C:" if raw_parts and raw_parts[0].replace("/", "\\").startswith("C:") else ""
-
-    monkeypatch.setattr(Path, "drive", property(mock_drive))
-
     scanner = NTFSScanner()
     # 1. Scan folder where drive is empty
-    assert scanner.scan_folder(Path("relative/path"), {".txt"}) is None
+    assert scanner.scan_folder(PureWindowsPath("relative/path"), {".txt"}) is None
 
     # 2. Scan volume successfully
     mock_k32.CreateFileW.return_value = 1234
-    res = scanner.scan_folder(Path("C:/Subfolder"), {".txt"})
+    windows_folder = PureWindowsPath("C:/Subfolder")
+    res = scanner.scan_folder(windows_folder, {".txt"})
     # Subfolder/file.txt
     assert len(res) == 1
     assert res[0].name == "file.txt"
@@ -279,7 +272,7 @@ def test_ntfs_scanner_mocked_execution(monkeypatch, tmp_path):
     # 3. CreateFileW fails (INVALID_HANDLE_VALUE = -1)
     mock_k32.CreateFileW.return_value = -1
     monkeypatch.setattr("ctypes.get_last_error", lambda: 5)  # Access Denied
-    assert scanner.scan_folder(Path("C:/Subfolder"), {".txt"}) is None
+    assert scanner.scan_folder(windows_folder, {".txt"}) is None
 
 
 # ── 7. Cross-platform Scanner Helper ──────────────────────────────────────────

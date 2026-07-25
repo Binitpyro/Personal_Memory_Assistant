@@ -9,7 +9,7 @@ vi.mock('../../useApi', () => ({
     if (opts?.cacheKey === 'health') {
       return {
         data: {
-          version: '0.0.70',
+          version: '0.0.71',
           status: 'ok',
           db: 'connected',
           split_brain_sync_status: 'idle',

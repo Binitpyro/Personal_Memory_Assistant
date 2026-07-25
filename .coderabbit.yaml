@@ -1,13 +1,2 @@
-# yaml-language-server: $schema=https://coderabbit.ai/coderabbit-schema.json
 language: "en-US"
-reviews:
-  profile: "chill"
-  request_changes_workflow: false
-  high_level_summary: true
-  path_filters:
-    # ── INCLUSION: target folder/files to review ──
-    - "app/**/*.py"
-    # ── EXCLUSION: skip noise within included paths ──
-    - "!**/__pycache__/**"
-    - "!**/*.pyc"
-    - "!**/migrations/**"
+reviews: {profile: "chill", request_changes_workflow: false, high_level_summary: true, path_filters: ["app/**/*.py", "!**/__pycache__/**", "!**/*.pyc", "!**/migrations/**"]}

@@ -256,6 +256,7 @@ def test_ntfs_scanner_mocked_execution(monkeypatch, tmp_path):
     monkeypatch.setattr("app.scanner.ntfs_mft.kernel32", mock_k32)
     # mock get_last_error to return ERROR_HANDLE_EOF (38)
     monkeypatch.setattr("ctypes.get_last_error", lambda: 38)
+
     def mock_drive(path):
         # ``Path.parts`` and ``str(path)`` both read ``Path.drive``; use the
         # internal parsed/raw components so this replacement remains non-recursive.

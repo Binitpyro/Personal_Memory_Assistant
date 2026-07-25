@@ -3,7 +3,7 @@
 
 [![Version](https://img.shields.io/badge/Version-0.0.71-blue?style=flat-square)](https://github.com/Binitpyro/Personal_Memory_Assistant)
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
-[![Rust](https://img.shields.io/badge/Rust-1.75+-brown?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/Rust-1.77+-brown?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![React](https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react&logoColor=black)](https://react.dev/)
 [![Tauri](https://img.shields.io/badge/Tauri-v2-FFC107?style=flat-square&logo=tauri&logoColor=black)](https://tauri.app/)
 
@@ -29,10 +29,10 @@ Personal Memory Assistant (PMA) is a high-performance, local-first search and re
 - **Backend**: FastAPI (Python 3.12), Pydantic v2
 - **Storage Layer**:
     - **Metadata**: SQLite (FTS5 for keyword search)
-    - **Vector Store**: LanceDB (High-performance O(1) semantic retrieval)
+    - **Vector Store**: LanceDB (High-performance O(1) semantic retrieval; separate tables for chunk embeddings and document-summary embeddings)
 - **Extraction**: Rust-powered parallel file walker & stream extractor
-- **Models**: ONNX Runtime and tokenizers for local embedding generation
-- **AI Providers**: Gemini, OpenAI, Anthropic, Groq, OpenRouter, Ollama, LM Studio, and OpenAI-compatible endpoints
+- **Models**: ONNX Runtime and tokenizers for local embedding generation and cross-encoder reranking
+- **AI Providers**: Gemini, OpenAI, Anthropic, Groq, OpenRouter, NVIDIA NIM, Ollama, LM Studio, and generic OpenAI-compatible endpoints
 - **Spatial Engine**: WebGPU-powered GPGPU compute for real-time indexing & Volumetric Visualization
 
 ---
@@ -150,38 +150,52 @@ EXE workflow is temporarily on hold and should not be used as a current release 
 ## 7. Architecture
 
 ### 7.1 Ingestion Pipeline
-The system reads files in streams to ensure scalability without exceeding memory limits.
+The system reads files in streams to ensure scalability without exceeding memory limits. Each file is chunked for keyword/semantic indexing and independently distilled into a structural summary that gets its own embedding, giving retrieval a document-level signal alongside chunk-level ones.
 
 ```mermaid
 graph LR
     subgraph "Scanning"
-        A[File System] --> B[File Scanner]
+        A[File System] --> B[Rust File Scanner]
     end
-    
+
     subgraph "Processing"
         B --> C[Text Extractor]
         C --> D[SQLite Database]
         C --> E[Chunker]
+        C --> S[Deep Summarizer]
     end
-    
+
     subgraph "Indexing"
         E --> F[AI Embedder]
-        F --> G[LanceDB Vector Store]
+        F --> G[LanceDB Chunk Vectors]
         E --> H[FTS5 Keyword Index]
+        S --> G2[LanceDB Summary Vectors]
     end
 ```
 
 ### 7.2 Unified Search Flow
-The system uses **Reciprocal Rank Fusion (RRF)** to combine traditional keyword matching with deep semantic search.
+A query planner first classifies intent into one of four modes: fast metadata/project lookups bypass retrieval entirely, graph-intent queries traverse the knowledge graph, and everything else runs the full RAG pipeline. FULL_RAG fuses three signals — keyword matching (SQLite FTS5), chunk-level semantic search, and document-summary semantic search — via **Reciprocal Rank Fusion (RRF)**, then applies a cross-encoder reranker for maximum precision, automatically bypassed when the top result's confidence decisively clears the runner-up.
 
 ```mermaid
 graph LR
-    A[Query] --> B[Unified Search]
+    A[Query] --> P[Query Planner]
+
+    P -->|FAST_METADATA| M[SQLite Stats]
+    P -->|FAST_PROJECT| J[Project Metadata Lookup]
+    P -->|GRAPH_SEARCH| K[Knowledge Graph Traversal]
+
+    P -->|FULL_RAG| B[Hybrid Retrieval]
     B -->|Keywords| C[SQLite FTS5]
-    B -->|Meaning| D[LanceDB Vector]
+    B -->|Chunk Meaning| D[LanceDB Semantic]
+    B -->|Doc Meaning| N[LanceDB Summaries]
     C --> E[RRF Ranker]
     D --> E
-    E --> F[Contextual Results]
+    N --> E
+    E --> R{Confidence Gap >= 2x?}
+    R -->|Yes: bypass| F[Context Builder]
+    R -->|No: rerank| Q[Cross-Encoder Reranker]
+    Q --> F
+    F --> L[LLM Answer]
 ```
 
 ---

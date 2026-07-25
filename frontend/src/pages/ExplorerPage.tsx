@@ -47,9 +47,12 @@ function FolderNode({ node, depth, onSelect, selectedPath, onDeleteFolder }: Fol
 
   return (
     <div className="select-none">
-      <button
+      <div
+        role="button"
+        tabIndex={0}
         className={`group flex items-center gap-2 w-full px-2 py-1 rounded-lg transition-colors cursor-pointer text-left ${open ? 'bg-black/5' : 'hover:bg-black/5'}`}
         onClick={() => setOpen(!open)}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(!open); } }}
       >
         <div className="w-4 h-4 flex items-center justify-center text-text-secondary">
           {(node.children.size > 0 || node.files.length > 0) && (
@@ -66,7 +69,7 @@ function FolderNode({ node, depth, onSelect, selectedPath, onDeleteFolder }: Fol
         >
           <Trash2 className="w-3.5 h-3.5" />
         </button>
-      </button>
+      </div>
 
       {
         open && (

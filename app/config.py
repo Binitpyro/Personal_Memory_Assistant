@@ -22,6 +22,8 @@ class Settings(BaseSettings):
 
     lancedb_mode: str = "portable"  # "portable" or "split_brain"
     lancedb_persist_dir: str = "data/lancedb"
+    # Split-brain always keeps this recovery copy; portable mode may opt in.
+    sqlite_embedding_backup: bool = False
 
     @model_validator(mode="after")
     def compute_paths(self):
@@ -38,6 +40,8 @@ class Settings(BaseSettings):
             else:
                 persist_base = os.path.expanduser("~/.cache/personal_memory_assistant")
 
+            os.makedirs(persist_base, exist_ok=True)
+
             # Update paths to use the persistent base
             self.db_path = os.path.join(persist_base, "pma_metadata.db")
             self.lancedb_persist_dir = os.path.join(persist_base, "lancedb_cache")
@@ -47,6 +51,9 @@ class Settings(BaseSettings):
                 self.lancedb_persist_dir = "data/lancedb"
             if not self.db_path:
                 self.db_path = "data/pma_metadata.db"
+
+            os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
+            os.makedirs(os.path.abspath(self.lancedb_persist_dir), exist_ok=True)
 
         return self
 
@@ -58,7 +65,7 @@ class Settings(BaseSettings):
     max_file_size_mb: int = 50
     supported_extensions: str = (
         ".txt,.md,.pdf,.docx,.csv,.json,.py,.js,.ts,.java,.c,.cpp,.rs,.go,.rb,.html,.css,.xml"
-        ",.yaml,.yml,.toml,.ini,.cfg,.sh,.bat,.uasset,.umap,.uproject,.uplugin"
+        ",.yaml,.yml,.toml,.ini,.cfg,.sh,.bat"
         # Extended language support (overhaul plan)
         ",.swift,.kt,.dart,.vue,.svelte,.graphql,.gql,.proto,.thrift"
         ",.sql,.log,.r,.lua,.zig,.tf,.hcl,.ipynb,.rtf,.odt"
@@ -71,6 +78,18 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-2.5-flash-lite"
     gemini_max_output_tokens: int = 4096
     gemini_timeout: float = 90.0
+
+    openai_api_key: str = ""
+    openai_base_url: str = ""
+
+    anthropic_api_key: str = ""
+
+    groq_api_key: str = ""
+
+    openrouter_api_key: str = ""
+
+    openai_compatible_api_key: str = ""
+    openai_compatible_base_url: str = ""
 
     ollama_url: str = "http://localhost:11434/api/generate"
     ollama_model: str = "llama3"

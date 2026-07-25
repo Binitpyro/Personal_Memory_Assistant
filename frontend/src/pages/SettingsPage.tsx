@@ -1,94 +1,30 @@
 import { useState, useEffect } from 'react'
-import { Settings, Shield, Key, CheckCircle2, AlertCircle, LogOut, Cpu, HardDrive, RefreshCcw, Trash2, AlertTriangle, DatabaseZap } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
+import { Settings, CheckCircle2, AlertCircle, Cpu, HardDrive, RefreshCcw, Trash2, AlertTriangle, DatabaseZap } from 'lucide-react'
 import { useApi, invalidateCache } from '../useApi'
 import {
-  getAuthStatus,
-  disconnectAuth,
   getLocalModels,
   getSystemInfo,
   getLLMPreferences,
   setLLMPreferences,
+  setProviderDefaultModel,
   clearIndex,
-  launchGoogleAuth,
   getDriveInfo,
   purgeHostCache,
+  getProviders,
+  type ProviderStatus,
   type LLMPreferences,
-  type AuthStatus,
   type LocalModelDetection,
   type SystemInfo,
   type DriveInfo
 } from '../api'
 
+// STATIC_FALLBACK_MODELS removed in favor of dynamic backend discovery and persistent model heaps.
+
 // ── Sub-components for lower cognitive complexity ───────────────────
 
-function AuthSection({
-  authStatus,
-  onConnect,
-  onDisconnect
-}: {
-  authStatus?: AuthStatus;
-  onConnect: () => void;
-  onDisconnect: () => void;
-}) {
-  const isConnected = !!authStatus?.connected
-  return (
-    <div className="glass p-6 rounded-2xl border border-primary/10">
-      <div className="flex items-start justify-between">
-        <div className="flex items-start gap-4">
-          <div className="p-3 bg-primary/10 rounded-xl">
-            <Shield className="w-6 h-6 text-primary" />
-          </div>
-          <div>
-            <h2 className="text-lg font-bold text-text-primary">Google Gemini Account</h2>
-            <p className="text-sm text-text-secondary mt-1 max-w-lg">
-              Connect your Google Account to use the Gemini AI natively without needing an API key.
-              Your token is stored safely on your local machine.
-            </p>
 
-            <div className="mt-4 flex items-center gap-2">
-              <span className="text-sm font-medium text-text-primary">Status:</span>
-              {isConnected ? (
-                <span className="inline-flex items-center justify-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-success/15 text-success">
-                  <span className="w-1.5 h-1.5 rounded-full bg-success animate-pulse"></span>
-                  {authStatus?.method === 'env' ? 'Connected (.env)' : 'Connected'}
-                </span>
-              ) : (
-                <span className="inline-flex items-center justify-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-text-secondary/15 text-text-secondary">
-                  <span className="w-1.5 h-1.5 rounded-full bg-text-secondary"></span>
-                  Not Connected
-                </span>
-              )}
-            </div>
-          </div>
-        </div>
-
-        <div className="shrink-0 flex flex-col gap-2">
-          {isConnected ? (
-            authStatus?.method !== 'env' && (
-              <button
-                onClick={onDisconnect}
-                className="glass-button text-error hover:bg-error/10 !py-2 !px-4 gap-2 border border-error/20"
-              >
-                <LogOut className="w-4 h-4" />
-                Disconnect
-              </button>
-            )
-          ) : (
-            <button
-              onClick={onConnect}
-              className="glass-button !bg-primary !text-white hover:!bg-primary-h !py-2 !px-4 gap-2"
-            >
-              <Key className="w-4 h-4" />
-              Connect with Google
-            </button>
-          )}
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function LocalModelsSection({ localModels }: { localModels?: LocalModelDetection }) {
+function LocalModelsSection({ localModels }: Readonly<{ localModels?: LocalModelDetection }>) {
   return (
     <div className="glass p-6 rounded-2xl border border-primary/10">
       <div className="flex items-start gap-4 mb-6">
@@ -176,28 +112,67 @@ function LocalModelsSection({ localModels }: { localModels?: LocalModelDetection
 }
 
 function LLMPreferencesSection({
-  localModels,
   onSave,
   saving
-}: {
-  localModels?: LocalModelDetection;
-  onSave: (prefs: LLMPreferences) => void;
-  saving: boolean;
-}) {
+}: Readonly<{
+  onSave: (prefs: LLMPreferences) => void
+  saving: boolean
+}>) {
+  const navigate = useNavigate()
   const { data: llmPrefs } = useApi(getLLMPreferences, { cacheKey: 'llm-prefs' })
-  const [provider, setProvider] = useState<LLMPreferences['provider']>('auto')
-  const [geminiModel, setGeminiModel] = useState('gemini-2.5-flash-lite')
-  const [ollamaModel, setOllamaModel] = useState('')
-  const [lmStudioModel, setLmStudioModel] = useState('')
+  const { data: providers } = useApi(getProviders, { cacheKey: 'providers-list' })
+  
+  const [provider, setProvider] = useState<string>('auto')
+  const [selectedModels, setSelectedModels] = useState<Record<string, string>>({})
 
   useEffect(() => {
     if (llmPrefs) {
       setProvider(llmPrefs.provider || 'auto')
-      setGeminiModel(llmPrefs.gemini_model || 'gemini-2.5-flash-lite')
-      setOllamaModel(llmPrefs.ollama_model || '')
-      setLmStudioModel(llmPrefs.lm_studio_model || '')
+      const initialModels: Record<string, string> = {}
+      if (llmPrefs.gemini_model) initialModels.gemini = llmPrefs.gemini_model
+      if (llmPrefs.ollama_model) initialModels.ollama = llmPrefs.ollama_model
+      if (llmPrefs.lm_studio_model) initialModels.lm_studio = llmPrefs.lm_studio_model
+      setSelectedModels(initialModels)
     }
   }, [llmPrefs])
+
+  const activeProviders = (providers || []).filter(
+    (p: ProviderStatus) => p.is_set || p.spec.id === 'ollama' || p.spec.id === 'lm_studio'
+  )
+  
+  const activeProviderSpec = activeProviders.find(p => p.spec.id === provider)
+  
+  const availableModels = activeProviderSpec 
+    ? (activeProviderSpec.last_validation?.models?.map(m => m.id) || [])
+    : []
+
+  const currentModel = provider !== 'auto' ? (selectedModels[provider] || '') : ''
+
+  const handleProviderChange = (newProvider: string) => {
+    setProvider(newProvider)
+    if (newProvider !== 'auto') {
+      const pSpec = activeProviders.find(p => p.spec.id === newProvider)
+      const pModels = pSpec?.last_validation?.models?.map(m => m.id) || []
+      if (pModels.length > 0 && !selectedModels[newProvider]) {
+        setSelectedModels(prev => ({ ...prev, [newProvider]: pModels[0] }))
+      }
+    }
+  }
+
+  const handleModelChange = (newModel: string) => {
+    if (provider !== 'auto') {
+      setSelectedModels(prev => ({ ...prev, [provider]: newModel }))
+    }
+  }
+
+  const submitSave = () => {
+    if (!llmPrefs) return
+    const newPrefs: LLMPreferences = { ...llmPrefs, provider }
+    Object.entries(selectedModels).forEach(([pId, mId]) => {
+      newPrefs[`${pId}_model`] = mId
+    })
+    onSave(newPrefs)
+  }
 
   return (
     <div className="glass p-6 rounded-2xl border border-primary/10">
@@ -206,60 +181,65 @@ function LLMPreferencesSection({
           <Cpu className="w-6 h-6 text-primary" />
         </div>
         <div>
-          <h2 className="text-lg font-bold text-text-primary">Advanced Model Selection</h2>
+          <h2 className="text-lg font-bold text-text-primary">Model Selection</h2>
           <p className="text-sm text-text-secondary mt-1">
-            Choose your preferred provider and default model. PMA applies these preferences at runtime.
+            Choose your preferred intelligence provider and model. For detailed API key configurations, use the advanced view.
           </p>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <label className="text-sm text-text-secondary flex flex-col gap-1">
+      <div className="flex flex-col md:flex-row gap-4 items-end">
+        <label className="text-sm text-text-secondary flex flex-col gap-1 w-full md:w-64">
           Provider
-          <select value={provider} onChange={(e) => setProvider(e.target.value as any)} className="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-text-primary">
+          <select 
+            value={provider} 
+            onChange={(e) => handleProviderChange(e.target.value)} 
+            className="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-text-primary"
+          >
             <option value="auto">Auto (recommended)</option>
-            <option value="gemini">Gemini</option>
-            <option value="ollama">Ollama</option>
-            <option value="lm_studio">LM Studio</option>
+            {activeProviders.map(p => (
+              <option key={p.spec.id} value={p.spec.id}>{p.spec.display_name}</option>
+            ))}
           </select>
         </label>
 
-        <label className="text-sm text-text-secondary flex flex-col gap-1">
-          Gemini model
-          <input value={geminiModel} onChange={(e) => setGeminiModel(e.target.value)} className="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-text-primary" placeholder="gemini-2.5-flash-lite" />
-        </label>
-
-        <label className="text-sm text-text-secondary flex flex-col gap-1">
-          Ollama model
-          <select value={ollamaModel} onChange={(e) => setOllamaModel(e.target.value)} className="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-text-primary">
-            <option value="">(auto)</option>
-            {(localModels?.ollama.models || []).map((m) => <option key={m} value={m}>{m}</option>)}
-          </select>
-        </label>
-
-        <label className="text-sm text-text-secondary flex flex-col gap-1">
-          LM Studio model
-          <select value={lmStudioModel} onChange={(e) => setLmStudioModel(e.target.value)} className="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-text-primary">
-            <option value="">(auto)</option>
-            {(localModels?.lm_studio.models || []).map((m) => <option key={m} value={m}>{m}</option>)}
-          </select>
-        </label>
+        {provider !== 'auto' && availableModels.length > 0 && (
+          <label className="text-sm text-text-secondary flex flex-col gap-1 w-full md:w-64 animate-fade-in">
+            Model
+            <select 
+              value={currentModel} 
+              onChange={(e) => handleModelChange(e.target.value)} 
+              className="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-text-primary"
+            >
+              <option value="" disabled>Select a model...</option>
+              {availableModels.map(mId => (
+                <option key={mId} value={mId}>{mId}</option>
+              ))}
+            </select>
+          </label>
+        )}
       </div>
 
-      <div className="mt-4">
+      <div className="mt-6 flex items-center gap-3">
         <button
-          onClick={() => onSave({ provider, gemini_model: geminiModel, ollama_model: ollamaModel, lm_studio_model: lmStudioModel })}
-          disabled={saving}
+          onClick={submitSave}
+          disabled={saving || !llmPrefs}
           className="glass-button !bg-primary !text-white hover:!bg-primary-h !py-2 !px-4"
         >
-          {saving ? 'Saving...' : 'Save LLM Preferences'}
+          {saving ? 'Saving...' : 'Save Preference'}
+        </button>
+        <button
+          onClick={() => navigate('/settings/providers')}
+          className="glass-button !bg-primary/10 border border-primary/20 text-primary hover:!bg-primary/20 !py-2 !px-4"
+        >
+          Manage Providers (Advanced)
         </button>
       </div>
     </div>
   )
 }
 
-function StorageSection({ sysInfo }: { sysInfo?: SystemInfo }) {
+function StorageSection({ sysInfo }: Readonly<{ sysInfo?: SystemInfo }>) {
   const getProgressColor = (pct: number) => {
     if (pct > 90) return 'bg-error'
     if (pct > 75) return 'bg-warning'
@@ -307,11 +287,11 @@ function SplitBrainSection({
   driveInfo,
   onPurge,
   purging
-}: {
+}: Readonly<{
   driveInfo?: DriveInfo;
   onPurge: () => void;
   purging: boolean;
-}) {
+}>) {
   if (!driveInfo) return null
 
   const isAtRisk = driveInfo.is_portable_fs && driveInfo.lancedb_mode !== 'split_brain'
@@ -386,7 +366,7 @@ function SplitBrainSection({
   )
 }
 
-function ResetSection({ onRestartOnboarding, onFullReset }: { onRestartOnboarding: () => void; onFullReset: () => void }) {
+function ResetSection({ onRestartOnboarding, onFullReset }: Readonly<{ onRestartOnboarding: () => void; onFullReset: () => void }>) {
   return (
     <div className="glass p-6 rounded-2xl border border-error/10 bg-error/5">
       <div className="flex items-start gap-4 mb-6">
@@ -424,7 +404,6 @@ function ResetSection({ onRestartOnboarding, onFullReset }: { onRestartOnboardin
 // ── Main Page Component ──────────────────────────────────────────────
 
 export function SettingsPage() {
-  const { data: authStatus, refetch: refetchAuth } = useApi(getAuthStatus, { cacheKey: 'auth-status' })
   const { data: localModels } = useApi(getLocalModels, { cacheKey: 'local-models' })
   const { data: sysInfo } = useApi(getSystemInfo, { cacheKey: 'system-info' })
   const { refetch: refetchPrefs } = useApi(getLLMPreferences, { cacheKey: 'llm-prefs' })
@@ -434,50 +413,20 @@ export function SettingsPage() {
   const [savingPrefs, setSavingPrefs] = useState(false)
   const [purgingCache, setPurgingCache] = useState(false)
 
-  useEffect(() => {
-    const refreshAuth = () => {
-      void refetchAuth()
-    }
 
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible') {
-        refreshAuth()
-      }
-    }
-
-    globalThis.addEventListener('focus', refreshAuth)
-    document.addEventListener('visibilitychange', handleVisibilityChange)
-    return () => {
-      globalThis.removeEventListener('focus', refreshAuth)
-      document.removeEventListener('visibilitychange', handleVisibilityChange)
-    }
-  }, [refetchAuth])
-
-  const handleConnectGoogle = async () => {
-    try {
-      setMessage({ type: 'ok', text: 'Google sign-in opened in your browser. Return here when it finishes.' })
-      await launchGoogleAuth()
-    } catch (e) {
-      setMessage({ type: 'err', text: e instanceof Error ? e.message : 'Could not launch Google sign-in' })
-    }
-  }
-
-  const handleDisconnect = async () => {
-    try {
-      await disconnectAuth()
-      invalidateCache('auth-status')
-      refetchAuth()
-      setMessage({ type: 'ok', text: 'Disconnected account.' })
-    } catch (e) {
-      setMessage({ type: 'err', text: e instanceof Error ? e.message : 'Disconnection failed' })
-    }
-  }
 
   const handleSavePrefs = async (prefs: LLMPreferences) => {
     setSavingPrefs(true)
     try {
       await setLLMPreferences(prefs)
+      for (const [key, val] of Object.entries(prefs)) {
+        if (key.endsWith('_model') && typeof val === 'string' && val) {
+          const providerId = key.replace('_model', '')
+          await setProviderDefaultModel(providerId, val).catch(() => {})
+        }
+      }
       invalidateCache('llm-prefs')
+      invalidateCache('providers-list')
       refetchPrefs()
       setMessage({ type: 'ok', text: 'LLM preferences saved.' })
     } catch (e) {
@@ -540,16 +489,11 @@ export function SettingsPage() {
         </div>
       )}
 
-      <AuthSection
-        authStatus={authStatus}
-        onConnect={handleConnectGoogle}
-        onDisconnect={handleDisconnect}
-      />
+
 
       <LocalModelsSection localModels={localModels} />
 
       <LLMPreferencesSection
-        localModels={localModels}
         onSave={handleSavePrefs}
         saving={savingPrefs}
       />

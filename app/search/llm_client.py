@@ -2,30 +2,85 @@ import json
 import logging
 from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import Any
 
 import httpx
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+import keyring
 
 from app.config import settings
+from app.providers import BaseProvider, create_provider, get_configured_provider_ids
+from app.search.capability_detector import capability_detector
 
 logger = logging.getLogger(__name__)
+
+
+def _get_effective_fallback_chain() -> list[str]:
+    configured_ids = get_configured_provider_ids()
+    pref_path = Path("data/settings.json")
+    saved_chain: list[str] = []
+    if pref_path.exists():
+        try:
+            with open(pref_path, encoding="utf-8") as f:
+                data = json.load(f)
+            saved_chain = data.get("llm", {}).get("fallback_chain") or []
+        except Exception:  # nosec B110
+            pass
+
+    if not saved_chain or set(saved_chain) <= {"gemini", "openai", "ollama"}:
+        return configured_ids
+
+    chain = []
+    for pid in saved_chain:
+        if pid in configured_ids and pid not in chain:
+            chain.append(pid)
+    for pid in configured_ids:
+        if pid not in chain:
+            chain.append(pid)
+
+    return chain if chain else configured_ids
+
+
+class ProviderNotConfiguredError(Exception):
+    """Raised when no active LLM provider can be resolved."""
+
+    pass
 
 
 class LLMClient:
     def __init__(self):
         self.api_key = settings.gemini_api_key
+        self.provider_keys = {}
         self.ollama_url = settings.ollama_url
         self.ollama_model = settings.ollama_model
         self.model = settings.gemini_model
         self.provider_preference = "auto"
         self.lm_studio_url = settings.lm_studio_url
         self.lm_studio_model = ""
-        self._gemini_client: httpx.AsyncClient | None = None
-        self._ollama_client: httpx.AsyncClient | None = None
-        self._lm_studio_client: httpx.AsyncClient | None = None
-        self._oauth_token = self._load_oauth_token()
-        self._load_runtime_preferences()
+        self._oauth_token: str | None = None
+        self._token_loaded = False
+
+    async def _ensure_token_loaded(self):
+        if not self._token_loaded:
+            import asyncio
+
+            self._oauth_token = await asyncio.to_thread(self._load_oauth_token)
+            await asyncio.to_thread(self._load_runtime_preferences)
+            await self._load_keyring_keys()
+            self._token_loaded = True
+
+    async def _load_keyring_keys(self):
+        import asyncio
+
+        try:
+            from app.providers import PROVIDER_IDS
+
+            for provider in PROVIDER_IDS:
+                key = await asyncio.to_thread(keyring.get_password, "pma_backend", provider)
+                if key:
+                    self.provider_keys[provider] = key
+                    if provider == "gemini":
+                        self.api_key = key
+        except Exception as e:
+            logger.warning("Failed to load keys from OS keyring: %s", e)
 
     def _refresh_token_if_expired(self, creds, token_data, token_path):
         from google.auth.transport.requests import Request as GoogleRequest
@@ -55,20 +110,56 @@ class LLMClient:
             logger.warning("Failed to load OAuth token: %s", e)
         return None
 
-    def _get_gemini_client(self) -> httpx.AsyncClient:
-        if self._gemini_client is None or self._gemini_client.is_closed:
-            self._gemini_client = httpx.AsyncClient(timeout=settings.gemini_timeout)
-        return self._gemini_client
+    def get_model_class(
+        self, override_provider: str | None = None, override_model: str | None = None
+    ) -> str:
+        provider = (override_provider or self.provider_preference or "auto").lower()
 
-    def _get_ollama_client(self) -> httpx.AsyncClient:
-        if self._ollama_client is None or self._ollama_client.is_closed:
-            self._ollama_client = httpx.AsyncClient(timeout=settings.ollama_timeout)
-        return self._ollama_client
+        if provider == "gemini":
+            return "cloud"
+        if provider == "ollama":
+            model = override_model or self.ollama_model
+            model_lower = model.lower() if model else ""
+            if "3b" in model_lower or "2b" in model_lower or "mini" in model_lower:
+                return "3b_local"
+            if "7b" in model_lower or "8b" in model_lower:
+                return "7b_local"
+            return "7b_local"
+        if provider == "lm_studio":
+            model = override_model or self.lm_studio_model
+            model_lower = model.lower() if model else ""
+            if "3b" in model_lower or "2b" in model_lower or "mini" in model_lower:
+                return "3b_local"
+            if "7b" in model_lower or "8b" in model_lower:
+                return "7b_local"
+            return "7b_local"
 
-    def _get_lm_studio_client(self) -> httpx.AsyncClient:
-        if self._lm_studio_client is None or self._lm_studio_client.is_closed:
-            self._lm_studio_client = httpx.AsyncClient(timeout=settings.ollama_timeout)
-        return self._lm_studio_client
+        if provider in (
+            "openai",
+            "anthropic",
+            "groq",
+            "openrouter",
+            "nvidia_nim",
+            "openai_compatible",
+        ):
+            return "cloud"
+
+        if provider == "auto":
+            if self.api_key or self._oauth_token:
+                return "cloud"
+            model = override_model or self.ollama_model
+            model_lower = model.lower() if model else ""
+            if "3b" in model_lower or "2b" in model_lower or "mini" in model_lower:
+                return "3b_local"
+            return "7b_local"
+
+        if self.api_key or self._oauth_token:
+            return "cloud"
+        model = override_model or self.ollama_model
+        model_lower = model.lower() if model else ""
+        if "3b" in model_lower or "2b" in model_lower or "mini" in model_lower:
+            return "3b_local"
+        return "7b_local"
 
     def _load_runtime_preferences(self) -> None:
         pref_path = Path("data/settings.json")
@@ -101,15 +192,35 @@ class LLMClient:
         if lm_studio_model is not None:
             self.lm_studio_model = lm_studio_model
 
-    def _build_prompt(self, query: str, context: str) -> str:
+    def _build_prompt(
+        self, query: str, context: str, mode: str | None = None, supports_claims: bool = False
+    ) -> str:
         prompt_path = Path("prompts/rag_system.txt")
-        # P10-2: Use delimiters to harden AI boundary
         safe_query = f"<user_query>\n{query}\n</user_query>"
+
+        mode_instructions = {
+            "explain": "\nMODE INSTRUCTION (Explain): Explain the concepts clearly using at least one analogy or 'in other words' reformulation.",
+            "verify": "\nMODE INSTRUCTION (Verify): Act strictly as a verifier. You MUST cite at least 2 source files with direct quotes to substantiate claims.",
+            "explore": "\nMODE INSTRUCTION (Explore): End your response with at least 2 relevant follow-up questions to help the user explore the topic further.",
+            "distill": "\nMODE INSTRUCTION (Distill): Distill the answer. Your response MUST be 150 words or less and use bullet points.",
+            "challenge": "\nMODE INSTRUCTION (Challenge): Actively highlight any contradictions or conflicting information found in the sources. Point out where different sources disagree.",
+        }
+        mode_str = mode_instructions.get(mode.lower()) if mode else ""
 
         try:
             if prompt_path.exists():
                 with open(prompt_path, encoding="utf-8") as f:
                     template = f.read()
+                if supports_claims:
+                    template_parts = template.split("### Context")
+                    if len(template_parts) == 2:
+                        claim_instr = '\n7. HIGH PRIORITY: Wrap any assertions or facts derived from the context in <claim sources="[n]"> tags.\n   Example: <claim sources="[1]">Python was created in 1991</claim> by <claim sources="[1]">Guido van Rossum</claim>.\n\n'
+                        template = (
+                            template_parts[0] + claim_instr + "### Context" + template_parts[1]
+                        )
+
+                if mode_str:
+                    template += f"\n{mode_str}\n"
                 return template.format(context=context, query=safe_query)
         except Exception as e:
             logger.warning("Failed to load prompt template, falling back to default: %s", e)
@@ -135,7 +246,14 @@ Instructions:
 4. Group information logically (e.g., by project, folder, or purpose).
 5. Cite source files by their paths using [source_index] notation.
 6. Do not use excessive filler words. Be professional, direct, and thorough where needed.
+"""
+        if supports_claims:
+            template += """
+7. HIGH PRIORITY: Wrap any assertions or facts derived from the context in <claim sources="[n]"> tags.
+   Example: <claim sources="[1]">Python was created in 1991</claim> by <claim sources="[1]">Guido van Rossum</claim>.
+"""
 
+        template += """
 ### Context
 {context}
 
@@ -144,262 +262,341 @@ Instructions:
 
 Answer:
 """
+        if mode_str:
+            template += f"\n{mode_str}\n"
         return template.format(context=context, query=safe_query)
-
-    async def _check_ollama_health(self) -> bool:
-        try:
-            client = self._get_ollama_client()
-            resp = await client.get(
-                self.ollama_url.replace("/api/generate", "/api/tags"), timeout=1.0
-            )
-            return resp.status_code == 200
-        except Exception:
-            return False
-
-    async def generate_answer(
-        self, query: str, context: str, history: list[dict[str, str]] | None = None
-    ) -> str:
-        prompt = self._build_prompt(query, context)
-        provider = (self.provider_preference or "auto").lower()
-
-        if provider in {"gemini", "auto"} and (self.api_key or self._oauth_token):
-            return await self._call_gemini(prompt, history=history)
-        if provider in {"lm_studio", "auto"} and await self._check_lm_studio_health():
-            return await self._call_lm_studio(prompt, history=history)
-        if provider in {"ollama", "auto"} and await self._check_ollama_health():
-            return await self._call_ollama(prompt, history=history)
-        return "LLM unavailable. Please provide a GEMINI_API_KEY or ensure Ollama is running."
-
-    async def stream_answer(
-        self, query: str, context: str, history: list[dict[str, str]] | None = None
-    ) -> AsyncGenerator[str, None]:
-        prompt = self._build_prompt(query, context)
-        provider = (self.provider_preference or "auto").lower()
-
-        if provider in {"gemini", "auto"} and (self.api_key or self._oauth_token):
-            async for chunk in self._stream_gemini(prompt, history=history):
-                yield chunk
-            return
-        if provider in {"lm_studio", "auto"} and await self._check_lm_studio_health():
-            async for chunk in self._stream_lm_studio(prompt, history=history):
-                yield chunk
-            return
-        if provider in {"ollama", "auto"} and await self._check_ollama_health():
-            async for chunk in self._stream_ollama(prompt, history=history):
-                yield chunk
-            return
-        yield "LLM unavailable."
-
-    async def _check_lm_studio_health(self) -> bool:
-        try:
-            client = self._get_lm_studio_client()
-            resp = await client.get(f"{self.lm_studio_url}/models", timeout=1.0)
-            return resp.status_code == 200
-        except Exception:
-            return False
-
-    def _build_gemini_payload(
-        self, prompt: str, history: list[dict[str, str]] | None
-    ) -> dict[str, Any]:
-        contents = []
-        if history:
-            for msg in history:
-                role = "user" if msg["role"] == "user" else "model"
-                contents.append({"role": role, "parts": [{"text": msg["content"]}]})
-        contents.append({"role": "user", "parts": [{"text": prompt}]})
-
-        return {
-            "contents": contents,
-            "generationConfig": {
-                "temperature": 0.2,
-                "topP": 0.8,
-                "maxOutputTokens": settings.gemini_max_output_tokens,
-            },
-        }
-
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=10),
-        retry=retry_if_exception_type(httpx.HTTPError),
-        reraise=True,
-    )
-    async def _call_gemini(self, prompt: str, history: list[dict[str, str]] | None = None) -> str:
-        # Production v1 endpoint
-        url = f"https://generativelanguage.googleapis.com/v1/models/{self.model}:generateContent"
-
-        # Diagnostics
-        key_preview = self.api_key[:6] + "..." if self.api_key and len(self.api_key) > 6 else "****"
-        logger.info("Gemini Request: %s (model: %s, key: %s)", url, self.model, key_preview)
-
-        payload = self._build_gemini_payload(prompt, history)
-        client = self._get_gemini_client()
-
-        try:
-            # P10-1: Exclusively use headers for API keys to prevent URL leak
-            headers = {}
-            if self._oauth_token:
-                headers["Authorization"] = f"Bearer {self._oauth_token}"
-            else:
-                headers["x-goog-api-key"] = self.api_key
-
-            response = await client.post(url, headers=headers, json=payload)
-
-            if response.status_code != 200:
-                return f"Gemini API error {response.status_code}: {response.text[:100]}"
-
-            data = response.json()
-            return str(data["candidates"][0]["content"]["parts"][0]["text"])
-        except Exception as e:
-            logger.error("Gemini request failed: %s", str(e), exc_info=True)
-            raise
-
-    async def _stream_gemini(
-        self, prompt: str, history: list[dict[str, str]] | None = None
-    ) -> AsyncGenerator[str, None]:
-        url = f"https://generativelanguage.googleapis.com/v1/models/{self.model}:streamGenerateContent"
-
-        payload = self._build_gemini_payload(prompt, history)
-        client = self._get_gemini_client()
-
-        try:
-            # P10-1: Exclusively use headers for API keys to prevent URL leak
-            headers = {}
-            if self._oauth_token:
-                headers["Authorization"] = f"Bearer {self._oauth_token}"
-            else:
-                headers["x-goog-api-key"] = self.api_key
-
-            async with client.stream("POST", url, headers=headers, json=payload) as response:
-                if response.status_code != 200:
-                    yield f"Error: {response.status_code}"
-                    return
-                decoder = json.JSONDecoder()
-                buffer = ""
-                async for chunk in response.aiter_text():
-                    buffer += chunk
-                    buffer, new_texts = self._parse_stream_buffer(decoder, buffer)
-                    for text in new_texts:
-                        yield text
-        except Exception as e:
-            logger.error("Gemini stream failed: %s", e)
-            yield "Streaming error."
-
-    def _parse_stream_buffer(self, decoder: json.JSONDecoder, buffer: str) -> tuple[str, list[str]]:
-        new_texts = []
-        while True:
-            buffer = buffer.lstrip(", \r\n\t[]")
-            if not buffer:
-                break
-            try:
-                data, end_idx = decoder.raw_decode(buffer)
-                if isinstance(data, dict) and "candidates" in data:
-                    text = (
-                        data["candidates"][0].get("content", {}).get("parts", [{}])[0].get("text")
-                    )
-                    if text:
-                        new_texts.append(text)
-                buffer = buffer[end_idx:]
-            except json.JSONDecodeError:
-                break
-        return buffer, new_texts
 
     def _build_messages(
         self, prompt: str, history: list[dict[str, str]] | None
     ) -> list[dict[str, str]]:
         messages = []
         if history:
-            messages.extend(history)
+            messages.extend(history[-10:])
         messages.append({"role": "user", "content": prompt})
         return messages
 
-    async def _call_ollama(self, prompt: str, history: list[dict[str, str]] | None = None) -> str:
-        try:
-            import ollama  # type: ignore
+    async def _resolve_provider_by_id(
+        self, pid: str, model_override: str | None = None, timeout: float = 30.0
+    ) -> BaseProvider:
+        # Determine source
+        source = "unset"
+        env_key_name = f"{pid}_api_key"
+        if getattr(settings, env_key_name, None):
+            source = "env"
+        elif pid in ("ollama", "lm_studio"):
+            source = "default"
+        elif pid in self.provider_keys:
+            source = "keyring"
+        else:
+            # Let's check keyring again just in case
+            import asyncio
 
-            response = await ollama.chat(
-                model=self.ollama_model,
-                messages=self._build_messages(prompt, history),
+            try:
+                key = await asyncio.to_thread(keyring.get_password, "pma_backend", pid)
+                if key:
+                    self.provider_keys[pid] = key
+                    source = "keyring"
+            except Exception:  # nosec B110
+                pass
+
+        # Load settings for base_url/model
+        pref_path = Path("data/settings.json")
+        per_provider = {}
+        if pref_path.exists():
+            try:
+                with open(pref_path, encoding="utf-8") as f:
+                    data = json.load(f)
+                per_provider = data.get("llm", {}).get("per_provider", {})
+            except Exception:  # nosec B110
+                pass
+
+        provider_settings = per_provider.get(pid, {})
+        base_url = provider_settings.get("base_url")
+
+        default_model = model_override or provider_settings.get("default_model")
+        if not default_model:
+            if pid == "gemini":
+                default_model = self.model
+            elif pid == "ollama":
+                default_model = self.ollama_model
+            elif pid == "lm_studio":
+                default_model = self.lm_studio_model
+            elif pid == "openai":
+                default_model = "gpt-4o-mini"
+            elif pid == "anthropic":
+                default_model = "claude-3-5-sonnet-20241022"
+
+        api_key = None
+        if source == "env":
+            api_key = getattr(settings, f"{pid}_api_key", None)
+        elif source == "keyring":
+            api_key = self.provider_keys.get(pid)
+
+        if pid == "gemini" and self._oauth_token and not api_key:
+            api_key = self._oauth_token
+
+        # Check health for local
+        if pid == "lm_studio":
+            if hasattr(self, "_check_lm_studio_health"):
+                is_healthy = await self._check_lm_studio_health()
+                if not is_healthy:
+                    raise ProviderNotConfiguredError("LM Studio is not running.")
+        elif pid == "ollama":
+            if hasattr(self, "_check_ollama_health"):
+                is_healthy = await self._check_ollama_health()
+                if not is_healthy:
+                    raise ProviderNotConfiguredError("Ollama is not running.")
+        elif not api_key and pid not in ("ollama", "lm_studio"):
+            raise ProviderNotConfiguredError(f"API Key for {pid} is not set.")
+
+        return create_provider(
+            pid, api_key=api_key, base_url=base_url, default_model=default_model, timeout=timeout
+        )
+
+    async def _resolve(
+        self,
+        override_provider: str | None = None,
+        override_model: str | None = None,
+        timeout: float = 30.0,
+    ) -> BaseProvider:
+        await self._ensure_token_loaded()
+
+        if override_provider:
+            return await self._resolve_provider_by_id(
+                override_provider, override_model, timeout=timeout
             )
-            return str(response["message"]["content"])
-        except Exception as e:
-            logger.error("Ollama failed: %s", e)
-            return "Ollama failed."
 
-    async def _stream_ollama(
-        self, prompt: str, history: list[dict[str, str]] | None = None
-    ) -> AsyncGenerator[str, None]:
-        try:
-            import ollama  # type: ignore
+        provider_preference = self.provider_preference or "auto"
+        fallback_chain = _get_effective_fallback_chain()
 
-            stream = await ollama.chat(
-                model=self.ollama_model,
-                messages=self._build_messages(prompt, history),
-                stream=True,
-            )
-            async for chunk in stream:
-                yield chunk["message"]["content"]
-        except Exception as e:
-            logger.error("Ollama stream failed: %s", e)
-            yield "Ollama stream failed."
+        resolved_id = None
+        if provider_preference != "auto":
+            resolved_id = provider_preference
+        else:
+            # Find the first active provider in the fallback chain
+            for pid in fallback_chain:
+                try:
+                    prov = await self._resolve_provider_by_id(pid)
+                    await prov.close()
+                    resolved_id = pid
+                    break
+                except Exception:  # nosec B112
+                    continue
 
-    async def _call_lm_studio(
-        self, prompt: str, history: list[dict[str, str]] | None = None
+            if not resolved_id:
+                raise ProviderNotConfiguredError(
+                    "LLM unavailable. Please configure an API key or use a local model."
+                )
+
+        return await self._resolve_provider_by_id(resolved_id, override_model, timeout=timeout)
+
+    async def generate_answer(
+        self,
+        query: str,
+        context: str,
+        history: list[dict[str, str]] | None = None,
+        mode: str | None = None,
+        skip_capability_check: bool = False,
+        override_provider: str | None = None,
+        override_model: str | None = None,
     ) -> str:
-        try:
-            client = self._get_lm_studio_client()
-            messages = self._build_messages(prompt, history)
-            model_name = self.lm_studio_model or "local-model"
-            resp = await client.post(
-                f"{self.lm_studio_url}/chat/completions",
-                json={
-                    "model": model_name,
-                    "messages": messages,
-                    "stream": False,
-                    "temperature": 0.2,
-                },
-            )
-            if resp.status_code != 200:
-                return f"LM Studio error {resp.status_code}"
-            data = resp.json()
-            return str(
-                data.get("choices", [{}])[0].get("message", {}).get("content", "No response.")
-            )
-        except Exception:
-            return "LM Studio failed."
+        await self._ensure_token_loaded()
+        supports_claims = False
+        if not skip_capability_check:
+            supports_claims = await capability_detector.detect_capabilities(self)
+        prompt = self._build_prompt(query, context, mode, supports_claims=supports_claims)
 
-    async def _stream_lm_studio(
-        self, prompt: str, history: list[dict[str, str]] | None = None
+        fallback_chain = _get_effective_fallback_chain()
+
+        # Build list of providers to try
+        providers_to_try = []
+        if override_provider:
+            providers_to_try.append((override_provider, override_model, 30.0))
+        else:
+            primary_id = None
+            try:
+                temp_prov = await self._resolve()
+                primary_id = temp_prov.spec.id
+                await temp_prov.close()
+            except Exception:  # nosec B110
+                pass
+
+            if primary_id:
+                providers_to_try.append((primary_id, override_model, 30.0))
+
+            for pid in fallback_chain:
+                if pid != primary_id:
+                    providers_to_try.append(
+                        (pid, None, 10.0)
+                    )  # 10s connection timeout for fallbacks
+
+        max_attempts = len(providers_to_try)
+        attempt = 0
+        last_error = None
+
+        while attempt < max_attempts:
+            pid, model, to_val = providers_to_try[attempt]
+            try:
+                provider = await self._resolve_provider_by_id(pid, model, timeout=to_val)
+                try:
+                    return await provider.chat(self._build_messages(prompt, history))
+                finally:
+                    await provider.close()
+            except Exception as e:
+                logger.warning(f"Fallback attempt {attempt} for {pid} failed: {e}")
+                last_error = e
+                attempt += 1
+
+        if last_error:
+            return f"LLM unavailable: All providers in fallback chain failed. Last error: {last_error!s}"
+        return "LLM unavailable: No providers configured."
+
+    async def stream_answer(
+        self,
+        query: str,
+        context: str,
+        history: list[dict[str, str]] | None = None,
+        mode: str | None = None,
+        override_provider: str | None = None,
+        override_model: str | None = None,
     ) -> AsyncGenerator[str, None]:
+        await self._ensure_token_loaded()
+        supports_claims = await capability_detector.detect_capabilities(self)
+        prompt = self._build_prompt(query, context, mode, supports_claims=supports_claims)
+
+        fallback_chain = _get_effective_fallback_chain()
+
+        # Build list of providers to try
+        providers_to_try = []
+        if override_provider:
+            providers_to_try.append((override_provider, override_model, 30.0))
+        else:
+            primary_id = None
+            try:
+                temp_prov = await self._resolve()
+                primary_id = temp_prov.spec.id
+                await temp_prov.close()
+            except Exception:  # nosec B110
+                pass
+
+            if primary_id:
+                providers_to_try.append((primary_id, override_model, 30.0))
+
+            for pid in fallback_chain:
+                if pid != primary_id:
+                    providers_to_try.append(
+                        (pid, None, 10.0)
+                    )  # 10s connection timeout for fallbacks
+
+        max_attempts = len(providers_to_try)
+
+        # We need helper variables for token usage counting
+        full_answer = ""
+        prompt_tokens = 0
+        completion_tokens = 0
+
+        # Calculate prompt tokens locally
         try:
-            client = self._get_lm_studio_client()
-            messages = self._build_messages(prompt, history)
-            model_name = self.lm_studio_model or "local-model"
-            async with client.stream(
-                "POST",
-                f"{self.lm_studio_url}/chat/completions",
-                json={
-                    "model": model_name,
-                    "messages": messages,
-                    "stream": True,
-                    "temperature": 0.2,
-                },
-            ) as resp:
-                if resp.status_code != 200:
-                    yield f"LM Studio error {resp.status_code}"
-                    return
-                async for line in resp.aiter_lines():
-                    if not line or not line.startswith("data: "):
-                        continue
-                    payload = line[6:].strip()
-                    if payload == "[DONE]":
-                        break
-                    try:
-                        parsed = json.loads(payload)
-                        delta = parsed.get("choices", [{}])[0].get("delta", {}).get("content")
-                        if delta:
-                            yield delta
-                    except Exception as e:
-                        logger.debug("Failed to parse LM Studio stream chunk: %s", e)
-                        continue
+            from app.search.context_builder import _get_tokens
+
+            # Include messages in prompt count
+            full_prompt_text = prompt + "\n" + json.dumps(history or [])
+            prompt_tokens = len(_get_tokens(full_prompt_text))
         except Exception:
-            yield "LM Studio stream failed."
+            prompt_tokens = max(len(prompt) // 4, len(prompt.split()) * 4 // 3)
+
+        async def _generator():
+            nonlocal full_answer, completion_tokens
+            attempt = 0
+            last_error: Exception | None = None
+
+            while attempt < max_attempts:
+                pid, model, to_val = providers_to_try[attempt]
+                provider_instance = None
+                try:
+                    provider_instance = await self._resolve_provider_by_id(
+                        pid, model, timeout=to_val
+                    )
+                    if attempt > 0:
+                        yield json.dumps({"control": "fallback", "to": pid})
+
+                    async for chunk in provider_instance.stream(
+                        self._build_messages(prompt, history)
+                    ):
+                        full_answer += chunk
+                        yield chunk
+                    break
+                except (
+                    httpx.HTTPStatusError,
+                    httpx.RequestError,
+                    httpx.TimeoutException,
+                    ProviderNotConfiguredError,
+                ) as e:
+                    logger.warning(f"Streaming fallback attempt {attempt} for {pid} failed: {e}")
+                    last_error = e
+                    attempt += 1
+                except Exception as e:
+                    logger.error(f"Unexpected streaming error: {e}")
+                    last_error = e
+                    attempt += 1
+                finally:
+                    if provider_instance:
+                        await provider_instance.close()
+            else:
+                if last_error:
+                    yield f"Streaming error: All providers in fallback chain failed. Last error: {last_error!s}"
+                else:
+                    yield "Streaming error: No providers configured."
+
+        buffer = ""
+        found_claim = False
+        chars_checked = 0
+
+        async for chunk in _generator():
+            yield chunk
+
+            if supports_claims and not found_claim and chars_checked < 600:
+                buffer += chunk
+                chars_checked += len(chunk)
+                if "<claim" in buffer:
+                    found_claim = True
+                elif chars_checked >= 600 and not found_claim:
+                    capability_detector.report_failure(self)
+                    supports_claims = False
+
+        # Calculate completion tokens and yield final control usage packet
+        try:
+            from app.search.context_builder import _get_tokens
+
+            completion_tokens = len(_get_tokens(full_answer))
+        except Exception:
+            completion_tokens = max(len(full_answer) // 4, len(full_answer.split()) * 4 // 3)
+
+        yield json.dumps(
+            {
+                "control": "usage",
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+            }
+        )
+
+    # Health check methods
+    async def _check_ollama_health(self) -> bool:
+        provider = create_provider("ollama", base_url=self.ollama_url)
+        try:
+            res = await provider.validate()
+            return res["ok"]
+        except Exception:
+            return False
+        finally:
+            await provider.close()
+
+    async def _check_lm_studio_health(self) -> bool:
+        provider = create_provider("lm_studio", base_url=self.lm_studio_url)
+        try:
+            res = await provider.validate()
+            return res["ok"]
+        except Exception:
+            return False
+        finally:
+            await provider.close()

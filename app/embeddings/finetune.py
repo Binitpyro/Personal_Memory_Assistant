@@ -33,8 +33,23 @@ async def _load_training_pairs(db_path: str = _DEFAULT_DB_PATH) -> list[tuple[st
             ) as cursor:
                 texts = [row[0] for row in await cursor.fetchall()]
 
-            for i in range(len(texts) - 1):
-                pairs.append((texts[i], texts[i + 1]))
+            if len(texts) < 2:
+                continue
+
+            for i in range(len(texts)):
+                # M-06: Avoid using consecutive chunks which often cross logical section
+                # boundaries. We prefer pairs with a minimum index distance of 2 to ensure
+                # they share the same broad file context without being literal neighbors.
+                candidates = [j for j in range(len(texts)) if abs(i - j) >= 2]
+                if candidates:
+                    target_idx = random.choice(candidates)  # nosec B311 # noqa: S311
+                    pairs.append((texts[i], texts[target_idx]))
+                else:
+                    # Fallback for small files (2-3 chunks): use the furthest available chunk
+                    target_idx = (i + 1) % len(texts)
+                    if len(texts) > 2:
+                        target_idx = (i + 2) % len(texts)
+                    pairs.append((texts[i], texts[target_idx]))
 
     secure_rng = random.SystemRandom()
     secure_rng.shuffle(pairs)

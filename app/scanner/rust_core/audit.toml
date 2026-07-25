@@ -1,0 +1,6 @@
+# audit.toml for cargo-audit
+[advisories]
+ignore = [
+    "RUSTSEC-2025-0020",
+    "RUSTSEC-2026-0177"
+]

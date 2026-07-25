@@ -7,6 +7,43 @@ use std::io::Read;
 use ring::digest::{Context, SHA256};
 use rayon::prelude::*;
 
+mod layout;
+
+fn get_sentence_offsets_json(text: &str) -> String {
+    if std::env::var("PMA_SENTENCE_OFFSETS").map(|v| v == "0").unwrap_or(false) {
+        return "[]".to_string();
+    }
+    let mut offsets = Vec::new();
+    let chars: Vec<char> = text.chars().collect();
+    let mut curr = 0;
+    
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '.' || c == '!' || c == '?' {
+            let mut j = i + 1;
+            let mut has_ws = false;
+            while j < chars.len() && chars[j].is_whitespace() {
+                has_ws = true;
+                j += 1;
+            }
+            if has_ws && j < chars.len() && chars[j].is_uppercase() {
+                let end = i + 2;
+                offsets.push(format!("[{}, {}]", curr, end));
+                curr = j;
+                i = j;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    if curr < chars.len() {
+        offsets.push(format!("[{}, {}]", curr, chars.len()));
+    }
+    
+    format!("[{}]", offsets.join(", "))
+}
+
 fn get_sentence_boundary(text: &str, byte_pos: usize, byte_window: usize) -> usize {
     let mut safe_byte_pos = byte_pos;
     // Ensure byte_pos is on a char boundary by moving backward if necessary
@@ -14,7 +51,7 @@ fn get_sentence_boundary(text: &str, byte_pos: usize, byte_window: usize) -> usi
         safe_byte_pos -= 1;
     }
 
-    let mut search_start = if safe_byte_pos > byte_window { safe_byte_pos - byte_window } else { 0 };
+    let mut search_start = safe_byte_pos.saturating_sub(byte_window);
     
     // Ensure search_start is on a char boundary by moving forward if necessary
     while search_start < safe_byte_pos && !text.is_char_boundary(search_start) {
@@ -46,7 +83,7 @@ fn _calculate_chunk_end(text: &str, start_char: usize, char_indices: &[usize], c
 
 /// Creates overlapping chunks of text, snapping to sentence boundaries.
 #[pyfunction]
-fn create_chunks(py: Python, text: &str, chunk_size_chars: usize, chunk_overlap_chars: usize, prefix: &str, base_offset: usize) -> PyResult<Vec<PyObject>> {
+fn create_chunks(py: Python, text: &str, chunk_size_chars: usize, chunk_overlap_chars: usize, prefix: &str, base_offset: usize) -> PyResult<Vec<Py<PyAny>>> {
     let mut chunks = Vec::new();
     let char_indices: Vec<usize> = text.char_indices().map(|(b, _)| b).collect();
     let total_chars = char_indices.len();
@@ -65,7 +102,10 @@ fn create_chunks(py: Python, text: &str, chunk_size_chars: usize, chunk_overlap_
         dict.set_item("start_offset", base_offset + start_char)?;
         let chunk_char_len = chunk_text.chars().count();
         dict.set_item("end_offset", base_offset + start_char + chunk_char_len)?;
-        dict.set_item("text_preview", format!("{}{}", prefix, chunk_text))?;
+        let full_text = format!("{}{}", prefix, chunk_text);
+        dict.set_item("text_preview", &full_text)?;
+        dict.set_item("sentence_offsets", get_sentence_offsets_json(&full_text))?;
+        dict.set_item("segmenter_version", "rs_v1")?;
         
         chunks.push(dict.into());
 
@@ -89,7 +129,7 @@ fn create_chunks(py: Python, text: &str, chunk_size_chars: usize, chunk_overlap_
 
 /// Chunks markdown text by heading sections (up to level 3).
 #[pyfunction]
-fn chunk_markdown(py: Python, text: &str, chunk_size_chars: usize, chunk_overlap_chars: usize, prefix: &str) -> PyResult<Vec<PyObject>> {
+fn chunk_markdown(py: Python, text: &str, chunk_size_chars: usize, chunk_overlap_chars: usize, prefix: &str) -> PyResult<Vec<Py<PyAny>>> {
     let mut chunks = Vec::new();
     let re = regex::Regex::new(r"(?m)^#{1,3}\s").unwrap();
     
@@ -106,7 +146,10 @@ fn chunk_markdown(py: Python, text: &str, chunk_size_chars: usize, chunk_overlap
                     let dict = PyDict::new(py);
                     dict.set_item("start_offset", start_char)?;
                     dict.set_item("end_offset", start_char + sec_chars)?;
-                    dict.set_item("text_preview", format!("{}{}", prefix, sec.trim()))?;
+                    let full_text = format!("{}{}", prefix, sec.trim());
+                    dict.set_item("text_preview", &full_text)?;
+                    dict.set_item("sentence_offsets", get_sentence_offsets_json(&full_text))?;
+                    dict.set_item("segmenter_version", "rs_v1")?;
                     chunks.push(dict.into());
                 } else {
                     let mut c = create_chunks(py, sec, chunk_size_chars, chunk_overlap_chars, prefix, start_char)?;
@@ -127,7 +170,10 @@ fn chunk_markdown(py: Python, text: &str, chunk_size_chars: usize, chunk_overlap
                 let dict = PyDict::new(py);
                 dict.set_item("start_offset", start_char)?;
                 dict.set_item("end_offset", start_char + sec_chars)?;
-                dict.set_item("text_preview", format!("{}{}", prefix, sec.trim()))?;
+                let full_text = format!("{}{}", prefix, sec.trim());
+                dict.set_item("text_preview", &full_text)?;
+                dict.set_item("sentence_offsets", get_sentence_offsets_json(&full_text))?;
+                dict.set_item("segmenter_version", "rs_v1")?;
                 chunks.push(dict.into());
             } else {
                 let mut c = create_chunks(py, sec, chunk_size_chars, chunk_overlap_chars, prefix, start_char)?;
@@ -146,10 +192,9 @@ fn find_sentence_boundary(text: &str, char_pos: usize, char_window: usize) -> us
     let mut byte_pos = text.len();
     let mut byte_search_start = 0;
     
-    let target_start_char = if char_pos > char_window { char_pos - char_window } else { 0 };
-    
-    let mut current_char_idx = 0;
-    for (b_idx, _) in text.char_indices() {
+    let target_start_char = char_pos.saturating_sub(char_window);
+
+    for (current_char_idx, (b_idx, _)) in text.char_indices().enumerate() {
         if current_char_idx == target_start_char {
             byte_search_start = b_idx;
         }
@@ -157,7 +202,6 @@ fn find_sentence_boundary(text: &str, char_pos: usize, char_window: usize) -> us
             byte_pos = b_idx;
             break;
         }
-        current_char_idx += 1;
     }
 
     let region = &text[byte_search_start..byte_pos];
@@ -319,7 +363,21 @@ fn _pack_children(nodes: &mut [TreeNode], idx: usize) {
     child_data.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
     _initialize_spiral_positions(&mut child_data);
-    _simulate_repulsion(&mut child_data);
+    // H-06 / P-01: Use the Barnes-Hut O(n log n) layout from layout.rs instead
+    // of the O(n^2) pair-wise repulsion loop that shipped previously.
+    let mut nodes_for_layout: Vec<layout::Node> = child_data.iter().map(|cd| layout::Node {
+        position: cd.2,
+        radius: cd.1,
+        parent_index: u32::MAX,
+        flags: 0,
+        type_hash: 0,
+        pad: 0,
+    }).collect();
+    let cfg = layout::LayoutConfig::default();
+    layout::simulate_layout(&mut nodes_for_layout, &cfg);
+    for (i, cd) in child_data.iter_mut().enumerate() {
+        cd.2 = nodes_for_layout[i].position;
+    }
 
     let mut bounding_radius = 0.0_f32;
     for cd in &child_data {
@@ -344,36 +402,7 @@ fn _initialize_spiral_positions(child_data: &mut [(usize, f32, [f32; 3])]) {
     }
 }
 
-fn _simulate_repulsion(child_data: &mut [(usize, f32, [f32; 3])]) {
-    let child_count = child_data.len();
-    for _ in 0..150 {
-        for cd in child_data.iter_mut() { 
-            cd.2[0] *= 0.95; cd.2[1] *= 0.95; cd.2[2] *= 0.95; 
-        }
-        for i in 0..child_count {
-            for j in (i+1)..child_count {
-                let dx = child_data[i].2[0] - child_data[j].2[0];
-                let dy = child_data[i].2[1] - child_data[j].2[1];
-                let dz = child_data[i].2[2] - child_data[j].2[2];
-                let dist_sq = dx*dx + dy*dy + dz*dz;
-                let min_dist = child_data[i].1 + child_data[j].1 + 0.8;
-                if dist_sq < min_dist * min_dist && dist_sq > 0.0001 {
-                    let dist = dist_sq.sqrt();
-                    let overlap = min_dist - dist;
-                    let (nx, ny, nz) = (dx / dist, dy / dist, dz / dist);
-                    let push = overlap * 0.5;
-                    let total_r = child_data[i].1 + child_data[j].1;
-                    child_data[i].2[0] += nx * push * (child_data[j].1 / total_r);
-                    child_data[i].2[1] += ny * push * (child_data[j].1 / total_r);
-                    child_data[i].2[2] += nz * push * (child_data[j].1 / total_r);
-                    child_data[j].2[0] -= nx * push * (child_data[i].1 / total_r);
-                    child_data[j].2[1] -= ny * push * (child_data[i].1 / total_r);
-                    child_data[j].2[2] -= nz * push * (child_data[i].1 / total_r);
-                }
-            }
-        }
-    }
-}
+
 
 /// Generates a tightly packed binary buffer for 3D visualization using Hierarchical Spherical Packing
 #[pyfunction]
@@ -398,6 +427,9 @@ fn get_spatial_binary(files: Vec<(String, f32, String)>) -> PyResult<Vec<u8>> {
     }
 
     let mut buffer = Vec::new();
+    // SAFETY: Node is #[repr(C, align(32))] and contains only primitive types (f32, u32).
+    // Casting to [u8] is safe because Node has no uninitialized padding bytes,
+    // and gpu_nodes has exactly nodes.len() * size_of::<Node>() valid bytes.
     let slice_u8 = unsafe { std::slice::from_raw_parts(gpu_nodes.as_ptr() as *const u8, gpu_nodes.len() * std::mem::size_of::<Node>()) };
     buffer.extend_from_slice(slice_u8);
     Ok(buffer)
@@ -513,9 +545,25 @@ fn extract_text_files(paths: Vec<String>, max_size: usize) -> PyResult<Vec<(Stri
 }
 
 
-/// A Python module implemented in Rust using PyO3.
+/// Hash a path exactly as build_tree does for Node.type_hash, so callers
+/// can join external metadata onto the visualizer binary stream.
+#[pyfunction]
+fn hash_tree_path(path: &str) -> u32 {
+    use std::hash::{Hash, Hasher};
+    let normalized = path.replace("\\", "/");
+    let joined = normalized
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("/");
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    joined.hash(&mut hasher);
+    (hasher.finish() & 0xFFFFFFFF) as u32
+}
+
+/// Python module implemented in Rust using PyO3.
 #[pymodule]
-fn rust_core(_py: Python, m: &PyModule) -> PyResult<()> {
+fn rust_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(scan_folders, m)?)?;
     m.add_function(wrap_pyfunction!(create_chunks, m)?)?;
     m.add_function(wrap_pyfunction!(chunk_markdown, m)?)?;
@@ -523,6 +571,7 @@ fn rust_core(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(get_spatial_binary, m)?)?;
     m.add_function(wrap_pyfunction!(calculate_sha256, m)?)?;
     m.add_function(wrap_pyfunction!(extract_text_files, m)?)?;
+    m.add_function(wrap_pyfunction!(hash_tree_path, m)?)?;
     Ok(())
 }
 
@@ -678,4 +727,123 @@ mod tests {
     fn test_ext_empty_string() {
         assert_eq!(normalize_ext(""), "");
     }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_calculate_sha256_valid_file() {
+        let temp_dir = std::env::temp_dir().join("pma_test_sha256");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let file_path = temp_dir.join("test_sha256.txt");
+        std::fs::write(&file_path, "PMA Test Data").unwrap();
+        
+        let hash_res = calculate_sha256(file_path.to_str().unwrap()).unwrap();
+        assert_eq!(hash_res, "cea2d8a89cbf1cf9d2e23d3f5bd5bf2e58a9622c7030febd2d034efab8d700d6");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_calculate_sha256_non_existent() {
+        let hash_res = calculate_sha256("non_existent_file_path_12345.txt").unwrap();
+        assert_eq!(hash_res, "");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_scan_folders_non_existent() {
+        let res = scan_folders(vec!["/non_existent_folder_path_12345".to_string()], vec![]).unwrap();
+        assert!(res.is_empty());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_scan_folders_matching_extensions() {
+        let temp_dir = std::env::temp_dir().join("pma_test_scan");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        
+        std::fs::write(temp_dir.join("a.py"), "print(1)").unwrap();
+        std::fs::write(temp_dir.join("b.txt"), "hello").unwrap();
+        std::fs::write(temp_dir.join("c.bin"), b"\x00\x01\x02").unwrap();
+
+        let paths = scan_folders(vec![temp_dir.to_str().unwrap().to_string()], vec![".py".to_string(), "txt".to_string()]).unwrap();
+        
+        assert_eq!(paths.len(), 2);
+        let has_a = paths.iter().any(|p| p.ends_with("a.py"));
+        let has_b = paths.iter().any(|p| p.ends_with("b.txt"));
+        let has_c = paths.iter().any(|p| p.ends_with("c.bin"));
+        assert!(has_a);
+        assert!(has_b);
+        assert!(!has_c);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_extract_text_files_valid() {
+        let temp_dir = std::env::temp_dir().join("pma_test_extract");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        
+        let file1 = temp_dir.join("file1.txt");
+        let file2 = temp_dir.join("file2.txt");
+        std::fs::write(&file1, "First File").unwrap();
+        std::fs::write(&file2, "Second File").unwrap();
+
+        let paths = vec![file1.to_str().unwrap().to_string(), file2.to_str().unwrap().to_string()];
+        let results = extract_text_files(paths, 1000).unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].1, "First File");
+        assert_eq!(results[1].1, "Second File");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_extract_text_files_binary() {
+        let temp_dir = std::env::temp_dir().join("pma_test_extract_bin");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        
+        let file1 = temp_dir.join("binary.bin");
+        std::fs::write(&file1, b"\x00\x00\x00\x00Hello\x00\x01\x02").unwrap();
+
+        let paths = vec![file1.to_str().unwrap().to_string()];
+        let results = extract_text_files(paths, 1000).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].1.contains("Binary content not indexed"));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_find_sentence_boundary_standard() {
+        let text = "Hello world. This is a test sentence here. Third sentence.";
+        let boundary = find_sentence_boundary(text, 25, 20);
+        assert_eq!(boundary, 13);
+    }
+
+    #[test]
+    fn test_get_spatial_binary_empty() {
+        let res = get_spatial_binary(vec![]).unwrap();
+        assert_eq!(res.len(), 32);
+    }
+
+    #[test]
+    fn test_get_spatial_binary_some_files() {
+        let files = vec![
+            ("src/main.rs".to_string(), 1000.0, "rs".to_string()),
+            ("src/lib.rs".to_string(), 500.0, "rs".to_string()),
+        ];
+        let res = get_spatial_binary(files).unwrap();
+        assert_eq!(res.len(), 4 * 32);
+    }
+
+    // PyO3 tests removed due to PyO3 0.29 GIL API changes; tested via pytest instead.
 }
+

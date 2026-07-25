@@ -4,6 +4,7 @@ demo_data/
 logs/
 data/
 tests/
+frontend/src/__tests__/
 *.exe
 *.msi
 *.spec
@@ -12,6 +13,9 @@ build/
 *.log
 *.xml
 pylint_results.txt
+htmlcov/
+.coverage
+frontend/coverage/
 .scannerwork/
 sonar-project.properties
 .env*

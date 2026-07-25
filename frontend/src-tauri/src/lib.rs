@@ -1,12 +1,9 @@
 use tauri::Manager;
 
-fn resolve_prod_sidecar<R: tauri::Runtime>(
-    app_handle: &tauri::AppHandle<R>,
+fn resolve_prod_sidecar_paths(
+    resource_dir: &std::path::Path,
+    app_local_data_dir: &std::path::Path,
 ) -> Result<String, String> {
-    let resource_dir = app_handle
-        .path()
-        .resource_dir()
-        .map_err(|err| format!("Failed to resolve resource directory: {err}"))?;
     let direct_sidecar = resource_dir.join("python").join("PMA.exe");
     if direct_sidecar.exists() {
         return Ok(direct_sidecar.to_string_lossy().to_string());
@@ -20,10 +17,7 @@ fn resolve_prod_sidecar<R: tauri::Runtime>(
         ));
     }
 
-    let extract_dir = app_handle
-        .path()
-        .app_local_data_dir()
-        .map_err(|err| format!("Failed to resolve app local data directory: {err}"))?
+    let extract_dir = app_local_data_dir
         .join("sidecar")
         .join(env!("CARGO_PKG_VERSION"))
         .join("PMA");
@@ -78,6 +72,20 @@ fn resolve_prod_sidecar<R: tauri::Runtime>(
     }
 
     Ok(extracted_sidecar.to_string_lossy().to_string())
+}
+
+fn resolve_prod_sidecar<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+) -> Result<String, String> {
+    let resource_dir = app_handle
+        .path()
+        .resource_dir()
+        .map_err(|err| format!("Failed to resolve resource directory: {err}"))?;
+    let app_local_data_dir = app_handle
+        .path()
+        .app_local_data_dir()
+        .map_err(|err| format!("Failed to resolve app local data directory: {err}"))?;
+    resolve_prod_sidecar_paths(&resource_dir, &app_local_data_dir)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -176,10 +184,8 @@ pub fn run() {
                 let stdout = child.stdout.take().unwrap();
                 tauri::async_runtime::spawn_blocking(move || {
                     let reader = BufReader::new(stdout);
-                    for line in reader.lines() {
-                        if let Ok(l) = line {
-                            println!("[BACKEND] {}", l);
-                        }
+                    for l in reader.lines().map_while(Result::ok) {
+                        println!("[BACKEND] {}", l);
                     }
                 });
 
@@ -187,10 +193,8 @@ pub fn run() {
                 let stderr = child.stderr.take().unwrap();
                 tauri::async_runtime::spawn_blocking(move || {
                     let reader = BufReader::new(stderr);
-                    for line in reader.lines() {
-                        if let Ok(l) = line {
-                            eprintln!("[BACKEND ERROR] {}", l);
-                        }
+                    for l in reader.lines().map_while(Result::ok) {
+                        eprintln!("[BACKEND ERROR] {}", l);
                     }
                 });
 
@@ -213,12 +217,171 @@ pub fn run() {
         .expect("error while running tauri application");
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct BackendInfo {
     port: u16,
     token: String,
 }
 
+fn get_backend_info_inner(info: &BackendInfo) -> (u16, String) {
+    (info.port, info.token.clone())
+}
+
 #[tauri::command]
 fn get_backend_info(state: tauri::State<'_, BackendInfo>) -> (u16, String) {
-    (state.port, state.token.clone())
+    get_backend_info_inner(&state)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_backend_info_ipc_command() {
+        let info = BackendInfo {
+            port: 18234,
+            token: "test-token-uuid-1234".to_string(),
+        };
+        let (port, token) = get_backend_info_inner(&info);
+        assert_eq!(port, 18234);
+        assert_eq!(token, "test-token-uuid-1234");
+    }
+
+    #[test]
+    fn test_uuid_token_format() {
+        use uuid::Uuid;
+        let token = Uuid::new_v4().to_string();
+        assert_eq!(token.len(), 36);
+        assert!(Uuid::parse_str(&token).is_ok());
+    }
+
+    #[test]
+    fn test_portpicker_in_valid_range() {
+        let port = portpicker::pick_unused_port().unwrap_or(18234);
+        assert!(port > 1024);
+    }
+
+    #[test]
+    fn test_portpicker_non_zero() {
+        let port = portpicker::pick_unused_port().unwrap_or(18234);
+        assert_ne!(port, 0);
+    }
+
+    #[test]
+    fn test_serialization_backend_info() {
+        let info = BackendInfo {
+            port: 1234,
+            token: "serializable-token".to_string(),
+        };
+        let serialized = serde_json::to_string(&info).unwrap();
+        let deserialized: BackendInfo = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized.port, 1234);
+        assert_eq!(deserialized.token, "serializable-token");
+    }
+
+    #[test]
+    fn test_resolve_sidecar_missing_both() {
+        let temp_dir = std::env::temp_dir().join(format!("test_missing_both_{}", uuid::Uuid::new_v4()));
+        let resource_dir = temp_dir.join("resources");
+        let app_local_data_dir = temp_dir.join("local_data");
+        std::fs::create_dir_all(&resource_dir).unwrap();
+        std::fs::create_dir_all(&app_local_data_dir).unwrap();
+
+        let res = resolve_prod_sidecar_paths(&resource_dir, &app_local_data_dir);
+        assert!(res.is_err());
+        let err_msg = res.unwrap_err();
+        assert!(err_msg.contains("Bundled sidecar not found"));
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn test_resolve_sidecar_direct_exe() {
+        let temp_dir = std::env::temp_dir().join(format!("test_direct_exe_{}", uuid::Uuid::new_v4()));
+        let resource_dir = temp_dir.join("resources");
+        let app_local_data_dir = temp_dir.join("local_data");
+        
+        let python_dir = resource_dir.join("python");
+        std::fs::create_dir_all(&python_dir).unwrap();
+        let exe_path = python_dir.join("PMA.exe");
+        std::fs::write(&exe_path, "mock-exe-content").unwrap();
+        
+        let res = resolve_prod_sidecar_paths(&resource_dir, &app_local_data_dir);
+        assert!(res.is_ok());
+        let resolved_path = res.unwrap();
+        assert!(resolved_path.contains("PMA.exe"));
+        
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn test_resolve_sidecar_already_extracted() {
+        let temp_dir = std::env::temp_dir().join(format!("test_already_extracted_{}", uuid::Uuid::new_v4()));
+        let resource_dir = temp_dir.join("resources");
+        let app_local_data_dir = temp_dir.join("local_data");
+
+        let python_dir = resource_dir.join("python");
+        std::fs::create_dir_all(&python_dir).unwrap();
+        let zip_path = python_dir.join("PMA-sidecar.zip");
+        std::fs::write(&zip_path, "mock-zip-content").unwrap();
+
+        let extract_dir = app_local_data_dir
+            .join("sidecar")
+            .join(env!("CARGO_PKG_VERSION"))
+            .join("PMA");
+        std::fs::create_dir_all(&extract_dir).unwrap();
+        let extracted_exe = extract_dir.join("PMA.exe");
+        std::fs::write(&extracted_exe, "mock-extracted-content").unwrap();
+        
+        let res = resolve_prod_sidecar_paths(&resource_dir, &app_local_data_dir);
+        assert!(res.is_ok());
+        let resolved_path = res.unwrap();
+        assert_eq!(resolved_path, extracted_exe.to_string_lossy().to_string());
+        
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn test_resolve_sidecar_clean_partial() {
+        let temp_dir = std::env::temp_dir().join(format!("test_clean_partial_{}", uuid::Uuid::new_v4()));
+        let resource_dir = temp_dir.join("resources");
+        let app_local_data_dir = temp_dir.join("local_data");
+
+        let python_dir = resource_dir.join("python");
+        std::fs::create_dir_all(&python_dir).unwrap();
+        let zip_path = python_dir.join("PMA-sidecar.zip");
+        std::fs::write(&zip_path, "mock-zip-content").unwrap();
+
+        let extract_dir = app_local_data_dir
+            .join("sidecar")
+            .join(env!("CARGO_PKG_VERSION"))
+            .join("PMA");
+        std::fs::create_dir_all(&extract_dir).unwrap();
+        
+        let marker_file = extract_dir.join("marker.txt");
+        std::fs::write(&marker_file, "marker").unwrap();
+        
+        let res = resolve_prod_sidecar_paths(&resource_dir, &app_local_data_dir);
+        assert!(res.is_err());
+        
+        assert!(!marker_file.exists());
+        
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn test_resolve_sidecar_non_existent_resource_dir() {
+        let temp_dir = std::env::temp_dir().join(format!("test_non_existent_{}", uuid::Uuid::new_v4()));
+        let resource_dir = temp_dir.join("non_existent_resources");
+        let app_local_data_dir = temp_dir.join("local_data");
+        std::fs::create_dir_all(&app_local_data_dir).unwrap();
+
+        let res = resolve_prod_sidecar_paths(&resource_dir, &app_local_data_dir);
+        assert!(res.is_err());
+        let err_msg = res.unwrap_err();
+        assert!(err_msg.contains("Bundled sidecar not found"));
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+}
+

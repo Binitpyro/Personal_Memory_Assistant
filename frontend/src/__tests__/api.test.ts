@@ -2,26 +2,24 @@
  * frontend/src/__tests__/api.test.ts
  * Tests for API response shape validation and error handling patterns
  * (pure logic, no actual fetch calls).
+ *
+ * L-04 NOTE: The helper functions below (isValidSearchResult, extractErrorMessage,
+ * canSubmitQuery, getBadgeVariant) are intentional LOCAL TEST UTILITIES. They
+ * document and validate the expected response contract and UI state machine logic.
+ * They are NOT meant to shadow or replace production exports from api.ts — they
+ * serve as a specification that the actual frontend consumers must conform to.
+ * If any of these are promoted to production code, they should be moved to
+ * api.ts (or a dedicated utils.ts) and imported here.
  */
 import { describe, it, expect } from 'vitest'
+import {
+  isValidSearchResult,
+  extractErrorMessage,
+  canSubmitQuery,
+  getBadgeVariant
+} from '../utils/api-helpers'
 
 // ── API response type guards ───────────────────────────────────────────────
-
-interface SearchResult {
-  answer: string
-  sources: Array<{ file_path: string; text: string; score: number }>
-  cached?: boolean
-  latency_ms?: number
-}
-
-function isValidSearchResult(data: unknown): data is SearchResult {
-  if (typeof data !== 'object' || data === null) return false
-  const d = data as Record<string, unknown>
-  return (
-    typeof d['answer'] === 'string' &&
-    Array.isArray(d['sources'])
-  )
-}
 
 describe('isValidSearchResult', () => {
   it('accepts valid result', () => {
@@ -50,17 +48,6 @@ describe('isValidSearchResult', () => {
 
 // ── Error message extractor ───────────────────────────────────────────────
 
-function extractErrorMessage(error: unknown): string {
-  if (typeof error === 'string') return error
-  if (error instanceof Error) return error.message
-  if (typeof error === 'object' && error !== null) {
-    const e = error as Record<string, unknown>
-    if (typeof e['detail'] === 'string') return e['detail']
-    if (typeof e['message'] === 'string') return e['message']
-  }
-  return 'An unexpected error occurred'
-}
-
 describe('extractErrorMessage', () => {
   it('handles string errors', () => {
     expect(extractErrorMessage('Network error')).toBe('Network error')
@@ -84,14 +71,6 @@ describe('extractErrorMessage', () => {
 
 // ── Query state machine ───────────────────────────────────────────────────
 
-type QueryStatus = 'idle' | 'loading' | 'streaming' | 'done' | 'error'
-
-function canSubmitQuery(status: QueryStatus, query: string): boolean {
-  return status === 'idle' || status === 'done' || status === 'error'
-    ? query.trim().length > 0
-    : false
-}
-
 describe('canSubmitQuery', () => {
   it('allows submission when idle with non-empty query', () => {
     expect(canSubmitQuery('idle', 'what files do I have?')).toBe(true)
@@ -114,16 +93,6 @@ describe('canSubmitQuery', () => {
 })
 
 // ── Source badge color logic ──────────────────────────────────────────────
-
-type BadgeVariant = 'primary' | 'secondary' | 'warning' | 'error' | 'neutral'
-
-function getBadgeVariant(score: number): BadgeVariant {
-  if (score >= 0.8) return 'primary'
-  if (score >= 0.6) return 'secondary'
-  if (score >= 0.4) return 'warning'
-  if (score >= 0.2) return 'error'
-  return 'neutral'
-}
 
 describe('getBadgeVariant', () => {
   it('returns primary for high scores', () => {

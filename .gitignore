@@ -200,7 +200,7 @@ chroma/
 .chroma/
 
 # Disconnected assets
-PMA Obsidian/
+PMA Obsidian/files/
 # demo_data/     <-- Tracked now
 # static/        <-- Keep ignored for build assets
 static/
@@ -212,8 +212,8 @@ app/vector_store/lancedb_data/
 # Jupyter etc (if you use them)
 .ipynb_checkpoints/
 
-# Hackathon local/private files
-PMA Obsidian/
+# local/private files
+PMA Obsidian/files/
 # scripts/      <-- Tracked
 GEMINI.md
 scripts/Sonar-Scan.bat
@@ -234,7 +234,6 @@ pylint_results.txt
 .pytest_temp/
 personal_memory_assistant.egg-info/
 frontend/coverage/
-tests/
 
 # Built executables
 *.exe
@@ -246,3 +245,18 @@ build/
 .scannerwork/
 /.agent
 sonar-project.properties
+/.agents
+/.claude
+/.codex
+/agents
+ORIGINAL_REQUEST.md
+progress.md
+security_report.md
+AGENTS.md
+pma_metadata.db*
+/PMA Obsidian/.obsidian/plugins
+/tests/fixtures
+/PMA Obsidian/.obsidian
+/frontend/test-results
+/frontend/test-results
+/frontend/test-results

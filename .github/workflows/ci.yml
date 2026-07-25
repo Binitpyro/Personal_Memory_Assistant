@@ -12,6 +12,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Set up uv
         uses: astral-sh/setup-uv@v5
         with:
@@ -20,7 +23,12 @@ jobs:
 
       - name: Install dependencies
         run: |
-          uv sync --frozen --all-extras
+          uv sync --all-extras
+
+      - name: Build Rust core extension
+        working-directory: app/scanner/rust_core
+        run: |
+          uv run maturin develop --release
 
       - name: Run Ruff (Lint & Format Check)
         run: |

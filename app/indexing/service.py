@@ -928,7 +928,7 @@ class IndexingService:
                 tag = "Unknown"
                 for f_res, f_name in resolved_folders:
                     try:
-                        p_obj.relative_to(f_res)
+                        p_obj.resolve().relative_to(f_res)
                         tag = f_name
                         break
                     except ValueError:

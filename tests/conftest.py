@@ -1,9 +1,15 @@
 import asyncio
+import ctypes
 import gc
 import os
 import re
 import sys
 from unittest.mock import AsyncMock, MagicMock
+
+if not hasattr(ctypes, "windll"):
+    ctypes.windll = MagicMock()
+if not hasattr(ctypes, "get_last_error"):
+    ctypes.get_last_error = MagicMock(return_value=0)
 
 # Ensure nltk is mocked to prevent network calls and lookup issues
 try:
@@ -120,6 +126,16 @@ async def client(mock_db, mock_emb, mock_lancedb, mock_llm):
         yield ac
 
     app.dependency_overrides.clear()
+
+
+@pytest.fixture(autouse=True, scope="session")
+def ensure_dummy_react_index():
+    from pathlib import Path
+
+    index_file = Path(__file__).parent.parent / "static" / "react" / "index.html"
+    if not index_file.exists():
+        index_file.parent.mkdir(parents=True, exist_ok=True)
+        index_file.write_text("<!DOCTYPE html><html><body>PMA Test</body></html>")
 
 
 @pytest.fixture(autouse=True)

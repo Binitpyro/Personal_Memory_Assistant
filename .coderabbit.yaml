@@ -1,6 +1,27 @@
 # yaml-language-server: $schema=https://coderabbit.ai/coderabbit-schema.json
 language: "en-US"
 reviews:
+  profile: "chill"
+  request_changes_workflow: false
+  high_level_summary: true
+  path_filters:
+    - "!PMA Obsidian/**"
+    - "!static/**"
+    - "!demo_data/**"
+    - "!logs/**"
+    - "!data/**"
+    - "!tests/**"
+    - "!frontend/src/__tests__/**"
+    - "!**.xml"
+    - "!**.exe"
+    - "!**.msi"
+    - "!**.spec"
+    - "!test_list.txt"
+    - "!dist_readme.txt"
+    - "!pylint_results.txt"
+    - "!htmlcov/**"
+    - "!.coverage"
+    - "!frontend/coverage/**"
   ignore_patterns:
     - "PMA Obsidian/**"
     - "static/**"
@@ -19,3 +40,4 @@ reviews:
     - "htmlcov/**"
     - ".coverage"
     - "frontend/coverage/**"
+

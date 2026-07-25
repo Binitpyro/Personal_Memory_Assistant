@@ -1,11 +1,15 @@
 import json
 import os
 import sys
-import httpx
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
+
+from app.providers.gemini import GeminiProvider
+from app.providers.lm_studio import LMStudioProvider
+from app.providers.ollama import OllamaProvider
 
 # 1. Mock the optional ollama library before import
 mock_ollama = MagicMock()
@@ -278,6 +282,7 @@ def test_build_prompt(patch_data_paths):
 @pytest.mark.asyncio
 async def test_check_ollama_health():
     from app.providers.cache import validation_cache
+
     validation_cache.clear()
     client = LLMClient()
     client.ollama_url = "http://ollama"
@@ -295,6 +300,7 @@ async def test_check_ollama_health():
 @pytest.mark.asyncio
 async def test_check_lm_studio_health():
     from app.providers.cache import validation_cache
+
     validation_cache.clear()
     client = LLMClient()
     client.lm_studio_url = "http://lmstudio"
@@ -348,9 +354,10 @@ async def test_generate_answer():
     client.api_key = None
     client._oauth_token = None
     client.provider_preference = "auto"
-    
+
     async def mock_resolve_with_fallback(pid, model=None, timeout=30.0):
         from app.search.llm_client import ProviderNotConfiguredError
+
         if pid == "gemini" or pid == "openai":
             raise ProviderNotConfiguredError("Not configured")
         if pid == "lm_studio":
@@ -358,6 +365,7 @@ async def test_generate_answer():
         if pid == "ollama":
             return mock_ollama
         raise Exception("Unknown provider")
+
     client._resolve_provider_by_id = mock_resolve_with_fallback
 
     ans = await client.generate_answer("q", "c", skip_capability_check=True)
@@ -366,11 +374,13 @@ async def test_generate_answer():
     # Ollama fallback
     async def mock_resolve_ollama(pid, model=None, timeout=30.0):
         from app.search.llm_client import ProviderNotConfiguredError
+
         if pid in ("gemini", "openai", "lm_studio"):
             raise ProviderNotConfiguredError("Not configured")
         if pid == "ollama":
             return mock_ollama
         raise Exception("Unknown provider")
+
     client._resolve_provider_by_id = mock_resolve_ollama
     ans = await client.generate_answer("q", "c", skip_capability_check=True)
     assert ans == "ollama_ans"
@@ -380,22 +390,16 @@ async def test_generate_answer():
         from app.search.llm_client import ProviderNotConfiguredError
 
         raise ProviderNotConfiguredError("Not configured")
+
     client._resolve_provider_by_id = mock_resolve_none
     ans = await client.generate_answer("q", "c", skip_capability_check=True)
     assert "Last error: Not configured" in ans
 
 
-from app.providers.gemini import GeminiProvider
-from app.providers.ollama import OllamaProvider
-from app.providers.lm_studio import LMStudioProvider
-
-
 @pytest.mark.asyncio
 async def test_call_gemini_success():
     provider = GeminiProvider(
-        api_key="fake_gemini_key",
-        base_url=None,
-        default_model="gemini-model"
+        api_key="fake_gemini_key", base_url=None, default_model="gemini-model"
     )
 
     mock_resp = MagicMock()
@@ -416,9 +420,7 @@ async def test_call_gemini_success():
 @pytest.mark.asyncio
 async def test_call_gemini_oauth_success():
     provider = GeminiProvider(
-        api_key="ya29.oauth_token",
-        base_url=None,
-        default_model="gemini-model"
+        api_key="ya29.oauth_token", base_url=None, default_model="gemini-model"
     )
 
     mock_resp = MagicMock()
@@ -438,15 +440,13 @@ async def test_call_gemini_oauth_success():
 @pytest.mark.asyncio
 async def test_call_gemini_api_error():
     provider = GeminiProvider(
-        api_key="fake_gemini_key",
-        base_url=None,
-        default_model="gemini-model"
+        api_key="fake_gemini_key", base_url=None, default_model="gemini-model"
     )
 
     mock_resp = httpx.Response(
         400,
         text="Invalid request arguments",
-        request=httpx.Request("POST", "https://generativelanguage.googleapis.com")
+        request=httpx.Request("POST", "https://generativelanguage.googleapis.com"),
     )
 
     with patch("httpx.AsyncClient.post", AsyncMock(return_value=mock_resp)):
@@ -458,11 +458,7 @@ async def test_call_gemini_api_error():
 
 @pytest.mark.asyncio
 async def test_call_ollama():
-    provider = OllamaProvider(
-        api_key=None,
-        base_url="http://ollama",
-        default_model="mistral"
-    )
+    provider = OllamaProvider(api_key=None, base_url="http://ollama", default_model="mistral")
 
     mock_resp = MagicMock()
     mock_resp.status_code = 200
@@ -474,19 +470,17 @@ async def test_call_ollama():
         assert ans == "Ollama response content"
 
     # Ollama library failure
-    with patch("httpx.AsyncClient.post", AsyncMock(side_effect=Exception("Ollama offline"))):
-        with pytest.raises(Exception):
-            await provider.chat([{"role": "user", "content": "prompt"}])
+    with (
+        patch("httpx.AsyncClient.post", AsyncMock(side_effect=RuntimeError("Ollama offline"))),
+        pytest.raises(RuntimeError),
+    ):
+        await provider.chat([{"role": "user", "content": "prompt"}])
     await provider.close()
 
 
 @pytest.mark.asyncio
 async def test_stream_ollama():
-    provider = OllamaProvider(
-        api_key=None,
-        base_url="http://ollama",
-        default_model="mistral"
-    )
+    provider = OllamaProvider(api_key=None, base_url="http://ollama", default_model="mistral")
 
     mock_resp = MagicMock()
     mock_resp.status_code = 200
@@ -508,11 +502,7 @@ async def test_stream_ollama():
 
 @pytest.mark.asyncio
 async def test_call_lm_studio_success():
-    provider = LMStudioProvider(
-        api_key=None,
-        base_url="http://lmstudio",
-        default_model="phi3"
-    )
+    provider = LMStudioProvider(api_key=None, base_url="http://lmstudio", default_model="phi3")
 
     mock_resp = MagicMock()
     mock_resp.status_code = 200
@@ -524,9 +514,7 @@ async def test_call_lm_studio_success():
 
     # Non-200
     mock_resp_err = httpx.Response(
-        500,
-        text="Internal Server Error",
-        request=httpx.Request("POST", "http://lmstudio")
+        500, text="Internal Server Error", request=httpx.Request("POST", "http://lmstudio")
     )
     with patch("httpx.AsyncClient.post", AsyncMock(return_value=mock_resp_err)):
         with pytest.raises(Exception) as exc:
@@ -537,11 +525,7 @@ async def test_call_lm_studio_success():
 
 @pytest.mark.asyncio
 async def test_stream_gemini_success():
-    provider = GeminiProvider(
-        api_key="key",
-        base_url=None,
-        default_model="gemini-model"
-    )
+    provider = GeminiProvider(api_key="key", base_url=None, default_model="gemini-model")
 
     mock_resp = MagicMock()
     mock_resp.status_code = 200
@@ -568,16 +552,12 @@ async def test_stream_gemini_success():
 
 @pytest.mark.asyncio
 async def test_stream_gemini_error():
-    provider = GeminiProvider(
-        api_key="key",
-        base_url=None,
-        default_model="gemini-model"
-    )
+    provider = GeminiProvider(api_key="key", base_url=None, default_model="gemini-model")
 
     mock_resp = httpx.Response(
         403,
         text="Forbidden",
-        request=httpx.Request("POST", "https://generativelanguage.googleapis.com")
+        request=httpx.Request("POST", "https://generativelanguage.googleapis.com"),
     )
 
     with patch("httpx.AsyncClient.stream", return_value=AsyncContextManagerMock(mock_resp)):
@@ -591,11 +571,7 @@ async def test_stream_gemini_error():
 
 @pytest.mark.asyncio
 async def test_stream_lm_studio_success():
-    provider = LMStudioProvider(
-        api_key=None,
-        base_url="http://lmstudio",
-        default_model="phi3"
-    )
+    provider = LMStudioProvider(api_key=None, base_url="http://lmstudio", default_model="phi3")
 
     mock_resp = MagicMock()
     mock_resp.status_code = 200
@@ -617,16 +593,10 @@ async def test_stream_lm_studio_success():
 
 @pytest.mark.asyncio
 async def test_stream_lm_studio_error():
-    provider = LMStudioProvider(
-        api_key=None,
-        base_url="http://lmstudio",
-        default_model="phi3"
-    )
+    provider = LMStudioProvider(api_key=None, base_url="http://lmstudio", default_model="phi3")
 
     mock_resp = httpx.Response(
-        500,
-        text="Internal Server Error",
-        request=httpx.Request("POST", "http://lmstudio")
+        500, text="Internal Server Error", request=httpx.Request("POST", "http://lmstudio")
     )
     with patch("httpx.AsyncClient.stream", return_value=AsyncContextManagerMock(mock_resp)):
         results = []
@@ -644,9 +614,10 @@ async def test_stream_answer_monitoring():
 
     mock_provider = AsyncMock()
     mock_provider.spec.id = "gemini"
-    
+
     async def fake_stream(*args, **kwargs):
         yield '<claim sources="[1]">Fact</claim>'
+
     mock_provider.stream = fake_stream
 
     client._resolve_provider_by_id = AsyncMock(return_value=mock_provider)
@@ -664,13 +635,13 @@ async def test_stream_answer_monitoring():
         assert results[0] == '<claim sources="[1]">Fact</claim>'
         assert any("usage" in r for r in results)
 
-
     # 2. Capability check passes, but stream fails to return `<claim` within 600 chars
     mock_provider_fail = AsyncMock()
     mock_provider_fail.spec.id = "gemini"
-    
+
     async def fake_stream_no_claims(*args, **kwargs):
         yield "A" * 700
+
     mock_provider_fail.stream = fake_stream_no_claims
 
     client._resolve_provider_by_id = AsyncMock(return_value=mock_provider_fail)
@@ -687,4 +658,3 @@ async def test_stream_answer_monitoring():
             results.append(chunk)
 
         mock_report.assert_called_once_with(client)
-

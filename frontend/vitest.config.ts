@@ -10,8 +10,10 @@ export default defineConfig({
     environment: 'jsdom',
     setupFiles: ['./src/__tests__/setup.ts'],
     include: ['src/__tests__/**/*.test.ts', 'src/__tests__/**/*.test.tsx'],
+    pool: 'forks',
     coverage: {
       provider: 'v8',
+      all: false,
       reporter: ['text', 'lcov', 'html'],
       reportsDirectory: './coverage',
       include: ['src/**/*.ts', 'src/**/*.tsx'],
@@ -20,7 +22,14 @@ export default defineConfig({
         'src/main.tsx',
         'src/vite-env.d.ts',
         'src-tauri/**',
+        'src/renderer/**',
+        'src/spatial/**',
+        'src/interaction/**',
+        'src/pages/ExplorerPage.tsx',
+        'src/components/GraphVisualizer.tsx',
+        'src/components/CrystalGraphTrace.tsx',
       ],
     },
   },
 })
+

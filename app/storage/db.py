@@ -728,8 +728,8 @@ class DatabaseManager:
             ids: list[int] = []
             for chunk in insert_data:
                 async with conn.execute(
-                    "INSERT INTO chunks (file_id, start_offset, end_offset, text_preview, sentence_offsets, segmenter_version) "  # noqa: E501
-                    "VALUES (:file_id, :start_offset, :end_offset, :text_preview, :sentence_offsets, :segmenter_version) RETURNING id;",  # noqa: E501
+                    "INSERT INTO chunks (file_id, start_offset, end_offset, text_preview, sentence_offsets, segmenter_version) "
+                    "VALUES (:file_id, :start_offset, :end_offset, :text_preview, :sentence_offsets, :segmenter_version) RETURNING id;",
                     chunk,
                 ) as cursor:
                     row = await cursor.fetchone()
@@ -772,8 +772,8 @@ class DatabaseManager:
             for i in range(0, len(insert_data), max_rows_per_query):
                 batch = insert_data[i : i + max_rows_per_query]
                 await conn.executemany(
-                    "INSERT INTO chunks (file_id, start_offset, end_offset, text_preview, sentence_offsets, segmenter_version) "  # noqa: E501
-                    "VALUES (:file_id, :start_offset, :end_offset, :text_preview, :sentence_offsets, :segmenter_version);",  # noqa: E501
+                    "INSERT INTO chunks (file_id, start_offset, end_offset, text_preview, sentence_offsets, segmenter_version) "
+                    "VALUES (:file_id, :start_offset, :end_offset, :text_preview, :sentence_offsets, :segmenter_version);",
                     batch,
                 )
 
@@ -836,7 +836,7 @@ class DatabaseManager:
         conn = self._get_conn()
         await conn.executemany(
             "INSERT INTO kg_nodes (id, type, label, properties, chunk_id) VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT(id) DO UPDATE SET type=excluded.type, label=excluded.label, properties=excluded.properties, chunk_id=excluded.chunk_id",  # noqa: E501
+            "ON CONFLICT(id) DO UPDATE SET type=excluded.type, label=excluded.label, properties=excluded.properties, chunk_id=excluded.chunk_id",
             data,
         )
         if auto_commit:
@@ -855,8 +855,8 @@ class DatabaseManager:
         await conn.execute("PRAGMA foreign_keys = OFF")
         try:
             await conn.executemany(
-                "INSERT INTO kg_edges (source, target, relation, weight, properties) VALUES (?, ?, ?, ?, ?) "  # noqa: E501
-                "ON CONFLICT(source, target, relation) DO UPDATE SET weight=excluded.weight, properties=excluded.properties",  # noqa: E501
+                "INSERT INTO kg_edges (source, target, relation, weight, properties) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(source, target, relation) DO UPDATE SET weight=excluded.weight, properties=excluded.properties",
                 data,
             )
             if auto_commit:
@@ -1003,7 +1003,7 @@ class DatabaseManager:
         SELECT path_str FROM paths
         WHERE depth > 0
         LIMIT ?
-        """  # noqa: E501, S608
+        """  # noqa: S608
         params = [*src_chunk_ids, max_depth, limit]
 
         async with self._get_read_conn() as conn, conn.execute(query, params) as cursor:
@@ -1200,7 +1200,7 @@ class DatabaseManager:
         async with (
             self._get_read_conn() as conn,
             conn.execute(
-                "SELECT id, path, size, type, folder_tag, usage_count FROM files ORDER BY folder_tag, path"  # noqa: E501
+                "SELECT id, path, size, type, folder_tag, usage_count FROM files ORDER BY folder_tag, path"
             ) as cursor,
         ):
             return list(await cursor.fetchall())
@@ -1210,7 +1210,7 @@ class DatabaseManager:
         async with self._get_read_conn() as conn:
             # First stream all folder profiles
             async with conn.execute(
-                "SELECT folder_path, project_type, file_count, total_size_bytes FROM folder_profiles"  # noqa: E501
+                "SELECT folder_path, project_type, file_count, total_size_bytes FROM folder_profiles"
             ) as cursor:
                 async for row in cursor:
                     yield {
@@ -1344,7 +1344,7 @@ class DatabaseManager:
                 deep_analysis_toggled, mode_selected, force_include_count, feature_thumbs,
                 model_class, context_tokens_budget, context_tokens_used, chunks_included, chunks_dropped
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,  # noqa: E501
+            """,
             (
                 query_id,
                 time_to_first_token_ms,

@@ -56,9 +56,7 @@ class EpubExtractor:
                                 _MAX_CUMULATIVE_DECOMPRESSED_SIZE,
                                 path,
                             )
-                            raise ValueError(
-                                "Decompression limit exceeded (potential ZIP bomb)"
-                            )
+                            raise ValueError("Decompression limit exceeded (potential ZIP bomb)")
 
                         # Read at most 10 MB from a safe entry.
                         with zf.open(entry_info) as f:
@@ -66,7 +64,7 @@ class EpubExtractor:
                             cumulative_decompressed_bytes += len(raw_bytes)
                             if cumulative_decompressed_bytes > _MAX_CUMULATIVE_DECOMPRESSED_SIZE:
                                 logger.warning(
-                                    "EPUB extraction stopped: cumulative decompressed size limit (%d bytes) exceeded for %s",  # noqa: E501
+                                    "EPUB extraction stopped: cumulative decompressed size limit (%d bytes) exceeded for %s",
                                     _MAX_CUMULATIVE_DECOMPRESSED_SIZE,
                                     path,
                                 )

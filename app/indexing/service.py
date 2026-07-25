@@ -788,9 +788,7 @@ class IndexingService:
         else:
             chunk_ids_int = await self.db.insert_chunks_bulk(chunk_rows)
 
-        backup_enabled = (
-            settings.lancedb_mode == "split_brain" or settings.sqlite_embedding_backup
-        )
+        backup_enabled = settings.lancedb_mode == "split_brain" or settings.sqlite_embedding_backup
         l_ids, l_embs, l_metas = [], [], []
         emb_blobs = []
         kg_nodes_data = []

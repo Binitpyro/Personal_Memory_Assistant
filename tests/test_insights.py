@@ -57,10 +57,10 @@ async def test_files_tree_endpoint(client, mock_db):
 
     # Populate mock_db
     await mock_db.execute_write(
-        "INSERT INTO files (id, path, type, size, folder_tag, usage_count, modified_at) VALUES (1, 'dir/a.py', '.py', 100, 'folder_a', 2, 'now')"  # noqa: E501
+        "INSERT INTO files (id, path, type, size, folder_tag, usage_count, modified_at) VALUES (1, 'dir/a.py', '.py', 100, 'folder_a', 2, 'now')"
     )
     await mock_db.execute_write(
-        "INSERT INTO files (id, path, type, size, folder_tag, usage_count, modified_at) VALUES (2, 'dir/b.txt', '.txt', 200, NULL, NULL, 'now')"  # noqa: E501
+        "INSERT INTO files (id, path, type, size, folder_tag, usage_count, modified_at) VALUES (2, 'dir/b.txt', '.txt', 200, NULL, NULL, 'now')"
     )
 
     # 1. Non-cached fetch
@@ -89,10 +89,10 @@ async def test_files_tree_endpoint(client, mock_db):
 async def test_visualizer_binary_stream_endpoint(client, mock_db):
     # Populate mock_db
     await mock_db.execute_write(
-        "INSERT INTO files (id, path, type, size, folder_tag, usage_count, modified_at) VALUES (1, 'a.py', '.py', 1024, 'tag1', 0, 'now')"  # noqa: E501
+        "INSERT INTO files (id, path, type, size, folder_tag, usage_count, modified_at) VALUES (1, 'a.py', '.py', 1024, 'tag1', 0, 'now')"
     )
     await mock_db.execute_write(
-        "INSERT INTO files (id, path, type, size, folder_tag, usage_count, modified_at) VALUES (2, 'b.txt', '.txt', 2048, 'tag2', 0, 'now')"  # noqa: E501
+        "INSERT INTO files (id, path, type, size, folder_tag, usage_count, modified_at) VALUES (2, 'b.txt', '.txt', 2048, 'tag2', 0, 'now')"
     )
 
     # 1. /api/visualizer/stream

@@ -11,8 +11,8 @@ class ProviderSpec:
     base_url_editable: bool
     auth: Literal["bearer", "x-api-key", "x-goog-api-key", "none"]
     models_endpoint: str
-    models_parser: str            # "openai" | "anthropic" | "gemini" | "ollama_tags"
-    api_key_pattern: str | None   # regex sanity check
+    models_parser: str  # "openai" | "anthropic" | "gemini" | "ollama_tags"
+    api_key_pattern: str | None  # regex sanity check
     api_key_docs_url: str
     supports_streaming: bool
     supports_tools: bool

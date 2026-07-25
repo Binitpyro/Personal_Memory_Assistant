@@ -80,11 +80,11 @@ async def test_finetune_success(tmp_path):
 
     # Pre-populate db with 12 chunks for file_id=1 to trigger training pair generation >= 10
     await db.execute_write(
-        "INSERT INTO files (id, path, type, size, modified_at) VALUES (1, 'a.py', '.py', 100, 'now')"  # noqa: E501
+        "INSERT INTO files (id, path, type, size, modified_at) VALUES (1, 'a.py', '.py', 100, 'now')"
     )
     for i in range(12):
         await db.execute_write(
-            f"INSERT INTO chunks (file_id, text_preview, start_offset, end_offset) VALUES (1, 'chunk {i} text content', {i * 10}, {i * 10 + 9})"  # noqa: E501, S608
+            f"INSERT INTO chunks (file_id, text_preview, start_offset, end_offset) VALUES (1, 'chunk {i} text content', {i * 10}, {i * 10 + 9})"  # noqa: S608
         )
 
     await db.close()

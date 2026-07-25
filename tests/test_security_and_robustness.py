@@ -36,7 +36,7 @@ async def test_api_token_enforcement(mock_db, mock_emb, mock_lancedb, mock_llm):
         response = await ac.post("/api/query", json={"question": "test"})
         assert response.status_code == 401
 
-    # C. Request with valid token in query param -> passes auth check (might be 200 or 422/other depending on route details, but NOT 401)  # noqa: E501
+    # C. Request with valid token in query param -> passes auth check (might be 200 or 422/other depending on route details, but NOT 401)
     token = os.environ.get("X_LOCAL_ACCESS_TOKEN", "test-token")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         # Requesting search status check endpoint with token
@@ -287,7 +287,7 @@ def test_epub_extractor_cumulative_zip_bomb(tmp_path):
 
 @pytest.mark.anyio
 async def test_rag_pipeline_extremely_large_input(tmp_path, mock_db, mock_emb, mock_lancedb):
-    # Test that StreamChunker and IndexingService handle a very large input file without infinite loops or crashes  # noqa: E501
+    # Test that StreamChunker and IndexingService handle a very large input file without infinite loops or crashes
     large_file = tmp_path / "huge.txt"
     large_file.write_text("This is some text. " * 300_000)  # ~6MB text
 

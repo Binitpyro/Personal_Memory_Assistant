@@ -194,6 +194,49 @@ test.beforeEach(async ({ page }) => {
       }),
     });
   });
+
+  await page.route('**/api/providers', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify([
+        {
+          spec: {
+            id: 'gemini',
+            display_name: 'Google Gemini',
+            kind: 'cloud',
+            default_base_url: null,
+            base_url_editable: false,
+            auth: 'x-goog-api-key',
+            models_endpoint: '',
+            models_parser: '',
+            api_key_pattern: null,
+            api_key_docs_url: '',
+            supports_streaming: true,
+            supports_tools: true,
+            supports_vision: true,
+            supported_features: [],
+          },
+          is_set: true,
+          preview: 'AIzaSy...',
+          stored_in: 'env',
+          base_url: null,
+          default_model: 'gemini-2.5-flash-lite',
+          last_validation: {
+            ok: true,
+            latency_ms: 120,
+            models: [
+              { id: 'gemini-2.5-flash-lite', context_length: 1000000, pricing_hint: 0, family: 'gemini' },
+              { id: 'gemini-3-pro', context_length: 1000000, pricing_hint: 0, family: 'gemini' },
+            ],
+            error: null,
+            error_code: null,
+            server_time: null,
+          },
+        },
+      ]),
+    });
+  });
 });
 
 test('Search Scenario - Navigating to search, submitting query, verifying mocked search answer and sources', async ({ page }) => {
@@ -322,13 +365,13 @@ test('Settings Scenario - Updating model provider and model, and verifying it is
   // Select 'gemini'
   await providerSelect.selectOption('gemini');
 
-  // Find model input field
-  const modelInput = page.locator('label:has-text("Gemini model") input');
-  await expect(modelInput).toBeVisible();
-  await modelInput.fill('gemini-3-pro');
+  // Find model select dropdown
+  const modelSelect = page.locator('label:has-text("Model") select');
+  await expect(modelSelect).toBeVisible();
+  await modelSelect.selectOption('gemini-3-pro');
 
-  // Click Save
-  const saveBtn = page.locator('button', { hasText: 'Save LLM Preferences' });
+  // Click Save Preference
+  const saveBtn = page.locator('button', { hasText: 'Save Preference' });
   await expect(saveBtn).toBeVisible();
   
   // Verify that POST preference endpoint is successfully called with correct body on save

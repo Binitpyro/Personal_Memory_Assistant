@@ -42,7 +42,7 @@ def _write_settings(data: dict[str, Any]) -> None:
 
 
 @models_router.get("/preferences")
-async def get_preferences(response: Response = None) -> dict[str, Any]:
+async def get_preferences(response: Response = None) -> dict[str, Any]:  # type: ignore[assignment]
     if response:
         response.headers["X-Deprecated"] = "true"
     data = await asyncio.to_thread(_read_settings)
@@ -56,7 +56,7 @@ async def get_preferences(response: Response = None) -> dict[str, Any]:
 
 
 @models_router.post("/preferences")
-async def set_preferences(payload: LLMPreferences, response: Response = None) -> dict[str, Any]:
+async def set_preferences(payload: LLMPreferences, response: Response = None) -> dict[str, Any]:  # type: ignore[assignment]
     if response:
         response.headers["X-Deprecated"] = "true"
     normalized_provider = (payload.provider or "auto").lower()
@@ -85,7 +85,7 @@ async def set_preferences(payload: LLMPreferences, response: Response = None) ->
 
 
 @models_router.get("/detect")
-async def detect_local_models(response: Response = None) -> dict[str, Any]:
+async def detect_local_models(response: Response = None) -> dict[str, Any]:  # type: ignore[assignment]
     """
     Rapidly probes standard local ports to detect active LLM providers.
     Returns the list of available models for each provider.

@@ -2,11 +2,13 @@ import json
 import logging
 import time
 from collections.abc import AsyncGenerator
-from typing import Any
+from typing import Any, cast
+
 import httpx
+
 from app.providers.base import ModelInfo, ValidationResult
-from app.providers.registry import spec_of
 from app.providers.cache import validation_cache
+from app.providers.registry import spec_of
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +20,7 @@ class GeminiProvider:
         api_key: str | None,
         base_url: str | None = None,
         default_model: str | None = None,
-        timeout: float = 30.0
+        timeout: float = 30.0,
     ):
         self.spec = spec_of("gemini")
         self.api_key = api_key
@@ -61,18 +63,20 @@ class GeminiProvider:
             # Gemini returns names like "models/gemini-1.5-flash"
             model_id = name.split("/")[-1] if name.startswith("models/") else name
             if model_id:
-                models.append({
-                    "id": model_id,
-                    "context_length": item.get("inputTokenLimit"),
-                    "pricing_hint": None,
-                    "family": "chat"
-                })
-        return models
+                models.append(
+                    {
+                        "id": model_id,
+                        "context_length": item.get("inputTokenLimit"),
+                        "pricing_hint": None,
+                        "family": "chat",
+                    }
+                )
+        return cast(list[ModelInfo], models)
 
     async def validate(self) -> ValidationResult:
         cached = validation_cache.get(self.spec.id, self.base_url, self.api_key)
         if cached:
-            return cached
+            return cast(ValidationResult, cached)
 
         client = self._get_client()
         url = f"{self.base_url}{self.spec.models_endpoint}"
@@ -85,7 +89,7 @@ class GeminiProvider:
             "models": [],
             "error": None,
             "error_code": None,
-            "server_time": None
+            "server_time": None,
         }
 
         try:
@@ -105,11 +109,13 @@ class GeminiProvider:
                         result["error"] = "Auth worked but no models are visible."
                 except Exception as parse_err:
                     result["error_code"] = "wrong_base_url"
-                    result["error"] = f"Failed to parse models payload: {str(parse_err)}"
+                    result["error"] = f"Failed to parse models payload: {parse_err!s}"
             else:
                 if resp.status_code in (400, 401, 403):
                     result["error_code"] = "auth_failed"
-                    result["error"] = "Key is invalid or lacks permissions. Regenerate at Gemini API docs."
+                    result["error"] = (
+                        "Key is invalid or lacks permissions. Regenerate at Gemini API docs."
+                    )
                 elif resp.status_code == 404:
                     result["error_code"] = "wrong_base_url"
                     result["error"] = "Gemini endpoint not found."
@@ -133,16 +139,17 @@ class GeminiProvider:
                 result = fallback
             else:
                 result["error_code"] = "provider_down"
-                result["error"] = f"Unexpected Gemini validation error: {str(e)}"
+                result["error"] = f"Unexpected Gemini validation error: {e!s}"
 
-        key_preview = self.api_key[:6] + "..." if self.api_key and len(self.api_key) > 6 else "****"
         logger.info(
             "Validation for gemini: ok=%s, error_code=%s, error=%s",
-            result["ok"], result["error_code"], result["error"]
+            result["ok"],
+            result["error_code"],
+            result["error"],
         )
 
         validation_cache.set(self.spec.id, self.base_url, self.api_key, result)
-        return result
+        return cast(ValidationResult, result)
 
     def _build_payload(self, messages: list[dict[str, str]]) -> dict[str, Any]:
         contents = []
@@ -164,7 +171,7 @@ class GeminiProvider:
         *,
         model: str | None = None,
         temperature: float = 0.2,
-        max_tokens: int = 4096
+        max_tokens: int = 4096,
     ) -> str:
         client = self._get_client()
         model_name = model or self.default_model
@@ -188,7 +195,7 @@ class GeminiProvider:
         *,
         model: str | None = None,
         temperature: float = 0.2,
-        max_tokens: int = 4096
+        max_tokens: int = 4096,
     ) -> AsyncGenerator[str, None]:
         client = self._get_client()
         model_name = model or self.default_model

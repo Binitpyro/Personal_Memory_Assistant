@@ -731,6 +731,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_calculate_sha256_valid_file() {
         let temp_dir = std::env::temp_dir().join("pma_test_sha256");
         let _ = std::fs::remove_dir_all(&temp_dir);
@@ -744,18 +745,21 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_calculate_sha256_non_existent() {
         let hash_res = calculate_sha256("non_existent_file_path_12345.txt").unwrap();
         assert_eq!(hash_res, "");
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_scan_folders_non_existent() {
         let res = scan_folders(vec!["/non_existent_folder_path_12345".to_string()], vec![]).unwrap();
         assert!(res.is_empty());
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_scan_folders_matching_extensions() {
         let temp_dir = std::env::temp_dir().join("pma_test_scan");
         let _ = std::fs::remove_dir_all(&temp_dir);
@@ -779,6 +783,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_extract_text_files_valid() {
         let temp_dir = std::env::temp_dir().join("pma_test_extract");
         let _ = std::fs::remove_dir_all(&temp_dir);
@@ -800,6 +805,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_extract_text_files_binary() {
         let temp_dir = std::env::temp_dir().join("pma_test_extract_bin");
         let _ = std::fs::remove_dir_all(&temp_dir);

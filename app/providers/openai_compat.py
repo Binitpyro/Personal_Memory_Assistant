@@ -2,10 +2,13 @@ import json
 import logging
 import time
 from collections.abc import AsyncGenerator
+from typing import cast
+
 import httpx
+
 from app.providers.base import ModelInfo, ValidationResult
-from app.providers.registry import ProviderSpec
 from app.providers.cache import validation_cache
+from app.providers.registry import ProviderSpec
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +21,7 @@ class OpenAICompatibleProvider:
         api_key: str | None,
         base_url: str | None,
         default_model: str | None,
-        timeout: float = 30.0
+        timeout: float = 30.0,
     ):
         self.spec = spec
         self.api_key = api_key
@@ -57,13 +60,15 @@ class OpenAICompatibleProvider:
         for item in data.get("data", []):
             model_id = item.get("id")
             if model_id:
-                models.append({
-                    "id": model_id,
-                    "context_length": item.get("context_window"),
-                    "pricing_hint": None,
-                    "family": self._detect_family(model_id)
-                })
-        return models
+                models.append(
+                    {
+                        "id": model_id,
+                        "context_length": item.get("context_window"),
+                        "pricing_hint": None,
+                        "family": self._detect_family(model_id),
+                    }
+                )
+        return cast(list[ModelInfo], models)
 
     def _detect_family(self, model_id: str) -> str | None:
         model_lower = model_id.lower()
@@ -77,7 +82,7 @@ class OpenAICompatibleProvider:
         # Check cache
         cached = validation_cache.get(self.spec.id, self.base_url, self.api_key)
         if cached:
-            return cached
+            return cast(ValidationResult, cached)
 
         client = self._get_client()
         url = f"{self.base_url}{self.spec.models_endpoint}"
@@ -90,7 +95,7 @@ class OpenAICompatibleProvider:
             "models": [],
             "error": None,
             "error_code": None,
-            "server_time": None
+            "server_time": None,
         }
 
         try:
@@ -111,7 +116,7 @@ class OpenAICompatibleProvider:
                         result["error"] = "Auth worked but no models are visible."
                 except Exception as parse_err:
                     result["error_code"] = "wrong_base_url"
-                    result["error"] = f"Failed to parse models payload: {str(parse_err)}"
+                    result["error"] = f"Failed to parse models payload: {parse_err!s}"
             else:
                 self._map_http_error(resp.status_code, resp.text, result)
 
@@ -121,7 +126,9 @@ class OpenAICompatibleProvider:
                 result = fallback
             else:
                 result["error_code"] = "network"
-                result["error"] = f"Cannot reach {self.base_url}. Check firewall / VPN / captive portal."
+                result["error"] = (
+                    f"Cannot reach {self.base_url}. Check firewall / VPN / captive portal."
+                )
         except (httpx.ConnectError, httpx.HTTPError) as http_err:
             fallback = validation_cache.get_offline_fallback(self.spec.id)
             if fallback and not isinstance(http_err, httpx.HTTPStatusError):
@@ -140,28 +147,41 @@ class OpenAICompatibleProvider:
                 result = fallback
             else:
                 result["error_code"] = "provider_down"
-                result["error"] = f"Unexpected validation error: {str(e)}"
+                result["error"] = f"Unexpected validation error: {e!s}"
 
         # Redact keys in logs
         key_preview = self.api_key[:6] + "..." if self.api_key and len(self.api_key) > 6 else "****"
         logger.info(
             "Validation for %s (%s, key: %s): ok=%s, error_code=%s, error=%s",
-            self.spec.id, url, key_preview, result["ok"], result["error_code"], result["error"]
+            self.spec.id,
+            url,
+            key_preview,
+            result["ok"],
+            result["error_code"],
+            result["error"],
         )
 
         validation_cache.set(self.spec.id, self.base_url, self.api_key, result)
-        return result
+        return cast(ValidationResult, result)
 
-    def _map_http_error(self, status_code: int, response_text: str, result: ValidationResult) -> None:
+    def _map_http_error(
+        self, status_code: int, response_text: str, result: ValidationResult
+    ) -> None:
         if status_code in (401, 403):
             result["error_code"] = "auth_failed"
-            result["error"] = f"Key is invalid or lacks permissions. Regenerate at {self.spec.api_key_docs_url}."
+            result["error"] = (
+                f"Key is invalid or lacks permissions. Regenerate at {self.spec.api_key_docs_url}."
+            )
         elif status_code == 404:
             result["error_code"] = "wrong_base_url"
-            result["error"] = "URL responded but doesn't look like an OpenAI-compatible API. Check base URL."
+            result["error"] = (
+                "URL responded but doesn't look like an OpenAI-compatible API. Check base URL."
+            )
         elif status_code == 429:
             result["error_code"] = "rate_limited"
-            result["error"] = "Rate-limited even on model listing—account is likely paused or out of credits. Check billing."
+            result["error"] = (
+                "Rate-limited even on model listing—account is likely paused or out of credits. Check billing."
+            )
         elif status_code >= 500:
             result["error_code"] = "provider_down"
             result["error"] = f"Provider returned {status_code}—try again or switch to a fallback."
@@ -175,7 +195,7 @@ class OpenAICompatibleProvider:
         *,
         model: str | None = None,
         temperature: float = 0.2,
-        max_tokens: int = 4096
+        max_tokens: int = 4096,
     ) -> str:
         client = self._get_client()
         url = f"{self.base_url}/chat/completions"
@@ -187,7 +207,7 @@ class OpenAICompatibleProvider:
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
-            "stream": False
+            "stream": False,
         }
 
         resp = await client.post(url, headers=headers, json=payload)
@@ -201,7 +221,7 @@ class OpenAICompatibleProvider:
         *,
         model: str | None = None,
         temperature: float = 0.2,
-        max_tokens: int = 4096
+        max_tokens: int = 4096,
     ) -> AsyncGenerator[str, None]:
         client = self._get_client()
         url = f"{self.base_url}/chat/completions"
@@ -213,7 +233,7 @@ class OpenAICompatibleProvider:
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
-            "stream": True
+            "stream": True,
         }
 
         async with client.stream("POST", url, headers=headers, json=payload) as resp:

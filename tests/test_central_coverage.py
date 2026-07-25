@@ -258,9 +258,10 @@ def test_context_builder_edge_cases():
 @pytest.mark.asyncio
 async def test_llm_client_retry_logic():
     from app.search.llm_client import ProviderNotConfiguredError
+
     client = LLMClient()
-    client._resolve_provider_by_id = AsyncMock(side_effect=ProviderNotConfiguredError("Not configured"))
+    client._resolve_provider_by_id = AsyncMock(
+        side_effect=ProviderNotConfiguredError("Not configured")
+    )
     ans = await client.generate_answer("q", "c")
     assert "LLM unavailable" in ans
-
-

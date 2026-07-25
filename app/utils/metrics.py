@@ -1,5 +1,4 @@
 import logging
-import math
 import threading
 import time
 from collections import deque
@@ -23,6 +22,7 @@ class LatencyTracker:
 
     def get_stats(self) -> dict[str, dict[str, float]]:
         import statistics
+
         stats = {}
         with self._lock:
             for stage, values in self._history.items():

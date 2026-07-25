@@ -44,10 +44,10 @@ class MemoryMonitor:
                 rss = process.memory_info().rss
                 if rss > self.peak_rss:
                     self.peak_rss = rss
-            except Exception:  # noqa: S110
+            except Exception:
                 pass
             print(
-                f"[MemoryMonitor] Current RSS: {rss / 1024 / 1024:.2f} MB | Peak: {self.peak_rss / 1024 / 1024:.2f} MB",  # noqa: E501
+                f"[MemoryMonitor] Current RSS: {rss / 1024 / 1024:.2f} MB | Peak: {self.peak_rss / 1024 / 1024:.2f} MB",
                 flush=True,
             )
             time.sleep(self.interval)

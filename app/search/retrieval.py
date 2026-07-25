@@ -1,5 +1,6 @@
 import asyncio
 import difflib
+import json
 import logging
 import re
 import threading
@@ -415,7 +416,7 @@ async def hybrid_retrieve(
 
     placeholders = ",".join("?" for _ in chunk_ids_ordered)
     query_sql = (
-        f"SELECT c.id, zlib_decompress(c.text_preview) as text_preview, f.path, f.folder_tag, f.modified_at, c.start_offset, c.end_offset, c.sentence_offsets, c.segmenter_version "  # noqa: E501, S608
+        f"SELECT c.id, zlib_decompress(c.text_preview) as text_preview, f.path, f.folder_tag, f.modified_at, c.start_offset, c.end_offset, c.sentence_offsets, c.segmenter_version "  # noqa: S608
         f"FROM chunks c JOIN files f ON c.file_id = f.id "
         f"WHERE c.id IN ({placeholders})"
     )
@@ -634,7 +635,7 @@ async def _execute_graph_plan(
 
     placeholders = ",".join("?" for _ in all_ids)
     query_sql = (
-        f"SELECT c.id, zlib_decompress(c.text_preview) as text_preview, f.path, f.folder_tag, f.modified_at "  # noqa: E501, S608
+        f"SELECT c.id, zlib_decompress(c.text_preview) as text_preview, f.path, f.folder_tag, f.modified_at "  # noqa: S608
         f"FROM chunks c JOIN files f ON c.file_id = f.id "
         f"WHERE c.id IN ({placeholders})"
     )
@@ -850,7 +851,6 @@ async def stream_rag(
     override_provider: str | None = None,
     override_model: str | None = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
-
     """NDJSON stream events for /api/query/stream (match SearchPage chunk types)."""
     t_start = time.perf_counter()
 
@@ -970,7 +970,7 @@ async def stream_rag(
     if forced_chunk_ids:
         placeholders = ",".join("?" for _ in forced_chunk_ids)
         query_sql = (
-            f"SELECT c.id, zlib_decompress(c.text_preview) as text_preview, f.path, f.folder_tag, f.modified_at, c.start_offset, c.end_offset, c.sentence_offsets, c.segmenter_version "  # noqa: E501, S608
+            f"SELECT c.id, zlib_decompress(c.text_preview) as text_preview, f.path, f.folder_tag, f.modified_at, c.start_offset, c.end_offset, c.sentence_offsets, c.segmenter_version "  # noqa: S608
             f"FROM chunks c JOIN files f ON c.file_id = f.id "
             f"WHERE c.id IN ({placeholders})"
         )
@@ -1069,7 +1069,7 @@ async def stream_rag(
     try:
         annotation_query = "Extract patterns"
         annotation_context = (
-            f"Identify 1 to 3 coding/writing patterns or stylistic technical decisions from this answer:\n"  # noqa: E501
+            f"Identify 1 to 3 coding/writing patterns or stylistic technical decisions from this answer:\n"
             f"{full_answer}\n"
             "Return them as a simple comma-separated list."
         )
@@ -1170,7 +1170,7 @@ async def stream_rag(
                         response_text=full_answer,
                         timestamp=time.time(),
                     )
-        except Exception:  # noqa: S110
+        except Exception:
             pass
 
     if graph_paths_text:

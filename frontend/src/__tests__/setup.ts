@@ -2,6 +2,11 @@ import { vi, afterEach } from 'vitest';
 import React from 'react';
 import { cleanup } from '@testing-library/react';
 
+// Mock HTMLCanvasElement getContext for JSDOM
+if (typeof HTMLCanvasElement !== 'undefined') {
+  HTMLCanvasElement.prototype.getContext = vi.fn().mockReturnValue(null) as any;
+}
+
 // Mock ResizeObserver
 class ResizeObserverMock {
   observe() {}

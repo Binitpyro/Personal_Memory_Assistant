@@ -101,7 +101,7 @@ async def _stream_visualizer_binary_impl(extension: str | None, db: DatabaseMana
         else:
             if _RUST_AVAILABLE:
                 logger.warning(
-                    "rust_core is loaded but missing get_spatial_binary (likely an outdated DLL is locked). Falling back to Python layout."  # noqa: E501
+                    "rust_core is loaded but missing get_spatial_binary (likely an outdated DLL is locked). Falling back to Python layout."
                 )
             buf = _python_fallback_binary(rows)
 

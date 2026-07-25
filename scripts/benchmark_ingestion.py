@@ -48,7 +48,7 @@ class MemoryMonitor:
 
             # Print current RSS periodically
             print(
-                f"[MemoryMonitor] Current RSS: {rss / 1024 / 1024:.2f} MB | Peak: {self.peak_rss / 1024 / 1024:.2f} MB",  # noqa: E501
+                f"[MemoryMonitor] Current RSS: {rss / 1024 / 1024:.2f} MB | Peak: {self.peak_rss / 1024 / 1024:.2f} MB",
                 flush=True,
             )
             time.sleep(self.interval)
@@ -157,7 +157,7 @@ async def run_benchmark():
 if __name__ == "__main__":
     if not Path("tests/fixtures/perf_corpus").exists():
         print(
-            "Corpus directory tests/fixtures/perf_corpus does not exist. Run scripts/generate_perf_corpus.py first."  # noqa: E501
+            "Corpus directory tests/fixtures/perf_corpus does not exist. Run scripts/generate_perf_corpus.py first."
         )
         sys.exit(1)
     asyncio.run(run_benchmark())

@@ -30,14 +30,14 @@ class CapabilityDetector:
             logger.info("CapabilityDetector: Model class is 3b_local, disabling claim tags.")
             return False
 
-        cache_key = f"{llm_client.provider_preference}_{llm_client.model}_{llm_client.ollama_model}_{llm_client.lm_studio_model}"  # noqa: E501
+        cache_key = f"{llm_client.provider_preference}_{llm_client.model}_{llm_client.ollama_model}_{llm_client.lm_studio_model}"
 
         if cache_key in self._capability_cache:
             return bool(self._capability_cache[cache_key])
 
         probe_prompt = (
             "Given: 'Python was created in 1991 by Guido van Rossum.'\n"
-            'Output: <claim sources="[1]">Python was created in 1991</claim> by <claim sources="[1]">Guido van Rossum</claim>.\n\n'  # noqa: E501
+            'Output: <claim sources="[1]">Python was created in 1991</claim> by <claim sources="[1]">Guido van Rossum</claim>.\n\n'
             "Your turn. Format the following sentence using the exact same claim tags:\n"
             "Given: 'The Earth orbits the Sun.'\n"
             "Output:"
@@ -66,9 +66,9 @@ class CapabilityDetector:
 
     def report_failure(self, llm_client: "LLMClient"):
         """Called when the model fails to follow the <claim> tag instructions on a real query."""
-        cache_key = f"{llm_client.provider_preference}_{llm_client.model}_{llm_client.ollama_model}_{llm_client.lm_studio_model}"  # noqa: E501
+        cache_key = f"{llm_client.provider_preference}_{llm_client.model}_{llm_client.ollama_model}_{llm_client.lm_studio_model}"
         logger.warning(
-            "CapabilityDetector: Model failed to produce <claim> tags in real query. Disabling capabilities for session."  # noqa: E501
+            "CapabilityDetector: Model failed to produce <claim> tags in real query. Disabling capabilities for session."
         )
         self._capability_cache[cache_key] = False
 

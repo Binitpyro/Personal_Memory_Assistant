@@ -1,3 +1,4 @@
+#[cfg(not(miri))]
 use rayon::prelude::*;
 
 #[repr(C, align(32))]
@@ -248,7 +249,12 @@ pub fn simulate_layout(nodes: &mut [Node], config: &LayoutConfig) {
     for _iter in 0..config.iterations {
         let tree = Octree::build(nodes);
         
-        let mut forces: Vec<[f32; 3]> = nodes.par_iter().map(|node| {
+        #[cfg(not(miri))]
+        let node_iter = nodes.par_iter();
+        #[cfg(miri)]
+        let node_iter = nodes.iter();
+
+        let mut forces: Vec<[f32; 3]> = node_iter.map(|node| {
             let mut force = tree.compute_repulsion(node.position, config);
             force[0] += -0.01 * node.position[0];
             force[1] += -0.01 * node.position[1];

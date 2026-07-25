@@ -162,7 +162,8 @@ class DatabaseManager:
             yield self._write_conn
             return
 
-        assert self._read_pool is not None
+        if self._read_pool is None:
+            raise RuntimeError("Database read pool is not initialized")
         conn = await self._read_pool.get()
         try:
             yield conn

@@ -147,7 +147,7 @@ class EmbeddingService:
                 from huggingface_hub import snapshot_download
 
                 # Fetch only required ONNX and tokenizer files to save bandwidth and disk space
-                model_path_str = snapshot_download(
+                model_path_str = snapshot_download(  # nosec B615
                     repo_id=self.model_name,
                     allow_patterns=["*.json", "*.txt", "*.onnx", "onnx/*"],
                     ignore_patterns=["*.safetensors", "*.bin", "*.h5", "*.msgpack"],

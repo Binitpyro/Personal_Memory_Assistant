@@ -115,7 +115,8 @@ class LanceDBClient:
 
     def _get_table(self, name: str):
         self.connect()
-        assert self.db is not None
+        if self.db is None:
+            raise RuntimeError("LanceDB connection is not initialized")
         if name in self._table_cache:
             return self._table_cache[name]
         with self._write_lock:
@@ -129,7 +130,8 @@ class LanceDBClient:
 
     def _create_or_open_table(self, name: str, data: Any):
         self.connect()
-        assert self.db is not None
+        if self.db is None:
+            raise RuntimeError("LanceDB connection is not initialized")
         with self._write_lock:
             if name in self._table_cache:
                 tbl = self._table_cache[name]
@@ -160,7 +162,8 @@ class LanceDBClient:
 
     def get_all_ids(self, table_name: str = "pma_chunks") -> set[str]:
         self.connect()
-        assert self.db is not None
+        if self.db is None:
+            raise RuntimeError("LanceDB connection is not initialized")
         try:
             tbl = self._get_table(table_name)
             if tbl is not None:
@@ -174,7 +177,8 @@ class LanceDBClient:
     def get_max_id(self, table_name: str = "pma_chunks") -> int:
         """Fetch the highest numeric chunk_id currently in LanceDB using PyArrow computation."""
         self.connect()
-        assert self.db is not None
+        if self.db is None:
+            raise RuntimeError("LanceDB connection is not initialized")
         try:
             tbl = self._get_table(table_name)
             if tbl is not None:
@@ -194,7 +198,8 @@ class LanceDBClient:
     def count_rows(self, table_name: str = "pma_chunks") -> int:
         """Efficiently count total rows in a LanceDB table."""
         self.connect()
-        assert self.db is not None
+        if self.db is None:
+            raise RuntimeError("LanceDB connection is not initialized")
         try:
             tbl = self._get_table(table_name)
             if tbl is not None:
@@ -491,7 +496,8 @@ class LanceDBClient:
 
     async def clear_all(self) -> None:
         self.connect()
-        assert self.db is not None
+        if self.db is None:
+            raise RuntimeError("LanceDB connection is not initialized")
         loop = asyncio.get_running_loop()
 
         def _drop():

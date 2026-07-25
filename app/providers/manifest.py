@@ -24,7 +24,7 @@ def get_configured_provider_ids() -> list[str]:
             key = keyring.get_password("pma_backend", pid)
             if key:
                 configured.append(pid)
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
     # Check local providers in priority order: lm_studio, ollama

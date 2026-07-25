@@ -389,8 +389,10 @@ mod tests {
                 pad: 0,
             },
         ];
-        let mut config = LayoutConfig::default();
-        config.iterations = 5;
+        let config = LayoutConfig {
+            iterations: 5,
+            ..Default::default()
+        };
         let orig_pos_0 = nodes[0].position;
         let orig_pos_1 = nodes[1].position;
         simulate_layout(&mut nodes, &config);

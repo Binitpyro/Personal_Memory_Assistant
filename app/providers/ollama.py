@@ -93,12 +93,13 @@ class OllamaProvider:
                 result["error_code"] = "provider_down"
                 result["error"] = f"Ollama returned status {resp.status_code}."
 
-        except httpx.ConnectTimeout:
-            result["error_code"] = "network"
-            result["error"] = f"Cannot reach Ollama at {self.base_url}."
         except Exception as e:
-            result["error_code"] = "provider_down"
-            result["error"] = f"Unexpected Ollama validation error: {str(e)}"
+            fallback = validation_cache.get_offline_fallback(self.spec.id)
+            if fallback:
+                result = fallback
+            else:
+                result["error_code"] = "network"
+                result["error"] = f"Cannot connect to Ollama at {self.base_url}. Is Ollama running? ({str(e)})"
 
         logger.info(
             "Validation for ollama: ok=%s, error_code=%s, error=%s",

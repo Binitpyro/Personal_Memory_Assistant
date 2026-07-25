@@ -116,19 +116,31 @@ class OpenAICompatibleProvider:
                 self._map_http_error(resp.status_code, resp.text, result)
 
         except httpx.ConnectTimeout:
-            result["error_code"] = "network"
-            result["error"] = f"Cannot reach {self.base_url}. Check firewall / VPN / captive portal."
-        except (httpx.ConnectError, httpx.HTTPError) as http_err:
-            err_msg = str(http_err)
-            if "ssl" in err_msg.lower() or "cert" in err_msg.lower():
-                result["error_code"] = "tls_error"
-                result["error"] = "TLS handshake failed. Verify certificates."
+            fallback = validation_cache.get_offline_fallback(self.spec.id)
+            if fallback:
+                result = fallback
             else:
                 result["error_code"] = "network"
-                result["error"] = f"HTTP error occurred: {err_msg}"
+                result["error"] = f"Cannot reach {self.base_url}. Check firewall / VPN / captive portal."
+        except (httpx.ConnectError, httpx.HTTPError) as http_err:
+            fallback = validation_cache.get_offline_fallback(self.spec.id)
+            if fallback and not isinstance(http_err, httpx.HTTPStatusError):
+                result = fallback
+            else:
+                err_msg = str(http_err)
+                if "ssl" in err_msg.lower() or "cert" in err_msg.lower():
+                    result["error_code"] = "tls_error"
+                    result["error"] = "TLS handshake failed. Verify certificates."
+                else:
+                    result["error_code"] = "network"
+                    result["error"] = f"HTTP error occurred: {err_msg}"
         except Exception as e:
-            result["error_code"] = "provider_down"
-            result["error"] = f"Unexpected validation error: {str(e)}"
+            fallback = validation_cache.get_offline_fallback(self.spec.id)
+            if fallback:
+                result = fallback
+            else:
+                result["error_code"] = "provider_down"
+                result["error"] = f"Unexpected validation error: {str(e)}"
 
         # Redact keys in logs
         key_preview = self.api_key[:6] + "..." if self.api_key and len(self.api_key) > 6 else "****"

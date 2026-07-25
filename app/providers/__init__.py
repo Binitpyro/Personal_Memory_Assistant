@@ -1,6 +1,6 @@
 from app.providers.base import BaseProvider, ModelInfo, ValidationResult
 from app.providers.registry import ProviderSpec, PROVIDER_REGISTRY, spec_of
-from app.providers.manifest import PROVIDER_IDS
+from app.providers.manifest import PROVIDER_IDS, get_configured_provider_ids
 from app.providers.gemini import GeminiProvider
 from app.providers.openai import OpenAIProvider
 from app.providers.anthropic import AnthropicProvider

@@ -7,14 +7,19 @@ import {
   getSystemInfo,
   getLLMPreferences,
   setLLMPreferences,
+  setProviderDefaultModel,
   clearIndex,
   getDriveInfo,
   purgeHostCache,
+  getProviders,
+  type ProviderStatus,
   type LLMPreferences,
   type LocalModelDetection,
   type SystemInfo,
   type DriveInfo
 } from '../api'
+
+// STATIC_FALLBACK_MODELS removed in favor of dynamic backend discovery and persistent model heaps.
 
 // ── Sub-components for lower cognitive complexity ───────────────────
 
@@ -107,29 +112,67 @@ function LocalModelsSection({ localModels }: Readonly<{ localModels?: LocalModel
 }
 
 function LLMPreferencesSection({
-  localModels,
   onSave,
   saving
 }: Readonly<{
-  localModels?: LocalModelDetection;
-  onSave: (prefs: LLMPreferences) => void;
-  saving: boolean;
+  onSave: (prefs: LLMPreferences) => void
+  saving: boolean
 }>) {
   const navigate = useNavigate()
   const { data: llmPrefs } = useApi(getLLMPreferences, { cacheKey: 'llm-prefs' })
-  const [provider, setProvider] = useState<LLMPreferences['provider']>('auto')
-  const [geminiModel, setGeminiModel] = useState('gemini-2.5-flash-lite')
-  const [ollamaModel, setOllamaModel] = useState('')
-  const [lmStudioModel, setLmStudioModel] = useState('')
+  const { data: providers } = useApi(getProviders, { cacheKey: 'providers-list' })
+  
+  const [provider, setProvider] = useState<string>('auto')
+  const [selectedModels, setSelectedModels] = useState<Record<string, string>>({})
 
   useEffect(() => {
     if (llmPrefs) {
       setProvider(llmPrefs.provider || 'auto')
-      setGeminiModel(llmPrefs.gemini_model || 'gemini-2.5-flash-lite')
-      setOllamaModel(llmPrefs.ollama_model || '')
-      setLmStudioModel(llmPrefs.lm_studio_model || '')
+      const initialModels: Record<string, string> = {}
+      if (llmPrefs.gemini_model) initialModels.gemini = llmPrefs.gemini_model
+      if (llmPrefs.ollama_model) initialModels.ollama = llmPrefs.ollama_model
+      if (llmPrefs.lm_studio_model) initialModels.lm_studio = llmPrefs.lm_studio_model
+      setSelectedModels(initialModels)
     }
   }, [llmPrefs])
+
+  const activeProviders = (providers || []).filter(
+    (p: ProviderStatus) => p.is_set || p.spec.id === 'ollama' || p.spec.id === 'lm_studio'
+  )
+  
+  const activeProviderSpec = activeProviders.find(p => p.spec.id === provider)
+  
+  const availableModels = activeProviderSpec 
+    ? (activeProviderSpec.last_validation?.models?.map(m => m.id) || [])
+    : []
+
+  const currentModel = provider !== 'auto' ? (selectedModels[provider] || '') : ''
+
+  const handleProviderChange = (newProvider: string) => {
+    setProvider(newProvider)
+    if (newProvider !== 'auto') {
+      const pSpec = activeProviders.find(p => p.spec.id === newProvider)
+      const pModels = pSpec?.last_validation?.models?.map(m => m.id) || []
+      if (pModels.length > 0 && !selectedModels[newProvider]) {
+        setSelectedModels(prev => ({ ...prev, [newProvider]: pModels[0] }))
+      }
+    }
+  }
+
+  const handleModelChange = (newModel: string) => {
+    if (provider !== 'auto') {
+      setSelectedModels(prev => ({ ...prev, [provider]: newModel }))
+    }
+  }
+
+  const submitSave = () => {
+    if (!llmPrefs) return
+    const newPrefs: LLMPreferences = { ...llmPrefs, provider }
+    Object.entries(selectedModels).forEach(([pId, mId]) => {
+      newPrefs[`${pId}_model`] = mId
+    })
+    onSave(newPrefs)
+  }
 
   return (
     <div className="glass p-6 rounded-2xl border border-primary/10">
@@ -138,59 +181,58 @@ function LLMPreferencesSection({
           <Cpu className="w-6 h-6 text-primary" />
         </div>
         <div>
-          <h2 className="text-lg font-bold text-text-primary">Advanced Model Selection</h2>
+          <h2 className="text-lg font-bold text-text-primary">Model Selection</h2>
           <p className="text-sm text-text-secondary mt-1">
-            Choose your preferred provider and default model. PMA applies these preferences at runtime.
+            Choose your preferred intelligence provider and model. For detailed API key configurations, use the advanced view.
           </p>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <label className="text-sm text-text-secondary flex flex-col gap-1">
+      <div className="flex flex-col md:flex-row gap-4 items-end">
+        <label className="text-sm text-text-secondary flex flex-col gap-1 w-full md:w-64">
           Provider
-          <select value={provider} onChange={(e) => setProvider(e.target.value as LLMPreferences['provider'])} className="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-text-primary">
+          <select 
+            value={provider} 
+            onChange={(e) => handleProviderChange(e.target.value)} 
+            className="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-text-primary"
+          >
             <option value="auto">Auto (recommended)</option>
-            <option value="gemini">Gemini</option>
-            <option value="ollama">Ollama</option>
-            <option value="lm_studio">LM Studio</option>
+            {activeProviders.map(p => (
+              <option key={p.spec.id} value={p.spec.id}>{p.spec.display_name}</option>
+            ))}
           </select>
         </label>
 
-        <label className="text-sm text-text-secondary flex flex-col gap-1">
-          Gemini model
-          <input value={geminiModel} onChange={(e) => setGeminiModel(e.target.value)} className="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-text-primary" placeholder="gemini-2.5-flash-lite" />
-        </label>
-
-        <label className="text-sm text-text-secondary flex flex-col gap-1">
-          Ollama model
-          <select value={ollamaModel} onChange={(e) => setOllamaModel(e.target.value)} className="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-text-primary">
-            <option value="">(auto)</option>
-            {(localModels?.ollama.models || []).map((m) => <option key={m} value={m}>{m}</option>)}
-          </select>
-        </label>
-
-        <label className="text-sm text-text-secondary flex flex-col gap-1">
-          LM Studio model
-          <select value={lmStudioModel} onChange={(e) => setLmStudioModel(e.target.value)} className="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-text-primary">
-            <option value="">(auto)</option>
-            {(localModels?.lm_studio.models || []).map((m) => <option key={m} value={m}>{m}</option>)}
-          </select>
-        </label>
+        {provider !== 'auto' && availableModels.length > 0 && (
+          <label className="text-sm text-text-secondary flex flex-col gap-1 w-full md:w-64 animate-fade-in">
+            Model
+            <select 
+              value={currentModel} 
+              onChange={(e) => handleModelChange(e.target.value)} 
+              className="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-text-primary"
+            >
+              <option value="" disabled>Select a model...</option>
+              {availableModels.map(mId => (
+                <option key={mId} value={mId}>{mId}</option>
+              ))}
+            </select>
+          </label>
+        )}
       </div>
 
-      <div className="mt-4 flex items-center gap-3">
+      <div className="mt-6 flex items-center gap-3">
         <button
-          onClick={() => onSave({ provider, gemini_model: geminiModel, ollama_model: ollamaModel, lm_studio_model: lmStudioModel })}
-          disabled={saving}
+          onClick={submitSave}
+          disabled={saving || !llmPrefs}
           className="glass-button !bg-primary !text-white hover:!bg-primary-h !py-2 !px-4"
         >
-          {saving ? 'Saving...' : 'Save LLM Preferences'}
+          {saving ? 'Saving...' : 'Save Preference'}
         </button>
         <button
           onClick={() => navigate('/settings/providers')}
           className="glass-button !bg-primary/10 border border-primary/20 text-primary hover:!bg-primary/20 !py-2 !px-4"
         >
-          Manage Providers & Keys
+          Manage Providers (Advanced)
         </button>
       </div>
     </div>
@@ -377,7 +419,14 @@ export function SettingsPage() {
     setSavingPrefs(true)
     try {
       await setLLMPreferences(prefs)
+      for (const [key, val] of Object.entries(prefs)) {
+        if (key.endsWith('_model') && typeof val === 'string' && val) {
+          const providerId = key.replace('_model', '')
+          await setProviderDefaultModel(providerId, val).catch(() => {})
+        }
+      }
       invalidateCache('llm-prefs')
+      invalidateCache('providers-list')
       refetchPrefs()
       setMessage({ type: 'ok', text: 'LLM preferences saved.' })
     } catch (e) {
@@ -445,7 +494,6 @@ export function SettingsPage() {
       <LocalModelsSection localModels={localModels} />
 
       <LLMPreferencesSection
-        localModels={localModels}
         onSave={handleSavePrefs}
         saving={savingPrefs}
       />

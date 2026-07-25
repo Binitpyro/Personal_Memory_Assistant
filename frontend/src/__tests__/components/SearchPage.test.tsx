@@ -28,6 +28,7 @@ vi.mock('../../api', () => {
     clearQueryHistory: vi.fn(),
     getFileTree: vi.fn(),
     getAppConfig: vi.fn(),
+    getProviders: vi.fn(),
   };
 });
 

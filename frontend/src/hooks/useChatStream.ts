@@ -220,7 +220,7 @@ export function useChatStream(onHistoryUpdate: () => void) {
     // Resolve initial active provider and model
     const providers = queryClient.getQueryData<ProviderStatus[]>(['providers-list']);
     const primaryProvider = sessionModelOverride?.provider || providers?.find(p => p.is_set)?.spec.id || 'gemini';
-    const primaryModel = sessionModelOverride?.model || providers?.find(p => p.is_set)?.default_model || 'gemini-2.5-flash-lite';
+    const primaryModel = sessionModelOverride?.model || providers?.find(p => p.is_set)?.default_model || 'default-model';
 
     let currentProviderId = primaryProvider;
     let currentModelId = primaryModel;
@@ -247,7 +247,7 @@ export function useChatStream(onHistoryUpdate: () => void) {
         if (chunk.type === 'fallback') {
           currentProviderId = chunk.to || 'openai';
           const fallbackProviderStatus = providers?.find(p => p.spec.id === currentProviderId);
-          currentModelId = fallbackProviderStatus?.default_model || (currentProviderId === 'openai' ? 'gpt-4o-mini' : 'gemini-2.5-flash-lite');
+          currentModelId = fallbackProviderStatus?.default_model || 'default-model';
           dispatch({ type: 'SET_FALLBACK', payload: { to: currentProviderId } });
         }
 

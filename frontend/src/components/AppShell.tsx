@@ -97,11 +97,6 @@ export function AppShell() {
         <div className="px-5 py-4 border-t border-primary/10 flex flex-col gap-1">
           <span className="text-xs text-text-secondary opacity-0 group-hover:opacity-100 transition-opacity duration-300 whitespace-nowrap">
             v{appConfig?.app_version ?? health?.version ?? '—'}
-            {appConfig?.gemini_model ? (
-              <span className="block text-[10px] opacity-70 truncate max-w-[12rem]" title={appConfig.gemini_model}>
-                {appConfig.gemini_model}
-              </span>
-            ) : null}
           </span>
           {/* Weekly Cost Roll-up */}
           <div className="text-[10px] text-text-secondary font-medium opacity-0 group-hover:opacity-100 transition-opacity duration-300 mt-2 whitespace-nowrap overflow-hidden">

@@ -5,23 +5,18 @@ import type { ProviderStatus } from '../../api';
 import { useSessionProvider } from '../../context/SessionProviderContext';
 import { Sparkles, Search, X, Check } from 'lucide-react';
 
-const STATIC_FALLBACK_MODELS: Record<string, string[]> = {
-  gemini: ['gemini-2.5-flash-lite', 'gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-1.5-flash', 'gemini-1.5-pro'],
-  openai: ['gpt-4o-mini', 'gpt-4o', 'o1-mini', 'o3-mini'],
-  anthropic: ['claude-3-5-sonnet-20241022', 'claude-3-5-haiku-20241022', 'claude-3-opus-20240229'],
-  groq: ['llama-3.3-70b-versatile', 'gemma2-9b-it', 'mixtral-8x7b-32768'],
-  nvidia_nim: ['meta/llama-3.3-70b-instruct', 'nvidia/llama-3.1-nemotron-70b-instruct'],
-  ollama: ['llama3', 'mistral', 'gemma2', 'phi3'],
-  lm_studio: ['phi3', 'llama3'],
-};
+// STATIC_FALLBACK_MODELS removed in favor of dynamic backend discovery and persistent model heaps.
+// const STATIC_FALLBACK_MODELS: Record<string, string[]> = { ... };
 
 export function ModelPicker() {
-  const { data: providers } = useApi(getProviders, { cacheKey: 'providers-list' });
+  const { data: providers, refetch: refreshProviders } = useApi(getProviders, { cacheKey: 'providers-list' });
   const { sessionModelOverride, setSessionModelOverride } = useSessionProvider();
   
   const [isOpen, setIsOpen] = useState(false);
   const [search, setSearch] = useState('');
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const [customModel, setCustomModel] = useState('');
+  const [customProvider, setCustomProvider] = useState('gemini');
 
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -42,6 +37,7 @@ export function ModelPicker() {
     if (isOpen) {
       setSearch('');
       setSelectedIndex(0);
+      setCustomModel('');
       setTimeout(() => {
         inputRef.current?.focus();
       }, 50);
@@ -57,17 +53,19 @@ export function ModelPicker() {
     providerId: string;
     providerName: string;
     modelId: string;
+    isOffline?: boolean;
   }
 
   const flatModels: FlatModelItem[] = [];
   activeProviders.forEach((p: ProviderStatus) => {
-    const pModels = p.last_validation?.models?.map((m: { id: string }) => m.id) || STATIC_FALLBACK_MODELS[p.spec.id] || [];
+    const isOffline = !!p.last_validation?.cached_offline;
+    const pModels = p.last_validation?.models?.map((m: { id: string }) => m.id) || [];
     pModels.forEach((mId: string) => {
       flatModels.push({
-
         providerId: p.spec.id,
         providerName: p.spec.display_name,
         modelId: mId,
+        isOffline,
       });
     });
   });
@@ -86,6 +84,14 @@ export function ModelPicker() {
   const handleSelectModel = (item: FlatModelItem) => {
     setSessionModelOverride({ provider: item.providerId, model: item.modelId });
     setIsOpen(false);
+  };
+
+  const handleCustomSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (customModel.trim()) {
+      setSessionModelOverride({ provider: customProvider, model: customModel.trim() });
+      setIsOpen(false);
+    }
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -127,7 +133,7 @@ export function ModelPicker() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
           <div className="absolute inset-0" onClick={() => setIsOpen(false)} />
           
-          <div className="relative w-full max-w-lg glass rounded-2xl shadow-2xl border border-white/10 overflow-hidden flex flex-col max-h-[75vh] animate-in fade-in zoom-in duration-200">
+          <div className="relative w-full max-w-lg glass rounded-2xl shadow-2xl border border-white/10 overflow-hidden flex flex-col max-h-[80vh] animate-in fade-in zoom-in duration-200">
             {/* Header */}
             <div className="flex items-center gap-3 px-4 py-3.5 border-b border-white/5 bg-white/[0.02]">
               <Search className="w-4 h-4 text-text-secondary" />
@@ -143,6 +149,13 @@ export function ModelPicker() {
                 placeholder="Search models or providers..."
                 className="flex-1 bg-transparent text-sm text-text-primary focus:outline-none placeholder:text-text-secondary/50"
               />
+              <button
+                onClick={() => refreshProviders()}
+                className="p-1 hover:bg-white/5 rounded-md text-text-secondary hover:text-text-primary text-[10px] transition-all"
+                title="Refresh model list"
+              >
+                🔄 Refresh
+              </button>
               <button
                 onClick={() => setIsOpen(false)}
                 className="p-1 hover:bg-white/5 rounded-md text-text-secondary hover:text-text-primary transition-all"
@@ -173,9 +186,16 @@ export function ModelPicker() {
                       }`}
                     >
                       <div className="flex flex-col items-start text-left min-w-0">
-                        <span className={`text-xs font-semibold truncate w-full ${isSelected ? 'text-white' : 'text-text-primary'}`}>
-                          {item.modelId}
-                        </span>
+                        <div className="flex items-center gap-2">
+                          <span className={`text-xs font-semibold truncate ${isSelected ? 'text-white' : 'text-text-primary'}`}>
+                            {item.modelId}
+                          </span>
+                          {item.isOffline && (
+                            <span className="text-[9px] px-1.5 py-0.5 rounded bg-yellow-500/20 text-yellow-300 font-medium">
+                              Offline / Cached
+                            </span>
+                          )}
+                        </div>
                         <span className={`text-[10px] uppercase tracking-wider ${isSelected ? 'text-white/80' : 'text-text-secondary/80'}`}>
                           {item.providerName}
                         </span>
@@ -187,11 +207,40 @@ export function ModelPicker() {
                   );
                 })
               ) : (
-                <div className="py-8 text-center text-xs text-text-secondary/60">
-                  No active provider or model matching "{search}"
+                <div className="py-6 text-center text-xs text-text-secondary/60">
+                  No active model matching "{search}". Enter a custom model below.
                 </div>
               )}
             </div>
+
+            {/* Custom Model Input Form */}
+            <form onSubmit={handleCustomSubmit} className="p-3 border-t border-white/5 bg-white/[0.02] flex items-center gap-2">
+              <select
+                value={customProvider}
+                onChange={(e) => setCustomProvider(e.target.value)}
+                className="bg-white/5 border border-white/10 rounded px-2 py-1 text-xs text-text-primary focus:outline-none"
+              >
+                {(providers || []).map((p: ProviderStatus) => (
+                  <option key={p.spec.id} value={p.spec.id} className="bg-background text-text-primary">
+                    {p.spec.display_name}
+                  </option>
+                ))}
+              </select>
+              <input
+                type="text"
+                placeholder="Or enter custom model ID..."
+                value={customModel}
+                onChange={(e) => setCustomModel(e.target.value)}
+                className="flex-1 bg-white/5 border border-white/10 rounded px-2.5 py-1 text-xs text-text-primary focus:outline-none placeholder:text-text-secondary/40"
+              />
+              <button
+                type="submit"
+                disabled={!customModel.trim()}
+                className="px-3 py-1 bg-primary hover:bg-primary/80 disabled:opacity-50 text-white rounded text-xs font-medium transition-all"
+              >
+                Use
+              </button>
+            </form>
 
             {/* Footer */}
             <div className="px-4 py-2 border-t border-white/5 bg-white/[0.01] flex items-center justify-between text-[10px] text-text-secondary">

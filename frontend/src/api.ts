@@ -480,10 +480,11 @@ export interface LocalModelDetection {
 export const getLocalModels = () => json<LocalModelDetection>('/llm/detect');
 
 export interface LLMPreferences {
-  provider: 'auto' | 'gemini' | 'ollama' | 'lm_studio';
+  provider: 'auto' | 'gemini' | 'ollama' | 'lm_studio' | string;
   gemini_model?: string | null;
   ollama_model?: string | null;
   lm_studio_model?: string | null;
+  [key: string]: any;
 }
 
 export const getLLMPreferences = () => json<LLMPreferences>('/llm/preferences');
@@ -537,6 +538,7 @@ export interface ValidationResponse {
   error: string | null;
   error_code: string | null;
   server_time: string | null;
+  cached_offline?: boolean;
 }
 
 export const getProviders = () => json<ProviderStatus[]>('/providers');

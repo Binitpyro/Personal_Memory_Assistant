@@ -16,10 +16,13 @@ vi.mock('../../useApi', () => ({
       return { data: { total_files: 5, total_chunks: 25, database_size_bytes: 2048 }, loading: false, error: null, refetch: vi.fn() };
     }
     if (opts?.cacheKey === 'llm-prefs') {
-      return { data: { provider: 'auto', gemini_model: 'gemini-2.5-flash-lite', ollama_model: '', lm_studio_model: '' }, loading: false, error: null, refetch: vi.fn() };
+      return { data: { provider: 'auto', gemini_model: 'default-model', ollama_model: '', lm_studio_model: '' }, loading: false, error: null, refetch: vi.fn() };
     }
     if (opts?.cacheKey === 'drive-info') {
       return { data: { is_portable_fs: false, lancedb_mode: 'local', mount_path: '/mock/path', free_bytes: 5000000 }, loading: false, error: null, refetch: vi.fn() };
+    }
+    if (opts?.cacheKey === 'providers-list') {
+      return { data: [], loading: false, error: null, refetch: vi.fn() };
     }
     return { data: undefined, loading: false, error: null, refetch: vi.fn() };
   }),
@@ -39,6 +42,7 @@ vi.mock('../../api', () => {
     launchGoogleAuth: vi.fn(),
     getDriveInfo: vi.fn(),
     purgeHostCache: vi.fn(),
+    getProviders: vi.fn(),
   };
 });
 
@@ -47,7 +51,6 @@ describe('SettingsPage Component', () => {
     renderWithProviders(<SettingsPage />);
 
     expect(screen.getByText('Settings')).toBeDefined();
-    expect(screen.getByText('Advanced Model Selection')).toBeDefined();
-    expect(screen.getByText('Google Gemini Account')).toBeDefined();
+    expect(screen.getByText('Model Selection')).toBeDefined();
   });
 });

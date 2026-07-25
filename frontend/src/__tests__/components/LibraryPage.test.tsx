@@ -57,7 +57,7 @@ vi.mock('../../useApi', () => ({
         data: {
           watch_dirs: [],
           google_drive_sync: false,
-          gemini_model: 'gemini-2.5-flash-lite',
+          gemini_model: 'default-model',
         },
         loading: false,
         error: null,

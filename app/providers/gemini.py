@@ -121,11 +121,19 @@ class GeminiProvider:
                     result["error"] = f"Gemini error {resp.status_code}: {resp.text[:100]}"
 
         except httpx.ConnectTimeout:
-            result["error_code"] = "network"
-            result["error"] = f"Cannot reach Gemini at {self.base_url}."
+            fallback = validation_cache.get_offline_fallback(self.spec.id)
+            if fallback:
+                result = fallback
+            else:
+                result["error_code"] = "network"
+                result["error"] = f"Cannot reach Gemini at {self.base_url}."
         except Exception as e:
-            result["error_code"] = "provider_down"
-            result["error"] = f"Unexpected Gemini validation error: {str(e)}"
+            fallback = validation_cache.get_offline_fallback(self.spec.id)
+            if fallback:
+                result = fallback
+            else:
+                result["error_code"] = "provider_down"
+                result["error"] = f"Unexpected Gemini validation error: {str(e)}"
 
         key_preview = self.api_key[:6] + "..." if self.api_key and len(self.api_key) > 6 else "****"
         logger.info(

@@ -6,7 +6,7 @@ from pathlib import Path
 import keyring
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Extra
-from app.providers import create_provider, PROVIDER_IDS, PROVIDER_REGISTRY
+from app.providers import create_provider, PROVIDER_IDS, PROVIDER_REGISTRY, get_configured_provider_ids
 from app.providers.base import ValidationResult
 from app.config import settings
 from app.providers.cache import validation_cache
@@ -73,7 +73,7 @@ def migrate_settings_if_needed(data: dict) -> dict:
         llm["provider"] = "auto"
 
     if "fallback_chain" not in llm:
-        llm["fallback_chain"] = ["gemini", "openai", "ollama"]
+        llm["fallback_chain"] = get_configured_provider_ids()
 
     return data
 
@@ -113,7 +113,7 @@ async def get_llm_settings():
     llm = data.get("llm", {})
     return {
         "provider": llm.get("provider", "auto"),
-        "fallback_chain": llm.get("fallback_chain", ["gemini", "openai", "ollama"])
+        "fallback_chain": llm.get("fallback_chain") or get_configured_provider_ids()
     }
 
 
@@ -176,6 +176,14 @@ async def list_providers():
                 api_key = None
 
         last_validation = validation_cache.get(pid, base_url, api_key)
+
+        # Trigger background validation if no validation result is cached yet for active providers
+        if last_validation is None and (is_set or pid in ("ollama", "lm_studio")):
+            try:
+                p_obj = create_provider(pid, api_key=api_key, base_url=base_url, default_model=default_model)
+                asyncio.create_task(p_obj.validate())
+            except Exception as e:
+                logger.debug("Failed to spawn background validation for %s: %s", pid, e)
 
         results.append({
             "spec": spec,
@@ -359,7 +367,7 @@ async def get_current_provider():
     llm = data.get("llm", {})
     provider_preference = llm.get("provider", "auto")
 
-    fallback_chain = llm.get("fallback_chain", ["gemini", "openai", "ollama"])
+    fallback_chain = llm.get("fallback_chain") or get_configured_provider_ids()
 
     resolved_id = None
     source = "unset"

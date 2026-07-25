@@ -7,9 +7,35 @@ import httpx
 import keyring
 from app.config import settings
 from app.search.capability_detector import capability_detector
-from app.providers import BaseProvider, create_provider
+from app.providers import BaseProvider, create_provider, get_configured_provider_ids
 
 logger = logging.getLogger(__name__)
+
+
+def _get_effective_fallback_chain() -> list[str]:
+    configured_ids = get_configured_provider_ids()
+    pref_path = Path("data/settings.json")
+    saved_chain = []
+    if pref_path.exists():
+        try:
+            with open(pref_path, encoding="utf-8") as f:
+                data = json.load(f)
+            saved_chain = data.get("llm", {}).get("fallback_chain") or []
+        except Exception:
+            pass
+
+    if not saved_chain or set(saved_chain) <= {"gemini", "openai", "ollama"}:
+        return configured_ids
+
+    chain = []
+    for pid in saved_chain:
+        if pid in configured_ids and pid not in chain:
+            chain.append(pid)
+    for pid in configured_ids:
+        if pid not in chain:
+            chain.append(pid)
+
+    return chain if chain else configured_ids
 
 class ProviderNotConfiguredError(Exception):
     """Raised when no active LLM provider can be resolved."""
@@ -328,19 +354,8 @@ Answer:
         if override_provider:
             return await self._resolve_provider_by_id(override_provider, override_model, timeout=timeout)
 
-        pref_path = Path("data/settings.json")
         provider_preference = self.provider_preference or "auto"
-        fallback_chain = ["gemini", "openai", "lm_studio", "ollama"]
-
-        if pref_path.exists():
-            try:
-                with open(pref_path, encoding="utf-8") as f:
-                    data = json.load(f)
-                llm_prefs = data.get("llm", {})
-                provider_preference = llm_prefs.get("provider", "auto")
-                fallback_chain = llm_prefs.get("fallback_chain", fallback_chain)
-            except Exception:
-                pass
+        fallback_chain = _get_effective_fallback_chain()
 
         resolved_id = None
         if provider_preference != "auto":
@@ -377,17 +392,9 @@ Answer:
             supports_claims = await capability_detector.detect_capabilities(self)
         prompt = self._build_prompt(query, context, mode, supports_claims=supports_claims)
 
-        pref_path = Path("data/settings.json")
-        fallback_chain = ["gemini", "openai", "lm_studio", "ollama"]
-        if pref_path.exists():
-            try:
-                with open(pref_path, encoding="utf-8") as f:
-                    data = json.load(f)
-                fallback_chain = data.get("llm", {}).get("fallback_chain", fallback_chain)
-            except Exception:
-                pass
+        fallback_chain = _get_effective_fallback_chain()
 
-        # Build list of providers to try (max 2 fallbacks)
+        # Build list of providers to try
         providers_to_try = []
         if override_provider:
             providers_to_try.append((override_provider, override_model, 30.0))
@@ -407,7 +414,7 @@ Answer:
                 if pid != primary_id:
                     providers_to_try.append((pid, None, 10.0)) # 10s connection timeout for fallbacks
 
-        max_attempts = min(3, len(providers_to_try))
+        max_attempts = len(providers_to_try)
         attempt = 0
         last_error = None
 
@@ -442,15 +449,7 @@ Answer:
         supports_claims = await capability_detector.detect_capabilities(self)
         prompt = self._build_prompt(query, context, mode, supports_claims=supports_claims)
 
-        pref_path = Path("data/settings.json")
-        fallback_chain = ["gemini", "openai", "lm_studio", "ollama"]
-        if pref_path.exists():
-            try:
-                with open(pref_path, encoding="utf-8") as f:
-                    data = json.load(f)
-                fallback_chain = data.get("llm", {}).get("fallback_chain", fallback_chain)
-            except Exception:
-                pass
+        fallback_chain = _get_effective_fallback_chain()
 
         # Build list of providers to try
         providers_to_try = []
@@ -472,7 +471,7 @@ Answer:
                 if pid != primary_id:
                     providers_to_try.append((pid, None, 10.0)) # 10s connection timeout for fallbacks
 
-        max_attempts = min(3, len(providers_to_try))
+        max_attempts = len(providers_to_try)
         
         # We need helper variables for token usage counting
         full_answer = ""

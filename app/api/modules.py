@@ -58,5 +58,5 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(Non
         # Attempt to close cleanly if still open
         try:  # noqa: SIM105
             await websocket.close(code=1011)  # Internal Error
-        except Exception:
+        except Exception:  # nosec B110
             pass

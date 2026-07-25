@@ -1170,7 +1170,7 @@ async def stream_rag(
                         response_text=full_answer,
                         timestamp=time.time(),
                     )
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
     if graph_paths_text:

@@ -22,7 +22,7 @@ def _get_effective_fallback_chain() -> list[str]:
             with open(pref_path, encoding="utf-8") as f:
                 data = json.load(f)
             saved_chain = data.get("llm", {}).get("fallback_chain") or []
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
     if not saved_chain or set(saved_chain) <= {"gemini", "openai", "ollama"}:
@@ -296,7 +296,7 @@ Answer:
                 if key:
                     self.provider_keys[pid] = key
                     source = "keyring"
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
         # Load settings for base_url/model
@@ -307,7 +307,7 @@ Answer:
                 with open(pref_path, encoding="utf-8") as f:
                     data = json.load(f)
                 per_provider = data.get("llm", {}).get("per_provider", {})
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
         provider_settings = per_provider.get(pid, {})
@@ -380,7 +380,7 @@ Answer:
                     await prov.close()
                     resolved_id = pid
                     break
-                except Exception:
+                except Exception:  # nosec B112
                     continue
 
             if not resolved_id:
@@ -418,7 +418,7 @@ Answer:
                 temp_prov = await self._resolve()
                 primary_id = temp_prov.spec.id
                 await temp_prov.close()
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
             if primary_id:
@@ -476,7 +476,7 @@ Answer:
                 temp_prov = await self._resolve()
                 primary_id = temp_prov.spec.id
                 await temp_prov.close()
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
             if primary_id:

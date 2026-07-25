@@ -184,10 +184,8 @@ pub fn run() {
                 let stdout = child.stdout.take().unwrap();
                 tauri::async_runtime::spawn_blocking(move || {
                     let reader = BufReader::new(stdout);
-                    for line in reader.lines() {
-                        if let Ok(l) = line {
-                            println!("[BACKEND] {}", l);
-                        }
+                    for l in reader.lines().map_while(Result::ok) {
+                        println!("[BACKEND] {}", l);
                     }
                 });
 
@@ -195,10 +193,8 @@ pub fn run() {
                 let stderr = child.stderr.take().unwrap();
                 tauri::async_runtime::spawn_blocking(move || {
                     let reader = BufReader::new(stderr);
-                    for line in reader.lines() {
-                        if let Ok(l) = line {
-                            eprintln!("[BACKEND ERROR] {}", l);
-                        }
+                    for l in reader.lines().map_while(Result::ok) {
+                        eprintln!("[BACKEND ERROR] {}", l);
                     }
                 });
 
@@ -306,7 +302,7 @@ mod tests {
         let app_local_data_dir = temp_dir.join("local_data");
         
         let python_dir = resource_dir.join("python");
-        let _ = std::fs::create_dir_all(&python_dir).unwrap();
+        std::fs::create_dir_all(&python_dir).unwrap();
         let exe_path = python_dir.join("PMA.exe");
         std::fs::write(&exe_path, "mock-exe-content").unwrap();
         
@@ -325,7 +321,7 @@ mod tests {
         let app_local_data_dir = temp_dir.join("local_data");
 
         let python_dir = resource_dir.join("python");
-        let _ = std::fs::create_dir_all(&python_dir).unwrap();
+        std::fs::create_dir_all(&python_dir).unwrap();
         let zip_path = python_dir.join("PMA-sidecar.zip");
         std::fs::write(&zip_path, "mock-zip-content").unwrap();
 
@@ -333,7 +329,7 @@ mod tests {
             .join("sidecar")
             .join(env!("CARGO_PKG_VERSION"))
             .join("PMA");
-        let _ = std::fs::create_dir_all(&extract_dir).unwrap();
+        std::fs::create_dir_all(&extract_dir).unwrap();
         let extracted_exe = extract_dir.join("PMA.exe");
         std::fs::write(&extracted_exe, "mock-extracted-content").unwrap();
         
@@ -352,7 +348,7 @@ mod tests {
         let app_local_data_dir = temp_dir.join("local_data");
 
         let python_dir = resource_dir.join("python");
-        let _ = std::fs::create_dir_all(&python_dir).unwrap();
+        std::fs::create_dir_all(&python_dir).unwrap();
         let zip_path = python_dir.join("PMA-sidecar.zip");
         std::fs::write(&zip_path, "mock-zip-content").unwrap();
 
@@ -360,7 +356,7 @@ mod tests {
             .join("sidecar")
             .join(env!("CARGO_PKG_VERSION"))
             .join("PMA");
-        let _ = std::fs::create_dir_all(&extract_dir).unwrap();
+        std::fs::create_dir_all(&extract_dir).unwrap();
         
         let marker_file = extract_dir.join("marker.txt");
         std::fs::write(&marker_file, "marker").unwrap();

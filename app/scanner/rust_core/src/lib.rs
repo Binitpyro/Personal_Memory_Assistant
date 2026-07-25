@@ -51,7 +51,7 @@ fn get_sentence_boundary(text: &str, byte_pos: usize, byte_window: usize) -> usi
         safe_byte_pos -= 1;
     }
 
-    let mut search_start = if safe_byte_pos > byte_window { safe_byte_pos - byte_window } else { 0 };
+    let mut search_start = safe_byte_pos.saturating_sub(byte_window);
     
     // Ensure search_start is on a char boundary by moving forward if necessary
     while search_start < safe_byte_pos && !text.is_char_boundary(search_start) {
@@ -192,10 +192,9 @@ fn find_sentence_boundary(text: &str, char_pos: usize, char_window: usize) -> us
     let mut byte_pos = text.len();
     let mut byte_search_start = 0;
     
-    let target_start_char = if char_pos > char_window { char_pos - char_window } else { 0 };
-    
-    let mut current_char_idx = 0;
-    for (b_idx, _) in text.char_indices() {
+    let target_start_char = char_pos.saturating_sub(char_window);
+
+    for (current_char_idx, (b_idx, _)) in text.char_indices().enumerate() {
         if current_char_idx == target_start_char {
             byte_search_start = b_idx;
         }
@@ -203,7 +202,6 @@ fn find_sentence_boundary(text: &str, char_pos: usize, char_window: usize) -> us
             byte_pos = b_idx;
             break;
         }
-        current_char_idx += 1;
     }
 
     let region = &text[byte_search_start..byte_pos];

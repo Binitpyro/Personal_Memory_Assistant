@@ -159,7 +159,7 @@ async def list_providers():
                     is_set = True
                     preview = key[:6] + "..." if len(key) > 6 else "****"
                     stored_in = "keyring"
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
         provider_settings = per_provider.get(pid, {})
@@ -381,7 +381,7 @@ async def get_current_provider():
             key = await asyncio.to_thread(keyring.get_password, "pma_backend", pid)
             if key:
                 return True, "keyring"
-        except Exception:
+        except Exception:  # nosec B110
             pass
         return False, "unset"
 

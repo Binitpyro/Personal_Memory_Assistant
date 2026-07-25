@@ -41,7 +41,9 @@ from app.project_constants import APP_VERSION
 from app.storage.db import DatabaseManager
 
 _BASE_DIR = Path(__file__).parent.parent
-_REACT_DIR = _BASE_DIR / "static" / "react"
+_STATIC_DIR = _BASE_DIR / "static"
+_STATIC_DIR.mkdir(parents=True, exist_ok=True)
+_REACT_DIR = _STATIC_DIR / "react"
 INDEX_HTML = "index.html"
 _REACT_INDEX = _REACT_DIR / INDEX_HTML
 
@@ -381,7 +383,7 @@ async def _bg_auto_vacuum(db_manager):
 
 app = FastAPI(title="Personal Memory Assistant", lifespan=lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=500)
-app.mount("/static", StaticFiles(directory=str(_BASE_DIR / "static")), name="static")
+app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]

@@ -42,7 +42,7 @@ async def _load_training_pairs(db_path: str = _DEFAULT_DB_PATH) -> list[tuple[st
                 # they share the same broad file context without being literal neighbors.
                 candidates = [j for j in range(len(texts)) if abs(i - j) >= 2]
                 if candidates:
-                    target_idx = random.choice(candidates)  # noqa: S311
+                    target_idx = random.choice(candidates)  # nosec B311 # noqa: S311
                     pairs.append((texts[i], texts[target_idx]))
                 else:
                     # Fallback for small files (2-3 chunks): use the furthest available chunk

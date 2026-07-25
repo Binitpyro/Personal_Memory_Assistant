@@ -37,8 +37,6 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": {
-      "../../dist/PMA-sidecar.zip": "python/PMA-sidecar.zip"
-    }
+    "resources": {}
   }
 }

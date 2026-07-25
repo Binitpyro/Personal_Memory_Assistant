@@ -41,7 +41,7 @@ class EmbeddingService:
 
         self._tokenizer = Tokenizer.from_file(str(tokenizer_json))
         self._tokenizer.enable_truncation(max_length=512)
-        self._tokenizer.enable_padding(pad_id=0, pad_token="[PAD]")  # noqa: S106
+        self._tokenizer.enable_padding(pad_id=0, pad_token="[PAD]")  # nosec B106 # noqa: S106
 
         # Load ONNX session (check for quantized models first)
         onnx_file = None

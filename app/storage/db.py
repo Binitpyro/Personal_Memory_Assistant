@@ -313,7 +313,7 @@ class DatabaseManager:
                         INSERT INTO chunk_fts(rowid, chunks_text)
                         SELECT id, zlib_decompress(text_preview) FROM chunks;
                         {FTS_TRIGGERS_DDL}
-                    """  # noqa: S608
+                    """  # nosec B608 # noqa: S608
                     await conn.executescript(query)
                     await conn.execute(
                         "INSERT OR REPLACE INTO system_state (key, value) VALUES ('fts_dirty', '0')"
@@ -477,7 +477,7 @@ class DatabaseManager:
                     {FTS_TRIGGERS_DDL}
                     INSERT INTO chunk_fts(rowid, chunks_text)
                     SELECT id, zlib_decompress(text_preview) FROM chunks;
-                """  # noqa: S608
+                """  # nosec B608 # noqa: S608
                 await conn.executescript(query)
                 await conn.commit()
                 logger.info("Storage optimization: Optimized chunk_fts schema.")
@@ -526,7 +526,7 @@ class DatabaseManager:
             DROP TABLE IF EXISTS temp_ingest_chunk_deletes;
 
             {FTS_TRIGGERS_DDL}
-        """  # noqa: S608
+        """  # nosec B608 # noqa: S608
         await conn.executescript(query)
         await conn.execute(
             "INSERT OR REPLACE INTO system_state (key, value) VALUES ('fts_dirty', '0')"
@@ -903,7 +903,7 @@ class DatabaseManager:
                 batch = chunk_ids[i : i + batch_size]
                 placeholders = ",".join("?" for _ in batch)
                 query = (
-                    "SELECT chunk_id, embedding FROM chunk_embeddings "  # noqa: S608
+                    "SELECT chunk_id, embedding FROM chunk_embeddings "  # nosec B608 # noqa: S608
                     f"WHERE chunk_id IN ({placeholders})"
                 )
                 async with conn.execute(query, batch) as cursor:
@@ -972,7 +972,7 @@ class DatabaseManager:
         JOIN kg_nodes n ON b.id = n.id
         WHERE json_extract(n.properties, '$.chunk_id') IS NOT NULL
         LIMIT ?
-        """  # noqa: S608
+        """  # nosec B608 # noqa: S608
         params = [*chunk_ids, max_depth, max_depth, limit]
 
         async with self._get_read_conn() as conn, conn.execute(query, params) as cursor:
@@ -1004,7 +1004,7 @@ class DatabaseManager:
         SELECT path_str FROM paths
         WHERE depth > 0
         LIMIT ?
-        """  # noqa: S608
+        """  # nosec B608 # noqa: S608
         params = [*src_chunk_ids, max_depth, limit]
 
         async with self._get_read_conn() as conn, conn.execute(query, params) as cursor:
@@ -1085,7 +1085,7 @@ class DatabaseManager:
             for i in range(0, len(paths), batch_size):
                 batch = paths[i : i + batch_size]
                 placeholders = ",".join("?" for _ in batch)
-                query = f"SELECT path, id FROM files WHERE path IN ({placeholders})"  # noqa: S608
+                query = f"SELECT path, id FROM files WHERE path IN ({placeholders})"  # nosec B608 # noqa: S608
                 async with conn.execute(query, batch) as cursor:
                     async for row in cursor:
                         result[row[0]] = row[1]
@@ -1099,7 +1099,7 @@ class DatabaseManager:
             for i in range(0, len(paths), batch_size):
                 batch = paths[i : i + batch_size]
                 placeholders = ",".join("?" for _ in batch)
-                query = f"SELECT path, modified_at FROM files WHERE path IN ({placeholders})"  # noqa: S608
+                query = f"SELECT path, modified_at FROM files WHERE path IN ({placeholders})"  # nosec B608 # noqa: S608
                 async with conn.execute(query, batch) as cursor:
                     async for row in cursor:
                         result[row[0]] = row[1]
@@ -1114,7 +1114,7 @@ class DatabaseManager:
                 batch = paths[i : i + batch_size]
                 placeholders = ",".join("?" for _ in batch)
                 query = (
-                    f"SELECT path, COALESCE(sha256, '') FROM files WHERE path IN ({placeholders})"  # noqa: S608
+                    f"SELECT path, COALESCE(sha256, '') FROM files WHERE path IN ({placeholders})"  # nosec B608 # noqa: S608
                 )
                 async with conn.execute(query, batch) as cursor:
                     async for row in cursor:
@@ -1136,7 +1136,7 @@ class DatabaseManager:
                 batch = paths[i : i + batch_size]
                 placeholders = ",".join("?" for _ in batch)
                 query = (
-                    f"SELECT path, modified_at, COALESCE(sha256, '') FROM files "  # noqa: S608
+                    f"SELECT path, modified_at, COALESCE(sha256, '') FROM files "  # nosec B608 # noqa: S608
                     f"WHERE path IN ({placeholders})"
                 )
                 async with conn.execute(query, batch) as cursor:
@@ -1150,7 +1150,7 @@ class DatabaseManager:
                 batch = paths[i : i + batch_size]
                 placeholders = ",".join("?" for _ in batch)
                 query = (
-                    f"SELECT path, modified_at, COALESCE(sha256, '') FROM files "  # noqa: S608
+                    f"SELECT path, modified_at, COALESCE(sha256, '') FROM files "  # nosec B608 # noqa: S608
                     f"WHERE path IN ({placeholders})"
                 )
                 async with conn.execute(query, batch) as cursor:
@@ -1187,7 +1187,7 @@ class DatabaseManager:
         in_params = list(counts.keys())
         placeholders = ",".join("?" for _ in in_params)
         sql = (
-            "UPDATE files SET usage_count = CASE path "  # noqa: S608
+            "UPDATE files SET usage_count = CASE path "  # nosec B608 # noqa: S608
             + " ".join(when_clauses)
             + " ELSE usage_count END WHERE path IN ("
             + placeholders
@@ -1430,7 +1430,7 @@ class DatabaseManager:
                     batch = stale_ids[i : i + batch_size]
                     placeholders = ",".join("?" for _ in batch)
                     await conn.execute(
-                        f"DELETE FROM files WHERE id IN ({placeholders})",  # noqa: S608
+                        f"DELETE FROM files WHERE id IN ({placeholders})",  # nosec B608 # noqa: S608
                         tuple(batch),
                     )
 
@@ -1484,7 +1484,7 @@ class DatabaseManager:
             -- text_preview is stored zlib-compressed so triggers decompress on the fly.
             {FTS_TABLE_DDL}
             {FTS_TRIGGERS_DDL}
-        """  # noqa: S608
+        """  # nosec B608 # noqa: S608
         await conn.executescript(query)
 
         logger.info("Cleared all data: %d files, %d chunks", files_count, chunks_count)
@@ -1506,7 +1506,7 @@ class DatabaseManager:
             params.append(folder_tag)
         where = " WHERE " + " AND ".join(conditions) if conditions else ""
         sql = (
-            "SELECT path, size, type, folder_tag, usage_count "  # noqa: S608
+            "SELECT path, size, type, folder_tag, usage_count "  # nosec B608 # noqa: S608
             f"FROM files{where} ORDER BY path"
         )
         async with self._get_read_conn() as conn, conn.execute(sql, params) as cursor:
@@ -1677,7 +1677,7 @@ class DatabaseManager:
                 batch = node_ids[i : i + batch_size]
                 placeholders = ",".join("?" for _ in batch)
                 query = (
-                    f"SELECT id, type, label, properties FROM kg_nodes WHERE id IN ({placeholders})"  # noqa: S608
+                    f"SELECT id, type, label, properties FROM kg_nodes WHERE id IN ({placeholders})"  # nosec B608 # noqa: S608
                 )
                 async with conn.execute(query, batch) as cursor:
                     rows = await cursor.fetchall()

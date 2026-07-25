@@ -1,19 +1,19 @@
 {
   "errors": [],
-  "generated_at": "2026-07-25T13:43:17Z",
+  "generated_at": "2026-07-25T14:35:55Z",
   "metrics": {
     "_totals": {
-      "CONFIDENCE.HIGH": 20,
-      "CONFIDENCE.LOW": 20,
-      "CONFIDENCE.MEDIUM": 3,
+      "CONFIDENCE.HIGH": 0,
+      "CONFIDENCE.LOW": 0,
+      "CONFIDENCE.MEDIUM": 0,
       "CONFIDENCE.UNDEFINED": 0,
       "SEVERITY.HIGH": 0,
-      "SEVERITY.LOW": 21,
-      "SEVERITY.MEDIUM": 22,
+      "SEVERITY.LOW": 0,
+      "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 10086,
+      "loc": 10093,
       "nosec": 0,
-      "skipped_tests": 0
+      "skipped_tests": 36
     },
     "app\\__init__.py": {
       "CONFIDENCE.HIGH": 0,
@@ -107,30 +107,30 @@
       "skipped_tests": 0
     },
     "app\\api\\modules.py": {
-      "CONFIDENCE.HIGH": 1,
+      "CONFIDENCE.HIGH": 0,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
       "CONFIDENCE.UNDEFINED": 0,
       "SEVERITY.HIGH": 0,
-      "SEVERITY.LOW": 1,
+      "SEVERITY.LOW": 0,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
       "loc": 47,
       "nosec": 0,
-      "skipped_tests": 0
+      "skipped_tests": 1
     },
     "app\\api\\providers.py": {
-      "CONFIDENCE.HIGH": 2,
+      "CONFIDENCE.HIGH": 0,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
       "CONFIDENCE.UNDEFINED": 0,
       "SEVERITY.HIGH": 0,
-      "SEVERITY.LOW": 2,
+      "SEVERITY.LOW": 0,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
       "loc": 332,
       "nosec": 0,
-      "skipped_tests": 0
+      "skipped_tests": 2
     },
     "app\\api\\search.py": {
       "CONFIDENCE.HIGH": 0,
@@ -198,30 +198,30 @@
       "skipped_tests": 0
     },
     "app\\embeddings\\finetune.py": {
-      "CONFIDENCE.HIGH": 1,
+      "CONFIDENCE.HIGH": 0,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
       "CONFIDENCE.UNDEFINED": 0,
       "SEVERITY.HIGH": 0,
-      "SEVERITY.LOW": 1,
+      "SEVERITY.LOW": 0,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
       "loc": 133,
       "nosec": 0,
-      "skipped_tests": 0
+      "skipped_tests": 1
     },
     "app\\embeddings\\service.py": {
-      "CONFIDENCE.HIGH": 1,
+      "CONFIDENCE.HIGH": 0,
       "CONFIDENCE.LOW": 0,
-      "CONFIDENCE.MEDIUM": 1,
+      "CONFIDENCE.MEDIUM": 0,
       "CONFIDENCE.UNDEFINED": 0,
       "SEVERITY.HIGH": 0,
-      "SEVERITY.LOW": 1,
-      "SEVERITY.MEDIUM": 1,
+      "SEVERITY.LOW": 0,
+      "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
       "loc": 238,
       "nosec": 0,
-      "skipped_tests": 0
+      "skipped_tests": 2
     },
     "app\\indexing\\__init__.py": {
       "CONFIDENCE.HIGH": 0,
@@ -562,17 +562,17 @@
       "skipped_tests": 0
     },
     "app\\providers\\manifest.py": {
-      "CONFIDENCE.HIGH": 1,
+      "CONFIDENCE.HIGH": 0,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
       "CONFIDENCE.UNDEFINED": 0,
       "SEVERITY.HIGH": 0,
-      "SEVERITY.LOW": 1,
+      "SEVERITY.LOW": 0,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
       "loc": 27,
       "nosec": 0,
-      "skipped_tests": 0
+      "skipped_tests": 1
     },
     "app\\providers\\nvidia_nim.py": {
       "CONFIDENCE.HIGH": 0,
@@ -744,17 +744,17 @@
       "skipped_tests": 0
     },
     "app\\search\\llm_client.py": {
-      "CONFIDENCE.HIGH": 6,
+      "CONFIDENCE.HIGH": 0,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
       "CONFIDENCE.UNDEFINED": 0,
       "SEVERITY.HIGH": 0,
-      "SEVERITY.LOW": 6,
+      "SEVERITY.LOW": 0,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
       "loc": 505,
       "nosec": 0,
-      "skipped_tests": 0
+      "skipped_tests": 6
     },
     "app\\search\\planner.py": {
       "CONFIDENCE.HIGH": 0,
@@ -772,28 +772,28 @@
     "app\\search\\reranker.py": {
       "CONFIDENCE.HIGH": 0,
       "CONFIDENCE.LOW": 0,
-      "CONFIDENCE.MEDIUM": 1,
+      "CONFIDENCE.MEDIUM": 0,
       "CONFIDENCE.UNDEFINED": 0,
       "SEVERITY.HIGH": 0,
-      "SEVERITY.LOW": 1,
+      "SEVERITY.LOW": 0,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
       "loc": 107,
       "nosec": 0,
-      "skipped_tests": 0
+      "skipped_tests": 1
     },
     "app\\search\\retrieval.py": {
-      "CONFIDENCE.HIGH": 1,
-      "CONFIDENCE.LOW": 5,
+      "CONFIDENCE.HIGH": 0,
+      "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
       "CONFIDENCE.UNDEFINED": 0,
       "SEVERITY.HIGH": 0,
-      "SEVERITY.LOW": 1,
-      "SEVERITY.MEDIUM": 5,
+      "SEVERITY.LOW": 0,
+      "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
       "loc": 1060,
       "nosec": 0,
-      "skipped_tests": 0
+      "skipped_tests": 6
     },
     "app\\state.py": {
       "CONFIDENCE.HIGH": 0,
@@ -822,17 +822,17 @@
       "skipped_tests": 0
     },
     "app\\storage\\db.py": {
-      "CONFIDENCE.HIGH": 1,
-      "CONFIDENCE.LOW": 15,
-      "CONFIDENCE.MEDIUM": 1,
+      "CONFIDENCE.HIGH": 0,
+      "CONFIDENCE.LOW": 0,
+      "CONFIDENCE.MEDIUM": 0,
       "CONFIDENCE.UNDEFINED": 0,
       "SEVERITY.HIGH": 0,
-      "SEVERITY.LOW": 1,
-      "SEVERITY.MEDIUM": 16,
+      "SEVERITY.LOW": 0,
+      "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 1481,
+      "loc": 1482,
       "nosec": 0,
-      "skipped_tests": 0
+      "skipped_tests": 16
     },
     "app\\utils\\metrics.py": {
       "CONFIDENCE.HIGH": 0,
@@ -861,15 +861,15 @@
       "skipped_tests": 0
     },
     "app\\vector_store\\lancedb_client.py": {
-      "CONFIDENCE.HIGH": 6,
+      "CONFIDENCE.HIGH": 0,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
       "CONFIDENCE.UNDEFINED": 0,
       "SEVERITY.HIGH": 0,
-      "SEVERITY.LOW": 6,
+      "SEVERITY.LOW": 0,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 405,
+      "loc": 411,
       "nosec": 0,
       "skipped_tests": 0
     }

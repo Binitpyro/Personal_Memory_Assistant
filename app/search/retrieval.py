@@ -176,7 +176,7 @@ async def _fts_search(
 
         params.append(2 * k)
         fts_sql = (
-            "SELECT cf.rowid, cf.chunks_text FROM chunk_fts cf "  # noqa: S608
+            "SELECT cf.rowid, cf.chunks_text FROM chunk_fts cf "  # nosec B608 # noqa: S608
             "JOIN chunks c ON c.id = cf.rowid "
             "JOIN files f ON f.id = c.file_id "
             f"WHERE {' AND '.join(where_clauses)} "
@@ -416,7 +416,7 @@ async def hybrid_retrieve(
 
     placeholders = ",".join("?" for _ in chunk_ids_ordered)
     query_sql = (
-        f"SELECT c.id, zlib_decompress(c.text_preview) as text_preview, f.path, f.folder_tag, f.modified_at, c.start_offset, c.end_offset, c.sentence_offsets, c.segmenter_version "  # noqa: S608
+        f"SELECT c.id, zlib_decompress(c.text_preview) as text_preview, f.path, f.folder_tag, f.modified_at, c.start_offset, c.end_offset, c.sentence_offsets, c.segmenter_version "  # nosec B608 # noqa: S608
         f"FROM chunks c JOIN files f ON c.file_id = f.id "
         f"WHERE c.id IN ({placeholders})"
     )
@@ -635,7 +635,7 @@ async def _execute_graph_plan(
 
     placeholders = ",".join("?" for _ in all_ids)
     query_sql = (
-        f"SELECT c.id, zlib_decompress(c.text_preview) as text_preview, f.path, f.folder_tag, f.modified_at "  # noqa: S608
+        f"SELECT c.id, zlib_decompress(c.text_preview) as text_preview, f.path, f.folder_tag, f.modified_at "  # nosec B608 # noqa: S608
         f"FROM chunks c JOIN files f ON c.file_id = f.id "
         f"WHERE c.id IN ({placeholders})"
     )
@@ -970,7 +970,7 @@ async def stream_rag(
     if forced_chunk_ids:
         placeholders = ",".join("?" for _ in forced_chunk_ids)
         query_sql = (
-            f"SELECT c.id, zlib_decompress(c.text_preview) as text_preview, f.path, f.folder_tag, f.modified_at, c.start_offset, c.end_offset, c.sentence_offsets, c.segmenter_version "  # noqa: S608
+            f"SELECT c.id, zlib_decompress(c.text_preview) as text_preview, f.path, f.folder_tag, f.modified_at, c.start_offset, c.end_offset, c.sentence_offsets, c.segmenter_version "  # nosec B608 # noqa: S608
             f"FROM chunks c JOIN files f ON c.file_id = f.id "
             f"WHERE c.id IN ({placeholders})"
         )
@@ -1249,7 +1249,7 @@ async def _get_top_relevant_profiles(lancedb_client, db, query_emb, k=2) -> str:
 
         # Fetch the actual synthesized profile text from SQLite
         placeholders = ",".join("?" for _ in tags)
-        sql = f"SELECT profile_text FROM folder_profiles WHERE folder_tag IN ({placeholders})"  # noqa: S608  # noqa: S608
+        sql = f"SELECT profile_text FROM folder_profiles WHERE folder_tag IN ({placeholders})"  # nosec B608 # noqa: S608
         rows = await db.execute_query(sql, tuple(tags))
 
         return "\n".join(r[0] for r in rows)

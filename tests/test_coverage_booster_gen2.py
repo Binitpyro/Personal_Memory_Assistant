@@ -256,6 +256,13 @@ def test_ntfs_scanner_mocked_execution(monkeypatch, tmp_path):
     monkeypatch.setattr("app.scanner.ntfs_mft.kernel32", mock_k32)
     # mock get_last_error to return ERROR_HANDLE_EOF (38)
     monkeypatch.setattr("ctypes.get_last_error", lambda: 38)
+    monkeypatch.setattr(
+        Path,
+        "drive",
+        property(
+            lambda self: "C:" if str(self).startswith("C:") or str(self).startswith("C:\\") else ""
+        ),
+    )
 
     scanner = NTFSScanner()
     # 1. Scan folder where drive is empty

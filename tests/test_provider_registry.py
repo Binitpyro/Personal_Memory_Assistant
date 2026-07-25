@@ -1,4 +1,7 @@
 import re
+
+import pytest
+
 from app.providers.registry import PROVIDER_REGISTRY
 
 
@@ -9,7 +12,7 @@ def test_provider_registry_api_key_patterns():
             try:
                 re.compile(spec.api_key_pattern)
             except re.error as e:
-                assert False, f"api_key_pattern for provider {pid} fails to compile: {e}"
+                pytest.fail(f"api_key_pattern for provider {pid} fails to compile: {e}")
 
 
 def test_provider_registry_base_url():

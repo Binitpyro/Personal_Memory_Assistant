@@ -1,9 +1,9 @@
 import json
 import logging
 from collections.abc import AsyncGenerator
-from typing import Any
-import httpx
-from app.providers.base import ModelInfo, ValidationResult
+from typing import Any, cast
+
+from app.providers.base import ModelInfo
 from app.providers.openai_compat import OpenAICompatibleProvider
 from app.providers.registry import spec_of
 
@@ -17,7 +17,7 @@ class AnthropicProvider(OpenAICompatibleProvider):
         api_key: str | None,
         base_url: str | None = None,
         default_model: str | None = None,
-        timeout: float = 30.0
+        timeout: float = 30.0,
     ):
         spec = spec_of("anthropic")
         super().__init__(
@@ -50,15 +50,19 @@ class AnthropicProvider(OpenAICompatibleProvider):
         for item in data.get("data", []):
             model_id = item.get("id")
             if model_id:
-                models.append({
-                    "id": model_id,
-                    "context_length": 200000,  # Standard Anthropic context window
-                    "pricing_hint": None,
-                    "family": "chat"
-                })
-        return models
+                models.append(
+                    {
+                        "id": model_id,
+                        "context_length": 200000,  # Standard Anthropic context window
+                        "pricing_hint": None,
+                        "family": "chat",
+                    }
+                )
+        return cast(list[ModelInfo], models)
 
-    def _build_messages_payload(self, messages: list[dict[str, str]]) -> tuple[str | None, list[dict[str, str]]]:
+    def _build_messages_payload(
+        self, messages: list[dict[str, str]]
+    ) -> tuple[str | None, list[dict[str, str]]]:
         system_prompt = None
         filtered_messages = []
         for msg in messages:
@@ -66,10 +70,7 @@ class AnthropicProvider(OpenAICompatibleProvider):
             if role == "system":
                 system_prompt = msg["content"]
             else:
-                if role == "model" or role == "assistant":
-                    role = "assistant"
-                else:
-                    role = "user"
+                role = "assistant" if role in ("model", "assistant") else "user"
                 filtered_messages.append({"role": role, "content": msg["content"]})
         return system_prompt, filtered_messages
 
@@ -79,7 +80,7 @@ class AnthropicProvider(OpenAICompatibleProvider):
         *,
         model: str | None = None,
         temperature: float = 0.2,
-        max_tokens: int = 4096
+        max_tokens: int = 4096,
     ) -> str:
         client = self._get_client()
         url = f"{self.base_url}/v1/messages"
@@ -108,7 +109,7 @@ class AnthropicProvider(OpenAICompatibleProvider):
         *,
         model: str | None = None,
         temperature: float = 0.2,
-        max_tokens: int = 4096
+        max_tokens: int = 4096,
     ) -> AsyncGenerator[str, None]:
         client = self._get_client()
         url = f"{self.base_url}/v1/messages"

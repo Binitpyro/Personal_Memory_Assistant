@@ -56,7 +56,7 @@ class ValidationCache:
         return None
 
     def get_offline_fallback(self, provider_id: str) -> Any | None:
-        if provider_id in self._persistent_heap and self._persistent_heap[provider_id]:
+        if self._persistent_heap.get(provider_id):
             return {
                 "ok": False,
                 "latency_ms": 0,
@@ -64,7 +64,7 @@ class ValidationCache:
                 "error": "Provider offline. Using cached model heap.",
                 "error_code": "cached_offline",
                 "cached_offline": True,
-                "server_time": None
+                "server_time": None,
             }
         return None
 
@@ -92,4 +92,3 @@ class ValidationCache:
 
 
 validation_cache = ValidationCache()
-

@@ -31,8 +31,8 @@ from app.api.indexing import router as indexing_router
 from app.api.insights import router as insights_router
 from app.api.limiter import limiter
 from app.api.models import models_router
-from app.api.providers import providers_router
 from app.api.modules import router as modules_router
+from app.api.providers import providers_router
 from app.api.search import router as search_router
 from app.api.system import router as system_router
 from app.api.telemetry import router as telemetry_router
@@ -67,11 +67,11 @@ def _init_local_access_token():
                 logger.info("Retrieved X_LOCAL_ACCESS_TOKEN from the OS keyring.")
             os.environ["X_LOCAL_ACCESS_TOKEN"] = token
         except Exception as e:
-            # Fallback to a secure in-memory token to avoid fail-open/insecure state while maintaining usability  # noqa: E501
+            # Fallback to a secure in-memory token to avoid fail-open/insecure state while maintaining usability
             token = secrets.token_urlsafe(32)
             os.environ["X_LOCAL_ACCESS_TOKEN"] = token
             logger.warning(
-                f"Failed to access OS keyring ({e}). Generated temporary in-memory X_LOCAL_ACCESS_TOKEN."  # noqa: E501
+                f"Failed to access OS keyring ({e}). Generated temporary in-memory X_LOCAL_ACCESS_TOKEN."
             )
 
 

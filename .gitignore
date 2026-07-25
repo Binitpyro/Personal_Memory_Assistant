@@ -257,3 +257,6 @@ pma_metadata.db*
 /PMA Obsidian/.obsidian/plugins
 /tests/fixtures
 /PMA Obsidian/.obsidian
+/frontend/test-results
+/frontend/test-results
+/frontend/test-results

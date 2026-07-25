@@ -12,7 +12,7 @@ from app.indexing.service import IndexingService
 async def test_db_manager_coverage_booster(mock_db):
     db = mock_db
 
-    # 1. Test get_existing_file_ids / get_files_modified_map / get_files_sha256_map / get_files_change_map on empty lists  # noqa: E501
+    # 1. Test get_existing_file_ids / get_files_modified_map / get_files_sha256_map / get_files_change_map on empty lists
     assert await db.get_existing_file_ids([]) == {}
     assert await db.get_files_modified_map([]) == {}
     assert await db.get_files_sha256_map([]) == {}
@@ -20,7 +20,7 @@ async def test_db_manager_coverage_booster(mock_db):
 
     # Insert a dummy file
     await db.execute_write(
-        "INSERT INTO files (path, size, modified_at, sha256, folder_tag, usage_count, type) VALUES (?, ?, ?, ?, ?, ?, ?)",  # noqa: E501
+        "INSERT INTO files (path, size, modified_at, sha256, folder_tag, usage_count, type) VALUES (?, ?, ?, ?, ?, ?, ?)",
         ("C:/file1.py", 100, "2026-07-05T20:00:00Z", "hash123", "FolderA", 1, ".py"),
     )
 
@@ -47,7 +47,7 @@ async def test_db_manager_coverage_booster(mock_db):
     # Insert chunks (text_preview needs to be compressed since get_file_chunks decompresses it)
     compressed_text = zlib.compress(b"def my_chunk(): pass")
     await db.execute_write(
-        "INSERT INTO chunks (id, file_id, start_offset, end_offset, text_preview) VALUES (?, ?, ?, ?, ?)",  # noqa: E501
+        "INSERT INTO chunks (id, file_id, start_offset, end_offset, text_preview) VALUES (?, ?, ?, ?, ?)",
         (10, file_id, 0, 20, compressed_text),
     )
     await db.execute_write(
@@ -76,7 +76,7 @@ async def test_db_manager_coverage_booster(mock_db):
 
     # Re-insert chunk for remaining tests
     await db.execute_write(
-        "INSERT INTO chunks (id, file_id, start_offset, end_offset, text_preview) VALUES (?, ?, ?, ?, ?)",  # noqa: E501
+        "INSERT INTO chunks (id, file_id, start_offset, end_offset, text_preview) VALUES (?, ?, ?, ?, ?)",
         (10, file_id, 0, 20, compressed_text),
     )
 
@@ -119,7 +119,7 @@ async def test_db_manager_coverage_booster(mock_db):
     # 7. Test stream_all_nodes
     # Insert folder profile first
     await db.execute_write(
-        "INSERT INTO folder_profiles (folder_path, folder_tag, project_type, file_count, total_size_bytes) VALUES (?, ?, ?, ?, ?)",  # noqa: E501
+        "INSERT INTO folder_profiles (folder_path, folder_tag, project_type, file_count, total_size_bytes) VALUES (?, ?, ?, ?, ?)",
         ("C:/FolderA", "FolderA", "Python", 1, 100),
     )
     nodes = []

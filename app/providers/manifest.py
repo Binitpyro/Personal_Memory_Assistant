@@ -1,4 +1,5 @@
 import keyring
+
 from app.config import settings
 from app.providers.registry import PROVIDER_REGISTRY
 
@@ -32,4 +33,3 @@ def get_configured_provider_ids() -> list[str]:
             configured.append(pid)
 
     return configured
-

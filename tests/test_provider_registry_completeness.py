@@ -1,5 +1,6 @@
 import re
 from pathlib import Path
+
 from app.providers import PROVIDER_IDS
 
 
@@ -15,5 +16,16 @@ def test_setup_page_provider_completeness():
     for provider_id in matches:
         # Some matches might be other fields, but let's filter by checking those that look like provider IDs
         # (gemini, groq, nvidia_nim, openrouter, etc)
-        if provider_id in ("gemini", "groq", "nvidia_nim", "openrouter", "openai", "anthropic", "ollama", "lm_studio"):
-            assert provider_id in PROVIDER_IDS, f"Provider ID '{provider_id}' in SetupPage.tsx is not registered in PROVIDER_IDS."
+        if provider_id in (
+            "gemini",
+            "groq",
+            "nvidia_nim",
+            "openrouter",
+            "openai",
+            "anthropic",
+            "ollama",
+            "lm_studio",
+        ):
+            assert provider_id in PROVIDER_IDS, (
+                f"Provider ID '{provider_id}' in SetupPage.tsx is not registered in PROVIDER_IDS."
+            )

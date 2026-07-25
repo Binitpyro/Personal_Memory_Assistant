@@ -221,7 +221,6 @@ async def enable_split_brain():
         )
 
 
-
 @router.post("/system/purge-host-cache")
 async def purge_host_cache():
     """Deletes the local LanceDB split-brain cache directory.

@@ -8,6 +8,8 @@ export function renderWithProviders(ui: React.ReactElement, { route = '/' } = {}
     defaultOptions: {
       queries: {
         retry: false,
+        gcTime: 0,
+        staleTime: 0,
       },
     },
   });

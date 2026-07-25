@@ -2,10 +2,13 @@ import json
 import logging
 import time
 from collections.abc import AsyncGenerator
+from typing import cast
+
 import httpx
+
 from app.providers.base import ModelInfo, ValidationResult
-from app.providers.registry import spec_of
 from app.providers.cache import validation_cache
+from app.providers.registry import spec_of
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +20,7 @@ class OllamaProvider:
         api_key: str | None = None,
         base_url: str | None = None,
         default_model: str | None = None,
-        timeout: float = 30.0
+        timeout: float = 30.0,
     ):
         self.spec = spec_of("ollama")
         self.api_key = api_key
@@ -48,18 +51,15 @@ class OllamaProvider:
         for item in data.get("models", []):
             name = item.get("name")
             if name:
-                models.append({
-                    "id": name,
-                    "context_length": 8192,
-                    "pricing_hint": 0.0,
-                    "family": "chat"
-                })
-        return models
+                models.append(
+                    {"id": name, "context_length": 8192, "pricing_hint": 0.0, "family": "chat"}
+                )
+        return cast(list[ModelInfo], models)
 
     async def validate(self) -> ValidationResult:
         cached = validation_cache.get(self.spec.id, self.base_url, self.api_key)
         if cached:
-            return cached
+            return cast(ValidationResult, cached)
 
         client = self._get_client()
         url = f"{self.base_url}{self.spec.models_endpoint}"
@@ -71,7 +71,7 @@ class OllamaProvider:
             "models": [],
             "error": None,
             "error_code": None,
-            "server_time": None
+            "server_time": None,
         }
 
         try:
@@ -88,7 +88,7 @@ class OllamaProvider:
                     result["ok"] = True
                 except Exception as parse_err:
                     result["error_code"] = "wrong_base_url"
-                    result["error"] = f"Failed to parse Ollama models: {str(parse_err)}"
+                    result["error"] = f"Failed to parse Ollama models: {parse_err!s}"
             else:
                 result["error_code"] = "provider_down"
                 result["error"] = f"Ollama returned status {resp.status_code}."
@@ -99,11 +99,15 @@ class OllamaProvider:
                 result = fallback
             else:
                 result["error_code"] = "network"
-                result["error"] = f"Cannot connect to Ollama at {self.base_url}. Is Ollama running? ({str(e)})"
+                result["error"] = (
+                    f"Cannot connect to Ollama at {self.base_url}. Is Ollama running? ({e!s})"
+                )
 
         logger.info(
             "Validation for ollama: ok=%s, error_code=%s, error=%s",
-            result["ok"], result["error_code"], result["error"]
+            result["ok"],
+            result["error_code"],
+            result["error"],
         )
 
         validation_cache.set(self.spec.id, self.base_url, self.api_key, result)
@@ -115,7 +119,7 @@ class OllamaProvider:
         *,
         model: str | None = None,
         temperature: float = 0.2,
-        max_tokens: int = 4096
+        max_tokens: int = 4096,
     ) -> str:
         client = self._get_client()
         url = f"{self.base_url}/api/chat"
@@ -125,10 +129,7 @@ class OllamaProvider:
             "model": model_name,
             "messages": messages,
             "stream": False,
-            "options": {
-                "temperature": temperature,
-                "num_predict": max_tokens
-            }
+            "options": {"temperature": temperature, "num_predict": max_tokens},
         }
 
         resp = await client.post(url, json=payload)
@@ -142,7 +143,7 @@ class OllamaProvider:
         *,
         model: str | None = None,
         temperature: float = 0.2,
-        max_tokens: int = 4096
+        max_tokens: int = 4096,
     ) -> AsyncGenerator[str, None]:
         client = self._get_client()
         url = f"{self.base_url}/api/chat"
@@ -152,10 +153,7 @@ class OllamaProvider:
             "model": model_name,
             "messages": messages,
             "stream": True,
-            "options": {
-                "temperature": temperature,
-                "num_predict": max_tokens
-            }
+            "options": {"temperature": temperature, "num_predict": max_tokens},
         }
 
         async with client.stream("POST", url, json=payload) as resp:

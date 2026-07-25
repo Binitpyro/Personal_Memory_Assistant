@@ -29,7 +29,6 @@ class QueryRequest(BaseModel):
         None
     )  # List of {"role": "user/assistant", "content": "..."}
 
-
     @field_validator("history")
     @classmethod
     def validate_history(cls, v):

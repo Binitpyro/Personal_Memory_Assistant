@@ -103,7 +103,7 @@ class CodeGraphExtractor:
                         edges.append(
                             {
                                 "src_id": caller_id,
-                                "dst_id": f"PENDING::{callee_name}",  # Resolved in _resolve_pending_calls  # noqa: E501
+                                "dst_id": f"PENDING::{callee_name}",  # Resolved in _resolve_pending_calls
                                 "rel_type": "CALLS",
                             }
                         )

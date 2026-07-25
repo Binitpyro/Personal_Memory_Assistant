@@ -1,6 +1,8 @@
-import pytest
-import httpx
 from unittest.mock import AsyncMock, patch
+
+import httpx
+import pytest
+
 from app.providers.openai import OpenAIProvider
 
 
@@ -9,14 +11,14 @@ async def test_openai_provider_validate_success():
     provider = OpenAIProvider(
         api_key="sk-testopenaiapikey123",
         base_url="https://api.openai.com/v1",
-        default_model="gpt-4o"
+        default_model="gpt-4o",
     )
 
     mock_response = httpx.Response(
         200,
         json={"data": [{"id": "gpt-4o"}, {"id": "gpt-4o-mini"}]},
         headers={"Date": "Mon, 01 Jan 2026 00:00:00 GMT"},
-        request=httpx.Request("GET", "https://api.openai.com/v1/models")
+        request=httpx.Request("GET", "https://api.openai.com/v1/models"),
     )
 
     with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
@@ -34,16 +36,14 @@ async def test_openai_provider_validate_success():
 @pytest.mark.asyncio
 async def test_openai_provider_validate_auth_failure():
     provider = OpenAIProvider(
-        api_key="sk-invalid",
-        base_url="https://api.openai.com/v1",
-        default_model="gpt-4o"
+        api_key="sk-invalid", base_url="https://api.openai.com/v1", default_model="gpt-4o"
     )
 
     mock_response = httpx.Response(
         401,
         text="Unauthorized",
         headers={"Date": "Mon, 01 Jan 2026 00:00:00 GMT"},
-        request=httpx.Request("GET", "https://api.openai.com/v1/models")
+        request=httpx.Request("GET", "https://api.openai.com/v1/models"),
     )
 
     with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:

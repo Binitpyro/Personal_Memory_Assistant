@@ -78,7 +78,7 @@ class EmbeddingService:
         providers = ["CPUExecutionProvider"]
 
         # O(1) Memory Fix: Prevent ONNX from allocating gigabytes of thread memory arenas
-        # By default, ONNX creates a memory arena per CPU core, scaling RAM to 1.5GB+ on modern CPUs.  # noqa: E501
+        # By default, ONNX creates a memory arena per CPU core, scaling RAM to 1.5GB+ on modern CPUs.
         # Performance Fix: Use more threads (4 intra, 2 inter) and enable memory optimizations.
         # With fixed tokenizer padding (length=256), enable_mem_pattern=True is safe and fast.
         import os

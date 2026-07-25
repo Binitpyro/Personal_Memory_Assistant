@@ -3,28 +3,36 @@ import { screen } from '@testing-library/react';
 import { SettingsPage } from '../../pages/SettingsPage';
 import { renderWithProviders } from '../test-utils';
 
+const mockAuthStatus = { connected: true, email: 'test@example.com' };
+const mockLocalModels = { ollama: { detected: false, models: [] }, lm_studio: { detected: false, models: [] } };
+const mockSystemInfo = { total_files: 5, total_chunks: 25, database_size_bytes: 2048 };
+const mockLLMPrefs = { provider: 'auto', gemini_model: 'default-model', ollama_model: '', lm_studio_model: '' };
+const mockDriveInfo = { is_portable_fs: false, lancedb_mode: 'local', mount_path: '/mock/path', free_bytes: 5000000 };
+const mockProviders: any[] = [];
+const mockRefetch = vi.fn();
+
 // Mock useApi directly using cacheKey
 vi.mock('../../useApi', () => ({
   useApi: vi.fn((_, opts) => {
     if (opts?.cacheKey === 'auth-status') {
-      return { data: { connected: true, email: 'test@example.com' }, loading: false, error: null, refetch: vi.fn() };
+      return { data: mockAuthStatus, loading: false, error: null, refetch: mockRefetch };
     }
     if (opts?.cacheKey === 'local-models') {
-      return { data: { ollama: { detected: false, models: [] }, lm_studio: { detected: false, models: [] } }, loading: false, error: null, refetch: vi.fn() };
+      return { data: mockLocalModels, loading: false, error: null, refetch: mockRefetch };
     }
     if (opts?.cacheKey === 'system-info') {
-      return { data: { total_files: 5, total_chunks: 25, database_size_bytes: 2048 }, loading: false, error: null, refetch: vi.fn() };
+      return { data: mockSystemInfo, loading: false, error: null, refetch: mockRefetch };
     }
     if (opts?.cacheKey === 'llm-prefs') {
-      return { data: { provider: 'auto', gemini_model: 'default-model', ollama_model: '', lm_studio_model: '' }, loading: false, error: null, refetch: vi.fn() };
+      return { data: mockLLMPrefs, loading: false, error: null, refetch: mockRefetch };
     }
     if (opts?.cacheKey === 'drive-info') {
-      return { data: { is_portable_fs: false, lancedb_mode: 'local', mount_path: '/mock/path', free_bytes: 5000000 }, loading: false, error: null, refetch: vi.fn() };
+      return { data: mockDriveInfo, loading: false, error: null, refetch: mockRefetch };
     }
     if (opts?.cacheKey === 'providers-list') {
-      return { data: [], loading: false, error: null, refetch: vi.fn() };
+      return { data: mockProviders, loading: false, error: null, refetch: mockRefetch };
     }
-    return { data: undefined, loading: false, error: null, refetch: vi.fn() };
+    return { data: undefined, loading: false, error: null, refetch: mockRefetch };
   }),
   invalidateCache: vi.fn(),
 }));

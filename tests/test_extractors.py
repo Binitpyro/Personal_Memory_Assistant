@@ -356,11 +356,11 @@ class TestEpubExtractor:
             # Subfolder OEBPS/ or any folder
             zf.writestr(
                 "OEBPS/ch1.xhtml",
-                "<html><body><h1>Introduction</h1><p>Welcome to &amp; standard text. This is a longer text paragraph that contains enough characters to pass the fifty character check in the extractor.</p></body></html>",  # noqa: E501
+                "<html><body><h1>Introduction</h1><p>Welcome to &amp; standard text. This is a longer text paragraph that contains enough characters to pass the fifty character check in the extractor.</p></body></html>",
             )
             zf.writestr(
                 "OEBPS/ch2.html",
-                "<html><body><p>This is second page. It has a lot of additional characters in order to exceed fifty characters as well.</p></body></html>",  # noqa: E501
+                "<html><body><p>This is second page. It has a lot of additional characters in order to exceed fifty characters as well.</p></body></html>",
             )
             # Ignored folder
             zf.writestr("__MACOSX/ch1.xhtml", "ignored")

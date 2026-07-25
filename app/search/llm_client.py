@@ -2,12 +2,13 @@ import json
 import logging
 from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import Any
+
 import httpx
 import keyring
+
 from app.config import settings
-from app.search.capability_detector import capability_detector
 from app.providers import BaseProvider, create_provider, get_configured_provider_ids
+from app.search.capability_detector import capability_detector
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +16,7 @@ logger = logging.getLogger(__name__)
 def _get_effective_fallback_chain() -> list[str]:
     configured_ids = get_configured_provider_ids()
     pref_path = Path("data/settings.json")
-    saved_chain = []
+    saved_chain: list[str] = []
     if pref_path.exists():
         try:
             with open(pref_path, encoding="utf-8") as f:
@@ -37,8 +38,10 @@ def _get_effective_fallback_chain() -> list[str]:
 
     return chain if chain else configured_ids
 
+
 class ProviderNotConfiguredError(Exception):
     """Raised when no active LLM provider can be resolved."""
+
     pass
 
 
@@ -58,6 +61,7 @@ class LLMClient:
     async def _ensure_token_loaded(self):
         if not self._token_loaded:
             import asyncio
+
             self._oauth_token = await asyncio.to_thread(self._load_oauth_token)
             await asyncio.to_thread(self._load_runtime_preferences)
             await self._load_keyring_keys()
@@ -65,8 +69,10 @@ class LLMClient:
 
     async def _load_keyring_keys(self):
         import asyncio
+
         try:
             from app.providers import PROVIDER_IDS
+
             for provider in PROVIDER_IDS:
                 key = await asyncio.to_thread(keyring.get_password, "pma_backend", provider)
                 if key:
@@ -104,7 +110,9 @@ class LLMClient:
             logger.warning("Failed to load OAuth token: %s", e)
         return None
 
-    def get_model_class(self, override_provider: str | None = None, override_model: str | None = None) -> str:
+    def get_model_class(
+        self, override_provider: str | None = None, override_model: str | None = None
+    ) -> str:
         provider = (override_provider or self.provider_preference or "auto").lower()
 
         if provider == "gemini":
@@ -126,7 +134,14 @@ class LLMClient:
                 return "7b_local"
             return "7b_local"
 
-        if provider in ("openai", "anthropic", "groq", "openrouter", "nvidia_nim", "openai_compatible"):
+        if provider in (
+            "openai",
+            "anthropic",
+            "groq",
+            "openrouter",
+            "nvidia_nim",
+            "openai_compatible",
+        ):
             return "cloud"
 
         if provider == "auto":
@@ -145,8 +160,6 @@ class LLMClient:
         if "3b" in model_lower or "2b" in model_lower or "mini" in model_lower:
             return "3b_local"
         return "7b_local"
-
-
 
     def _load_runtime_preferences(self) -> None:
         pref_path = Path("data/settings.json")
@@ -277,6 +290,7 @@ Answer:
         else:
             # Let's check keyring again just in case
             import asyncio
+
             try:
                 key = await asyncio.to_thread(keyring.get_password, "pma_backend", pid)
                 if key:
@@ -295,7 +309,7 @@ Answer:
                 per_provider = data.get("llm", {}).get("per_provider", {})
             except Exception:
                 pass
-                
+
         provider_settings = per_provider.get(pid, {})
         base_url = provider_settings.get("base_url")
 
@@ -336,11 +350,7 @@ Answer:
             raise ProviderNotConfiguredError(f"API Key for {pid} is not set.")
 
         return create_provider(
-            pid,
-            api_key=api_key,
-            base_url=base_url,
-            default_model=default_model,
-            timeout=timeout
+            pid, api_key=api_key, base_url=base_url, default_model=default_model, timeout=timeout
         )
 
     async def _resolve(
@@ -352,7 +362,9 @@ Answer:
         await self._ensure_token_loaded()
 
         if override_provider:
-            return await self._resolve_provider_by_id(override_provider, override_model, timeout=timeout)
+            return await self._resolve_provider_by_id(
+                override_provider, override_model, timeout=timeout
+            )
 
         provider_preference = self.provider_preference or "auto"
         fallback_chain = _get_effective_fallback_chain()
@@ -370,9 +382,11 @@ Answer:
                     break
                 except Exception:
                     continue
-            
+
             if not resolved_id:
-                raise ProviderNotConfiguredError("LLM unavailable. Please configure an API key or use a local model.")
+                raise ProviderNotConfiguredError(
+                    "LLM unavailable. Please configure an API key or use a local model."
+                )
 
         return await self._resolve_provider_by_id(resolved_id, override_model, timeout=timeout)
 
@@ -406,13 +420,15 @@ Answer:
                 await temp_prov.close()
             except Exception:
                 pass
-            
+
             if primary_id:
                 providers_to_try.append((primary_id, override_model, 30.0))
-            
+
             for pid in fallback_chain:
                 if pid != primary_id:
-                    providers_to_try.append((pid, None, 10.0)) # 10s connection timeout for fallbacks
+                    providers_to_try.append(
+                        (pid, None, 10.0)
+                    )  # 10s connection timeout for fallbacks
 
         max_attempts = len(providers_to_try)
         attempt = 0
@@ -432,9 +448,8 @@ Answer:
                 attempt += 1
 
         if last_error:
-            return f"LLM unavailable: All providers in fallback chain failed. Last error: {str(last_error)}"
+            return f"LLM unavailable: All providers in fallback chain failed. Last error: {last_error!s}"
         return "LLM unavailable: No providers configured."
-
 
     async def stream_answer(
         self,
@@ -463,16 +478,18 @@ Answer:
                 await temp_prov.close()
             except Exception:
                 pass
-            
+
             if primary_id:
                 providers_to_try.append((primary_id, override_model, 30.0))
-            
+
             for pid in fallback_chain:
                 if pid != primary_id:
-                    providers_to_try.append((pid, None, 10.0)) # 10s connection timeout for fallbacks
+                    providers_to_try.append(
+                        (pid, None, 10.0)
+                    )  # 10s connection timeout for fallbacks
 
         max_attempts = len(providers_to_try)
-        
+
         # We need helper variables for token usage counting
         full_answer = ""
         prompt_tokens = 0
@@ -481,6 +498,7 @@ Answer:
         # Calculate prompt tokens locally
         try:
             from app.search.context_builder import _get_tokens
+
             # Include messages in prompt count
             full_prompt_text = prompt + "\n" + json.dumps(history or [])
             prompt_tokens = len(_get_tokens(full_prompt_text))
@@ -490,21 +508,30 @@ Answer:
         async def _generator():
             nonlocal full_answer, completion_tokens
             attempt = 0
-            last_error = None
+            last_error: Exception | None = None
 
             while attempt < max_attempts:
                 pid, model, to_val = providers_to_try[attempt]
                 provider_instance = None
                 try:
-                    provider_instance = await self._resolve_provider_by_id(pid, model, timeout=to_val)
+                    provider_instance = await self._resolve_provider_by_id(
+                        pid, model, timeout=to_val
+                    )
                     if attempt > 0:
                         yield json.dumps({"control": "fallback", "to": pid})
 
-                    async for chunk in provider_instance.stream(self._build_messages(prompt, history)):
+                    async for chunk in provider_instance.stream(
+                        self._build_messages(prompt, history)
+                    ):
                         full_answer += chunk
                         yield chunk
                     break
-                except (httpx.HTTPStatusError, httpx.RequestError, httpx.TimeoutException, ProviderNotConfiguredError) as e:
+                except (
+                    httpx.HTTPStatusError,
+                    httpx.RequestError,
+                    httpx.TimeoutException,
+                    ProviderNotConfiguredError,
+                ) as e:
                     logger.warning(f"Streaming fallback attempt {attempt} for {pid} failed: {e}")
                     last_error = e
                     attempt += 1
@@ -517,7 +544,7 @@ Answer:
                         await provider_instance.close()
             else:
                 if last_error:
-                    yield f"Streaming error: All providers in fallback chain failed. Last error: {str(last_error)}"
+                    yield f"Streaming error: All providers in fallback chain failed. Last error: {last_error!s}"
                 else:
                     yield "Streaming error: No providers configured."
 
@@ -540,16 +567,18 @@ Answer:
         # Calculate completion tokens and yield final control usage packet
         try:
             from app.search.context_builder import _get_tokens
+
             completion_tokens = len(_get_tokens(full_answer))
         except Exception:
             completion_tokens = max(len(full_answer) // 4, len(full_answer.split()) * 4 // 3)
 
-        yield json.dumps({
-            "control": "usage",
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens
-        })
-
+        yield json.dumps(
+            {
+                "control": "usage",
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+            }
+        )
 
     # Health check methods
     async def _check_ollama_health(self) -> bool:

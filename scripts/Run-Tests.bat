@@ -8,7 +8,7 @@ echo %cmdcmdline% | find /i "%~0" >nul
 if not errorlevel 1 set "INTERACTIVE=1"
 
 echo ============================================================
-echo   PMA v0.0.69  -  Full Test Suite
+echo   PMA v0.0.71  -  Full Test Suite
 echo ============================================================
 echo.
 

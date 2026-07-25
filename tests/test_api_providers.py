@@ -1,7 +1,8 @@
 import os
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
+
 from fastapi.testclient import TestClient
-import pytest
+
 from app.main import app
 
 client = TestClient(app)
@@ -20,7 +21,7 @@ def test_get_providers(mock_get_pw, mock_write, mock_read):
             "provider": "openai",
             "per_provider": {
                 "openai": {"base_url": "https://api.openai.com/v1", "default_model": "gpt-4o"}
-            }
+            },
         }
     }
     mock_get_pw.return_value = "fake_key"
@@ -59,12 +60,10 @@ def test_delete_provider_key(mock_del_pw, mock_write, mock_read):
 @patch("app.api.providers.read_settings")
 @patch("app.api.providers.write_settings")
 def test_set_default_model(mock_write, mock_read):
-    mock_read.return_value = {
-        "llm": {
-            "per_provider": {}
-        }
-    }
+    mock_read.return_value = {"llm": {"per_provider": {}}}
 
-    resp = client.put("/api/providers/openai/default_model", json={"model": "gpt-4o"}, headers=headers)
+    resp = client.put(
+        "/api/providers/openai/default_model", json={"model": "gpt-4o"}, headers=headers
+    )
     assert resp.status_code == 200
     mock_write.assert_called()

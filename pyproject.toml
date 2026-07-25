@@ -79,6 +79,9 @@ ignore = [
     "S101",  # allow assert in tests
     "S603",  # subprocess calls are fine here
     "T201",  # allow print in CLI scripts
+    "E501",  # line length handled by ruff format
+    "S110",  # try-except-pass in fallback loops
+    "S112",  # try-except-continue in fallback loops
 ]
 
 [tool.ruff.lint.per-file-ignores]

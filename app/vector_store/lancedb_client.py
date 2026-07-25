@@ -146,7 +146,7 @@ class LanceDBClient:
             except Exception as e:
                 if "already exists" in str(e).lower():
                     logger.debug(
-                        "Table %s already exists despite list_tables check. Opening and appending...",  # noqa: E501
+                        "Table %s already exists despite list_tables check. Opening and appending...",
                         name,
                     )
                     tbl = self.db.open_table(name)
@@ -178,7 +178,7 @@ class LanceDBClient:
         try:
             tbl = self._get_table(table_name)
             if tbl is not None:
-                # Use PyArrow on just the 'id' column to avoid loading metadata and vectors, fixing O(1) violation.  # noqa: E501
+                # Use PyArrow on just the 'id' column to avoid loading metadata and vectors, fixing O(1) violation.
                 arrow_tbl = tbl.search(None).select(["id"]).to_arrow()
                 col = arrow_tbl.column("id")
                 if len(col) > 0:

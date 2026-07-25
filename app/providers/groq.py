@@ -9,7 +9,7 @@ class GroqProvider(OpenAICompatibleProvider):
         api_key: str | None,
         base_url: str | None = None,
         default_model: str | None = None,
-        timeout: float = 30.0
+        timeout: float = 30.0,
     ):
         spec = spec_of("groq")
         super().__init__(

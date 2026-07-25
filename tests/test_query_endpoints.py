@@ -56,7 +56,7 @@ async def test_api_query_standard(
                 "file_id": file_id,
                 "start_offset": 0,
                 "end_offset": 100,
-                "text_preview": "import os\ndef main():\n    print('Hello World')\n# End of file content string long enough to satisfy snippet length requirements",  # noqa: E501
+                "text_preview": "import os\ndef main():\n    print('Hello World')\n# End of file content string long enough to satisfy snippet length requirements",
             }
         ]
     )
@@ -70,7 +70,7 @@ async def test_api_query_standard(
                 [
                     {
                         "file_path": "d:/test_project/main.py",
-                        "text": "import os\ndef main():\n    print('Hello World')\n# End of file content string long enough to satisfy snippet length requirements",  # noqa: E501
+                        "text": "import os\ndef main():\n    print('Hello World')\n# End of file content string long enough to satisfy snippet length requirements",
                         "folder_tag": "test_tag",
                     }
                 ]
@@ -120,7 +120,7 @@ async def test_api_query_stream_standard(
                 "file_id": file_id,
                 "start_offset": 0,
                 "end_offset": 100,
-                "text_preview": "import os\ndef main():\n    print('Hello World')\n# End of file content string long enough to satisfy snippet length",  # noqa: E501
+                "text_preview": "import os\ndef main():\n    print('Hello World')\n# End of file content string long enough to satisfy snippet length",
             }
         ]
     )
@@ -133,7 +133,7 @@ async def test_api_query_stream_standard(
                 [
                     {
                         "file_path": "d:/test_project/main.py",
-                        "text": "import os\ndef main():\n    print('Hello World')\n# End of file content string long enough to satisfy snippet length",  # noqa: E501
+                        "text": "import os\ndef main():\n    print('Hello World')\n# End of file content string long enough to satisfy snippet length",
                         "folder_tag": "test_tag",
                     }
                 ]
@@ -188,7 +188,7 @@ async def test_api_query_fast_path_project(
 
     # Insert folder profile to trigger fast path project profiles
     await mock_db.execute_query(
-        "INSERT INTO folder_profiles (folder_tag, folder_path, project_type, profile_text) VALUES (?, ?, ?, ?)",  # noqa: E501
+        "INSERT INTO folder_profiles (folder_tag, folder_path, project_type, profile_text) VALUES (?, ?, ?, ?)",
         ("test_tag", "d:/test_project", "Python", "Synthesized project profile text for testing"),
     )
 
@@ -216,7 +216,7 @@ async def test_query_challenge_mode(
                 [
                     {
                         "file_path": "d:/test_project/main.py",
-                        "text": "import os\ndef main():\n    print('Hello World')\n# End of file content string long enough to satisfy snippet length",  # noqa: E501
+                        "text": "import os\ndef main():\n    print('Hello World')\n# End of file content string long enough to satisfy snippet length",
                         "folder_tag": "test_tag",
                     }
                 ]
@@ -302,7 +302,7 @@ async def test_retrieval_llm_failure_handling(mock_db, mock_emb, mock_lancedb, o
                 "file_id": file_id,
                 "start_offset": 0,
                 "end_offset": 100,
-                "text_preview": "import os\ndef main():\n    print('Hello World')\n# End of file content string long enough to satisfy snippet length requirements",  # noqa: E501
+                "text_preview": "import os\ndef main():\n    print('Hello World')\n# End of file content string long enough to satisfy snippet length requirements",
             }
         ]
     )
@@ -315,7 +315,7 @@ async def test_retrieval_llm_failure_handling(mock_db, mock_emb, mock_lancedb, o
                 [
                     {
                         "file_path": "d:/test_project/main.py",
-                        "text": "import os\ndef main():\n    print('Hello World')\n# End of file content string long enough to satisfy snippet length requirements",  # noqa: E501
+                        "text": "import os\ndef main():\n    print('Hello World')\n# End of file content string long enough to satisfy snippet length requirements",
                         "folder_tag": "test_tag",
                     }
                 ]

@@ -9,7 +9,7 @@ class LMStudioProvider(OpenAICompatibleProvider):
         api_key: str | None = None,
         base_url: str | None = None,
         default_model: str | None = None,
-        timeout: float = 30.0
+        timeout: float = 30.0,
     ):
         spec = spec_of("lm_studio")
         super().__init__(

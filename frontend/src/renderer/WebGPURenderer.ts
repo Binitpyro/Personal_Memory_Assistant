@@ -1,44 +1,65 @@
 /**
- * WebGPURenderer.ts
+ * WebGPURenderer.ts — "Aurora" build.
  *
- * Tier-1 renderer for the Crystal Dreamscape insights view.
+ * Full render graph overhaul. Preserves the exact public API from the
+ * legacy renderer (init / loadData / render / pick / resize / focusOnNode /
+ * handleMouseMove / handleZoom / destroy / markDirty / nav / focusPosition)
+ * so WebGPUFallback.tsx does not need to be touched.
  *
- * Instanced-mesh generation:
- *   - Collapsed folders render as flat-shaded icosahedron "crystals"
- *     (crystal.wgsl, opaque, fake screen-space refraction of the
- *     previous frame).
- *   - Files render as smooth icosphere "bubbles" (bubble.wgsl,
- *     transparent, two-pass back/front cull, pre-order draw so nested
- *     translucency composites correctly without a per-frame sort).
- *   - GPU picking renders instance indices into an r32uint target
- *     (picking.wgsl); the CPU maps the compacted slot back to the
- *     source node index via VisibleSet.crystalIndices/bubbleIndices.
+ * Preserved contracts:
+ *   • 32-byte per-instance Node stride (see NavigationController.NODE_STRIDE).
+ *   • Compacted instance buffer: crystals first, bubbles after. Picking IDs
+ *     for bubbles use firstInstance = crystalCount so they don't collide.
+ *   • Shared 3-variant crystal pipeline (currentVariant discriminant).
  *
- * Shares the NavigationController with WebGL2Renderer so LOD,
- * expand/collapse and breadcrumbs are tier-agnostic. Public API matches
- * WebGL2Renderer — the RendererLike contract in WebGPUFallback.tsx.
+ * Upgrades:
+ *   • Camera UBO grown from 112 → 192 bytes (adds invViewProj, focus,
+ *     exposure). The layout matches common.wgsl exactly.
+ *   • HDR linear pipeline: SceneColor / SceneColorPrev / Bloom / GodRays
+ *     all rgba16f. Only the final tonemap writes to the sRGB swap-chain.
+ *   • New passes: Sky, GPU particles (compute + additive draw),
+ *     Weighted-Blended OIT (accum + reveal + resolve), radial god-rays,
+ *     5-mip Kawase bloom, ACES tonemap composite with grain/vignette/CA.
+ *
+ * The render graph mirrors the diagram in the design doc:
+ *   Sky → Crystals → Particles → Bubbles(OIT) → OIT-Resolve → GodRays
+ *       → Bloom(down×5, up×5) → Tonemap → SwapChain → Copy(SceneColorPrev).
  */
 
-import commonShaderCode from './shaders/common.wgsl?raw';
-import crystalShaderCode from './shaders/crystal.wgsl?raw';
-import bubbleShaderCode from './shaders/bubble.wgsl?raw';
-import pickingShaderCode from './shaders/picking.wgsl?raw';
-import outlineShaderCode from './shaders/outline.wgsl?raw';
+import commonShaderCode      from './shaders/common.wgsl?raw';
+import skyShaderCode         from './shaders/aurora_sky.wgsl?raw';
+import crystalShaderCode     from './shaders/crystal.wgsl?raw';
+import bubbleShaderCode      from './shaders/bubble.wgsl?raw';
+import oitResolveShaderCode  from './shaders/oit_resolve.wgsl?raw';
+import particlesUpdateCode   from './shaders/particles_update.wgsl?raw';
+import particlesDrawCode     from './shaders/particles_draw.wgsl?raw';
+import godRaysShaderCode     from './shaders/godrays.wgsl?raw';
+import bloomShaderCode       from './shaders/bloom.wgsl?raw';
+import tonemapShaderCode     from './shaders/tonemap.wgsl?raw';
+import pickingShaderCode     from './shaders/picking.wgsl?raw';
+import outlineShaderCode     from './shaders/outline.wgsl?raw';
+
 import { generateCrystalVariants, type MeshData } from './geometry/icosahedron';
-import { generateIcosphereLOD } from './geometry/icosphere';
+import { generateIcosphereMulti } from './geometry/icosphere';
 import { NavigationController, NODE_STRIDE, NO_PARENT } from '../interaction/NavigationController';
 
-/** CameraUniform in crystal/bubble/picking.wgsl:
- *  mat4x4 viewProj (64) + eyePosition vec3 + currentVariant u32 (16) + time/w/h/fogDen (16) + fogCol/pad2 (16) = 112 bytes. */
-const CAMERA_UNIFORM_SIZE = 112;
+/** Grown UBO — matches common.wgsl's CameraUniform (std140). */
+const CAMERA_UNIFORM_SIZE = 192;
 
-/** Background: dark void matching the WebGL2 tier and the page chrome (#02030a). */
-const CLEAR_COLOR: GPUColor = [0.008, 0.012, 0.039, 1];
+// HDR clear — SceneColor is rgba16f linear, sky pass overwrites everything.
+const CLEAR_HDR: GPUColor = [0.0, 0.0, 0.0, 1.0];
+
+// Particle system — 64k is comfortable on integrated GPUs and looks lush.
+const PARTICLE_COUNT = 65_536;
+const PARTICLE_STRIDE = 32; // vec3 pos + f32 life + vec3 vel + f32 seed
+const SIM_PARAMS_SIZE = 48;
+
+const BLOOM_MIPS = 5;
 
 interface GpuMesh {
     vertexBuffer: GPUBuffer;
-    indexBuffer: GPUBuffer;
-    indexCount: number;
+    indexBuffer:  GPUBuffer;
+    indexCount:   number;
 }
 
 export class WebGPURenderer {
@@ -47,70 +68,112 @@ export class WebGPURenderer {
     private context!: GPUCanvasContext;
     private format!: GPUTextureFormat;
 
-    // Static geometry (allocated once at init)
+    // ── Geometry ────────────────────────────────────────────────────────
     private crystalMeshes: GpuMesh[] = [];
-    private bubbleMesh!: GpuMesh;
+    private bubbleMesh!: GpuMesh; // near-LOD; renderer picks it per instance
 
-    public enableOutline: boolean = true;
-
-    // Per-frame compacted instance buffer.
-    // Layout: crystal rows in [0, crystalCount), bubble rows in
-    // [crystalCount, crystalCount + bubbleCount). Keeping both in ONE
-    // buffer lets the picking pass use firstInstance = crystalCount for
-    // bubbles so pick IDs are unique across both mesh types.
+    // ── Instance buffer ─────────────────────────────────────────────────
     private instanceBuffer?: GPUBuffer;
     private crystalCount = 0;
     private bubbleCount = 0;
     private crystalIndices: Uint32Array = new Uint32Array(0);
-    private bubbleIndices: Uint32Array = new Uint32Array(0);
+    private bubbleIndices: Uint32Array  = new Uint32Array(0);
 
-    // Render targets
-    private depthTexture!: GPUTexture;
-    private pickingTexture!: GPUTexture;
+    // ── Render targets ──────────────────────────────────────────────────
+    private sceneColor!: GPUTexture;     // rgba16f — main HDR
+    private sceneColorPrev!: GPUTexture; // rgba16f — refraction source
+    private oitAccum!: GPUTexture;       // rgba16f
+    private oitReveal!: GPUTexture;      // r8unorm
+    private depthTex!: GPUTexture;       // depth24plus — written as RenderAttachment
+    private depthTexCopy!: GPUTexture;   // depth24plus — read-only copy for TextureBinding
+    private pickTex!: GPUTexture;        // r32uint
+    private godRaysMask!: GPUTexture;    // half-res r16f
+    private godRaysBlur!: GPUTexture;    // half-res rgba16f
+    private bloomMips: GPUTexture[] = []; // rgba16f, decreasing sizes
+    private bloomUp: GPUTexture[] = [];   // rgba16f, upsample chain
 
-    private cameraBuffers: GPUBuffer[] = [];
+    // ── Uniform / staging buffers ───────────────────────────────────────
+    private cameraBuffers: GPUBuffer[] = []; // 3 for the 3 crystal variants
     private pickBuffer!: GPUBuffer;
+    private simParamsBuffer!: GPUBuffer;
+    private particleBuffer!: GPUBuffer;
+    private bloomParamBuffers: GPUBuffer[] = []; // one per pass in the chain
 
-    // Explicit layouts so all pipelines share ONE camera bind group.
+    // ── Bind group layouts / groups (kept explicit for clarity) ─────────
     private cameraBGL!: GPUBindGroupLayout;
     private cameraBindGroups: GPUBindGroup[] = [];
 
+    private crystalSceneBGL!: GPUBindGroupLayout;
+    private crystalSceneBindGroup!: GPUBindGroup;
+
+    private oitResolveBGL!: GPUBindGroupLayout;
+    private oitResolveBG!: GPUBindGroup;
+
+    private simBGL!: GPUBindGroupLayout;
+    private simBindGroup!: GPUBindGroup;
+
+    private particleDrawBGL!: GPUBindGroupLayout;
+    private particleDrawBG!: GPUBindGroup;
+
+    private godRaysBGL!: GPUBindGroupLayout;
+    private godRaysMaskBG!: GPUBindGroup;
+    private godRaysBlurBG!: GPUBindGroup;
+
+    private bloomBGL!: GPUBindGroupLayout;
+    private bloomBindGroups: GPUBindGroup[] = []; // prefilter + down + up
+
+    private tonemapBGL!: GPUBindGroupLayout;
+    private tonemapBG!: GPUBindGroup;
+
     private outlineBGL!: GPUBindGroupLayout;
-    private outlinePipeline!: GPURenderPipeline;
-    private outlineBindGroup!: GPUBindGroup;
-    private nearestSampler!: GPUSampler;
+    private outlineBG!: GPUBindGroup;
 
+    // ── Pipelines ───────────────────────────────────────────────────────
+    private skyPipeline!: GPURenderPipeline;
     private crystalPipeline!: GPURenderPipeline;
-    private bubbleBackPipeline!: GPURenderPipeline;
-    private bubbleFrontPipeline!: GPURenderPipeline;
+    private bubbleOitPipeline!: GPURenderPipeline;
+    private oitResolvePipeline!: GPURenderPipeline;
+    private simComputePipeline!: GPUComputePipeline;
+    private particlesDrawPipeline!: GPURenderPipeline;
+    private godRaysMaskPipeline!: GPURenderPipeline;
+    private godRaysBlurPipeline!: GPURenderPipeline;
+    private bloomPrefilterPipeline!: GPURenderPipeline;
+    private bloomDownPipeline!: GPURenderPipeline;
+    private bloomUpPipeline!: GPURenderPipeline;
+    private tonemapPipeline!: GPURenderPipeline;
     private pickingPipeline!: GPURenderPipeline;
+    private outlinePipeline!: GPURenderPipeline;
 
+    // Samplers
+    private linearSampler!: GPUSampler;
+    private pointSampler!: GPUSampler;
+
+    // ── Nav + camera state ──────────────────────────────────────────────
     public readonly nav = new NavigationController();
+    public enableOutline = false; // Aurora relies on bloom / lighting, not ink outlines
+    public exposure = 1.0;
     private nodeCount = 0;
     private visibleDirty = true;
 
-    // Camera state — same conventions as WebGL2Renderer.
     private rotationX = 0.5;
     private rotationY = 0.5;
     private zoom = 550;
     public focusPosition: [number, number, number] = [0, 0, 0];
     private cameraPosition: [number, number, number] = [0, 0, 0];
     private isFirstFrame = true;
+    private needsPrevFrameSeed = true; // seed SceneColorPrev from sky on first data render
     private readonly startTime = performance.now();
+    private lastFrameTime = performance.now();
 
-    constructor(canvas: HTMLCanvasElement) {
-        this.canvas = canvas;
-    }
+    constructor(canvas: HTMLCanvasElement) { this.canvas = canvas; }
 
+    // ── Init ────────────────────────────────────────────────────────────
     public async init(): Promise<void> {
-        if (!navigator.gpu) {
-            throw new Error('WebGPU not supported on this browser.');
-        }
-        const adapter = await navigator.gpu.requestAdapter();
-        if (!adapter) {
-            throw new Error('No appropriate GPUAdapter found.');
-        }
+        if (!navigator.gpu) throw new Error('WebGPU not supported.');
+        const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+        if (!adapter) throw new Error('No appropriate GPUAdapter found.');
         this.device = await adapter.requestDevice();
+        this.device.lost.then(info => console.warn('[Aurora] Device lost:', info.message));
 
         this.context = this.canvas.getContext('webgpu') as GPUCanvasContext;
         this.format = navigator.gpu.getPreferredCanvasFormat();
@@ -118,41 +181,56 @@ export class WebGPURenderer {
             device: this.device,
             format: this.format,
             alphaMode: 'premultiplied',
-            // COPY_SRC: we snapshot the presented frame into prevFrameTexture
-            // each frame so crystal.wgsl can fake refraction next frame.
-            usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+            usage: GPUTextureUsage.RENDER_ATTACHMENT, // tonemap writes here; no copy needed
         });
 
-        this.canvas.width = Math.max(1, this.canvas.clientWidth);
+        this.canvas.width  = Math.max(1, this.canvas.clientWidth);
         this.canvas.height = Math.max(1, this.canvas.clientHeight);
 
+        // Camera UBOs (3 for the 3-variant crystal pass).
         for (let i = 0; i < 3; i++) {
             this.cameraBuffers.push(this.device.createBuffer({
                 size: CAMERA_UNIFORM_SIZE,
                 usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             }));
         }
-
         this.pickBuffer = this.device.createBuffer({
-            size: 256,
-            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+            size: 256, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
         });
+        this.simParamsBuffer = this.device.createBuffer({
+            size: SIM_PARAMS_SIZE, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+        this.particleBuffer = this.device.createBuffer({
+            size: PARTICLE_COUNT * PARTICLE_STRIDE,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        });
+        // Zero-initialize — life = 0 forces respawn on first tick.
+        this.device.queue.writeBuffer(
+            this.particleBuffer, 0,
+            new Float32Array(PARTICLE_COUNT * (PARTICLE_STRIDE / 4)),
+        );
 
-        const variants = generateCrystalVariants(3);
-        this.crystalMeshes = variants.map(v => this.uploadMesh(v));
-        this.bubbleMesh = this.uploadMesh(generateIcosphereLOD(3));
+        // Geometry — 3 crystal archetypes, 1 near-LOD icosphere for bubbles.
+        this.crystalMeshes = generateCrystalVariants(3).map(v => this.uploadMesh(v));
+        const [near] = generateIcosphereMulti();
+        this.bubbleMesh = this.uploadMesh(near);
 
-        this.nearestSampler = this.device.createSampler({ magFilter: 'nearest', minFilter: 'nearest' });
+        // Samplers
+        this.linearSampler = this.device.createSampler({
+            magFilter: 'linear', minFilter: 'linear', mipmapFilter: 'linear',
+            addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge',
+        });
+        this.pointSampler = this.device.createSampler({
+            magFilter: 'nearest', minFilter: 'nearest',
+            addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge',
+        });
 
         this.setupPipelines();
         this.setupTextures();
-
-        this.cameraBindGroups = this.cameraBuffers.map(buffer => this.device.createBindGroup({
-            layout: this.cameraBGL,
-            entries: [{ binding: 0, resource: { buffer } }],
-        }));
+        this.rebuildBindGroups();
     }
 
+    // ── Mesh upload ─────────────────────────────────────────────────────
     private uploadMesh(mesh: MeshData): GpuMesh {
         const vertexBuffer = this.device.createBuffer({
             size: mesh.vertices.byteLength,
@@ -162,7 +240,6 @@ export class WebGPURenderer {
         new Float32Array(vertexBuffer.getMappedRange()).set(mesh.vertices);
         vertexBuffer.unmap();
 
-        // Index buffer size must be a multiple of 4 bytes.
         const idxByteLength = Math.ceil(mesh.indices.byteLength / 4) * 4;
         const indexBuffer = this.device.createBuffer({
             size: idxByteLength,
@@ -175,35 +252,34 @@ export class WebGPURenderer {
         return { vertexBuffer, indexBuffer, indexCount: mesh.indexCount };
     }
 
-    /** Vertex-buffer layouts shared by crystal, bubble and picking pipelines.
-     *  Must stay in sync with the VertexInput structs in the WGSL files:
-     *  locations 0-1 = mesh (stride 24), locations 2-7 = instance (stride 32,
-     *  matching the Rust Node struct byte-for-byte). */
+    // ── Vertex layouts (unchanged 24 + 32 byte stride) ──────────────────
     private vertexLayouts(): GPUVertexBufferLayout[] {
         return [
             {
                 arrayStride: 24,
                 attributes: [
-                    { shaderLocation: 0, offset: 0, format: 'float32x3' },  // local_pos
-                    { shaderLocation: 1, offset: 12, format: 'float32x3' }, // local_normal
+                    { shaderLocation: 0, offset: 0,  format: 'float32x3' },
+                    { shaderLocation: 1, offset: 12, format: 'float32x3' },
                 ],
             },
             {
                 arrayStride: NODE_STRIDE,
                 stepMode: 'instance',
                 attributes: [
-                    { shaderLocation: 2, offset: 0, format: 'float32x3' },  // inst_position
-                    { shaderLocation: 3, offset: 12, format: 'float32' },   // inst_radius
-                    { shaderLocation: 4, offset: 16, format: 'uint32' },    // inst_parent_index
-                    { shaderLocation: 5, offset: 20, format: 'uint32' },    // inst_flags
-                    { shaderLocation: 6, offset: 24, format: 'uint32' },    // inst_type_hash
-                    { shaderLocation: 7, offset: 28, format: 'uint32' },    // inst_pad
+                    { shaderLocation: 2, offset: 0,  format: 'float32x3' },
+                    { shaderLocation: 3, offset: 12, format: 'float32'   },
+                    { shaderLocation: 4, offset: 16, format: 'uint32'    },
+                    { shaderLocation: 5, offset: 20, format: 'uint32'    },
+                    { shaderLocation: 6, offset: 24, format: 'uint32'    },
+                    { shaderLocation: 7, offset: 28, format: 'uint32'    },
                 ],
             },
         ];
     }
 
+    // ── Pipeline creation ───────────────────────────────────────────────
     private setupPipelines(): void {
+        // Bind group layouts
         this.cameraBGL = this.device.createBindGroupLayout({
             entries: [{
                 binding: 0,
@@ -212,45 +288,65 @@ export class WebGPURenderer {
             }],
         });
 
-        const cameraOnlyLayout = this.device.createPipelineLayout({ bindGroupLayouts: [this.cameraBGL] });
-        const buffers = this.vertexLayouts();
-
-        const fullCrystalShader = commonShaderCode + '\n' + crystalShaderCode;
-        const crystalModule = this.device.createShaderModule({ code: fullCrystalShader });
-        
-        // Crystals: opaque, depth-writing.
-        this.crystalPipeline = this.device.createRenderPipeline({
-            layout: cameraOnlyLayout,
-            vertex: { module: crystalModule, entryPoint: 'vs_main', buffers },
-            fragment: { module: crystalModule, entryPoint: 'fs_main', targets: [{ format: this.format }] },
-            primitive: { topology: 'triangle-list', cullMode: 'back' },
-            depthStencil: { depthWriteEnabled: true, depthCompare: 'less', format: 'depth24plus' },
+        this.crystalSceneBGL = this.device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+                { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'depth' } },
+                { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+            ],
         });
 
-        // Bubbles: transparent, no depth write, two passes (interior back
-        // faces first, then exterior front faces) per bubble.wgsl's contract.
-        const fullBubbleShader = commonShaderCode + '\n' + bubbleShaderCode;
-        const bubbleModule = this.device.createShaderModule({ code: fullBubbleShader });
-        const bubbleBlend: GPUBlendState = {
-            color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
-            alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
-        };
-        this.bubbleBackPipeline = this.device.createRenderPipeline({
-            layout: cameraOnlyLayout,
-            vertex: { module: bubbleModule, entryPoint: 'vs_main', buffers },
-            fragment: { module: bubbleModule, entryPoint: 'fs_main', targets: [{ format: this.format, blend: bubbleBlend }] },
-            primitive: { topology: 'triangle-list', cullMode: 'front' }, // Back faces
-            depthStencil: { depthWriteEnabled: false, depthCompare: 'less', format: 'depth24plus' },
-        });
-        this.bubbleFrontPipeline = this.device.createRenderPipeline({
-            layout: cameraOnlyLayout,
-            vertex: { module: bubbleModule, entryPoint: 'vs_main', buffers },
-            fragment: { module: bubbleModule, entryPoint: 'fs_main', targets: [{ format: this.format, blend: bubbleBlend }] },
-            primitive: { topology: 'triangle-list', cullMode: 'back' }, // Front faces
-            depthStencil: { depthWriteEnabled: false, depthCompare: 'less', format: 'depth24plus' },
+        this.oitResolveBGL = this.device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+                { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+                { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+            ],
         });
 
-        // Outline post-process pipeline
+        this.simBGL = this.device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+                { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+            ],
+        });
+
+        this.particleDrawBGL = this.device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+                { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
+                { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'depth' } },
+                { binding: 3, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+            ],
+        });
+
+        this.godRaysBGL = this.device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+                { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+                { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'depth' } },
+                { binding: 3, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+            ],
+        });
+
+        this.bloomBGL = this.device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+                { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+                { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+            ],
+        });
+
+        this.tonemapBGL = this.device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+                { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+                { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+                { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+                { binding: 4, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+            ],
+        });
+
         this.outlineBGL = this.device.createBindGroupLayout({
             entries: [
                 { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
@@ -258,54 +354,355 @@ export class WebGPURenderer {
                 { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'non-filtering' } },
             ],
         });
-        const outlineLayout = this.device.createPipelineLayout({ bindGroupLayouts: [this.outlineBGL] });
-        const outlineModule = this.device.createShaderModule({ code: outlineShaderCode });
-        this.outlinePipeline = this.device.createRenderPipeline({
-            layout: outlineLayout,
-            vertex: { module: outlineModule, entryPoint: 'vs_main' },
-            fragment: { 
-                module: outlineModule, 
-                entryPoint: 'fs_main', 
-                targets: [{ 
-                    format: this.format, 
-                    blend: {
-                        color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
-                        alpha: { srcFactor: 'zero', dstFactor: 'one', operation: 'add' },
-                    }
-                }] 
-            },
+
+        const cameraOnly = this.device.createPipelineLayout({ bindGroupLayouts: [this.cameraBGL] });
+        const buffers = this.vertexLayouts();
+
+        // ── Sky ─────────────────────────────────────────────────────────
+        const skyModule = this.device.createShaderModule({ label: 'aurora-sky-module', code: commonShaderCode + '\n' + skyShaderCode });
+        this.skyPipeline = this.device.createRenderPipeline({
+            label: 'aurora-sky-pipeline',
+            layout: cameraOnly,
+            vertex:   { module: skyModule, entryPoint: 'vs_main' },
+            fragment: { module: skyModule, entryPoint: 'fs_main',
+                        targets: [{ format: 'rgba16float' }] },
             primitive: { topology: 'triangle-list' },
         });
 
-        const pickingModule = this.device.createShaderModule({ code: pickingShaderCode });
-        this.pickingPipeline = this.device.createRenderPipeline({
-            layout: cameraOnlyLayout,
-            vertex: { module: pickingModule, entryPoint: 'vs_main', buffers },
-            fragment: { module: pickingModule, entryPoint: 'fs_main', targets: [{ format: 'r32uint' }] },
-            primitive: { topology: 'triangle-list', cullMode: 'back' },
-            depthStencil: { depthWriteEnabled: true, depthCompare: 'less', format: 'depth24plus' },
+        // ── Crystal (opaque, HDR, with prev-frame refraction) ───────────
+        const crystalModule = this.device.createShaderModule({ label: 'aurora-crystal-module', code: commonShaderCode + '\n' + crystalShaderCode });
+        const crystalPL = this.device.createPipelineLayout({
+            label: 'aurora-crystal-layout',
+            bindGroupLayouts: [this.cameraBGL, this.crystalSceneBGL],
         });
+        this.crystalPipeline = this.device.createRenderPipeline({
+            label: 'aurora-crystal-pipeline',
+            layout: crystalPL,
+            vertex:   { module: crystalModule, entryPoint: 'vs_main', buffers },
+            fragment: { module: crystalModule, entryPoint: 'fs_main',
+                        targets: [{ format: 'rgba16float' }] },
+            primitive: { topology: 'triangle-list', cullMode: 'back' },
+            depthStencil: { depthWriteEnabled: true, depthCompare: 'less', format: 'depth32float' },
+        });
+
+        // ── Bubbles (WBOIT — writes accum + reveal) ─────────────────────
+        const bubbleModule = this.device.createShaderModule({ label: 'aurora-bubble-module', code: commonShaderCode + '\n' + bubbleShaderCode });
+        this.bubbleOitPipeline = this.device.createRenderPipeline({
+            label: 'aurora-bubble-pipeline',
+            layout: cameraOnly,
+            vertex:   { module: bubbleModule, entryPoint: 'vs_main', buffers },
+            fragment: { module: bubbleModule, entryPoint: 'fs_main',
+                        targets: [
+                            { format: 'rgba16float',
+                              blend: { color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+                                       alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' } } },
+                            { format: 'r8unorm',
+                              blend: { color: { srcFactor: 'zero', dstFactor: 'one-minus-src', operation: 'add' },
+                                       alpha: { srcFactor: 'zero', dstFactor: 'one', operation: 'add' } } },
+                        ] },
+            primitive: { topology: 'triangle-list', cullMode: 'none' },
+            depthStencil: { depthWriteEnabled: false, depthCompare: 'less', format: 'depth32float' },
+        });
+
+        // ── OIT resolve (blends into SceneColor) ────────────────────────
+        const oitResolveModule = this.device.createShaderModule({ label: 'aurora-oit-resolve-module', code: commonShaderCode + '\n' + oitResolveShaderCode });
+        this.oitResolvePipeline = this.device.createRenderPipeline({
+            label: 'aurora-oit-resolve-pipeline',
+            layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.oitResolveBGL] }),
+            vertex:   { module: oitResolveModule, entryPoint: 'vs_main' },
+            fragment: { module: oitResolveModule, entryPoint: 'fs_main',
+                        targets: [{ format: 'rgba16float',
+                                    blend: { color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+                                             alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' } } }] },
+            primitive: { topology: 'triangle-list' },
+        });
+
+        // ── Particles: compute + additive draw ──────────────────────────
+        const simModule = this.device.createShaderModule({ label: 'aurora-particles-sim-module', code: commonShaderCode + '\n' + particlesUpdateCode });
+        this.simComputePipeline = this.device.createComputePipeline({
+            label: 'aurora-particles-sim-pipeline',
+            layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.simBGL] }),
+            compute: { module: simModule, entryPoint: 'cs_main' },
+        });
+        const drawModule = this.device.createShaderModule({ label: 'aurora-particles-draw-module', code: commonShaderCode + '\n' + particlesDrawCode });
+        this.particlesDrawPipeline = this.device.createRenderPipeline({
+            label: 'aurora-particles-draw-pipeline',
+            layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.particleDrawBGL] }),
+            vertex:   { module: drawModule, entryPoint: 'vs_main' },
+            fragment: { module: drawModule, entryPoint: 'fs_main',
+                        targets: [{ format: 'rgba16float',
+                                    blend: { color: { srcFactor: 'src-alpha', dstFactor: 'one', operation: 'add' },
+                                             alpha: { srcFactor: 'zero', dstFactor: 'one', operation: 'add' } } }] },
+            primitive: { topology: 'triangle-list' },
+            depthStencil: { depthWriteEnabled: false, depthCompare: 'less', format: 'depth32float' },
+        });
+
+        // ── God-rays: mask + radial-blur ────────────────────────────────
+        const godRaysModule = this.device.createShaderModule({ label: 'aurora-godrays-module', code: commonShaderCode + '\n' + godRaysShaderCode });
+        const godRaysLayout = this.device.createPipelineLayout({ bindGroupLayouts: [this.godRaysBGL] });
+        this.godRaysMaskPipeline = this.device.createRenderPipeline({
+            label: 'aurora-godrays-mask-pipeline',
+            layout: godRaysLayout,
+            vertex:   { module: godRaysModule, entryPoint: 'vs_main' },
+            fragment: { module: godRaysModule, entryPoint: 'fs_occlusion',
+                        targets: [{ format: 'rgba16float' }] },
+            primitive: { topology: 'triangle-list' },
+        });
+        this.godRaysBlurPipeline = this.device.createRenderPipeline({
+            label: 'aurora-godrays-blur-pipeline',
+            layout: godRaysLayout,
+            vertex:   { module: godRaysModule, entryPoint: 'vs_main' },
+            fragment: { module: godRaysModule, entryPoint: 'fs_radial',
+                        targets: [{ format: 'rgba16float' }] },
+            primitive: { topology: 'triangle-list' },
+        });
+
+        // ── Bloom chain — 3 entry points share one shader module ────────
+        const bloomModule = this.device.createShaderModule({ label: 'aurora-bloom-module', code: commonShaderCode + '\n' + bloomShaderCode });
+        const bloomPL = this.device.createPipelineLayout({ bindGroupLayouts: [this.bloomBGL] });
+        this.bloomPrefilterPipeline = this.device.createRenderPipeline({
+            label: 'aurora-bloom-prefilter-pipeline',
+            layout: bloomPL,
+            vertex:   { module: bloomModule, entryPoint: 'vs_main' },
+            fragment: { module: bloomModule, entryPoint: 'fs_prefilter',
+                        targets: [{ format: 'rgba16float' }] },
+            primitive: { topology: 'triangle-list' },
+        });
+        this.bloomDownPipeline = this.device.createRenderPipeline({
+            label: 'aurora-bloom-down-pipeline',
+            layout: bloomPL,
+            vertex:   { module: bloomModule, entryPoint: 'vs_main' },
+            fragment: { module: bloomModule, entryPoint: 'fs_down',
+                        targets: [{ format: 'rgba16float' }] },
+            primitive: { topology: 'triangle-list' },
+        });
+        this.bloomUpPipeline = this.device.createRenderPipeline({
+            label: 'aurora-bloom-up-pipeline',
+            layout: bloomPL,
+            vertex:   { module: bloomModule, entryPoint: 'vs_main' },
+            fragment: { module: bloomModule, entryPoint: 'fs_up',
+                        targets: [{ format: 'rgba16float',
+                                    blend: { color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+                                             alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' } } }] },
+            primitive: { topology: 'triangle-list' },
+        });
+
+        // ── Tonemap (final, writes to swap-chain) ───────────────────────
+        const tonemapModule = this.device.createShaderModule({ label: 'aurora-tonemap-module', code: commonShaderCode + '\n' + tonemapShaderCode });
+        this.tonemapPipeline = this.device.createRenderPipeline({
+            label: 'aurora-tonemap-pipeline',
+            layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.tonemapBGL] }),
+            vertex:   { module: tonemapModule, entryPoint: 'vs_main' },
+            fragment: { module: tonemapModule, entryPoint: 'fs_main',
+                        targets: [{ format: this.format }] },
+            primitive: { topology: 'triangle-list' },
+        });
+
+        // ── Picking (unchanged silhouette-tight pass) ───────────────────
+        const pickingModule = this.device.createShaderModule({ label: 'aurora-picking-module', code: commonShaderCode + '\n' + pickingShaderCode });
+        this.pickingPipeline = this.device.createRenderPipeline({
+            label: 'aurora-picking-pipeline',
+            layout: cameraOnly,
+            vertex:   { module: pickingModule, entryPoint: 'vs_main', buffers },
+            fragment: { module: pickingModule, entryPoint: 'fs_main',
+                        targets: [{ format: 'r32uint' }] },
+            primitive: { topology: 'triangle-list', cullMode: 'back' },
+            depthStencil: { depthWriteEnabled: true, depthCompare: 'less', format: 'depth32float' },
+        });
+
+        // ── Outline (optional, additive blue-ink) ───────────────────────
+        const outlineModule = this.device.createShaderModule({ label: 'aurora-outline-module', code: commonShaderCode + '\n' + outlineShaderCode });
+        this.outlinePipeline = this.device.createRenderPipeline({
+            label: 'aurora-outline-pipeline',
+            layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.outlineBGL] }),
+            vertex:   { module: outlineModule, entryPoint: 'vs_main' },
+            fragment: { module: outlineModule, entryPoint: 'fs_main',
+                        targets: [{ format: this.format,
+                                    blend: { color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+                                             alpha: { srcFactor: 'zero', dstFactor: 'one', operation: 'add' } } }] },
+            primitive: { topology: 'triangle-list' },
+        });
+
+        this.cameraBindGroups = this.cameraBuffers.map(buffer => this.device.createBindGroup({
+            layout: this.cameraBGL,
+            entries: [{ binding: 0, resource: { buffer } }],
+        }));
+
+        // Allocate bloom param buffers (prefilter + down×N + up×N = 1 + 2N)
+        for (let i = 0; i < 1 + 2 * BLOOM_MIPS; i++) {
+            this.bloomParamBuffers.push(this.device.createBuffer({
+                size: 32,
+                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+            }));
+        }
     }
 
+    // ── Textures — recreated on resize ──────────────────────────────────
     private setupTextures(): void {
-        const size = [this.canvas.width, this.canvas.height];
-        
-        this.depthTexture = this.device.createTexture({
-            size, format: 'depth24plus',
-            usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+        const W = this.canvas.width;
+        const H = this.canvas.height;
+
+        const mkColor = (w: number, h: number, format: GPUTextureFormat, extra: GPUTextureUsageFlags = 0) =>
+            this.device.createTexture({
+                size: [w, h], format,
+                usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | extra,
+            });
+
+        this.sceneColor     = mkColor(W, H, 'rgba16float', GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST);
+        this.sceneColorPrev = mkColor(W, H, 'rgba16float', GPUTextureUsage.COPY_DST);
+        this.oitAccum       = mkColor(W, H, 'rgba16float');
+        this.oitReveal      = mkColor(W, H, 'r8unorm');
+
+        this.depthTex = this.device.createTexture({
+            size: [W, H], format: 'depth32float',
+            usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
         });
-        
-        this.pickingTexture = this.device.createTexture({
-            size, format: 'r32uint',
+        // Separate read-only copy for sampling depth in fragment shaders.
+        // This avoids the WebGPU validation error where a texture is both
+        // RenderAttachment (writable) and TextureBinding (readable) in the
+        // same synchronization scope.
+        this.depthTexCopy = this.device.createTexture({
+            size: [W, H], format: 'depth32float',
+            usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+        });
+        this.pickTex = this.device.createTexture({
+            size: [W, H], format: 'r32uint',
             usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
         });
 
-        this.outlineBindGroup = this.device.createBindGroup({
+        // Half-res god-ray targets.
+        const HW = Math.max(1, W >> 1), HH = Math.max(1, H >> 1);
+        this.godRaysMask = mkColor(HW, HH, 'rgba16float');
+        this.godRaysBlur = mkColor(HW, HH, 'rgba16float');
+
+        // Bloom pyramid — 5 mips, each ½ the previous.
+        for (const t of this.bloomMips) t.destroy();
+        for (const t of this.bloomUp) t.destroy();
+        this.bloomMips = [];
+        this.bloomUp = [];
+        let bw = W, bh = H;
+        for (let i = 0; i < BLOOM_MIPS; i++) {
+            bw = Math.max(1, bw >> 1);
+            bh = Math.max(1, bh >> 1);
+            this.bloomMips.push(mkColor(bw, bh, 'rgba16float'));
+            this.bloomUp.push(mkColor(bw, bh, 'rgba16float'));
+        }
+    }
+
+    // Bind groups depend on textures — split so we can rebuild on resize.
+    private rebuildBindGroups(): void {
+        this.crystalSceneBindGroup = this.device.createBindGroup({
+            layout: this.crystalSceneBGL,
+            entries: [
+                { binding: 0, resource: this.sceneColorPrev.createView() },
+                { binding: 1, resource: this.depthTexCopy.createView() },
+                { binding: 2, resource: this.linearSampler },
+            ],
+        });
+
+        this.oitResolveBG = this.device.createBindGroup({
+            layout: this.oitResolveBGL,
+            entries: [
+                { binding: 0, resource: this.oitAccum.createView() },
+                { binding: 1, resource: this.oitReveal.createView() },
+                { binding: 2, resource: this.linearSampler },
+            ],
+        });
+
+        this.simBindGroup = this.device.createBindGroup({
+            layout: this.simBGL,
+            entries: [
+                { binding: 0, resource: { buffer: this.particleBuffer } },
+                { binding: 1, resource: { buffer: this.simParamsBuffer } },
+            ],
+        });
+
+        this.particleDrawBG = this.device.createBindGroup({
+            layout: this.particleDrawBGL,
+            entries: [
+                { binding: 0, resource: { buffer: this.cameraBuffers[0] } },
+                { binding: 1, resource: { buffer: this.particleBuffer } },
+                { binding: 2, resource: this.depthTexCopy.createView() },
+                { binding: 3, resource: this.linearSampler },
+            ],
+        });
+
+        this.godRaysMaskBG = this.device.createBindGroup({
+            layout: this.godRaysBGL,
+            entries: [
+                { binding: 0, resource: { buffer: this.cameraBuffers[0] } },
+                { binding: 1, resource: this.sceneColor.createView() },
+                { binding: 2, resource: this.depthTexCopy.createView() },
+                { binding: 3, resource: this.linearSampler },
+            ],
+        });
+        this.godRaysBlurBG = this.device.createBindGroup({
+            layout: this.godRaysBGL,
+            entries: [
+                { binding: 0, resource: { buffer: this.cameraBuffers[0] } },
+                { binding: 1, resource: this.godRaysMask.createView() },
+                { binding: 2, resource: this.depthTexCopy.createView() },
+                { binding: 3, resource: this.linearSampler },
+            ],
+        });
+
+        // Bloom bind groups: 1 prefilter (src = sceneColor) + 5 down (src = prev mip)
+        // + 5 up (src = smaller up mip). Total = 1 + 5 + 5 = 11.
+        this.bloomBindGroups = [];
+        // 0 — prefilter
+        this.bloomBindGroups.push(this.device.createBindGroup({
+            layout: this.bloomBGL,
+            entries: [
+                { binding: 0, resource: this.sceneColor.createView() },
+                { binding: 1, resource: this.linearSampler },
+                { binding: 2, resource: { buffer: this.bloomParamBuffers[0] } },
+            ],
+        }));
+        // 1..5 — down: mip i reads mip (i-1) (mip 0 = prefilter target = bloomMips[0])
+        for (let i = 1; i < BLOOM_MIPS; i++) {
+            this.bloomBindGroups.push(this.device.createBindGroup({
+                layout: this.bloomBGL,
+                entries: [
+                    { binding: 0, resource: this.bloomMips[i - 1].createView() },
+                    { binding: 1, resource: this.linearSampler },
+                    { binding: 2, resource: { buffer: this.bloomParamBuffers[i] } },
+                ],
+            }));
+        }
+        // Up chain — starts from smallest bloomMip, writes into bloomUp[n-1].
+        // Successive up-passes read bloomUp[i+1], write to bloomUp[i].
+        // Last read is from bloomMips[BLOOM_MIPS-1] to seed the chain.
+        for (let i = 0; i < BLOOM_MIPS; i++) {
+            const srcView = i === BLOOM_MIPS - 1
+                ? this.bloomMips[BLOOM_MIPS - 1].createView()
+                : this.bloomUp[i + 1].createView();
+            this.bloomBindGroups.push(this.device.createBindGroup({
+                layout: this.bloomBGL,
+                entries: [
+                    { binding: 0, resource: srcView },
+                    { binding: 1, resource: this.linearSampler },
+                    { binding: 2, resource: { buffer: this.bloomParamBuffers[BLOOM_MIPS + i] } },
+                ],
+            }));
+        }
+
+        this.tonemapBG = this.device.createBindGroup({
+            layout: this.tonemapBGL,
+            entries: [
+                { binding: 0, resource: { buffer: this.cameraBuffers[0] } },
+                { binding: 1, resource: this.sceneColor.createView() },
+                { binding: 2, resource: this.bloomUp[0].createView() },
+                { binding: 3, resource: this.godRaysBlur.createView() },
+                { binding: 4, resource: this.linearSampler },
+            ],
+        });
+
+        this.outlineBG = this.device.createBindGroup({
             layout: this.outlineBGL,
             entries: [
                 { binding: 0, resource: { buffer: this.cameraBuffers[0] } },
-                { binding: 1, resource: this.depthTexture.createView() },
-                { binding: 2, resource: this.nearestSampler },
+                { binding: 1, resource: this.depthTexCopy.createView() },
+                { binding: 2, resource: this.pointSampler },
             ],
         });
     }
@@ -314,19 +711,29 @@ export class WebGPURenderer {
         const w = Math.max(1, Math.floor(width));
         const h = Math.max(1, Math.floor(height));
         if (this.canvas.width === w && this.canvas.height === h) return;
-        this.canvas.width = w;
+        this.canvas.width  = w;
         this.canvas.height = h;
 
-        this.depthTexture?.destroy();
-        this.pickingTexture?.destroy();
+        // Destroy all size-dependent textures.
+        this.sceneColor?.destroy();
+        this.sceneColorPrev?.destroy();
+        this.oitAccum?.destroy();
+        this.oitReveal?.destroy();
+        this.depthTex?.destroy();
+        this.depthTexCopy?.destroy();
+        this.pickTex?.destroy();
+        this.godRaysMask?.destroy();
+        this.godRaysBlur?.destroy();
+
         this.setupTextures();
+        this.rebuildBindGroups();
     }
 
+    // ── Data ────────────────────────────────────────────────────────────
     public async loadData(data: ArrayBuffer): Promise<void> {
         this.nodeCount = Math.floor(data.byteLength / NODE_STRIDE);
         if (this.nodeCount === 0) return;
 
-        // Same integrity check as the WebGL2 renderer.
         const dv = new DataView(data);
         let hasRoot = false;
         for (let i = 0; i < this.nodeCount; i++) {
@@ -336,7 +743,6 @@ export class WebGPURenderer {
 
         this.nav.loadData(data);
 
-        // Worst-case capacity: every node visible.
         this.instanceBuffer?.destroy();
         this.instanceBuffer = this.device.createBuffer({
             size: Math.max(NODE_STRIDE, this.nodeCount * NODE_STRIDE),
@@ -363,27 +769,21 @@ export class WebGPURenderer {
         this.zoom = Math.max(50, r * 2.5);
     }
 
-    /** Recompact the visible set into the shared instance buffer.
-     *  Crystal rows first, bubble rows after — see instanceBuffer docs. */
     private rebuildInstances(): void {
         if (!this.instanceBuffer) return;
         const v = this.nav.buildVisibleSet();
-        this.crystalCount = v.crystalCount;
-        this.bubbleCount = v.bubbleCount;
+        this.crystalCount   = v.crystalCount;
+        this.bubbleCount    = v.bubbleCount;
         this.crystalIndices = v.crystalIndices.slice();
-        this.bubbleIndices = v.bubbleIndices.slice();
+        this.bubbleIndices  = v.bubbleIndices.slice();
 
         if (v.crystalCount > 0) {
-            this.device.queue.writeBuffer(
-                this.instanceBuffer, 0,
-                v.crystalData.buffer, v.crystalData.byteOffset, v.crystalData.byteLength,
-            );
+            this.device.queue.writeBuffer(this.instanceBuffer, 0,
+                v.crystalData.buffer, v.crystalData.byteOffset, v.crystalData.byteLength);
         }
         if (v.bubbleCount > 0) {
-            this.device.queue.writeBuffer(
-                this.instanceBuffer, v.crystalCount * NODE_STRIDE,
-                v.bubbleData.buffer, v.bubbleData.byteOffset, v.bubbleData.byteLength,
-            );
+            this.device.queue.writeBuffer(this.instanceBuffer, v.crystalCount * NODE_STRIDE,
+                v.bubbleData.buffer, v.bubbleData.byteOffset, v.bubbleData.byteLength);
         }
         this.visibleDirty = false;
     }
@@ -394,7 +794,6 @@ export class WebGPURenderer {
         const EPS = 0.1;
         this.rotationX = Math.max(-Math.PI / 2 + EPS, Math.min(Math.PI / 2 - EPS, this.rotationX));
     }
-
     public handleZoom(delta: number): void {
         const speed = Math.max(10, this.zoom * 0.05);
         this.zoom = Math.max(5, this.zoom + (delta > 0 ? speed : -speed));
@@ -408,7 +807,6 @@ export class WebGPURenderer {
         const eyeX = t[0] + this.zoom * Math.cos(this.rotationX) * Math.sin(this.rotationY);
         const eyeY = t[1] + this.zoom * Math.sin(this.rotationX);
         const eyeZ = t[2] + this.zoom * Math.cos(this.rotationX) * Math.cos(this.rotationY);
-
         if (this.isFirstFrame) {
             this.cameraPosition = [eyeX, eyeY, eyeZ];
             this.isFirstFrame = false;
@@ -417,128 +815,334 @@ export class WebGPURenderer {
             this.cameraPosition[1] += (eyeY - this.cameraPosition[1]) * 0.1;
             this.cameraPosition[2] += (eyeZ - this.cameraPosition[2]) * 0.1;
         }
+        const view = this.lookAt(this.cameraPosition, t, [0, 1, 0]);
+        const vp   = this.multiply(projection, view);
+        const invVp = this.invert4x4(vp);
 
-        const view = this.lookAt(this.cameraPosition, [t[0], t[1], t[2]], [0, 1, 0]);
-        const vpMatrix = this.multiply(projection, view);
+        // Pack 192-byte UBO — 48 floats. See common.wgsl CameraUniform.
+        const u = new Float32Array(48);
+        const u32 = new Uint32Array(u.buffer);
+        u.set(vp, 0);              // 16
+        u.set(invVp, 16);          // 16
+        u.set(this.cameraPosition, 32); // 3
+        // u32[35] = variant (written per-variant below)
+        const timeSec = (performance.now() - this.startTime) / 1000;
+        u[36] = timeSec;
+        u[37] = this.canvas.width;
+        u[38] = this.canvas.height;
+        u[39] = 0.000008; // fog density — tuned for typical zoom distances (200-2000)
+        u.set([0.16, 0.10, 0.30], 40); // fogColor — matches sky horizon tones
+        u[43] = this.exposure;
+        u.set(t, 44); // focus
+        // u[47] = pad
 
-        // Update all 3 camera variant buffers
         for (let i = 0; i < 3; i++) {
-            // 28 floats = 112 bytes
-            const uniformData = new Float32Array(28);
-            uniformData.set(vpMatrix, 0);
-            uniformData.set([this.cameraPosition[0], this.cameraPosition[1], this.cameraPosition[2]], 16);
-            // currentVariant at byte offset 76 (index 19 as Float32 alias, better to write as Uint32)
-            const uniformDataU32 = new Uint32Array(uniformData.buffer);
-            uniformDataU32[19] = i;
-
-            uniformData[20] = (performance.now() - this.startTime) / 1000; // time
-            uniformData[21] = this.canvas.width;                           // screenWidth
-            uniformData[22] = this.canvas.height;                          // screenHeight
-            uniformData[23] = 0.0005;                                      // fogDensity
-            uniformData.set([0.05, 0.03, 0.12, 0], 24);                    // fogColor (indigo) + _pad2
-
-            this.device.queue.writeBuffer(this.cameraBuffers[i], 0, uniformData);
+            u32[35] = i;
+            this.device.queue.writeBuffer(this.cameraBuffers[i], 0, u);
         }
     }
 
+    private updateSimParams(dtSec: number): void {
+        const buf = new Float32Array(SIM_PARAMS_SIZE / 4);
+        buf[0] = Math.min(dtSec, 0.05); // clamp long frames so integrator stays stable
+        buf[1] = (performance.now() - this.startTime) / 1000;
+        buf[2] = this.focusPosition[0];
+        buf[3] = this.focusPosition[1];
+        buf[4] = this.focusPosition[2];
+        buf[5] = Math.max(80, this.zoom * 0.6); // spawn radius scales with zoom
+        this.device.queue.writeBuffer(this.simParamsBuffer, 0, buf);
+    }
+
+    // Params for a bloom pass. `dst` is the render target of THIS pass.
+    private writeBloomParams(idx: number, dst: { width: number; height: number },
+                             threshold: number, knee: number, intensity: number) {
+        const b = new Float32Array(8);
+        b[0] = threshold; b[1] = knee; b[2] = intensity; b[3] = 0;
+        b[4] = 1 / dst.width; b[5] = 1 / dst.height;
+        this.device.queue.writeBuffer(this.bloomParamBuffers[idx], 0, b);
+    }
+
+    // ── The main event ──────────────────────────────────────────────────
     public render(): void {
         if (!this.device) return;
 
+        // Empty scene fast-path: still draw the sky, so the user gets the
+        // dreamscape backdrop even before data arrives.
         if (this.nodeCount === 0 || !this.instanceBuffer) {
-            const encoder = this.device.createCommandEncoder();
-            const clearPass = encoder.beginRenderPass({
-                colorAttachments: [{
-                    view: this.context.getCurrentTexture().createView(),
-                    loadOp: 'clear',
-                    clearValue: CLEAR_COLOR,
-                    storeOp: 'store',
-                }],
-            });
-            clearPass.end();
-            this.device.queue.submit([encoder.finish()]);
+            this.renderEmpty();
             return;
         }
 
         if (this.visibleDirty) this.rebuildInstances();
-        this.updateCamera();
+        const now = performance.now();
+        const dt = (now - this.lastFrameTime) / 1000;
+        this.lastFrameTime = now;
 
-        const currentTexture = this.context.getCurrentTexture();
+        this.updateCamera();
+        this.updateSimParams(dt);
+
         const encoder = this.device.createCommandEncoder();
 
-        const pass = encoder.beginRenderPass({
-            colorAttachments: [{
-                view: currentTexture.createView(),
-                loadOp: 'clear',
-                clearValue: CLEAR_COLOR,
-                storeOp: 'store',
-            }],
-            depthStencilAttachment: {
-                view: this.depthTexture.createView(),
-                depthClearValue: 1,
-                depthLoadOp: 'clear',
-                depthStoreOp: 'store',
-            },
-        });
+        // ── 0. Compute — advect particles ────────────────────────────────
+        {
+            const cp = encoder.beginComputePass();
+            cp.setPipeline(this.simComputePipeline);
+            cp.setBindGroup(0, this.simBindGroup);
+            cp.dispatchWorkgroups(Math.ceil(PARTICLE_COUNT / 64));
+            cp.end();
+        }
 
-        pass.setBindGroup(0, this.cameraBindGroups[0]);
+        const sceneView = this.sceneColor.createView();
+        const depthView = this.depthTex.createView();
 
-        // 1) Opaque crystals (collapsed folders).
+        // ── 1. Sky (fills SceneColor; also clears depth) ────────────────
+        {
+            const p = encoder.beginRenderPass({
+                colorAttachments: [{ view: sceneView, loadOp: 'clear', clearValue: CLEAR_HDR, storeOp: 'store' }],
+            });
+            p.setPipeline(this.skyPipeline);
+            p.setBindGroup(0, this.cameraBindGroups[0]);
+            p.draw(3);
+            p.end();
+        }
+        // Need a fresh depth clear for the geometry passes.
+        {
+            const p = encoder.beginRenderPass({
+                colorAttachments: [],
+                depthStencilAttachment: {
+                    view: depthView, depthClearValue: 1,
+                    depthLoadOp: 'clear', depthStoreOp: 'store',
+                },
+            });
+            p.end();
+        }
+
+        // On the first data frame, seed SceneColorPrev with the sky so the
+        // crystal refraction shader samples the sky gradient instead of black.
+        if (this.needsPrevFrameSeed) {
+            encoder.copyTextureToTexture(
+                { texture: this.sceneColor }, { texture: this.sceneColorPrev },
+                [this.canvas.width, this.canvas.height, 1],
+            );
+            this.needsPrevFrameSeed = false;
+        }
+
+        // Copy depth → depthTexCopy so fragment shaders can sample it
+        // without conflicting with the RenderAttachment write.
+        encoder.copyTextureToTexture(
+            { texture: this.depthTex, aspect: 'depth-only' },
+            { texture: this.depthTexCopy, aspect: 'depth-only' },
+            [this.canvas.width, this.canvas.height, 1],
+        );
+
+        // ── 2. Crystals (opaque, HDR, samples prev-frame) ───────────────
         if (this.crystalCount > 0) {
-            pass.setPipeline(this.crystalPipeline);
-            pass.setVertexBuffer(1, this.instanceBuffer, 0, this.crystalCount * NODE_STRIDE);
-            
-            for (let i = 0; i < 3; i++) {
-                pass.setBindGroup(0, this.cameraBindGroups[i]);
-                pass.setVertexBuffer(0, this.crystalMeshes[i].vertexBuffer);
-                pass.setIndexBuffer(this.crystalMeshes[i].indexBuffer, 'uint16');
-                pass.drawIndexed(this.crystalMeshes[i].indexCount, this.crystalCount);
+            const p = encoder.beginRenderPass({
+                colorAttachments: [{ view: sceneView, loadOp: 'load', storeOp: 'store' }],
+                depthStencilAttachment: {
+                    view: depthView, depthLoadOp: 'load', depthStoreOp: 'store',
+                },
+            });
+            p.setPipeline(this.crystalPipeline);
+            p.setBindGroup(1, this.crystalSceneBindGroup);
+            p.setVertexBuffer(1, this.instanceBuffer, 0, this.crystalCount * NODE_STRIDE);
+            for (let v = 0; v < 3; v++) {
+                p.setBindGroup(0, this.cameraBindGroups[v]);
+                p.setVertexBuffer(0, this.crystalMeshes[v].vertexBuffer);
+                p.setIndexBuffer(this.crystalMeshes[v].indexBuffer, 'uint16');
+                p.drawIndexed(this.crystalMeshes[v].indexCount, this.crystalCount);
             }
+            p.end();
         }
 
-        // 2) Transparent bubbles (files) — back faces then front faces.
+        // Refresh depthTexCopy after crystals wrote new depth data.
+        encoder.copyTextureToTexture(
+            { texture: this.depthTex, aspect: 'depth-only' },
+            { texture: this.depthTexCopy, aspect: 'depth-only' },
+            [this.canvas.width, this.canvas.height, 1],
+        );
+
+        // ── 3. Particles (additive, depth-test but no write) ────────────
+        {
+            const p = encoder.beginRenderPass({
+                colorAttachments: [{ view: sceneView, loadOp: 'load', storeOp: 'store' }],
+                depthStencilAttachment: {
+                    view: depthView, depthLoadOp: 'load', depthStoreOp: 'store',
+                },
+            });
+            p.setPipeline(this.particlesDrawPipeline);
+            p.setBindGroup(0, this.particleDrawBG);
+            p.draw(PARTICLE_COUNT * 6);
+            p.end();
+        }
+
+        // ── 4. Bubbles → WBOIT (accum + reveal) ─────────────────────────
         if (this.bubbleCount > 0) {
-            pass.setBindGroup(0, this.cameraBindGroups[0]);
-            pass.setVertexBuffer(0, this.bubbleMesh.vertexBuffer);
-            pass.setVertexBuffer(1, this.instanceBuffer, this.crystalCount * NODE_STRIDE, this.bubbleCount * NODE_STRIDE);
-            pass.setIndexBuffer(this.bubbleMesh.indexBuffer, 'uint16');
-
-            pass.setPipeline(this.bubbleBackPipeline);
-            pass.drawIndexed(this.bubbleMesh.indexCount, this.bubbleCount);
-
-            pass.setPipeline(this.bubbleFrontPipeline);
-            pass.drawIndexed(this.bubbleMesh.indexCount, this.bubbleCount);
+            const p = encoder.beginRenderPass({
+                colorAttachments: [
+                    { view: this.oitAccum.createView(),  loadOp: 'clear', clearValue: [0,0,0,0], storeOp: 'store' },
+                    { view: this.oitReveal.createView(), loadOp: 'clear', clearValue: [1,0,0,0], storeOp: 'store' },
+                ],
+                depthStencilAttachment: {
+                    view: depthView, depthLoadOp: 'load', depthStoreOp: 'store',
+                },
+            });
+            p.setPipeline(this.bubbleOitPipeline);
+            p.setBindGroup(0, this.cameraBindGroups[0]);
+            p.setVertexBuffer(0, this.bubbleMesh.vertexBuffer);
+            p.setVertexBuffer(1, this.instanceBuffer, this.crystalCount * NODE_STRIDE, this.bubbleCount * NODE_STRIDE);
+            p.setIndexBuffer(this.bubbleMesh.indexBuffer, 'uint16');
+            p.drawIndexed(this.bubbleMesh.indexCount, this.bubbleCount);
+            p.end();
         }
 
-        pass.end();
+        // ── 5. OIT resolve — blend accum/reveal back into SceneColor ────
+        if (this.bubbleCount > 0) {
+            const p = encoder.beginRenderPass({
+                colorAttachments: [{ view: sceneView, loadOp: 'load', storeOp: 'store' }],
+            });
+            p.setPipeline(this.oitResolvePipeline);
+            p.setBindGroup(0, this.oitResolveBG);
+            p.draw(3);
+            p.end();
+        }
 
-        // 3) Outline post-process (optional)
-        if (this.enableOutline) {
-            const outlinePass = encoder.beginRenderPass({
+        // Refresh depthTexCopy for god-rays and outline passes that sample depth.
+        encoder.copyTextureToTexture(
+            { texture: this.depthTex, aspect: 'depth-only' },
+            { texture: this.depthTexCopy, aspect: 'depth-only' },
+            [this.canvas.width, this.canvas.height, 1],
+        );
+
+        // ── 6. God-rays — mask, then radial blur ────────────────────────
+        {
+            const p = encoder.beginRenderPass({
+                colorAttachments: [{ view: this.godRaysMask.createView(), loadOp: 'clear', clearValue: [0,0,0,0], storeOp: 'store' }],
+            });
+            p.setPipeline(this.godRaysMaskPipeline);
+            p.setBindGroup(0, this.godRaysMaskBG);
+            p.draw(3);
+            p.end();
+        }
+        {
+            const p = encoder.beginRenderPass({
+                colorAttachments: [{ view: this.godRaysBlur.createView(), loadOp: 'clear', clearValue: [0,0,0,0], storeOp: 'store' }],
+            });
+            p.setPipeline(this.godRaysBlurPipeline);
+            p.setBindGroup(0, this.godRaysBlurBG);
+            p.draw(3);
+            p.end();
+        }
+
+        // ── 7. Bloom prefilter + downsample chain ───────────────────────
+        // Prefilter: sceneColor → bloomMips[0]
+        this.writeBloomParams(0, this.dimsOf(this.bloomMips[0]), 1.05, 0.35, 1.0);
+        {
+            const p = encoder.beginRenderPass({
+                colorAttachments: [{ view: this.bloomMips[0].createView(), loadOp: 'clear', clearValue: [0,0,0,0], storeOp: 'store' }],
+            });
+            p.setPipeline(this.bloomPrefilterPipeline);
+            p.setBindGroup(0, this.bloomBindGroups[0]);
+            p.draw(3);
+            p.end();
+        }
+        // Down: bloomMips[i-1] → bloomMips[i]
+        for (let i = 1; i < BLOOM_MIPS; i++) {
+            this.writeBloomParams(i, this.dimsOf(this.bloomMips[i]), 0, 0, 1);
+            const p = encoder.beginRenderPass({
+                colorAttachments: [{ view: this.bloomMips[i].createView(), loadOp: 'clear', clearValue: [0,0,0,0], storeOp: 'store' }],
+            });
+            p.setPipeline(this.bloomDownPipeline);
+            p.setBindGroup(0, this.bloomBindGroups[i]);
+            p.draw(3);
+            p.end();
+        }
+        // Up: additive; walk from smallest to largest.
+        for (let i = BLOOM_MIPS - 1; i >= 0; i--) {
+            const dst = this.bloomUp[i];
+            this.writeBloomParams(BLOOM_MIPS + i, this.dimsOf(dst), 0, 0, 0.75);
+            // Additive blend requires the destination to already contain the
+            // "current" bloom to add on top of. For the largest (last) up
+            // step, we clear first because nothing precedes it.
+            const p = encoder.beginRenderPass({
                 colorAttachments: [{
-                    view: currentTexture.createView(),
-                    loadOp: 'load',
+                    view: dst.createView(),
+                    loadOp: i === BLOOM_MIPS - 1 ? 'clear' : 'clear',
+                    clearValue: [0,0,0,0],
                     storeOp: 'store',
                 }],
             });
-            outlinePass.setPipeline(this.outlinePipeline);
-            outlinePass.setBindGroup(0, this.outlineBindGroup);
-            outlinePass.draw(3, 1, 0, 0);
-            outlinePass.end();
+            p.setPipeline(this.bloomUpPipeline);
+            p.setBindGroup(0, this.bloomBindGroups[BLOOM_MIPS + i]);
+            p.draw(3);
+            p.end();
         }
+
+        // ── 8. Tonemap composite → swap-chain ───────────────────────────
+        const swap = this.context.getCurrentTexture();
+        {
+            const p = encoder.beginRenderPass({
+                colorAttachments: [{ view: swap.createView(), loadOp: 'clear', clearValue: [0,0,0,1], storeOp: 'store' }],
+            });
+            p.setPipeline(this.tonemapPipeline);
+            p.setBindGroup(0, this.tonemapBG);
+            p.draw(3);
+            p.end();
+        }
+
+        // ── 9. Optional outline (over the composited swap-chain) ────────
+        if (this.enableOutline) {
+            const p = encoder.beginRenderPass({
+                colorAttachments: [{ view: swap.createView(), loadOp: 'load', storeOp: 'store' }],
+            });
+            p.setPipeline(this.outlinePipeline);
+            p.setBindGroup(0, this.outlineBG);
+            p.draw(3);
+            p.end();
+        }
+
+        // ── 10. Snapshot SceneColor → SceneColorPrev for next frame's crystals
+        encoder.copyTextureToTexture(
+            { texture: this.sceneColor }, { texture: this.sceneColorPrev },
+            [this.canvas.width, this.canvas.height, 1],
+        );
 
         this.device.queue.submit([encoder.finish()]);
     }
 
-    /**
-     * GPU picking. Returns the ORIGINAL source-buffer node index (not the
-     * compacted slot), or null if the click hit empty space.
-     *
-     * Crystals draw with firstInstance 0 into pick IDs [0, crystalCount);
-     * bubbles draw with firstInstance = crystalCount so their IDs land in
-     * [crystalCount, crystalCount + bubbleCount) AND the instance fetch
-     * reads the bubble rows of the shared instance buffer. One buffer,
-     * unique IDs, no rebinding.
-     */
+    private renderEmpty(): void {
+        this.updateCamera();
+        const encoder = this.device.createCommandEncoder();
+        const sceneView = this.sceneColor.createView();
+        {
+            const p = encoder.beginRenderPass({
+                colorAttachments: [{ view: sceneView, loadOp: 'clear', clearValue: CLEAR_HDR, storeOp: 'store' }],
+            });
+            p.setPipeline(this.skyPipeline);
+            p.setBindGroup(0, this.cameraBindGroups[0]);
+            p.draw(3);
+            p.end();
+        }
+        // Cheap tonemap — bloom/godrays targets stay empty (their clears run in render()).
+        this.writeBloomParams(0, this.dimsOf(this.bloomMips[0]), 100.0, 0.1, 0); // effectively kills bloom
+        const swap = this.context.getCurrentTexture();
+        {
+            const p = encoder.beginRenderPass({
+                colorAttachments: [{ view: swap.createView(), loadOp: 'clear', clearValue: [0,0,0,1], storeOp: 'store' }],
+            });
+            p.setPipeline(this.tonemapPipeline);
+            p.setBindGroup(0, this.tonemapBG);
+            p.draw(3);
+            p.end();
+        }
+        this.device.queue.submit([encoder.finish()]);
+    }
+
+    private dimsOf(t: GPUTexture): { width: number; height: number } {
+        return { width: t.width, height: t.height };
+    }
+
+    // ── Picking (unchanged from legacy — silhouette-tight) ──────────────
     public async pick(x: number, y: number): Promise<number | null> {
         if (!this.instanceBuffer) return null;
         if (this.visibleDirty) this.rebuildInstances();
@@ -549,23 +1153,17 @@ export class WebGPURenderer {
         const py = Math.max(0, Math.min(Math.floor(y), this.canvas.height - 1));
 
         this.updateCamera();
-
         const encoder = this.device.createCommandEncoder();
         const pass = encoder.beginRenderPass({
             colorAttachments: [{
-                view: this.pickingTexture.createView(),
-                loadOp: 'clear',
-                clearValue: { r: 0xFFFFFFFF, g: 0, b: 0, a: 0 },
-                storeOp: 'store',
+                view: this.pickTex.createView(),
+                loadOp: 'clear', clearValue: { r: 0xFFFFFFFF, g: 0, b: 0, a: 0 }, storeOp: 'store',
             }],
             depthStencilAttachment: {
-                view: this.depthTexture.createView(),
-                depthClearValue: 1,
-                depthLoadOp: 'clear',
-                depthStoreOp: 'store',
+                view: this.depthTex.createView(),
+                depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store',
             },
         });
-
         pass.setPipeline(this.pickingPipeline);
         pass.setScissorRect(px, py, 1, 1);
         pass.setBindGroup(0, this.cameraBindGroups[0]);
@@ -584,7 +1182,7 @@ export class WebGPURenderer {
         pass.end();
 
         encoder.copyTextureToBuffer(
-            { texture: this.pickingTexture, origin: [px, py, 0] },
+            { texture: this.pickTex, origin: [px, py, 0] },
             { buffer: this.pickBuffer, bytesPerRow: 256 },
             [1, 1, 1],
         );
@@ -602,26 +1200,25 @@ export class WebGPURenderer {
     }
 
     // ── Matrix helpers ──────────────────────────────────────────────────
-
     private perspective(fovy: number, aspect: number, near: number, far: number): Float32Array {
         const f = 1 / Math.tan(fovy / 2);
         const out = new Float32Array(16);
-        out[0] = f / aspect; out[5] = f; out[10] = far / (near - far); out[11] = -1; out[14] = (near * far) / (near - far);
+        out[0] = f / aspect; out[5] = f;
+        out[10] = far / (near - far); out[11] = -1;
+        out[14] = (near * far) / (near - far);
         return out;
     }
-
     private lookAt(eye: number[], center: number[], up: number[]): Float32Array {
-        const z = this.normalize(this.subtract(eye, center));
-        const x = this.normalize(this.cross(up, z));
-        const y = this.cross(z, x);
+        const z = this.norm3(this.sub3(eye, center));
+        const x = this.norm3(this.cross3(up, z));
+        const y = this.cross3(z, x);
         const out = new Float32Array(16);
-        out[0] = x[0]; out[4] = x[1]; out[8] = x[2]; out[12] = -this.dot(x, eye);
-        out[1] = y[0]; out[5] = y[1]; out[9] = y[2]; out[13] = -this.dot(y, eye);
-        out[2] = z[0]; out[6] = z[1]; out[10] = z[2]; out[14] = -this.dot(z, eye);
+        out[0] = x[0]; out[4] = x[1]; out[8]  = x[2]; out[12] = -this.dot3(x, eye);
+        out[1] = y[0]; out[5] = y[1]; out[9]  = y[2]; out[13] = -this.dot3(y, eye);
+        out[2] = z[0]; out[6] = z[1]; out[10] = z[2]; out[14] = -this.dot3(z, eye);
         out[3] = 0; out[7] = 0; out[11] = 0; out[15] = 1;
         return out;
     }
-
     private multiply(a: Float32Array, b: Float32Array): Float32Array {
         const out = new Float32Array(16);
         for (let col = 0; col < 4; col++) {
@@ -635,23 +1232,59 @@ export class WebGPURenderer {
         }
         return out;
     }
-
-    private subtract(a: number[], b: number[]): number[] { return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]; }
-    private normalize(a: number[]): number[] {
-        const len = Math.hypot(a[0], a[1], a[2]);
-        if (len === 0) return [0, 0, 1];
-        return [a[0] / len, a[1] / len, a[2] / len];
+    /** Full 4×4 inverse — needed for invViewProj in the sky pass. */
+    private invert4x4(m: Float32Array): Float32Array {
+        const inv = new Float32Array(16);
+        inv[0]  =  m[5]*m[10]*m[15] - m[5]*m[11]*m[14] - m[9]*m[6]*m[15] + m[9]*m[7]*m[14] + m[13]*m[6]*m[11] - m[13]*m[7]*m[10];
+        inv[4]  = -m[4]*m[10]*m[15] + m[4]*m[11]*m[14] + m[8]*m[6]*m[15] - m[8]*m[7]*m[14] - m[12]*m[6]*m[11] + m[12]*m[7]*m[10];
+        inv[8]  =  m[4]*m[9] *m[15] - m[4]*m[11]*m[13] - m[8]*m[5]*m[15] + m[8]*m[7]*m[13] + m[12]*m[5]*m[11] - m[12]*m[7]*m[9];
+        inv[12] = -m[4]*m[9] *m[14] + m[4]*m[10]*m[13] + m[8]*m[5]*m[14] - m[8]*m[6]*m[13] - m[12]*m[5]*m[10] + m[12]*m[6]*m[9];
+        inv[1]  = -m[1]*m[10]*m[15] + m[1]*m[11]*m[14] + m[9]*m[2]*m[15] - m[9]*m[3]*m[14] - m[13]*m[2]*m[11] + m[13]*m[3]*m[10];
+        inv[5]  =  m[0]*m[10]*m[15] - m[0]*m[11]*m[14] - m[8]*m[2]*m[15] + m[8]*m[3]*m[14] + m[12]*m[2]*m[11] - m[12]*m[3]*m[10];
+        inv[9]  = -m[0]*m[9] *m[15] + m[0]*m[11]*m[13] + m[8]*m[1]*m[15] - m[8]*m[3]*m[13] - m[12]*m[1]*m[11] + m[12]*m[3]*m[9];
+        inv[13] =  m[0]*m[9] *m[14] - m[0]*m[10]*m[13] - m[8]*m[1]*m[14] + m[8]*m[2]*m[13] + m[12]*m[1]*m[10] - m[12]*m[2]*m[9];
+        inv[2]  =  m[1]*m[6] *m[15] - m[1]*m[7] *m[14] - m[5]*m[2]*m[15] + m[5]*m[3]*m[14] + m[13]*m[2]*m[7]  - m[13]*m[3]*m[6];
+        inv[6]  = -m[0]*m[6] *m[15] + m[0]*m[7] *m[14] + m[4]*m[2]*m[15] - m[4]*m[3]*m[14] - m[12]*m[2]*m[7]  + m[12]*m[3]*m[6];
+        inv[10] =  m[0]*m[5] *m[15] - m[0]*m[7] *m[13] - m[4]*m[1]*m[15] + m[4]*m[3]*m[13] + m[12]*m[1]*m[7]  - m[12]*m[3]*m[5];
+        inv[14] = -m[0]*m[5] *m[14] + m[0]*m[6] *m[13] + m[4]*m[1]*m[14] - m[4]*m[2]*m[13] - m[12]*m[1]*m[6]  + m[12]*m[2]*m[5];
+        inv[3]  = -m[1]*m[6] *m[11] + m[1]*m[7] *m[10] + m[5]*m[2]*m[11] - m[5]*m[3]*m[10] - m[9] *m[2]*m[7]  + m[9] *m[3]*m[6];
+        inv[7]  =  m[0]*m[6] *m[11] - m[0]*m[7] *m[10] - m[4]*m[2]*m[11] + m[4]*m[3]*m[10] + m[8] *m[2]*m[7]  - m[8] *m[3]*m[6];
+        inv[11] = -m[0]*m[5] *m[11] + m[0]*m[7] *m[9]  + m[4]*m[1]*m[11] - m[4]*m[3]*m[9]  - m[8] *m[1]*m[7]  + m[8] *m[3]*m[5];
+        inv[15] =  m[0]*m[5] *m[10] - m[0]*m[6] *m[9]  - m[4]*m[1]*m[10] + m[4]*m[2]*m[9]  + m[8] *m[1]*m[6]  - m[8] *m[2]*m[5];
+        let det = m[0]*inv[0] + m[1]*inv[4] + m[2]*inv[8] + m[3]*inv[12];
+        if (Math.abs(det) < 1e-9) return new Float32Array(16); // degenerate — caller unlikely to hit
+        det = 1.0 / det;
+        for (let i = 0; i < 16; i++) inv[i] = inv[i] * det;
+        return inv;
     }
-    private cross(a: number[], b: number[]): number[] {
-        return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    private sub3(a: number[], b: number[]): number[] { return [a[0]-b[0], a[1]-b[1], a[2]-b[2]]; }
+    private norm3(a: number[]): number[] {
+        const l = Math.hypot(a[0], a[1], a[2]);
+        if (l === 0) return [0, 0, 1];
+        return [a[0]/l, a[1]/l, a[2]/l];
     }
-    private dot(a: number[], b: number[]): number { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+    private cross3(a: number[], b: number[]): number[] {
+        return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
+    }
+    private dot3(a: number[], b: number[]): number { return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; }
 
     public destroy(): void {
-        this.depthTexture?.destroy();
-        this.pickingTexture?.destroy();
+        this.sceneColor?.destroy();
+        this.sceneColorPrev?.destroy();
+        this.oitAccum?.destroy();
+        this.oitReveal?.destroy();
+        this.depthTex?.destroy();
+        this.depthTexCopy?.destroy();
+        this.pickTex?.destroy();
+        this.godRaysMask?.destroy();
+        this.godRaysBlur?.destroy();
+        for (const t of this.bloomMips) t.destroy();
+        for (const t of this.bloomUp)   t.destroy();
         for (const b of this.cameraBuffers) b?.destroy();
+        for (const b of this.bloomParamBuffers) b?.destroy();
         this.pickBuffer?.destroy();
+        this.simParamsBuffer?.destroy();
+        this.particleBuffer?.destroy();
         this.instanceBuffer?.destroy();
         for (const m of this.crystalMeshes) {
             m?.vertexBuffer.destroy();

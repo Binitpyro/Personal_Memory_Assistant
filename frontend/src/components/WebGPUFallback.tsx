@@ -35,6 +35,14 @@ import { WebGL2Renderer } from '../renderer/WebGL2Renderer';
 import { getVisualizerStream, getVisualizerMeta, type FileEntry, type VisualizerNodeMeta } from '../api';
 import type { NavigationController } from '../interaction/NavigationController';
 
+interface CachedStream {
+    buffer: ArrayBuffer;
+    meta: Record<string, VisualizerNodeMeta>;
+}
+
+const streamCache = new Map<string, CachedStream>();
+
+
 /** Both renderer classes conform to this shape; the hook is generic over it. */
 interface RendererLike {
     readonly init: () => Promise<void>;
@@ -54,6 +62,8 @@ export interface WebGPUFallbackProps {
     readonly activeFilter?: string | null;
     readonly onFilterChange?: (ext: string | null) => void;
     readonly initialMode?: 'folder' | 'type';
+    readonly exposure?: number;
+    readonly showOutlines?: boolean;
 }
 
 /**
@@ -72,6 +82,10 @@ function useDreamscapeCanvas<R extends RendererLike>(
     activeFilter: string | null | undefined,
     onError: (msg: string) => void,
     onNodeSelected?: (sourceIndex: number, name: string) => void,
+    rendererOptions?: {
+        exposure?: number;
+        showOutlines?: boolean;
+    },
 ) {
     const rendererRef = useRef<R | null>(null);
     const rafRef = useRef<number>(0);
@@ -97,22 +111,48 @@ function useDreamscapeCanvas<R extends RendererLike>(
         (async () => {
             try {
                 await renderer.init();
-                const [buffer, meta] = await Promise.all([
-                    getVisualizerStream(activeFilter),
-                    getVisualizerMeta(activeFilter).catch(() => ({})),
-                ]);
+
+                const tuned = renderer as R & {
+                    exposure?: number;
+                    enableOutline?: boolean;
+                };
+
+                if (rendererOptions?.exposure !== undefined) {
+                    tuned.exposure = rendererOptions.exposure;
+                }
+
+                if (rendererOptions?.showOutlines !== undefined) {
+                    tuned.enableOutline = rendererOptions.showOutlines;
+                }
+
+                let buffer: ArrayBuffer;
+                let meta: any;
+                const cacheKey = activeFilter || 'default';
+
+                if (streamCache.has(cacheKey)) {
+                    const cached = streamCache.get(cacheKey)!;
+                    buffer = cached.buffer;
+                    meta = cached.meta;
+                } else {
+                    [buffer, meta] = await Promise.all([
+                        getVisualizerStream(activeFilter),
+                        getVisualizerMeta(activeFilter).catch(() => ({})),
+                    ]);
+                    if (buffer.byteLength <= 4) {
+                        throw new Error('No 3D data available or filter returned 0 results.');
+                    }
+                    // Vite dev trap: if the backend is misconfigured we might get an
+                    // HTML page instead of binary. First two bytes of '<!doctype' are
+                    // 0x3C 0x21 in ASCII. Fail loud and early rather than reading
+                    // garbage as f32s.
+                    const head = new Uint8Array(buffer, 0, 2);
+                    if (head[0] === 0x3C && head[1] === 0x21) {
+                        throw new Error('Backend returned HTML instead of binary. Check the /api/visualizer/stream route.');
+                    }
+                    streamCache.set(cacheKey, { buffer, meta });
+                }
+
                 metaRef.current = meta;
-                if (buffer.byteLength <= 4) {
-                    throw new Error('No 3D data available or filter returned 0 results.');
-                }
-                // Vite dev trap: if the backend is misconfigured we might get an
-                // HTML page instead of binary. First two bytes of '<!doctype' are
-                // 0x3C 0x21 in ASCII. Fail loud and early rather than reading
-                // garbage as f32s.
-                const head = new Uint8Array(buffer, 0, 2);
-                if (head[0] === 0x3C && head[1] === 0x21) {
-                    throw new Error('Backend returned HTML instead of binary. Check the /api/visualizer/stream route.');
-                }
                 if (cancelled) return;
 
                 await renderer.loadData(buffer);
@@ -156,7 +196,7 @@ function useDreamscapeCanvas<R extends RendererLike>(
     // different buffer). We do NOT want re-init on every allFiles reference
     // change (that fires whenever InsightsPage re-renders). Include only the
     // stable dependencies.
-    }, [activeFilter, factory, onError]);
+    }, [activeFilter, factory, onError, rendererOptions?.exposure, rendererOptions?.showOutlines]);
 
     const onMouseDown = (e: React.MouseEvent) => {
         setDragging(true);
@@ -247,7 +287,7 @@ interface CanvasInnerProps extends WebGPUFallbackProps {
     readonly onError: (msg: string) => void;
 }
 
-const DreamscapeCanvas: React.FC<CanvasInnerProps> = ({ activeFilter, tier, onError }) => {
+const DreamscapeCanvas: React.FC<CanvasInnerProps> = ({ activeFilter, tier, onError, exposure, showOutlines }) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const [selection, setSelection] = useState<{ index: number, name: string } | null>(null);
 
@@ -263,7 +303,8 @@ const DreamscapeCanvas: React.FC<CanvasInnerProps> = ({ activeFilter, tier, onEr
 
     const { rendererRef, onMouseDown, onMouseMove, onMouseUp, hover, setHover } =
         useDreamscapeCanvas(canvasRef, factory, activeFilter, onError,
-            (idx, name) => setSelection({ index: idx, name }));
+            (idx, name) => setSelection({ index: idx, name }),
+            { exposure, showOutlines });
 
     const breadcrumbs = rendererRef.current?.nav.breadcrumbs ?? [];
 
@@ -363,7 +404,7 @@ const DreamscapeCanvas: React.FC<CanvasInnerProps> = ({ activeFilter, tier, onEr
  * Top-level tier-picker component. Probes WebGPU, then WebGL2, then falls
  * back to the 2D treemap.
  */
-export const WebGPUFallback: React.FC<WebGPUFallbackProps> = ({ allFiles, activeFilter, onFilterChange, initialMode }) => {
+export const WebGPUFallback: React.FC<WebGPUFallbackProps> = ({ allFiles, activeFilter, onFilterChange, initialMode, exposure = 1.15, showOutlines = false }) => {
     const [status, setStatus] = useState<'checking' | 'webgpu' | 'webgl2' | 'unsupported'>('checking');
     const [reason, setReason] = useState<string | null>(null);
 
@@ -445,6 +486,8 @@ export const WebGPUFallback: React.FC<WebGPUFallbackProps> = ({ allFiles, active
             activeFilter={activeFilter}
             onFilterChange={onFilterChange}
             initialMode={initialMode}
+            exposure={exposure}
+            showOutlines={showOutlines}
             // If the chosen tier errors out at load-time, degrade one step.
             onError={(msg) => {
                 setReason(msg);

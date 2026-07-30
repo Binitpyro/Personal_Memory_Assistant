@@ -104,7 +104,7 @@ class TestEmbedTexts:
         svc = EmbeddingService("model")
         # Model stays None, ready event is set (simulate failed load)
         svc._ready.set()
-        with pytest.raises(RuntimeError, match="Embedding model failed to load"):
+        with pytest.raises(RuntimeError, match="Embedding model"):
             await svc.embed_texts(["test"])
 
     @pytest.mark.asyncio

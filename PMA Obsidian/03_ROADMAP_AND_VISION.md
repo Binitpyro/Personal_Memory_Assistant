@@ -1,4 +1,4 @@
-﻿# PMA Future Roadmap: The Path to v1.0
+# PMA Future Roadmap: The Path to v1.0
 
 This document consolidates all planned features, technical optimizations, and strategic research frontiers identified during the v0.0.70 architectural audit and subsequent multi-agent design sessions.
 

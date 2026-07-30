@@ -197,11 +197,13 @@ def test_get_model_class():
 
     client.provider_preference = "auto"
     client.api_key = "key"
-    assert client.get_model_class() == "cloud"
+    client.ollama_model = "llama-7b"
+    # Auto mode is local-first, so ollama model class is returned
+    assert client.get_model_class() == "7b_local"
 
     client.api_key = None
     client._oauth_token = "token"  # noqa: S105
-    assert client.get_model_class() == "cloud"
+    assert client.get_model_class() == "7b_local"
 
     client._oauth_token = None
     client.ollama_model = "llama-3b"
@@ -369,21 +371,21 @@ async def test_generate_answer():
     client._resolve_provider_by_id = mock_resolve_with_fallback
 
     ans = await client.generate_answer("q", "c", skip_capability_check=True)
-    assert ans == "lm_studio_ans"
+    assert ans == "ollama_ans"
 
-    # Ollama fallback
-    async def mock_resolve_ollama(pid, model=None, timeout=30.0):
+    # LM studio fallback when ollama is not configured
+    async def mock_resolve_lm_studio(pid, model=None, timeout=30.0):
         from app.search.llm_client import ProviderNotConfiguredError
 
-        if pid in ("gemini", "openai", "lm_studio"):
+        if pid in ("gemini", "openai", "ollama"):
             raise ProviderNotConfiguredError("Not configured")
-        if pid == "ollama":
-            return mock_ollama
+        if pid == "lm_studio":
+            return mock_lm_studio
         raise Exception("Unknown provider")
 
-    client._resolve_provider_by_id = mock_resolve_ollama
+    client._resolve_provider_by_id = mock_resolve_lm_studio
     ans = await client.generate_answer("q", "c", skip_capability_check=True)
-    assert ans == "ollama_ans"
+    assert ans == "lm_studio_ans"
 
     # None available
     async def mock_resolve_none(pid, model=None, timeout=30.0):

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import threading
 from collections import OrderedDict
@@ -13,7 +14,31 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 
-MODEL_PINNED_REVISION = "5c4c1b51821259e67239f32b6fa0a6f0590a29ef"
+class EmbeddingUnavailableError(RuntimeError):
+    """Raised when embedding model failed integrity check or loading failed."""
+
+    pass
+
+
+def _get_models_lock_data() -> dict[str, Any]:
+    import sys
+
+    lock_file = None
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        candidate = Path(sys._MEIPASS) / "models.lock.json"
+        if candidate.exists():
+            lock_file = candidate
+    if not lock_file:
+        lock_file = Path(__file__).parent.parent.parent / "models.lock.json"
+
+    if lock_file.exists():
+        try:
+            with open(lock_file, encoding="utf-8") as f:
+                data = json.load(f)
+                return data.get("models", {})
+        except Exception as e:
+            logger.error("Failed to parse models.lock.json: %s", e)
+    return {}
 
 
 class EmbeddingService:
@@ -22,6 +47,7 @@ class EmbeddingService:
         self._session: Any = None  # onnxruntime.InferenceSession
         self._tokenizer: Any = None  # tokenizers.Tokenizer
         self._loading = False
+        self._load_error: str | None = None
         self._load_lock = threading.Lock()
         self._ready = threading.Event()
         self.optimal_batch_size = settings.embedding_batch_size
@@ -32,88 +58,90 @@ class EmbeddingService:
         self._cache_lock = threading.Lock()
         self._max_cache_size = 2000
 
-    def _verify_onnx_checksum(self, onnx_file: Path) -> bool:
+    def _verify_onnx_checksum(self, onnx_file: Path, expected_sha256: str) -> bool:
         import hashlib
+        import hmac
 
         if not onnx_file.exists() or onnx_file.stat().st_size == 0:
+            logger.error("ONNX model missing or empty: %s", onnx_file)
             return False
+
         hasher = hashlib.sha256()
         try:
             with open(onnx_file, "rb") as f:
                 while chunk := f.read(65536):
                     hasher.update(chunk)
             digest = hasher.hexdigest()
-            logger.info("ONNX model integrity verified. SHA256: %s... (%s)", digest[:16], onnx_file.name)
+            if not hmac.compare_digest(digest, expected_sha256):
+                logger.error(
+                    "ONNX integrity FAILED for %s: expected %s..., got %s...",
+                    onnx_file.name,
+                    expected_sha256[:16],
+                    digest[:16],
+                )
+                return False
+            logger.info("ONNX integrity verified: %s (%s...)", onnx_file.name, digest[:16])
             return True
         except Exception as e:
             logger.error("Failed to calculate SHA256 for %s: %s", onnx_file, e)
             return False
 
-    def _load_onnx_model(self, model_path: Path):
+    def _load_onnx_model(self, model_path: Path, expected_files: dict[str, Any]):
         import onnxruntime as ort
         from tokenizers import Tokenizer
 
         # Load tokenizer
         tokenizer_json = model_path / "tokenizer.json"
         if not tokenizer_json.exists():
-            # Fallback for some models that use different structures
             tokenizer_json = model_path / "onnx" / "tokenizer.json"
+
+        if not tokenizer_json.exists():
+            raise FileNotFoundError(f"tokenizer.json missing at {model_path}")
+
+        if "tokenizer.json" in expected_files:
+            expected_tok_sha = expected_files["tokenizer.json"].get("sha256")
+            if expected_tok_sha and not self._verify_onnx_checksum(tokenizer_json, expected_tok_sha):
+                raise ValueError(f"tokenizer.json at {tokenizer_json} failed integrity check.")
 
         self._tokenizer = Tokenizer.from_file(str(tokenizer_json))
         self._tokenizer.enable_truncation(max_length=512)
         self._tokenizer.enable_padding(pad_id=0, pad_token="[PAD]")  # nosec B106 # noqa: S106
 
-        # Load ONNX session (check for quantized models first)
+        # Load ONNX session
         onnx_file = None
-        quantized_names = [
-            "model_quantized.onnx",
-            "model_int8.onnx",
+        for candidate_rel in [
             "onnx/model_quantized.onnx",
-            "onnx/model_int8.onnx",
-        ]
-        for q_name in quantized_names:
-            candidate = model_path / q_name
-            if candidate.exists():
-                onnx_file = candidate
-                logger.info("Found quantized ONNX model at: %s", onnx_file)
+            "onnx/model.onnx",
+            "model_quantized.onnx",
+            "model.onnx",
+        ]:
+            cand = model_path / candidate_rel
+            if cand.exists():
+                onnx_file = cand
                 break
 
         if not onnx_file:
-            # Search the model directory for any .onnx file containing 'quant' or 'int8'
-            for file in model_path.rglob("*.onnx"):
-                if "quant" in file.name.lower() or "int8" in file.name.lower():
-                    onnx_file = file
-                    logger.info("Found matched quantized ONNX model at: %s", onnx_file)
-                    break
-
-        if not onnx_file:
-            onnx_file = model_path / "model.onnx"
-            if not onnx_file.exists():
-                onnx_file = model_path / "onnx" / "model.onnx"
-
-        if not onnx_file or not onnx_file.exists():
             raise FileNotFoundError(f"ONNX model file not found at {model_path}")
 
-        if not self._verify_onnx_checksum(onnx_file):
-            raise ValueError(f"ONNX model at {onnx_file} failed integrity check.")
+        rel_key = None
+        for k in expected_files:
+            if k.endswith(onnx_file.name):
+                rel_key = k
+                break
 
-        # Use CPU execution provider for maximum portability and minimum size
+        if rel_key and "sha256" in expected_files[rel_key]:
+            expected_sha = expected_files[rel_key]["sha256"]
+            if not self._verify_onnx_checksum(onnx_file, expected_sha):
+                raise ValueError(f"ONNX model at {onnx_file} failed integrity check.")
+
+        # Use CPU execution provider
         providers = ["CPUExecutionProvider"]
-
-        # O(1) Memory Fix: Prevent ONNX from allocating gigabytes of thread memory arenas
-        # By default, ONNX creates a memory arena per CPU core, scaling RAM to 1.5GB+ on modern CPUs.
-        # Performance Fix: Use more threads (4 intra, 2 inter) and enable memory optimizations.
-        # With fixed tokenizer padding (length=256), enable_mem_pattern=True is safe and fast.
         import os
 
         options = ort.SessionOptions()
-        # Use up to 4 intra-op threads, leave 1 core free for OS/other tasks
         options.intra_op_num_threads = min(4, max(1, (os.cpu_count() or 1) - 1))
-        # Use 2 inter-op threads for model-level parallelism
         options.inter_op_num_threads = 2
-        # Re-enable CPU memory arena (bounded by fixed tensor shapes from fixed padding)
         options.enable_cpu_mem_arena = True
-        # Enable memory pattern optimization - safe with fixed-length tokenizer padding
         options.enable_mem_pattern = True
 
         self._session = ort.InferenceSession(
@@ -121,7 +149,7 @@ class EmbeddingService:
         )
         logger.info("ONNX InferenceSession initialized for %s (Bounded Memory)", self.model_name)
 
-        # Prewarm the model with a dummy inference batch (batch=1, seq=8)
+        # Prewarm the model
         try:
             dummy_input_ids = np.zeros((1, 8), dtype=np.int64)
             dummy_attention_mask = np.ones((1, 8), dtype=np.int64)
@@ -138,21 +166,13 @@ class EmbeddingService:
 
             self._session.run(None, dummy_inputs)
 
-            # Dynamically determine the embedding dimension from a dummy run
             dummy_emb = self._mean_pooling(
                 self._session.run(None, dummy_inputs), dummy_attention_mask
             )
             self._embedding_dim = dummy_emb.shape[1]
-
-            logger.info(
-                "ONNX Runtime prewarmed successfully with dummy batch (batch=1, seq=8). "
-                "Extracted dim: %d",
-                self._embedding_dim,
-            )
+            logger.info("ONNX Runtime prewarmed successfully. Extracted dim: %d", self._embedding_dim)
         except Exception as prewarm_err:
-            logger.warning(
-                "Failed to prewarm ONNX session or extract embedding dimension: %s", prewarm_err
-            )
+            logger.warning("Failed to prewarm ONNX session: %s", prewarm_err)
 
     def load_model(self) -> None:
         """Loads the embedding model using ONNX Runtime (blocking)."""
@@ -160,15 +180,41 @@ class EmbeddingService:
             self._ready.set()
             return
 
+        self._load_error = None
         try:
-            model_path = Path(self.model_name)
+            candidate = Path(self.model_name).expanduser()
+            is_local_dir = (
+                candidate.is_absolute()
+                or self.model_name.startswith((".", "~"))
+                or candidate.is_dir()
+            )
 
-            if not model_path.exists():
+            expected_files: dict[str, Any] = {}
+            if is_local_dir:
+                model_path = candidate.resolve()
+                if not model_path.is_dir():
+                    raise FileNotFoundError(
+                        f"PMA_EMBEDDING_MODEL points to a missing directory: {model_path}"
+                    )
+            else:
+                lock_data = _get_models_lock_data()
+                entry = lock_data.get(self.model_name)
+                if entry is None:
+                    if not settings.embedding_allow_unpinned:
+                        raise ValueError(
+                            f"Model '{self.model_name}' is not in models.lock.json. "
+                            f"Run scripts/pin_models.py or set PMA_EMBEDDING_ALLOW_UNPINNED=true."
+                        )
+                    logger.warning("Loading UNPINNED, UNVERIFIED model '%s'", self.model_name)
+                    revision = None
+                else:
+                    revision = entry.get("revision")
+                    expected_files = entry.get("files", {})
+
                 from huggingface_hub import snapshot_download
+                from huggingface_hub.errors import LocalEntryNotFoundError
 
-                revision = MODEL_PINNED_REVISION if self.model_name == settings.embedding_model else None
                 try:
-                    # Attempt offline local load first
                     model_path_str = snapshot_download(  # nosec B615
                         repo_id=self.model_name,
                         revision=revision,
@@ -178,12 +224,13 @@ class EmbeddingService:
                     )
                     model_path = Path(model_path_str)
                     logger.info("Loaded ONNX model from local HF cache: %s", model_path)
-                except Exception:
-                    logger.info(
-                        "Downloading/Resolving ONNX model '%s' (rev %s) from HuggingFace...",
-                        self.model_name,
-                        revision or "latest",
-                    )
+                except LocalEntryNotFoundError:
+                    if not settings.embedding_allow_download:
+                        raise RuntimeError(
+                            "Embedding model not present in local cache and downloads are disabled. "
+                            "Set PMA_EMBEDDING_ALLOW_DOWNLOAD=true to enable downloads."
+                        ) from None
+                    logger.info("Downloading ONNX model '%s' (rev %s)...", self.model_name, revision or "latest")
                     model_path_str = snapshot_download(  # nosec B615
                         repo_id=self.model_name,
                         revision=revision,
@@ -194,13 +241,11 @@ class EmbeddingService:
                     model_path = Path(model_path_str)
 
             logger.info("Loading ONNX embedding model from: %s", model_path)
-            self._load_onnx_model(model_path)
-
-            logger.info(
-                "Embedding model loaded successfully (ONNX, batch_size=%d).",
-                self.optimal_batch_size,
-            )
+            self._load_onnx_model(model_path, expected_files)
+            logger.info("Embedding model loaded successfully (ONNX, batch_size=%d).", self.optimal_batch_size)
         except Exception as e:
+            self._session = None
+            self._load_error = str(e)
             logger.error("Failed to load ONNX embedding model: %s", e)
         finally:
             self._loading = False
@@ -245,8 +290,11 @@ class EmbeddingService:
             else:
                 await asyncio.get_running_loop().run_in_executor(None, self.load_model)
 
+        if self._load_error:
+            raise EmbeddingUnavailableError(f"Embedding model unavailable: {self._load_error}")
+
         if not self._session:
-            raise RuntimeError("Embedding model failed to load.")
+            raise EmbeddingUnavailableError("Embedding model failed to load.")
 
         # Deduplicate
         unique_texts: list[str] = []
@@ -277,7 +325,6 @@ class EmbeddingService:
 
                 input_ids = np.array([e.ids for e in encoded], dtype=np.int64)
                 attention_mask = np.array([e.attention_mask for e in encoded], dtype=np.int64)
-                # Some models don't need token_type_ids, but MiniLM usually does
                 token_type_ids = np.array([e.type_ids for e in encoded], dtype=np.int64)
 
                 onnx_inputs = {
@@ -286,12 +333,8 @@ class EmbeddingService:
                     "token_type_ids": token_type_ids,
                 }
 
-                # Run inference
                 model_output = self._session.run(None, onnx_inputs)
-
-                # Mean Pooling
                 sentence_embeddings = self._mean_pooling(model_output, attention_mask)
-                # Normalization
                 sentence_embeddings = self._normalize(sentence_embeddings)
 
                 end = i + len(batch)
@@ -306,7 +349,12 @@ class EmbeddingService:
 
     def embed_texts_sync(self, texts: list[str], batch_size: int | None = None) -> np.ndarray:
         if not self._session and not self.wait_until_ready(timeout=60):
-            raise RuntimeError("Embedding model not ready.")
+            if self._load_error:
+                raise EmbeddingUnavailableError(f"Embedding model unavailable: {self._load_error}")
+            raise EmbeddingUnavailableError("Embedding model not ready.")
+
+        if self._load_error:
+            raise EmbeddingUnavailableError(f"Embedding model unavailable: {self._load_error}")
 
         if not texts:
             return np.zeros((0, self._embedding_dim), dtype=np.float32)

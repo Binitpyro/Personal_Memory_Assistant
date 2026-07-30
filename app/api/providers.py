@@ -15,33 +15,27 @@ from app.providers import (
     PROVIDER_REGISTRY,
     create_provider,
     get_configured_provider_ids,
+    get_default_chain,
 )
 from app.providers.base import ValidationResult
 from app.providers.cache import validation_cache
+from app.settings_store import CURRENT_SCHEMA_VERSION, SettingsStore
 
 logger = logging.getLogger(__name__)
 _background_tasks: set[asyncio.Task[Any]] = set()
 
 providers_router = APIRouter(prefix="/providers", tags=["providers"])
 
-SETTINGS_PATH = Path("data/settings.json")
-
 
 def read_settings() -> dict:
-    if not SETTINGS_PATH.exists():
-        return {}
     try:
-        with open(SETTINGS_PATH, encoding="utf-8") as f:
-            data = json.load(f)
-            return data if isinstance(data, dict) else {}
+        return SettingsStore.read()
     except Exception:
         return {}
 
 
 def write_settings(data: dict) -> None:
-    SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+    SettingsStore.save(data)
 
 
 def migrate_settings_if_needed(data: dict) -> dict:
@@ -68,9 +62,6 @@ def migrate_settings_if_needed(data: dict) -> dict:
 
     if "provider" not in llm:
         llm["provider"] = "auto"
-
-    if "fallback_chain" not in llm:
-        llm["fallback_chain"] = get_configured_provider_ids()
 
     return data
 
@@ -108,9 +99,12 @@ async def get_llm_settings():
     data = await asyncio.to_thread(read_settings)
     data = migrate_settings_if_needed(data)
     llm = data.get("llm", {})
+    saved_chain = llm.get("fallback_chain")
+    if data.get("schema_version") != CURRENT_SCHEMA_VERSION:
+        saved_chain = None
     return {
         "provider": llm.get("provider", "auto"),
-        "fallback_chain": llm.get("fallback_chain") or get_configured_provider_ids(),
+        "fallback_chain": saved_chain or get_default_chain(),
     }
 
 
@@ -366,7 +360,10 @@ async def get_current_provider():
     llm = data.get("llm", {})
     provider_preference = llm.get("provider", "auto")
 
-    fallback_chain = llm.get("fallback_chain") or get_configured_provider_ids()
+    saved_chain = llm.get("fallback_chain")
+    if data.get("schema_version") != CURRENT_SCHEMA_VERSION:
+        saved_chain = None
+    fallback_chain = saved_chain or get_default_chain()
 
     resolved_id = None
     source = "unset"

@@ -7,10 +7,9 @@ from app.providers.anthropic import AnthropicProvider
 
 
 @pytest.mark.asyncio
-async def test_anthropic_provider_headers():
-    provider = AnthropicProvider(
-        api_key="sk-ant-testkey123", base_url="https://api.anthropic.com/v1"
-    )
+async def test_anthropic_provider_spec_default_url():
+    # Instantiate without base_url to test registry spec default
+    provider = AnthropicProvider(api_key="sk-ant-testkey123")
 
     mock_response = httpx.Response(
         200,
@@ -24,6 +23,10 @@ async def test_anthropic_provider_headers():
 
         assert len(models) == 1
         assert models[0]["id"] == "claude-3-5-sonnet-20241022"
+
+        # Assert URL does NOT contain doubled /v1/v1/models
+        url = mock_get.call_args[0][0]
+        assert url == "https://api.anthropic.com/v1/models"
 
         _, kwargs = mock_get.call_args
         headers = kwargs.get("headers", {})

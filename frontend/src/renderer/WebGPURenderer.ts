@@ -10,7 +10,10 @@
  *   • 32-byte per-instance Node stride (see NavigationController.NODE_STRIDE).
  *   • Compacted instance buffer: crystals first, bubbles after. Picking IDs
  *     for bubbles use firstInstance = crystalCount so they don't collide.
- *   • Shared 3-variant crystal pipeline (currentVariant discriminant).
+ *   • Shared crystal pipeline across all CRYSTAL_VARIANTS meshes. Instances are
+ *     counting-sorted by `type_hash % CRYSTAL_VARIANTS` in rebuildInstances so
+ *     each variant is a contiguous run drawn with one firstInstance offset.
+ *     crystalIndices is permuted with them — picking decodes through it.
  *
  * Upgrades:
  *   • Camera UBO grown from 112 → 192 bytes (adds invViewProj, focus,
@@ -39,12 +42,20 @@ import tonemapShaderCode     from './shaders/tonemap.wgsl?raw';
 import pickingShaderCode     from './shaders/picking.wgsl?raw';
 import outlineShaderCode     from './shaders/outline.wgsl?raw';
 
-import { generateCrystalVariants, type MeshData } from './geometry/icosahedron';
+import { generateCrystalVariants, CRYSTAL_VARIANTS, type MeshData } from './geometry/icosahedron';
 import { generateIcosphereMulti } from './geometry/icosphere';
-import { NavigationController, NODE_STRIDE, NO_PARENT } from '../interaction/NavigationController';
+import { NavigationController, NODE_STRIDE, NODE_OFF_TYPE_HASH, NO_PARENT } from '../interaction/NavigationController';
 
 /** Grown UBO — matches common.wgsl's CameraUniform (std140). */
 const CAMERA_UNIFORM_SIZE = 192;
+
+/**
+ * Vertical field of view. Shared by the projection matrix and the
+ * `projScaleY` UBO field so the two can never disagree — particles size
+ * their billboards off that field, and a mismatch there is what produced
+ * screen-filling sprites and a GPU hang.
+ */
+const FOV_Y = 45 * Math.PI / 180;
 
 // HDR clear — SceneColor is rgba16f linear, sky pass overwrites everything.
 const CLEAR_HDR: GPUColor = [0.0, 0.0, 0.0, 1.0];
@@ -84,16 +95,24 @@ export class WebGPURenderer {
     private sceneColorPrev!: GPUTexture; // rgba16f — refraction source
     private oitAccum!: GPUTexture;       // rgba16f
     private oitReveal!: GPUTexture;      // r8unorm
-    private depthTex!: GPUTexture;       // depth24plus — written as RenderAttachment
-    private depthTexCopy!: GPUTexture;   // depth24plus — read-only copy for TextureBinding
+    private depthTex!: GPUTexture;       // depth32float — written as RenderAttachment
+    private depthTexCopy!: GPUTexture;   // depth32float — read-only copy for TextureBinding
     private pickTex!: GPUTexture;        // r32uint
+    private pickDepthTex!: GPUTexture;   // depth32float — dedicated picking depth target
     private godRaysMask!: GPUTexture;    // half-res r16f
     private godRaysBlur!: GPUTexture;    // half-res rgba16f
     private bloomMips: GPUTexture[] = []; // rgba16f, decreasing sizes
     private bloomUp: GPUTexture[] = [];   // rgba16f, upsample chain
 
     // ── Uniform / staging buffers ───────────────────────────────────────
-    private cameraBuffers: GPUBuffer[] = []; // 3 for the 3 crystal variants
+    private cameraBuffers: GPUBuffer[] = [];
+    /**
+     * Prefix sums into the crystal region of the instance buffer, one entry per
+     * mesh variant plus a terminator. rebuildInstances() sorts crystals by
+     * `type_hash % CRYSTAL_VARIANTS` so each variant occupies one contiguous
+     * run and can be drawn with a single firstInstance offset.
+     */
+    private crystalVariantOffsets = new Uint32Array(CRYSTAL_VARIANTS + 1);
     private pickBuffer!: GPUBuffer;
     private simParamsBuffer!: GPUBuffer;
     private particleBuffer!: GPUBuffer;
@@ -119,8 +138,10 @@ export class WebGPURenderer {
     private godRaysMaskBG!: GPUBindGroup;
     private godRaysBlurBG!: GPUBindGroup;
 
-    private bloomBGL!: GPUBindGroupLayout;
-    private bloomBindGroups: GPUBindGroup[] = []; // prefilter + down + up
+    private bloomDownBGL!: GPUBindGroupLayout;
+    private bloomUpBGL!: GPUBindGroupLayout;
+    private bloomDownBindGroups: GPUBindGroup[] = [];
+    private bloomUpBindGroups: GPUBindGroup[] = [];
 
     private tonemapBGL!: GPUBindGroupLayout;
     private tonemapBG!: GPUBindGroup;
@@ -154,6 +175,12 @@ export class WebGPURenderer {
     public exposure = 1.0;
     private nodeCount = 0;
     private visibleDirty = true;
+    /**
+     * Set once `device.lost` resolves. A lost device rejects every subsequent
+     * submit, so the RAF loop must stop feeding it rather than pile up errors
+     * behind a fault the user can no longer act on.
+     */
+    private deviceLost = false;
 
     private rotationX = 0.5;
     private rotationY = 0.5;
@@ -165,6 +192,8 @@ export class WebGPURenderer {
     private readonly startTime = performance.now();
     private lastFrameTime = performance.now();
 
+    public onDeviceLost?: () => void;
+
     constructor(canvas: HTMLCanvasElement) { this.canvas = canvas; }
 
     // ── Init ────────────────────────────────────────────────────────────
@@ -173,7 +202,11 @@ export class WebGPURenderer {
         const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
         if (!adapter) throw new Error('No appropriate GPUAdapter found.');
         this.device = await adapter.requestDevice();
-        this.device.lost.then(info => console.warn('[Aurora] Device lost:', info.message));
+        this.device.lost.then(info => {
+            this.deviceLost = true;
+            console.error('[Aurora] GPU device lost:', info.message);
+            this.onDeviceLost?.();
+        });
 
         this.context = this.canvas.getContext('webgpu') as GPUCanvasContext;
         this.format = navigator.gpu.getPreferredCanvasFormat();
@@ -187,13 +220,14 @@ export class WebGPURenderer {
         this.canvas.width  = Math.max(1, this.canvas.clientWidth);
         this.canvas.height = Math.max(1, this.canvas.clientHeight);
 
-        // Camera UBOs (3 for the 3-variant crystal pass).
-        for (let i = 0; i < 3; i++) {
-            this.cameraBuffers.push(this.device.createBuffer({
-                size: CAMERA_UNIFORM_SIZE,
-                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-            }));
-        }
+        // One camera UBO. There used to be three, existing solely to carry a
+        // `currentVariant` discriminant that the crystal vertex shader compared
+        // against; instances are now bucketed by variant on the CPU instead, so
+        // the discriminant — and the two duplicate buffers — are gone.
+        this.cameraBuffers.push(this.device.createBuffer({
+            size: CAMERA_UNIFORM_SIZE,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        }));
         this.pickBuffer = this.device.createBuffer({
             size: 256, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
         });
@@ -210,8 +244,10 @@ export class WebGPURenderer {
             new Float32Array(PARTICLE_COUNT * (PARTICLE_STRIDE / 4)),
         );
 
-        // Geometry — 3 crystal archetypes, 1 near-LOD icosphere for bubbles.
-        this.crystalMeshes = generateCrystalVariants(3).map(v => this.uploadMesh(v));
+        // Geometry — CRYSTAL_VARIANTS cluster habits, 1 near-LOD icosphere for
+        // bubbles. At 3 variants the shape repetition across the scene was
+        // obvious; the meshes are small enough that more of them is ~free.
+        this.crystalMeshes = generateCrystalVariants(CRYSTAL_VARIANTS).map(v => this.uploadMesh(v));
         const [near] = generateIcosphereMulti();
         this.bubbleMesh = this.uploadMesh(near);
 
@@ -316,7 +352,7 @@ export class WebGPURenderer {
                 { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
                 { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
                 { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'depth' } },
-                { binding: 3, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+                { binding: 3, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'non-filtering' } },
             ],
         });
 
@@ -325,15 +361,24 @@ export class WebGPURenderer {
                 { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
                 { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
                 { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'depth' } },
-                { binding: 3, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+                { binding: 3, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'non-filtering' } },
             ],
         });
 
-        this.bloomBGL = this.device.createBindGroupLayout({
+        this.bloomDownBGL = this.device.createBindGroupLayout({
             entries: [
                 { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
                 { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
                 { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+            ],
+        });
+
+        this.bloomUpBGL = this.device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+                { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+                { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+                { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
             ],
         });
 
@@ -459,10 +504,11 @@ export class WebGPURenderer {
 
         // ── Bloom chain — 3 entry points share one shader module ────────
         const bloomModule = this.device.createShaderModule({ label: 'aurora-bloom-module', code: commonShaderCode + '\n' + bloomShaderCode });
-        const bloomPL = this.device.createPipelineLayout({ bindGroupLayouts: [this.bloomBGL] });
+        const bloomDownPL = this.device.createPipelineLayout({ bindGroupLayouts: [this.bloomDownBGL] });
+        const bloomUpPL = this.device.createPipelineLayout({ bindGroupLayouts: [this.bloomUpBGL] });
         this.bloomPrefilterPipeline = this.device.createRenderPipeline({
             label: 'aurora-bloom-prefilter-pipeline',
-            layout: bloomPL,
+            layout: bloomDownPL,
             vertex:   { module: bloomModule, entryPoint: 'vs_main' },
             fragment: { module: bloomModule, entryPoint: 'fs_prefilter',
                         targets: [{ format: 'rgba16float' }] },
@@ -470,7 +516,7 @@ export class WebGPURenderer {
         });
         this.bloomDownPipeline = this.device.createRenderPipeline({
             label: 'aurora-bloom-down-pipeline',
-            layout: bloomPL,
+            layout: bloomDownPL,
             vertex:   { module: bloomModule, entryPoint: 'vs_main' },
             fragment: { module: bloomModule, entryPoint: 'fs_down',
                         targets: [{ format: 'rgba16float' }] },
@@ -478,12 +524,10 @@ export class WebGPURenderer {
         });
         this.bloomUpPipeline = this.device.createRenderPipeline({
             label: 'aurora-bloom-up-pipeline',
-            layout: bloomPL,
+            layout: bloomUpPL,
             vertex:   { module: bloomModule, entryPoint: 'vs_main' },
             fragment: { module: bloomModule, entryPoint: 'fs_up',
-                        targets: [{ format: 'rgba16float',
-                                    blend: { color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
-                                             alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' } } }] },
+                        targets: [{ format: 'rgba16float' }] },
             primitive: { topology: 'triangle-list' },
         });
 
@@ -569,6 +613,10 @@ export class WebGPURenderer {
             size: [W, H], format: 'r32uint',
             usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
         });
+        this.pickDepthTex = this.device.createTexture({
+            size: [W, H], format: 'depth32float',
+            usage: GPUTextureUsage.RENDER_ATTACHMENT,
+        });
 
         // Half-res god-ray targets.
         const HW = Math.max(1, W >> 1), HH = Math.max(1, H >> 1);
@@ -623,7 +671,7 @@ export class WebGPURenderer {
                 { binding: 0, resource: { buffer: this.cameraBuffers[0] } },
                 { binding: 1, resource: { buffer: this.particleBuffer } },
                 { binding: 2, resource: this.depthTexCopy.createView() },
-                { binding: 3, resource: this.linearSampler },
+                { binding: 3, resource: this.pointSampler },
             ],
         });
 
@@ -633,7 +681,7 @@ export class WebGPURenderer {
                 { binding: 0, resource: { buffer: this.cameraBuffers[0] } },
                 { binding: 1, resource: this.sceneColor.createView() },
                 { binding: 2, resource: this.depthTexCopy.createView() },
-                { binding: 3, resource: this.linearSampler },
+                { binding: 3, resource: this.pointSampler },
             ],
         });
         this.godRaysBlurBG = this.device.createBindGroup({
@@ -642,26 +690,25 @@ export class WebGPURenderer {
                 { binding: 0, resource: { buffer: this.cameraBuffers[0] } },
                 { binding: 1, resource: this.godRaysMask.createView() },
                 { binding: 2, resource: this.depthTexCopy.createView() },
-                { binding: 3, resource: this.linearSampler },
+                { binding: 3, resource: this.pointSampler },
             ],
         });
 
-        // Bloom bind groups: 1 prefilter (src = sceneColor) + 5 down (src = prev mip)
-        // + 5 up (src = smaller up mip). Total = 1 + 5 + 5 = 11.
-        this.bloomBindGroups = [];
+        // Bloom bind groups: down chain + up chain
+        this.bloomDownBindGroups = [];
         // 0 — prefilter
-        this.bloomBindGroups.push(this.device.createBindGroup({
-            layout: this.bloomBGL,
+        this.bloomDownBindGroups.push(this.device.createBindGroup({
+            layout: this.bloomDownBGL,
             entries: [
                 { binding: 0, resource: this.sceneColor.createView() },
                 { binding: 1, resource: this.linearSampler },
                 { binding: 2, resource: { buffer: this.bloomParamBuffers[0] } },
             ],
         }));
-        // 1..5 — down: mip i reads mip (i-1) (mip 0 = prefilter target = bloomMips[0])
+        // 1..4 — down: mip i reads mip (i-1)
         for (let i = 1; i < BLOOM_MIPS; i++) {
-            this.bloomBindGroups.push(this.device.createBindGroup({
-                layout: this.bloomBGL,
+            this.bloomDownBindGroups.push(this.device.createBindGroup({
+                layout: this.bloomDownBGL,
                 entries: [
                     { binding: 0, resource: this.bloomMips[i - 1].createView() },
                     { binding: 1, resource: this.linearSampler },
@@ -669,19 +716,20 @@ export class WebGPURenderer {
                 ],
             }));
         }
-        // Up chain — starts from smallest bloomMip, writes into bloomUp[n-1].
-        // Successive up-passes read bloomUp[i+1], write to bloomUp[i].
-        // Last read is from bloomMips[BLOOM_MIPS-1] to seed the chain.
+        // Up chain — writes into bloomUp[i], takes src (smaller up or smallest down) and base_mip (same-size down)
+        this.bloomUpBindGroups = [];
         for (let i = 0; i < BLOOM_MIPS; i++) {
             const srcView = i === BLOOM_MIPS - 1
                 ? this.bloomMips[BLOOM_MIPS - 1].createView()
                 : this.bloomUp[i + 1].createView();
-            this.bloomBindGroups.push(this.device.createBindGroup({
-                layout: this.bloomBGL,
+            const baseView = this.bloomMips[i].createView();
+            this.bloomUpBindGroups.push(this.device.createBindGroup({
+                layout: this.bloomUpBGL,
                 entries: [
                     { binding: 0, resource: srcView },
                     { binding: 1, resource: this.linearSampler },
                     { binding: 2, resource: { buffer: this.bloomParamBuffers[BLOOM_MIPS + i] } },
+                    { binding: 3, resource: baseView },
                 ],
             }));
         }
@@ -774,12 +822,50 @@ export class WebGPURenderer {
         const v = this.nav.buildVisibleSet();
         this.crystalCount   = v.crystalCount;
         this.bubbleCount    = v.bubbleCount;
-        this.crystalIndices = v.crystalIndices.slice();
         this.bubbleIndices  = v.bubbleIndices.slice();
 
         if (v.crystalCount > 0) {
+            // Counting sort by mesh variant, so each variant is one contiguous
+            // run that a single draw can address via firstInstance.
+            //
+            // crystalIndices MUST be permuted in lockstep: the picking pass
+            // writes @builtin(instance_index) as the pick id and pick() maps it
+            // back through crystalIndices, so a mismatch silently selects the
+            // wrong folder rather than failing loudly.
+            //
+            // Reordering crystals is otherwise safe — buildVisibleSet's
+            // pre-order only matters for back-to-front bubble OIT, and crystals
+            // are opaque and depth-tested.
+            const N = CRYSTAL_VARIANTS;
+            const src = v.crystalData;
+            const dv = new DataView(src.buffer, src.byteOffset, src.byteLength);
+
+            const bucket = new Uint8Array(v.crystalCount);
+            const counts = new Uint32Array(N);
+            for (let i = 0; i < v.crystalCount; i++) {
+                const b = dv.getUint32(i * NODE_STRIDE + NODE_OFF_TYPE_HASH, true) % N;
+                bucket[i] = b;
+                counts[b]++;
+            }
+
+            const offsets = this.crystalVariantOffsets;
+            offsets[0] = 0;
+            for (let b = 0; b < N; b++) offsets[b + 1] = offsets[b] + counts[b];
+
+            const cursor = offsets.slice(0, N);
+            const sorted = new Uint8Array(v.crystalCount * NODE_STRIDE);
+            const idx    = new Uint32Array(v.crystalCount);
+            for (let i = 0; i < v.crystalCount; i++) {
+                const dst = cursor[bucket[i]]++;
+                sorted.set(src.subarray(i * NODE_STRIDE, (i + 1) * NODE_STRIDE), dst * NODE_STRIDE);
+                idx[dst] = v.crystalIndices[i];
+            }
+            this.crystalIndices = idx;
             this.device.queue.writeBuffer(this.instanceBuffer, 0,
-                v.crystalData.buffer, v.crystalData.byteOffset, v.crystalData.byteLength);
+                sorted.buffer, sorted.byteOffset, sorted.byteLength);
+        } else {
+            this.crystalIndices = new Uint32Array(0);
+            this.crystalVariantOffsets.fill(0);
         }
         if (v.bubbleCount > 0) {
             this.device.queue.writeBuffer(this.instanceBuffer, v.crystalCount * NODE_STRIDE,
@@ -801,7 +887,7 @@ export class WebGPURenderer {
 
     private updateCamera(): void {
         const aspect = this.canvas.width / this.canvas.height;
-        const projection = this.perspective(45 * Math.PI / 180, aspect, 0.1, 100000);
+        const projection = this.perspective(FOV_Y, aspect, 0.1, 100000);
 
         const t = this.focusPosition;
         const eyeX = t[0] + this.zoom * Math.cos(this.rotationX) * Math.sin(this.rotationY);
@@ -834,22 +920,26 @@ export class WebGPURenderer {
         u.set([0.16, 0.10, 0.30], 40); // fogColor — matches sky horizon tones
         u[43] = this.exposure;
         u.set(t, 44); // focus
-        // u[47] = pad
+        // projScaleY — P[1][1]. particles_draw.wgsl scales its billboards by
+        // this; it must be the PROJECTION term only, never viewProj's.
+        u[47] = 1 / Math.tan(FOV_Y / 2);
 
-        for (let i = 0; i < 3; i++) {
-            u32[35] = i;
-            this.device.queue.writeBuffer(this.cameraBuffers[i], 0, u);
-        }
+        // u32[35] is now dead padding (was `currentVariant`). It is kept in the
+        // struct so the 192-byte layout — and every offset after it — is
+        // unchanged for the other eleven shader modules.
+        u32[35] = 0;
+        this.device.queue.writeBuffer(this.cameraBuffers[0], 0, u);
     }
 
     private updateSimParams(dtSec: number): void {
         const buf = new Float32Array(SIM_PARAMS_SIZE / 4);
         buf[0] = Math.min(dtSec, 0.05); // clamp long frames so integrator stays stable
         buf[1] = (performance.now() - this.startTime) / 1000;
-        buf[2] = this.focusPosition[0];
-        buf[3] = this.focusPosition[1];
-        buf[4] = this.focusPosition[2];
-        buf[5] = Math.max(80, this.zoom * 0.6); // spawn radius scales with zoom
+        // buf[2] and buf[3] are _pad0 (vec2<f32>) for 16-byte alignment of focus
+        buf[4] = this.focusPosition[0];
+        buf[5] = this.focusPosition[1];
+        buf[6] = this.focusPosition[2];
+        buf[7] = Math.max(80, this.zoom * 0.6); // spawn radius scales with zoom @ offset 28
         this.device.queue.writeBuffer(this.simParamsBuffer, 0, buf);
     }
 
@@ -864,7 +954,7 @@ export class WebGPURenderer {
 
     // ── The main event ──────────────────────────────────────────────────
     public render(): void {
-        if (!this.device) return;
+        if (!this.device || this.deviceLost) return;
 
         // Empty scene fast-path: still draw the sky, so the user gets the
         // dreamscape backdrop even before data arrives.
@@ -944,13 +1034,21 @@ export class WebGPURenderer {
                 },
             });
             p.setPipeline(this.crystalPipeline);
+            p.setBindGroup(0, this.cameraBindGroups[0]);
             p.setBindGroup(1, this.crystalSceneBindGroup);
             p.setVertexBuffer(1, this.instanceBuffer, 0, this.crystalCount * NODE_STRIDE);
-            for (let v = 0; v < 3; v++) {
-                p.setBindGroup(0, this.cameraBindGroups[v]);
+            // One draw per variant over its own contiguous run. Previously each
+            // of 3 draws submitted the FULL crystal count and the vertex shader
+            // discarded 2/3 by pushing them outside clip space — which does not
+            // scale to CRYSTAL_VARIANTS meshes. Empty buckets are common on
+            // small folders, so skip them.
+            const off = this.crystalVariantOffsets;
+            for (let v = 0; v < CRYSTAL_VARIANTS; v++) {
+                const count = off[v + 1] - off[v];
+                if (count === 0) continue;
                 p.setVertexBuffer(0, this.crystalMeshes[v].vertexBuffer);
                 p.setIndexBuffer(this.crystalMeshes[v].indexBuffer, 'uint16');
-                p.drawIndexed(this.crystalMeshes[v].indexCount, this.crystalCount);
+                p.drawIndexed(this.crystalMeshes[v].indexCount, count, 0, 0, off[v]);
             }
             p.end();
         }
@@ -1023,18 +1121,17 @@ export class WebGPURenderer {
             p.setBindGroup(0, this.godRaysMaskBG);
             p.draw(3);
             p.end();
-        }
-        {
-            const p = encoder.beginRenderPass({
+
+            const q = encoder.beginRenderPass({
                 colorAttachments: [{ view: this.godRaysBlur.createView(), loadOp: 'clear', clearValue: [0,0,0,0], storeOp: 'store' }],
             });
-            p.setPipeline(this.godRaysBlurPipeline);
-            p.setBindGroup(0, this.godRaysBlurBG);
-            p.draw(3);
-            p.end();
+            q.setPipeline(this.godRaysBlurPipeline);
+            q.setBindGroup(0, this.godRaysBlurBG);
+            q.draw(3);
+            q.end();
         }
 
-        // ── 7. Bloom prefilter + downsample chain ───────────────────────
+        // ── 7. Bloom chain ──────────────────────────────────────────────
         // Prefilter: sceneColor → bloomMips[0]
         this.writeBloomParams(0, this.dimsOf(this.bloomMips[0]), 1.05, 0.35, 1.0);
         {
@@ -1042,7 +1139,7 @@ export class WebGPURenderer {
                 colorAttachments: [{ view: this.bloomMips[0].createView(), loadOp: 'clear', clearValue: [0,0,0,0], storeOp: 'store' }],
             });
             p.setPipeline(this.bloomPrefilterPipeline);
-            p.setBindGroup(0, this.bloomBindGroups[0]);
+            p.setBindGroup(0, this.bloomDownBindGroups[0]);
             p.draw(3);
             p.end();
         }
@@ -1053,27 +1150,24 @@ export class WebGPURenderer {
                 colorAttachments: [{ view: this.bloomMips[i].createView(), loadOp: 'clear', clearValue: [0,0,0,0], storeOp: 'store' }],
             });
             p.setPipeline(this.bloomDownPipeline);
-            p.setBindGroup(0, this.bloomBindGroups[i]);
+            p.setBindGroup(0, this.bloomDownBindGroups[i]);
             p.draw(3);
             p.end();
         }
-        // Up: additive; walk from smallest to largest.
+        // Up: shader computes base_mip + tent(src) * intensity
         for (let i = BLOOM_MIPS - 1; i >= 0; i--) {
             const dst = this.bloomUp[i];
             this.writeBloomParams(BLOOM_MIPS + i, this.dimsOf(dst), 0, 0, 0.75);
-            // Additive blend requires the destination to already contain the
-            // "current" bloom to add on top of. For the largest (last) up
-            // step, we clear first because nothing precedes it.
             const p = encoder.beginRenderPass({
                 colorAttachments: [{
                     view: dst.createView(),
-                    loadOp: i === BLOOM_MIPS - 1 ? 'clear' : 'clear',
+                    loadOp: 'clear',
                     clearValue: [0,0,0,0],
                     storeOp: 'store',
                 }],
             });
             p.setPipeline(this.bloomUpPipeline);
-            p.setBindGroup(0, this.bloomBindGroups[BLOOM_MIPS + i]);
+            p.setBindGroup(0, this.bloomUpBindGroups[i]);
             p.draw(3);
             p.end();
         }
@@ -1144,7 +1238,7 @@ export class WebGPURenderer {
 
     // ── Picking (unchanged from legacy — silhouette-tight) ──────────────
     public async pick(x: number, y: number): Promise<number | null> {
-        if (!this.instanceBuffer) return null;
+        if (!this.instanceBuffer || this.deviceLost) return null;
         if (this.visibleDirty) this.rebuildInstances();
         const total = this.crystalCount + this.bubbleCount;
         if (total === 0) return null;
@@ -1152,7 +1246,7 @@ export class WebGPURenderer {
         const px = Math.max(0, Math.min(Math.floor(x), this.canvas.width - 1));
         const py = Math.max(0, Math.min(Math.floor(y), this.canvas.height - 1));
 
-        this.updateCamera();
+        // Note: updateCamera() is not called here so picking does not advance camera smoothing lerp
         const encoder = this.device.createCommandEncoder();
         const pass = encoder.beginRenderPass({
             colorAttachments: [{
@@ -1160,7 +1254,7 @@ export class WebGPURenderer {
                 loadOp: 'clear', clearValue: { r: 0xFFFFFFFF, g: 0, b: 0, a: 0 }, storeOp: 'store',
             }],
             depthStencilAttachment: {
-                view: this.depthTex.createView(),
+                view: this.pickDepthTex.createView(),
                 depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store',
             },
         });
@@ -1169,10 +1263,18 @@ export class WebGPURenderer {
         pass.setBindGroup(0, this.cameraBindGroups[0]);
         pass.setVertexBuffer(1, this.instanceBuffer);
 
-        if (this.crystalCount > 0) {
-            pass.setVertexBuffer(0, this.crystalMeshes[0].vertexBuffer);
-            pass.setIndexBuffer(this.crystalMeshes[0].indexBuffer, 'uint16');
-            pass.drawIndexed(this.crystalMeshes[0].indexCount, this.crystalCount, 0, 0, 0);
+        // Per-variant, matching the colour pass. This used to draw variant 0's
+        // mesh for EVERY crystal, so two thirds of them were picked against the
+        // wrong silhouette; the bucketing makes the correct mesh free to use.
+        // firstInstance keeps @builtin(instance_index) equal to the global slot,
+        // which is what pick_id decodes against below.
+        const pOff = this.crystalVariantOffsets;
+        for (let v = 0; v < CRYSTAL_VARIANTS; v++) {
+            const count = pOff[v + 1] - pOff[v];
+            if (count === 0) continue;
+            pass.setVertexBuffer(0, this.crystalMeshes[v].vertexBuffer);
+            pass.setIndexBuffer(this.crystalMeshes[v].indexBuffer, 'uint16');
+            pass.drawIndexed(this.crystalMeshes[v].indexCount, count, 0, 0, pOff[v]);
         }
         if (this.bubbleCount > 0) {
             pass.setVertexBuffer(0, this.bubbleMesh.vertexBuffer);
@@ -1276,6 +1378,7 @@ export class WebGPURenderer {
         this.depthTex?.destroy();
         this.depthTexCopy?.destroy();
         this.pickTex?.destroy();
+        this.pickDepthTex?.destroy();
         this.godRaysMask?.destroy();
         this.godRaysBlur?.destroy();
         for (const t of this.bloomMips) t.destroy();

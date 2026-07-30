@@ -241,3 +241,56 @@ async def test_detect_local_models_ollama_detected():
 
     assert result["ollama"]["detected"] is True
     assert "llama3" in result["ollama"]["models"]
+
+
+@pytest.mark.asyncio
+async def test_llm_chat_passthrough_rejects_auto():
+    from fastapi import HTTPException
+    from app.api.models import LLMChatRequest, chat_passthrough
+
+    payload = LLMChatRequest(
+        messages=[{"role": "user", "content": "hi"}],
+        provider="auto",
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        await chat_passthrough(payload)
+    assert exc_info.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_llm_chat_passthrough_success():
+    from app.api.models import LLMChatRequest, chat_passthrough
+
+    mock_provider = AsyncMock()
+    mock_provider.chat = AsyncMock(return_value="Passthrough response")
+    mock_provider.close = AsyncMock()
+
+    mock_llm = MagicMock()
+    mock_llm._resolve_provider_by_id = AsyncMock(return_value=mock_provider)
+
+    payload = LLMChatRequest(
+        messages=[{"role": "user", "content": "hello"}],
+        provider="ollama",
+    )
+    with patch("app.api.models.get_llm", return_value=mock_llm):
+        result = await chat_passthrough(payload)
+
+    assert result["provider"] == "ollama"
+    assert result["content"] == "Passthrough response"
+    mock_provider.close.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_cloud_privacy_consent_required(tmp_path, monkeypatch):
+    from fastapi import HTTPException
+    from app.api import models as m
+
+    settings_file = tmp_path / "data" / "settings.json"
+    (tmp_path / "data").mkdir()
+    monkeypatch.setattr(m, "SETTINGS_PATH", settings_file)
+
+    payload = m.LLMPreferences(provider="gemini", cloud_privacy_consent=False)
+    with pytest.raises(HTTPException) as exc_info:
+        await m.set_preferences(payload)
+    assert exc_info.value.status_code == 400
+

@@ -74,11 +74,10 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     return out;
 }
 
-// WBOIT weight function (Meshkin variant, tuned for our near/far ratio 0.1/100k)
+// WBOIT weight function (Meshkin variant, normalized to scene scale)
 fn wboit_weight(alpha: f32, view_z: f32) -> f32 {
-    // Map view_z into ~[0, 1] then power-shape it.
-    let z = view_z * 0.01; // arbitrary scale — the shape not the magnitude matters
-    let w = clamp(10.0 / (1e-5 + pow(z, 3.0) + pow(z * 0.1, 3.0)), 1e-2, 3e3);
+    let z_norm = clamp(view_z / 2000.0, 0.0, 1.0);
+    let w = max(1e-2, 3e3 * pow(1.0 - z_norm, 3.0));
     return alpha * w;
 }
 
@@ -115,7 +114,8 @@ fn fs_main(in: VertexOutput) -> FragOut {
     let sun_col = vec3<f32>(1.00, 0.94, 0.86) * 1.6;
     let sky_col = vec3<f32>(0.55, 0.75, 1.00) * 0.55;
 
-    var diffuse = base * (wrap_key * sun_col + wrap_fill * sky_col);
+    let F_surf = F_Schlick(NdotV, vec3<f32>(0.04));
+    var diffuse = base * (wrap_key * sun_col + wrap_fill * sky_col) * (vec3<f32>(1.0) - F_surf) * INV_PI;
 
     // Blinn-Phong-ish shiny highlight — bubbles are ~perfectly smooth.
     let H = normalize(L_key + V);

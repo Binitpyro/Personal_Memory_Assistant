@@ -54,8 +54,20 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VOut {
     // Face the camera via view-space billboard.
     let world = vec4<f32>(p.position, 1.0);
     let clip  = camera.viewProj * world;
-    let px_per_unit = camera.screenHeight * 0.5;
-    let clip_offset = vec4<f32>(corner * size * (clip.w / px_per_unit) * 40.0, 0.0, 0.0);
+    let size_world = size * 4.0;
+    // Perspective billboard: a world-space half-size s at clip depth w lands at
+    // NDC offset s * P[i][i] / w, so the clip-space offset is that times w.
+    // The previous form multiplied by w and divided by P[1][1] — inverted on
+    // both counts — which cancelled the w entirely and left every sprite ~108x
+    // oversized and screen-filling. 65k of those hung the GPU outright
+    // (DXGI_ERROR_DEVICE_HUNG). It also read P out of viewProj, which folds in
+    // camera pitch; the projection alone belongs here.
+    let aspect = camera.screenWidth / max(camera.screenHeight, 1.0);
+    let w = max(clip.w, 1e-3);
+    // Cap the on-screen radius so a particle drifting into the near field can
+    // not walk back off the overdraw cliff.
+    let ndc_h = min(size_world * camera.projScaleY / w, 0.12);
+    let clip_offset = vec4<f32>(corner * ndc_h * vec2<f32>(1.0 / aspect, 1.0) * w, 0.0, 0.0);
 
     var o: VOut;
     o.clip_pos = clip + clip_offset * alive;
@@ -87,10 +99,15 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     let depth_dims = vec2<i32>(textureDimensions(scene_depth));
     let depth_px = clamp(vec2<i32>(in.clip_pos.xy), vec2<i32>(0, 0), depth_dims - vec2<i32>(1, 1));
     let scene_z_ndc = textureLoad(scene_depth, depth_px, 0);
-    // Convert NDC depth back to view-space linear z — reversed-Z: z_lin = far*near/(far - z*(far-near))
-    // We approximate: if the fragment view_z is close to the scene view_z it should fade.
-    // Cheap heuristic: use the depth ratio as proximity in [0,1].
-    let soft = clamp((scene_z_ndc - in.clip_pos.z) * 50.0, 0.0, 1.0);
+    // Linearize both depths for a meaningful world-space comparison.
+    // near = 0.1, far = 100000 — matching projection in WebGPURenderer.
+    let near = 0.1;
+    let far  = 100000.0;
+    let nf   = near * far;
+    let fmn  = far - near;
+    let scene_z_lin = nf / (far - scene_z_ndc * fmn);
+    let frag_z_lin  = nf / (far - in.clip_pos.z * fmn);
+    let soft = clamp((scene_z_lin - frag_z_lin) / 8.0, 0.0, 1.0);
 
     let rgb = in.color * core * 3.5;  // >1 → gets picked up by bloom
     return vec4<f32>(rgb, in.alpha * core * soft);

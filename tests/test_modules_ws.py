@@ -33,8 +33,8 @@ def test_websocket_connection_authorized():
 
         websocket.send_json({"action": "hello", "data": "world"})
         response = websocket.receive_json()
-        assert response["status"] == "success"
-        assert response["action"] == "hello"
+        assert response["status"] == "error"
+        assert "Unknown action 'hello'" in response["message"]
 
     # 2. Header parameter auth (passed in headers option of websocket_connect)
     with client.websocket_connect(

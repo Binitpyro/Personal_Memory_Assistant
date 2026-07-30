@@ -31,7 +31,8 @@ import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 
 import { NavigationController, NODE_STRIDE } from '../interaction/NavigationController';
-import { generateCrystalVariants, type MeshData } from './geometry/icosahedron';
+import { generateCrystalVariants, CRYSTAL_VARIANTS, type MeshData } from './geometry/icosahedron';
+import { crystalXform, crystalPalette } from './crystalInstance';
 import { generateIcosphereMulti } from './geometry/icosphere';
 
 // ─── Sky dome shaders (single hemispherical wash + stars + nebula) ────────
@@ -249,6 +250,22 @@ export class WebGL2Renderer {
     private readonly pointerNDC = new THREE.Vector2();
 
     private crystalSourceIndices: number[] = [];
+    /**
+     * Everything needed to re-pose a crystal each frame. This tier has no
+     * vertex-shader hook for the tumble the WebGPU path does on the GPU, so the
+     * orientation is recomputed on the CPU per frame and written back into the
+     * InstancedMesh matrices. Previously a static Euler triple was baked in once
+     * and never touched again — the crystals were simply frozen here.
+     */
+    private crystalInstances: {
+        variant: number; slot: number; hash: number;
+        x: number; y: number; z: number; r: number;
+    }[] = [];
+    private qSpin  = new THREE.Quaternion();
+    private qTilt  = new THREE.Quaternion();
+    private qPrec  = new THREE.Quaternion();
+    private axisL    = new THREE.Vector3();
+    private axisPerp = new THREE.Vector3();
     private bubbleSourceIndices: number[] = [];
 
     private startTime = performance.now();
@@ -310,9 +327,9 @@ export class WebGL2Renderer {
         this.scene.add(this.skyDome);
 
         // Meshes — one InstancedMesh per crystal variant (0 count until data lands).
-        const crystalVariants = generateCrystalVariants(3);
+        const crystalVariants = generateCrystalVariants(CRYSTAL_VARIANTS);
         const crystalMat = makeCrystalMaterial(env);
-        for (let i = 0; i < 3; i++) {
+        for (let i = 0; i < CRYSTAL_VARIANTS; i++) {
             const m = new THREE.InstancedMesh(
                 this.meshDataToBufferGeo(crystalVariants[i], true),
                 crystalMat, 1,
@@ -525,8 +542,8 @@ export class WebGL2Renderer {
         this.pickMesh.dispose();
 
         const cap = Math.max(1, this.nodeCount);
-        const crystalVariants = generateCrystalVariants(3);
-        for (let i = 0; i < 3; i++) {
+        const crystalVariants = generateCrystalVariants(CRYSTAL_VARIANTS);
+        for (let i = 0; i < CRYSTAL_VARIANTS; i++) {
             const m = new THREE.InstancedMesh(
                 this.meshDataToBufferGeo(crystalVariants[i], true),
                 crystalMat, cap,
@@ -593,44 +610,40 @@ export class WebGL2Renderer {
         const rawSrc = this.nav.getSourceView();
         if (!rawSrc) return;
 
-        const variantCounts = [0, 0, 0];
+        const variantCounts = new Array(CRYSTAL_VARIANTS).fill(0);
         this.crystalSourceIndices = [];
+        this.crystalInstances = [];
 
         for (let i = 0; i < v.crystalCount; i++) {
             const src = v.crystalIndices[i] * NODE_STRIDE;
             const hash = rawSrc.getUint32(src + 24, true);
-            const vidx = hash % 3;
+            const vidx = hash % CRYSTAL_VARIANTS;
             const x = rawSrc.getFloat32(src + 0,  true);
             const y = rawSrc.getFloat32(src + 4,  true);
             const z = rawSrc.getFloat32(src + 8,  true);
             const r = rawSrc.getFloat32(src + 12, true);
 
-            this.dummy.position.set(x, y, z);
-            this.dummy.scale.set(r, r, r);
-            this.dummy.rotation.set(
-                (hash % 360) * 0.017453,
-                ((hash >> 8)  % 360) * 0.017453,
-                ((hash >> 16) % 360) * 0.017453,
-            );
-            this.dummy.updateMatrix();
-
             const mesh = this.crystalMeshes[vidx];
             const slot = variantCounts[vidx];
-            mesh.setMatrixAt(slot, this.dummy.matrix);
-            // Golden-ratio hue rotation per instance.
-            const hue = (hash * 0.61803398875) % 1.0;
-            this.tmpColor.setHSL(hue, 0.65, 0.55);
+            // Shared with the WGSL path via crystalInstance.ts, so both tiers
+            // land on the same colour. This used to be setHSL(hue, 0.65, 0.55)
+            // against a golden-ratio hue — a different colour *space* and
+            // different constants from the shader, so the tiers disagreed.
+            const [cr, cg, cb] = crystalPalette(hash);
+            this.tmpColor.setRGB(cr, cg, cb);
             mesh.setColorAt(slot, this.tmpColor);
+            // Matrices are written every frame by updateCrystalMotion().
+            this.crystalInstances.push({ variant: vidx, slot, hash, x, y, z, r });
             variantCounts[vidx]++;
             this.crystalSourceIndices.push(v.crystalIndices[i]);
         }
-        for (let i = 0; i < 3; i++) {
+        for (let i = 0; i < CRYSTAL_VARIANTS; i++) {
             this.crystalMeshes[i].count = variantCounts[i];
-            this.crystalMeshes[i].instanceMatrix.needsUpdate = true;
             if (this.crystalMeshes[i].instanceColor) {
                 this.crystalMeshes[i].instanceColor!.needsUpdate = true;
             }
         }
+        this.updateCrystalMotion((performance.now() - this.startTime) / 1000);
 
         // Bubbles
         this.bubbleSourceIndices = Array.from(v.bubbleIndices);
@@ -672,6 +685,37 @@ export class WebGL2Renderer {
         this.visibleDirty = false;
     }
 
+    /**
+     * Re-pose every crystal for time `t`. The WebGPU tier does this in the
+     * vertex shader; here it is CPU work proportional to the visible crystal
+     * count, which is the number of collapsed folders on screen — tens to low
+     * hundreds in practice. If that ever grows enough to show in a profile,
+     * throttle to every Nth frame rather than dropping back to a static pose.
+     */
+    private updateCrystalMotion(t: number): void {
+        if (this.crystalInstances.length === 0) return;
+        for (const inst of this.crystalInstances) {
+            const x = crystalXform(inst.hash, t);
+            this.axisL.set(x.L[0], x.L[1], x.L[2]);
+            this.axisPerp.set(x.perp[0], x.perp[1], x.perp[2]);
+            // q = R_L(phi) . R_perp(theta) . R_L(psi) — spin is a BODY rotation
+            // and must be applied first, then the cone tilt, then precession
+            // about the space-fixed axis. Matches crystal_rotate() in common.wgsl.
+            this.qSpin.setFromAxisAngle(this.axisL, x.psi);
+            this.qTilt.setFromAxisAngle(this.axisPerp, x.theta);
+            this.qPrec.setFromAxisAngle(this.axisL, x.phi);
+            this.qPrec.multiply(this.qTilt).multiply(this.qSpin);
+
+            this.dummy.position.set(inst.x, inst.y, inst.z);
+            this.dummy.quaternion.copy(this.qPrec);
+            this.dummy.scale.set(
+                x.scale[0] * inst.r, x.scale[1] * inst.r, x.scale[2] * inst.r);
+            this.dummy.updateMatrix();
+            this.crystalMeshes[inst.variant].setMatrixAt(inst.slot, this.dummy.matrix);
+        }
+        for (const m of this.crystalMeshes) m.instanceMatrix.needsUpdate = true;
+    }
+
     public render(): void {
         if (this.nodeCount === 0) {
             // Still render the sky even before data lands.
@@ -689,6 +733,7 @@ export class WebGL2Renderer {
         this.lastFrameTime = now;
         void dt;
         const t = (now - this.startTime) / 1000;
+        this.updateCrystalMotion(t);
         this.skyUniforms.uTime.value = t;
         const pmat = this.particles.material as THREE.ShaderMaterial;
         pmat.uniforms.uTime.value = t;

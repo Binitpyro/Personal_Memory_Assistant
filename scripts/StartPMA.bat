@@ -133,10 +133,16 @@ if "%HAS_SONAR%"=="1" (
     echo.
 )
 
+:: Generate random per-session local access token
+if not exist "data" mkdir "data"
+for /f "usebackq tokens=*" %%T in (`powershell -NoProfile -Command "[guid]::NewGuid().ToString('N')"`) do set "PMA_DEV_TOKEN=%%T"
+if "%PMA_DEV_TOKEN%"=="" set "PMA_DEV_TOKEN=dev_token_%RANDOM%_%RANDOM%"
+echo %PMA_DEV_TOKEN%> "data\.dev_token"
+
 :: Windows Terminal Command Construction
-set "API_CMD=title PMA API && cd /d %PROJECT_DIR% && call .venv\Scripts\activate.bat && set X_LOCAL_ACCESS_TOKEN=dev_token_pma_local&& uvicorn app.main:app --reload --port 8000"
+set "API_CMD=title PMA API && cd /d %PROJECT_DIR% && call .venv\Scripts\activate.bat && set X_LOCAL_ACCESS_TOKEN=%PMA_DEV_TOKEN%&& uvicorn app.main:app --reload --port 8000"
 set "SONAR_CMD=title SonarQube && cd /d %SONAR_DIR% && call StartSonar.bat"
-set "VITE_CMD=title Vite Frontend && cd /d %PROJECT_DIR%\frontend && set VITE_DEV_TOKEN=dev_token_pma_local&& npm run dev"
+set "VITE_CMD=title Vite Frontend && cd /d %PROJECT_DIR%\frontend && set VITE_DEV_TOKEN=%PMA_DEV_TOKEN%&& npm run dev"
 set "TERM_CMD=title PMA Terminal && cd /d %PROJECT_DIR% && call .venv\Scripts\activate.bat"
 
 :: Launch WT with appropriate tabs:

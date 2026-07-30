@@ -46,7 +46,7 @@ fn chromatic_aberration(uv: vec2<f32>) -> vec3<f32> {
 
 // Blue-noise-ish grain via hash. Enough to break banding, not enough to distract.
 fn grain(uv: vec2<f32>, t: f32) -> f32 {
-    return hash21(uv * vec2<f32>(camera.screenWidth, camera.screenHeight) + t * 91.7) - 0.5;
+    return hash21(uv * vec2<f32>(camera.screenWidth, camera.screenHeight) + fract(t) * 1000.0) - 0.5;
 }
 
 fn vignette(uv: vec2<f32>) -> f32 {
@@ -56,42 +56,42 @@ fn vignette(uv: vec2<f32>) -> f32 {
 
 @fragment
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
-    // ── Composite HDR channels ─────────────────────────────────────────
-    var hdr = chromatic_aberration(in.uv);
-    let bl  = textureSampleLevel(bloom_tex,   linear_sampler, in.uv, 0.0).rgb;
-    let gr  = textureSampleLevel(godrays_tex, linear_sampler, in.uv, 0.0).rgb;
-
-    // Bloom is additive — toned down to prevent washing out crystal detail.
-    // God-rays use screen blend for physical plausibility.
-    hdr = hdr + bl * 0.35;
-    hdr = hdr + gr * (1.0 - hdr) * 0.55;
-
-    // Exposure key
-    hdr = hdr * camera.exposure;
-
-    // ── Tonemap (ACES) ─────────────────────────────────────────────────
-    var sdr = aces(hdr);
-
-    // ── Linear → sRGB (gamma encode) ───────────────────────────────────
-    sdr = linear_to_srgb(sdr);
-
-    // ── Vignette ───────────────────────────────────────────────────────
-    sdr = sdr * mix(0.7, 1.0, vignette(in.uv));
-
-    // ── Sharpen (unsharp mask, 1-tap) ──────────────────────────────────
+    let center = vec2<f32>(0.5);
+    let dir = in.uv - center;
+    let d2  = dot(dir, dir);
+    let mag = 0.0035 + d2 * 0.020;
     let px = 1.0 / vec2<f32>(camera.screenWidth, camera.screenHeight);
+
+    // CA Taps & Center Sample
+    let g_sample = textureSampleLevel(scene_color, linear_sampler, in.uv, 0.0).rgb;
+    let r = textureSampleLevel(scene_color, linear_sampler, in.uv - dir * mag, 0.0).r;
+    let b = textureSampleLevel(scene_color, linear_sampler, in.uv + dir * mag, 0.0).b;
+    var hdr = vec3<f32>(r, g_sample.g, b);
+
+    // Sharpen (unsharp mask) using center sample and 4 orthogonal taps
     let s1 = textureSampleLevel(scene_color, linear_sampler, in.uv + vec2<f32>( px.x, 0.0), 0.0).rgb;
     let s2 = textureSampleLevel(scene_color, linear_sampler, in.uv - vec2<f32>( px.x, 0.0), 0.0).rgb;
     let s3 = textureSampleLevel(scene_color, linear_sampler, in.uv + vec2<f32>(0.0,  px.y), 0.0).rgb;
     let s4 = textureSampleLevel(scene_color, linear_sampler, in.uv - vec2<f32>(0.0,  px.y), 0.0).rgb;
     let blurred = (s1 + s2 + s3 + s4) * 0.25;
-    let center = textureSampleLevel(scene_color, linear_sampler, in.uv, 0.0).rgb;
-    let sharp_hdr = center + (center - blurred) * 0.35;
-    // Apply the same tonemap+encode to sharpened center, then lerp in.
-    let sharp_sdr = linear_to_srgb(aces(sharp_hdr * camera.exposure));
-    sdr = mix(sdr, sharp_sdr, 0.4);
+    let sharp_detail = (g_sample - blurred) * 0.14;
+    hdr = hdr + sharp_detail;
 
-    // ── Grain (post-encode so it doesn't get tonemapped away) ──────────
+    // ── Composite Bloom & GodRays ──────────────────────────────────────
+    let bl  = textureSampleLevel(bloom_tex,   linear_sampler, in.uv, 0.0).rgb;
+    let gr  = textureSampleLevel(godrays_tex, linear_sampler, in.uv, 0.0).rgb;
+
+    hdr = hdr + bl * 0.35;
+    hdr = hdr + gr * (1.0 - hdr) * 0.22;
+    hdr = hdr * camera.exposure;
+
+    // ── Tonemap (ACES) & Linear → sRGB ─────────────────────────────────
+    var sdr = linear_to_srgb(aces(hdr));
+
+    // ── Vignette ───────────────────────────────────────────────────────
+    sdr = sdr * mix(0.7, 1.0, vignette(in.uv));
+
+    // ── Grain ──────────────────────────────────────────────────────────
     sdr = sdr + vec3<f32>(grain(in.uv, camera.time)) * 0.025;
 
     return vec4<f32>(clamp(sdr, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);

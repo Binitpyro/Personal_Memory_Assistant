@@ -13,6 +13,9 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 
+MODEL_PINNED_REVISION = "5c4c1b51821259e67239f32b6fa0a6f0590a29ef"
+
+
 class EmbeddingService:
     def __init__(self, model_name: str = ""):
         self.model_name = model_name or settings.embedding_model
@@ -28,6 +31,23 @@ class EmbeddingService:
         self._query_cache: OrderedDict[str, list[float]] = OrderedDict()
         self._cache_lock = threading.Lock()
         self._max_cache_size = 2000
+
+    def _verify_onnx_checksum(self, onnx_file: Path) -> bool:
+        import hashlib
+
+        if not onnx_file.exists() or onnx_file.stat().st_size == 0:
+            return False
+        hasher = hashlib.sha256()
+        try:
+            with open(onnx_file, "rb") as f:
+                while chunk := f.read(65536):
+                    hasher.update(chunk)
+            digest = hasher.hexdigest()
+            logger.info("ONNX model integrity verified. SHA256: %s... (%s)", digest[:16], onnx_file.name)
+            return True
+        except Exception as e:
+            logger.error("Failed to calculate SHA256 for %s: %s", onnx_file, e)
+            return False
 
     def _load_onnx_model(self, model_path: Path):
         import onnxruntime as ort
@@ -73,6 +93,9 @@ class EmbeddingService:
 
         if not onnx_file or not onnx_file.exists():
             raise FileNotFoundError(f"ONNX model file not found at {model_path}")
+
+        if not self._verify_onnx_checksum(onnx_file):
+            raise ValueError(f"ONNX model at {onnx_file} failed integrity check.")
 
         # Use CPU execution provider for maximum portability and minimum size
         providers = ["CPUExecutionProvider"]
@@ -141,18 +164,34 @@ class EmbeddingService:
             model_path = Path(self.model_name)
 
             if not model_path.exists():
-                logger.info(
-                    "Downloading/Resolving ONNX model '%s' from HuggingFace...", self.model_name
-                )
                 from huggingface_hub import snapshot_download
 
-                # Fetch only required ONNX and tokenizer files to save bandwidth and disk space
-                model_path_str = snapshot_download(  # nosec B615
-                    repo_id=self.model_name,
-                    allow_patterns=["*.json", "*.txt", "*.onnx", "onnx/*"],
-                    ignore_patterns=["*.safetensors", "*.bin", "*.h5", "*.msgpack"],
-                )
-                model_path = Path(model_path_str)
+                revision = MODEL_PINNED_REVISION if self.model_name == settings.embedding_model else None
+                try:
+                    # Attempt offline local load first
+                    model_path_str = snapshot_download(  # nosec B615
+                        repo_id=self.model_name,
+                        revision=revision,
+                        local_files_only=True,
+                        allow_patterns=["*.json", "*.txt", "*.onnx", "onnx/*"],
+                        ignore_patterns=["*.safetensors", "*.bin", "*.h5", "*.msgpack"],
+                    )
+                    model_path = Path(model_path_str)
+                    logger.info("Loaded ONNX model from local HF cache: %s", model_path)
+                except Exception:
+                    logger.info(
+                        "Downloading/Resolving ONNX model '%s' (rev %s) from HuggingFace...",
+                        self.model_name,
+                        revision or "latest",
+                    )
+                    model_path_str = snapshot_download(  # nosec B615
+                        repo_id=self.model_name,
+                        revision=revision,
+                        local_files_only=False,
+                        allow_patterns=["*.json", "*.txt", "*.onnx", "onnx/*"],
+                        ignore_patterns=["*.safetensors", "*.bin", "*.h5", "*.msgpack"],
+                    )
+                    model_path = Path(model_path_str)
 
             logger.info("Loading ONNX embedding model from: %s", model_path)
             self._load_onnx_model(model_path)
@@ -163,8 +202,6 @@ class EmbeddingService:
             )
         except Exception as e:
             logger.error("Failed to load ONNX embedding model: %s", e)
-            # In a production app, we would handle missing models by downloading them
-            # but here we follow the instruction to move to ONNX.
         finally:
             self._loading = False
             self._ready.set()

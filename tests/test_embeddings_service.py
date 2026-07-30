@@ -26,6 +26,7 @@ class TestEmbeddingServiceInit:
 class TestIsReady:
     def test_is_ready_after_event_set(self):
         svc = EmbeddingService("model")
+        svc._session = MagicMock()
         svc._ready.set()
         assert svc.is_ready
 
@@ -158,29 +159,40 @@ class TestEmbedTexts:
 class TestColdStart:
     def test_cold_start_success_assertions(self, tmp_path):
         from pathlib import Path
+
         svc = EmbeddingService("test-model")
         mock_sess = MagicMock()
         mock_tok = MagicMock()
+
+        local_dir = tmp_path / "model_dir"
+        local_dir.mkdir()
+        (local_dir / "tokenizer.json").write_text("{}", encoding="utf-8")
+        (local_dir / "onnx").mkdir()
+        (local_dir / "onnx" / "model_quantized.onnx").write_text("fake", encoding="utf-8")
+
         with patch.object(svc, "_load_onnx_model") as mock_load:
             def _fake_load(p, exp):
                 svc._session = mock_sess
                 svc._tokenizer = mock_tok
             mock_load.side_effect = _fake_load
-            with patch("app.embeddings.service._get_models_lock_data", return_value={"test-model": {"files": {}}}):
-                with patch("pathlib.Path.is_dir", return_value=True):
-                    svc.load_model()
+            with patch.object(Path, "expanduser", return_value=local_dir):
+                svc.load_model()
+
         assert svc.is_ready is True
-        assert svc._load_error is None
+        assert svc.has_failed is False
+        assert svc.load_error is None
         assert svc._session is not None
 
     def test_cold_start_failure_assertions(self):
         svc = EmbeddingService("test-model")
         with patch("app.embeddings.service._get_models_lock_data", side_effect=ValueError("Corrupt lockfile")):
             svc.load_model()
-        assert svc.is_ready is True
+        assert svc.is_ready is False
+        assert svc.has_failed is True
+        assert svc.wait_until_ready(timeout=0) is True
         assert svc._session is None
-        assert svc._load_error is not None
-        assert "Corrupt lockfile" in svc._load_error
+        assert svc.load_error is not None
+        assert "Corrupt lockfile" in svc.load_error
 
 
 class TestIntegrityFailClosed:

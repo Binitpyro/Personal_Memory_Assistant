@@ -40,6 +40,11 @@ def _get_effective_fallback_chain() -> list[str]:
     return chain
 
 
+async def _get_effective_fallback_chain_async() -> list[str]:
+    import asyncio
+    return await asyncio.to_thread(_get_effective_fallback_chain)
+
+
 class ProviderNotConfiguredError(Exception):
     """Raised when no active LLM provider can be resolved."""
 
@@ -371,7 +376,7 @@ Answer:
             )
 
         provider_preference = self.provider_preference or "auto"
-        fallback_chain = _get_effective_fallback_chain()
+        fallback_chain = await _get_effective_fallback_chain_async()
 
         resolved_id = None
         if provider_preference != "auto":
@@ -410,7 +415,7 @@ Answer:
             supports_claims = await capability_detector.detect_capabilities(self)
         prompt = self._build_prompt(query, context, mode, supports_claims=supports_claims)
 
-        fallback_chain = _get_effective_fallback_chain()
+        fallback_chain = await _get_effective_fallback_chain_async()
 
         # Build list of providers to try
         providers_to_try = []
@@ -463,7 +468,7 @@ Answer:
     ) -> str:
         """Raw LLM generation for external sidecars without RAG prompt wrapping."""
         await self._ensure_token_loaded()
-        fallback_chain = _get_effective_fallback_chain()
+        fallback_chain = await _get_effective_fallback_chain_async()
 
         providers_to_try = []
         if override_provider:
@@ -518,7 +523,7 @@ Answer:
         supports_claims = await capability_detector.detect_capabilities(self)
         prompt = self._build_prompt(query, context, mode, supports_claims=supports_claims)
 
-        fallback_chain = _get_effective_fallback_chain()
+        fallback_chain = await _get_effective_fallback_chain_async()
 
         # Build list of providers to try
         providers_to_try = []

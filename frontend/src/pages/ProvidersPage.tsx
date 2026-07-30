@@ -419,7 +419,7 @@ export function ProvidersPage() {
                   <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-xl text-xs text-amber-800 flex items-start gap-2">
                     <Zap className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
                     <span>
-                      <strong>Privacy Notice:</strong> Free-tier Google Gemini API keys may process input data for model improvement per Google ToS. Use local models for full privacy.
+                      <strong>Privacy & Region Notice:</strong> Free-tier Google Gemini API keys may process input data for model training per Google Terms of Service (EEA/CH/UK accounts subject to region restrictions). For full privacy, use local models or a paid API tier.
                     </span>
                   </div>
                 )}

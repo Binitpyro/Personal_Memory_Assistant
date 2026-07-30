@@ -153,3 +153,71 @@ class TestEmbedTexts:
             mock_progress.set_current_file = MagicMock()
             result = await svc.embed_texts(["text1"], batch_size=1)
         assert len(result) == 1
+
+
+class TestColdStart:
+    def test_cold_start_success_assertions(self, tmp_path):
+        from pathlib import Path
+        svc = EmbeddingService("test-model")
+        mock_sess = MagicMock()
+        mock_tok = MagicMock()
+        with patch.object(svc, "_load_onnx_model") as mock_load:
+            def _fake_load(p, exp):
+                svc._session = mock_sess
+                svc._tokenizer = mock_tok
+            mock_load.side_effect = _fake_load
+            with patch("app.embeddings.service._get_models_lock_data", return_value={"test-model": {"files": {}}}):
+                with patch("pathlib.Path.is_dir", return_value=True):
+                    svc.load_model()
+        assert svc.is_ready is True
+        assert svc._load_error is None
+        assert svc._session is not None
+
+    def test_cold_start_failure_assertions(self):
+        svc = EmbeddingService("test-model")
+        with patch("app.embeddings.service._get_models_lock_data", side_effect=ValueError("Corrupt lockfile")):
+            svc.load_model()
+        assert svc.is_ready is True
+        assert svc._session is None
+        assert svc._load_error is not None
+        assert "Corrupt lockfile" in svc._load_error
+
+
+class TestIntegrityFailClosed:
+    def test_missing_sha256_digest_raises_valueerror(self, tmp_path):
+        svc = EmbeddingService("test-model")
+        model_dir = tmp_path / "model"
+        model_dir.mkdir()
+        (model_dir / "tokenizer.json").write_text("{}", encoding="utf-8")
+        (model_dir / "onnx").mkdir()
+        (model_dir / "onnx" / "model.onnx").write_text("fake_onnx", encoding="utf-8")
+
+        expected_files = {
+            "tokenizer.json": {"sha256": "fake_hash"},
+            "onnx/model.onnx": {"sha256": ""}  # Empty digest -> must fail closed
+        }
+
+        with patch("tokenizers.Tokenizer.from_file", return_value=MagicMock()):
+            with patch.object(svc, "_verify_onnx_checksum", return_value=True):
+                with pytest.raises(ValueError, match="missing sha256 digest"):
+                    svc._load_onnx_model(model_dir, expected_files)
+
+    def test_unpinned_file_raises_valueerror(self, tmp_path):
+        svc = EmbeddingService("test-model")
+        model_dir = tmp_path / "model"
+        model_dir.mkdir()
+        (model_dir / "tokenizer.json").write_text("{}", encoding="utf-8")
+        (model_dir / "onnx").mkdir()
+        (model_dir / "onnx" / "model.onnx").write_text("fake_onnx", encoding="utf-8")
+
+        expected_files = {
+            "tokenizer.json": {"sha256": "fake_hash"},
+            "onnx/different_model.onnx": {"sha256": "abc"}  # model.onnx not pinned
+        }
+
+        with patch("tokenizers.Tokenizer.from_file", return_value=MagicMock()):
+            with patch.object(svc, "_verify_onnx_checksum", return_value=True):
+                with patch("app.config.settings.embedding_allow_unpinned", False):
+                    with pytest.raises(ValueError, match="not pinned in models.lock.json"):
+                        svc._load_onnx_model(model_dir, expected_files)
+

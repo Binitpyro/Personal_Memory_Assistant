@@ -51,6 +51,13 @@ This document prioritizes bottlenecks by user impact and engineering ROI. v0.0.7
 -   **Visualizer Load Time**: < 1s for 4M nodes.
 -   **Boot Sync Latency**: < 5s for 100k chunks.
 
+
+-   **Indexing Speed**: 50,000 files/min (Standard HDD) / 250,000 files/min (NVMe).
+-   **Memory Ceiling**: Indexing RAM < 100MB for any project size.
+-   **RAG Context Latency**: p50 <= 200 ms (Retrieval + Planning).
+-   **Visualizer Load Time**: < 1s for 4M nodes.
+-   **Boot Sync Latency**: < 5s for 100k chunks.
+
 ---
 
 ## 5) Code Hotspots to Monitor
@@ -60,3 +67,19 @@ This document prioritizes bottlenecks by user impact and engineering ROI. v0.0.7
 -   `app/search/retrieval.py`: Semantic deduplication runtime complexity.
 -   `frontend/src/api.ts`: SSE stream lifecycle and AbortController cleanup.
 
+---
+
+## 6) Technical Debt & Post-Submission Register (v0.0.71)
+
+### Token Handoff Contract (Keyring Env Bypass)
+`app/main.py:_init_local_access_token` only reaches `keyring.get_password` when `X_LOCAL_ACCESS_TOKEN` is unset in the process environment.
+Because launchers (`StartPMA.bat` and Tauri `lib.rs`) set the environment variable on spawn, keyring is never written during app launch.
+Keyring is only populated during bare `uvicorn` / `python app/main.py` launches.
+
+*Planned Fix (Post-Aug 17):* Move `keyring.set_password` and `os.environ["X_LOCAL_ACCESS_TOKEN"]` out of the `if not token:` branch so keyring stays authoritative across all execution modes.
+
+### Database Path Naming Alignment (`PMA_DB_PATH`)
+Core uses `data/pma_metadata.db` via `config.py`. To prevent naming collisions with sidecars (e.g. Zeni), sidecars use isolated names (e.g., `ZENI_DB_PATH`).
+
+### Sidecar Retrieval vs Core RAG Integration
+Core exposes `POST /api/query` and `POST /api/query/stream`. Sidecars such as Creative Module leverage dedicated passthrough (`POST /api/llm/chat`) and private FTS5 stores for specialized domain performance prior to Aug 17 submission. Unified retrieval routing is scheduled post-Aug 17.

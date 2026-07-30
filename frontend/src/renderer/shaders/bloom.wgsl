@@ -22,6 +22,7 @@ struct Params {
     _pad2:     vec2<f32>,
 };
 @group(0) @binding(2) var<uniform> params: Params;
+@group(0) @binding(3) var base_mip:  texture_2d<f32>;
 
 struct VOut {
     @builtin(position) clip_pos: vec4<f32>,
@@ -111,5 +112,6 @@ fn fs_up(in: VOut) -> @location(0) vec4<f32> {
     col = col + textureSampleLevel(src, s_linear, uv + t * vec2<f32>( 0.0, -1.0), 0.0).rgb * 2.0;
     col = col + textureSampleLevel(src, s_linear, uv + t * vec2<f32>( 1.0, -1.0), 0.0).rgb * 1.0;
     col = col * (1.0 / 16.0);
-    return vec4<f32>(col * params.intensity, 1.0);
+    let base = textureSampleLevel(base_mip, s_linear, uv, 0.0).rgb;
+    return vec4<f32>(base + col * params.intensity, 1.0);
 }

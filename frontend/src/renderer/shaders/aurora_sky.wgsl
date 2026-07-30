@@ -31,16 +31,8 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VOut {
     return out;
 }
 
-// Layer 1 — background wash. Two-stop vertical gradient in linear RGB.
-fn sky_gradient(dir: vec3<f32>) -> vec3<f32> {
-    let y = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
-    // Deep indigo #0a0a2e → violet #2a1a5e → soft magenta zenith #5a2e7a
-    let horizon = vec3<f32>(0.035, 0.035, 0.180);
-    let mid     = vec3<f32>(0.165, 0.100, 0.360);
-    let zenith  = vec3<f32>(0.350, 0.180, 0.520);
-    let a = mix(horizon, mid, smoothstep(0.0, 0.55, y));
-    return mix(a, zenith, smoothstep(0.45, 1.0, y));
-}
+// Layer 1 — background wash: sky_gradient() now lives in common.wgsl, because
+// the crystals reflect it. Layer 4 (aurora) moved there for the same reason.
 
 // Layer 2 — stars. Cell-based random placement so each cell contributes at
 // most one star; magnitude drawn from a power distribution for realistic
@@ -83,22 +75,7 @@ fn nebula(dir: vec3<f32>, t: f32) -> vec3<f32> {
     return col * s * 0.55 * hFade;
 }
 
-// Layer 4 — aurora ribbons. Slow-rolling sine sheets in the upper hemisphere.
-fn aurora(dir: vec3<f32>, t: f32) -> vec3<f32> {
-    if (dir.y < 0.05) { return vec3<f32>(0.0); }
-    let uv = vec2<f32>(atan2(dir.z, dir.x), dir.y);
-    let ribbon =
-        sin(uv.x * 4.0 + t * 0.35) * 0.5 +
-        sin(uv.x * 7.3 - t * 0.22) * 0.3 +
-        sin(uv.x * 11.1 + t * 0.11) * 0.2;
-    let band = 0.55 + ribbon * 0.15;
-    let d = abs(uv.y - band);
-    let intensity = exp(-d * 22.0) * smoothstep(0.02, 0.4, uv.y);
-    // Aurora green-magenta color shift
-    let hue = 0.35 + 0.25 * sin(uv.x * 2.0 + t * 0.15);
-    let col = hsv2rgb(vec3<f32>(hue, 0.7, 1.0));
-    return col * intensity * 0.6;
-}
+// Layer 4 — aurora ribbons: see common.wgsl (shared with the crystal shader).
 
 // Layer 5 — ground haze. A soft, near-black wash sitting below the horizon
 // so the crystal cluster doesn't feel like it's floating on nothing.

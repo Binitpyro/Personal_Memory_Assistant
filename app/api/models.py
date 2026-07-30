@@ -5,10 +5,11 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Response
+from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel
 
 from app.api.deps import get_llm
+from app.search.llm_client import ProviderNotConfiguredError
 
 logger = logging.getLogger(__name__)
 
@@ -17,11 +18,19 @@ models_router = APIRouter(prefix="/llm", tags=["llm"])
 SETTINGS_PATH = Path("data/settings.json")
 
 
+PRIVACY_NOTICE = (
+    "Free-tier cloud dispatches (such as Google Gemini free tier) may use data inputs for model "
+    "training/improvement per provider terms and are restricted for EEA, Switzerland, and UK users. "
+    "Explicit user consent (cloud_privacy_consent=true) is required prior to enabling cloud dispatches."
+)
+
+
 class LLMPreferences(BaseModel):
     provider: str = "auto"  # auto | gemini | ollama | lm_studio
     gemini_model: str | None = None
     ollama_model: str | None = None
     lm_studio_model: str | None = None
+    cloud_privacy_consent: bool = False
 
 
 def _read_settings() -> dict[str, Any]:
@@ -52,6 +61,8 @@ async def get_preferences(response: Response = None) -> dict[str, Any]:  # type:
         "gemini_model": llm_prefs.get("gemini_model"),
         "ollama_model": llm_prefs.get("ollama_model"),
         "lm_studio_model": llm_prefs.get("lm_studio_model"),
+        "cloud_privacy_consent": llm_prefs.get("cloud_privacy_consent", False),
+        "cloud_privacy_notice": PRIVACY_NOTICE,
     }
 
 
@@ -63,12 +74,22 @@ async def set_preferences(payload: LLMPreferences, response: Response = None) ->
     if normalized_provider not in {"auto", "gemini", "ollama", "lm_studio"}:
         normalized_provider = "auto"
 
+    if normalized_provider in {"gemini"} and not payload.cloud_privacy_consent:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Explicit consent (cloud_privacy_consent=true) is required to select cloud providers. "
+                "Free-tier cloud dispatches may use inputs for model training and are restricted in EEA/CH/UK."
+            ),
+        )
+
     data = await asyncio.to_thread(_read_settings)
     data["llm"] = {
         "provider": normalized_provider,
         "gemini_model": payload.gemini_model,
         "ollama_model": payload.ollama_model,
         "lm_studio_model": payload.lm_studio_model,
+        "cloud_privacy_consent": payload.cloud_privacy_consent,
     }
     await asyncio.to_thread(_write_settings, data)
 
@@ -120,3 +141,68 @@ async def detect_local_models(response: Response = None) -> dict[str, Any]:  # t
             logger.debug("LM Studio detection skipped: %s", e)
 
     return results
+
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+
+class LLMChatRequest(BaseModel):
+    messages: list[ChatMessage]
+    provider: str
+    model: str | None = None
+    temperature: float = 0.7
+    max_tokens: int = 4096
+
+
+@models_router.post("/chat")
+async def chat_passthrough(payload: LLMChatRequest) -> dict[str, Any]:
+    """
+    Generic LLM passthrough endpoint for sidecars (e.g. Creative Module).
+    Requires an explicit provider ID (rejects 'auto').
+    """
+    provider_id = (payload.provider or "").strip().lower()
+    if not provider_id or provider_id == "auto":
+        raise HTTPException(
+            status_code=400,
+            detail="Explicit provider is required. 'auto' is not allowed for sidecar passthrough dispatches.",
+        )
+
+    llm = get_llm()
+    try:
+        provider_instance = await llm._resolve_provider_by_id(
+            provider_id, model_override=payload.model
+        )
+    except ProviderNotConfiguredError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error("Failed to resolve provider '%s': %s", provider_id, e)
+        raise HTTPException(status_code=502, detail=f"Provider '{provider_id}' resolution failed: {e}")
+
+    try:
+        messages_dicts = [m.model_dump() for m in payload.messages]
+        content = await provider_instance.chat(
+            messages=messages_dicts,
+            model=payload.model,
+            temperature=payload.temperature,
+            max_tokens=payload.max_tokens,
+        )
+        resolved_model = payload.model or getattr(provider_instance, "model_name", None) or "default"
+        return {
+            "provider": provider_id,
+            "model": resolved_model,
+            "content": content,
+        }
+    except Exception as e:
+        logger.error("Error during LLM passthrough chat on provider '%s': %s", provider_id, e, exc_info=True)
+        raise HTTPException(status_code=502, detail=f"Provider '{provider_id}' error: {e}")
+    finally:
+        if hasattr(provider_instance, "close"):
+            try:
+                await provider_instance.close()
+            except Exception:
+                pass
+

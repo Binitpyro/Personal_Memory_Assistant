@@ -1,14 +1,18 @@
-// picking.wgsl — Unchanged silhouette-tight GPU picking pass.
+// picking.wgsl — silhouette-tight GPU picking pass.
 //
-// Deliberately kept in lockstep with the crystal & bubble vertex transforms
-// MINUS all per-instance jitter (drift, wobble, breathing). Rotation around
-// a fixed axis preserves the bounding-sphere silhouette so the picking
-// projection stays accurate to a pixel or two — that's the trade the
-// original renderer made and this rewrite preserves.
+// This used to apply NO rotation at all, on the theory that rotating about a
+// fixed axis preserves the bounding-sphere silhouette. That holds for a sphere,
+// but build() normalises a crystal so its *longest* axis is radius 1 — an
+// elongated prism therefore fills only a thin sliver of that sphere, and the
+// un-rotated sliver frequently did not overlap the rotated one that was drawn.
+// Clicks missed.
 //
-// If we ever add vertex-displacement effects that DO change the silhouette
-// (e.g. Gerstner peaks that push past the bounding sphere), the picking
-// pass has to grow the matching term too — right now it doesn't need to.
+// So the transform now comes from crystal_xform()/crystal_local_pos() in
+// common.wgsl, shared verbatim with crystal.wgsl. The two cannot drift apart.
+//
+// Bubbles share this pipeline but not the transform: they are icospheres, and
+// the crystal path's non-uniform stretch would turn them into ellipsoids and
+// break their pick silhouette. Bit 0 of inst_flags marks a folder (= crystal).
 
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
 
@@ -32,7 +36,12 @@ struct VertexOutput {
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    let world_pos = in.local_pos * in.inst_radius + in.inst_position;
+    var local = in.local_pos;
+    if ((in.inst_flags & 1u) != 0u) {
+        let x = crystal_xform(in.inst_type_hash, camera.time);
+        local = crystal_local_pos(x, in.local_pos);
+    }
+    let world_pos = local * in.inst_radius + in.inst_position;
     out.clip_pos = camera.viewProj * vec4<f32>(world_pos, 1.0);
     out.pick_id = in.inst_idx;
     return out;

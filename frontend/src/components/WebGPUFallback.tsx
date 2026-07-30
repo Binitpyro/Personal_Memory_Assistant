@@ -55,6 +55,7 @@ interface RendererLike {
     readonly handleZoom: (delta: number) => void;
     readonly focusOnNode: (sourceIndex: number) => void;
     readonly nav: NavigationController;
+    onDeviceLost?: () => void;
 }
 
 export interface WebGPUFallbackProps {
@@ -112,6 +113,16 @@ function useDreamscapeCanvas<R extends RendererLike>(
             try {
                 await renderer.init();
 
+                // Wired up the moment there is a device to lose — before the
+                // stream fetch, not after. A hang during the first frames used
+                // to land on an unset handler, so the tier never degraded and
+                // the RAF loop kept submitting to a dead device.
+                renderer.onDeviceLost = () => {
+                    cancelled = true;
+                    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+                    onError('GPU device lost. Please refresh the page to restore 3D view.');
+                };
+
                 const tuned = renderer as R & {
                     exposure?: number;
                     enableOutline?: boolean;
@@ -168,8 +179,17 @@ function useDreamscapeCanvas<R extends RendererLike>(
 
                 resizeObserver = new ResizeObserver(entries => {
                     for (const e of entries) {
-                        const { width, height } = e.contentRect;
-                        if (width > 0 && height > 0) renderer.resize(width, height);
+                        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+                        const dpBox = (e as any).devicePixelContentBoxSize?.[0];
+                        let w: number, h: number;
+                        if (dpBox) {
+                            w = dpBox.inlineSize;
+                            h = dpBox.blockSize;
+                        } else {
+                            w = Math.round(e.contentRect.width * dpr);
+                            h = Math.round(e.contentRect.height * dpr);
+                        }
+                        if (w > 0 && h > 0) renderer.resize(w, h);
                     }
                 });
                 resizeObserver.observe(canvas);
@@ -408,6 +428,16 @@ export const WebGPUFallback: React.FC<WebGPUFallbackProps> = ({ allFiles, active
     const [status, setStatus] = useState<'checking' | 'webgpu' | 'webgl2' | 'unsupported'>('checking');
     const [reason, setReason] = useState<string | null>(null);
 
+    // Must be stable: this lands in useDreamscapeCanvas's effect dependency
+    // array. As an inline arrow it changed identity on every parent render, so
+    // an unrelated InsightsPage re-render tore down the renderer and built a
+    // fresh GPUDevice — which is why a single fault used to log twice.
+    const handleError = useCallback((msg: string) => {
+        setReason(msg);
+        // If the chosen tier errors out at load-time, degrade one step.
+        setStatus(prev => (prev === 'webgpu' ? 'webgl2' : 'unsupported'));
+    }, []);
+
     useEffect(() => {
         let cancelled = false;
         (async () => {
@@ -481,6 +511,11 @@ export const WebGPUFallback: React.FC<WebGPUFallbackProps> = ({ allFiles, active
 
     return (
         <DreamscapeCanvas
+            // Keying on tier forces a BRAND NEW <canvas> when we degrade. A
+            // canvas keeps its context type for life, so reusing the same
+            // element after WebGPU claimed it makes getContext('webgl2')
+            // return null forever ("existing context of a different type").
+            key={status}
             tier={status}
             allFiles={allFiles}
             activeFilter={activeFilter}
@@ -488,11 +523,7 @@ export const WebGPUFallback: React.FC<WebGPUFallbackProps> = ({ allFiles, active
             initialMode={initialMode}
             exposure={exposure}
             showOutlines={showOutlines}
-            // If the chosen tier errors out at load-time, degrade one step.
-            onError={(msg) => {
-                setReason(msg);
-                setStatus(status === 'webgpu' ? 'webgl2' : 'unsupported');
-            }}
+            onError={handleError}
         />
     );
 };

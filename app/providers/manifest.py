@@ -23,10 +23,6 @@ def clear_reachability_cache() -> None:
 
 def is_local_endpoint_reachable(url: str, timeout: float = 0.2) -> bool:
     """Fast socket check (0.2s) with 5s TTL cache to verify local service availability."""
-    import os
-    if os.environ.get("PYTEST_CURRENT_TEST"):
-        return True
-
     now = time.monotonic()
     if url in _reachability_cache:
         cached_res, cached_ts = _reachability_cache[url]

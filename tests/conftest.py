@@ -148,3 +148,14 @@ async def cleanup_db():
     if _db_manager and _db_manager.conn:
         await _db_manager.close()
     gc.collect()
+
+
+@pytest.fixture(autouse=True)
+def mock_local_reachability_default(monkeypatch, request):
+    """Default fixture to mock local reachability in tests unless test module explicitly exercises real socket logic."""
+    if request.module and "test_provider_manifest" in request.module.__name__:
+        return
+    from app.providers import manifest
+    manifest.clear_reachability_cache()
+    monkeypatch.setattr(manifest, "is_local_endpoint_reachable", lambda url, timeout=0.2: True)
+

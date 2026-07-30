@@ -16,6 +16,7 @@ from app.providers import (
     create_provider,
     get_configured_provider_ids,
     get_default_chain,
+    get_default_chain_async,
 )
 from app.providers.base import ValidationResult
 from app.providers.cache import validation_cache
@@ -105,7 +106,7 @@ async def get_llm_settings():
         saved_chain = None
     return {
         "provider": llm.get("provider", "auto"),
-        "fallback_chain": saved_chain or get_default_chain(),
+        "fallback_chain": saved_chain or await get_default_chain_async(),
     }
 
 
@@ -364,7 +365,7 @@ async def get_current_provider():
     saved_chain = llm.get("fallback_chain")
     if data.get("schema_version") != CURRENT_SCHEMA_VERSION:
         saved_chain = None
-    fallback_chain = saved_chain or get_default_chain()
+    fallback_chain = saved_chain or await get_default_chain_async()
 
     resolved_id = None
     source = "unset"

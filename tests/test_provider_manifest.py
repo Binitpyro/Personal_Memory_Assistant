@@ -1,0 +1,67 @@
+"""
+tests/test_provider_manifest.py
+Coverage for app/providers/manifest.py:
+- Socket reachability checks (success & failure)
+- 5s TTL cache behavior
+- clear_reachability_cache helper
+- Async provider resolution helpers
+"""
+
+import socket
+import time
+from unittest.mock import patch
+
+import pytest
+
+from app.providers import manifest
+
+
+def test_reachability_closed_port():
+    manifest.clear_reachability_cache()
+    # Port 59999 should not be listening on localhost
+    result = manifest.is_local_endpoint_reachable("http://127.0.0.1:59999", timeout=0.05)
+    assert result is False
+
+
+def test_reachability_open_port():
+    manifest.clear_reachability_cache()
+    # Create a temporary local socket listening on an open port
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(1)
+    port = sock.getsockname()[1]
+
+    try:
+        url = f"http://127.0.0.1:{port}"
+        result = manifest.is_local_endpoint_reachable(url, timeout=0.2)
+        assert result is True
+    finally:
+        sock.close()
+
+
+def test_reachability_ttl_cache():
+    manifest.clear_reachability_cache()
+    url = "http://127.0.0.1:58888"
+
+    # First call - port closed -> False
+    res1 = manifest.is_local_endpoint_reachable(url, timeout=0.05)
+    assert res1 is False
+    assert url in manifest._reachability_cache
+
+    # Subsequent call within TTL should return cached result instantly without socket probe
+    with patch("socket.create_connection", side_effect=Exception("Should not be called!")):
+        res2 = manifest.is_local_endpoint_reachable(url, timeout=0.05)
+        assert res2 is False
+
+    # Clear cache
+    manifest.clear_reachability_cache()
+    assert url not in manifest._reachability_cache
+
+
+@pytest.mark.asyncio
+async def test_async_helpers():
+    ids = await manifest.get_configured_provider_ids_async()
+    assert isinstance(ids, list)
+
+    chain = await manifest.get_default_chain_async()
+    assert isinstance(chain, list)

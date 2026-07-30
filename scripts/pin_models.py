@@ -16,10 +16,9 @@ MODEL_SPECS = [
     {
         "family": "embedding",
         "name": "BAAI/bge-small-en-v1.5",
-        "repo_id": "BAAI/bge-small-en-v1.5",
-        "revision": "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
+        "repo_id": "Xenova/bge-small-en-v1.5",
+        "revision": "ea104dacec62c0de699686887e3f920caeb4f3e3",
         "target_files": [
-            "onnx/model.onnx",
             "onnx/model_quantized.onnx",
             "tokenizer.json",
         ],

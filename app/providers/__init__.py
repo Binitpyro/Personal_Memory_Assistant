@@ -3,7 +3,13 @@ from app.providers.base import BaseProvider, ModelInfo, ValidationResult
 from app.providers.gemini import GeminiProvider
 from app.providers.groq import GroqProvider
 from app.providers.lm_studio import LMStudioProvider
-from app.providers.manifest import PROVIDER_IDS, get_configured_provider_ids, get_default_chain
+from app.providers.manifest import (
+    PROVIDER_IDS,
+    get_configured_provider_ids,
+    get_configured_provider_ids_async,
+    get_default_chain,
+    get_default_chain_async,
+)
 from app.providers.nvidia_nim import NvidiaNimProvider
 from app.providers.ollama import OllamaProvider
 from app.providers.openai import OpenAIProvider
@@ -29,7 +35,9 @@ __all__ = [
     "ValidationResult",
     "create_provider",
     "get_configured_provider_ids",
+    "get_configured_provider_ids_async",
     "get_default_chain",
+    "get_default_chain_async",
     "spec_of",
 ]
 

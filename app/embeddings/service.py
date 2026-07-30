@@ -301,7 +301,18 @@ class EmbeddingService:
 
     @property
     def is_ready(self) -> bool:
-        return self._ready.is_set()
+        """Returns True only if model loading completed successfully and session is active."""
+        return self._ready.is_set() and self._session is not None and self._load_error is None
+
+    @property
+    def has_failed(self) -> bool:
+        """Returns True if model loading completed with an error."""
+        return self._ready.is_set() and (self._load_error is not None or self._session is None)
+
+    @property
+    def load_error(self) -> str | None:
+        """Returns the load error message if loading failed."""
+        return self._load_error
 
     def _mean_pooling(self, model_output, attention_mask):
         token_embeddings = model_output[0]

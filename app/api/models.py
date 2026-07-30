@@ -143,6 +143,25 @@ async def detect_local_models(response: Response = None) -> dict[str, Any]:  # t
     return results
 
 
+import time
+
+_passthrough_timestamps: list[float] = []
+MAX_PASSTHROUGH_PER_MINUTE = 30
+
+
+def _check_passthrough_rate_limit() -> None:
+    now = time.time()
+    cutoff = now - 60.0
+    global _passthrough_timestamps
+    _passthrough_timestamps = [t for t in _passthrough_timestamps if t > cutoff]
+    if len(_passthrough_timestamps) >= MAX_PASSTHROUGH_PER_MINUTE:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded. Maximum {MAX_PASSTHROUGH_PER_MINUTE} LLM passthrough requests per minute allowed.",
+        )
+    _passthrough_timestamps.append(now)
+
+
 class ChatMessage(BaseModel):
     role: str
     content: str
@@ -160,8 +179,9 @@ class LLMChatRequest(BaseModel):
 async def chat_passthrough(payload: LLMChatRequest) -> dict[str, Any]:
     """
     Generic LLM passthrough endpoint for sidecars (e.g. Creative Module).
-    Requires an explicit provider ID (rejects 'auto').
+    Requires an explicit provider ID (rejects 'auto'). Rate-limited to 30 req/min.
     """
+    _check_passthrough_rate_limit()
     provider_id = (payload.provider or "").strip().lower()
     if not provider_id or provider_id == "auto":
         raise HTTPException(

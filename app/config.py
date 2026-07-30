@@ -59,6 +59,8 @@ class Settings(BaseSettings):
 
     embedding_model: str = "BAAI/bge-small-en-v1.5"
     embedding_batch_size: int = 512  # Doubled: modern GPUs/CPUs handle this well
+    embedding_allow_download: bool = True
+    embedding_allow_unpinned: bool = False
 
     chunk_size: int = 512
     chunk_overlap: int = 50
@@ -87,6 +89,8 @@ class Settings(BaseSettings):
     groq_api_key: str = ""
 
     openrouter_api_key: str = ""
+
+    nvidia_nim_api_key: str = ""
 
     openai_compatible_api_key: str = ""
     openai_compatible_base_url: str = ""

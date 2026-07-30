@@ -20,6 +20,19 @@ class ProviderSpec:
     supported_features: set[str]  # "reasoning", "system_prompt", "json_mode", ...
 
 
+DEFAULT_CHAIN_ORDER: tuple[str, ...] = (
+    "ollama",
+    "lm_studio",
+    "openai_compatible",
+    "anthropic",
+    "openai",
+    "groq",
+    "nvidia_nim",
+    "openrouter",
+    "gemini",
+)
+
+
 PROVIDER_REGISTRY: dict[str, ProviderSpec] = {
     "gemini": ProviderSpec(
         id="gemini",
@@ -57,7 +70,7 @@ PROVIDER_REGISTRY: dict[str, ProviderSpec] = {
         id="anthropic",
         display_name="Anthropic",
         kind="cloud",
-        default_base_url="https://api.anthropic.com/v1",
+        default_base_url="https://api.anthropic.com",
         base_url_editable=False,
         auth="x-api-key",
         models_endpoint="/v1/models",

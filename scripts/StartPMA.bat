@@ -30,7 +30,6 @@ if exist "%~dp0..\frontend\src-tauri" (
 set "SCRIPT_DIR=%~dp0"
 for %%I in ("%SCRIPT_DIR%..") do set "PROJECT_DIR=%%~fI"
 set "SONAR_DIR=C:\sonarqube\bin\windows-x86-64"
-set "VITE_DEV_TOKEN=dev_token_pma_local"
 
 if not exist "%PROJECT_DIR%" (
     echo [ERROR] Project directory not found: %PROJECT_DIR%

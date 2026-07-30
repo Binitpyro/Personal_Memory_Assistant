@@ -7,36 +7,37 @@ import httpx
 import keyring
 
 from app.config import settings
-from app.providers import BaseProvider, create_provider, get_configured_provider_ids
+from app.providers import BaseProvider, create_provider, get_configured_provider_ids, get_default_chain
 from app.search.capability_detector import capability_detector
+from app.settings_store import CURRENT_SCHEMA_VERSION, SettingsStore
 
 logger = logging.getLogger(__name__)
 
 
 def _get_effective_fallback_chain() -> list[str]:
-    configured_ids = get_configured_provider_ids()
-    pref_path = Path("data/settings.json")
-    saved_chain: list[str] = []
-    if pref_path.exists():
-        try:
-            with open(pref_path, encoding="utf-8") as f:
-                data = json.load(f)
-            saved_chain = data.get("llm", {}).get("fallback_chain") or []
-        except Exception:  # nosec B110
-            pass
+    configured = set(get_configured_provider_ids())
+    try:
+        data = SettingsStore.read()
+    except Exception as e:
+        logger.warning("Failed to read settings in fallback chain lookup: %s", e)
+        return get_default_chain()
 
-    if not saved_chain or set(saved_chain) <= {"gemini", "openai", "ollama"}:
-        return configured_ids
+    if data.get("schema_version") != CURRENT_SCHEMA_VERSION:
+        return get_default_chain()
 
-    chain = []
-    for pid in saved_chain:
-        if pid in configured_ids and pid not in chain:
-            chain.append(pid)
-    for pid in configured_ids:
-        if pid not in chain:
-            chain.append(pid)
+    saved = data.get("llm", {}).get("fallback_chain") or []
+    if not saved:
+        return get_default_chain()
 
-    return chain if chain else configured_ids
+    chain = [p for p in saved if p in configured]
+    if not chain:
+        logger.warning(
+            "Saved fallback_chain %s has no configured providers; falling back to default order.",
+            saved,
+        )
+        return get_default_chain()
+
+    return chain
 
 
 class ProviderNotConfiguredError(Exception):
@@ -145,12 +146,14 @@ class LLMClient:
             return "cloud"
 
         if provider == "auto":
+            if self.ollama_model or self.lm_studio_model:
+                model = override_model or self.ollama_model or self.lm_studio_model
+                model_lower = model.lower() if model else ""
+                if "3b" in model_lower or "2b" in model_lower or "mini" in model_lower:
+                    return "3b_local"
+                return "7b_local"
             if self.api_key or self._oauth_token:
                 return "cloud"
-            model = override_model or self.ollama_model
-            model_lower = model.lower() if model else ""
-            if "3b" in model_lower or "2b" in model_lower or "mini" in model_lower:
-                return "3b_local"
             return "7b_local"
 
         if self.api_key or self._oauth_token:
@@ -300,18 +303,19 @@ Answer:
                 pass
 
         # Load settings for base_url/model
-        pref_path = Path("data/settings.json")
         per_provider = {}
-        if pref_path.exists():
-            try:
-                with open(pref_path, encoding="utf-8") as f:
-                    data = json.load(f)
-                per_provider = data.get("llm", {}).get("per_provider", {})
-            except Exception:  # nosec B110
-                pass
+        try:
+            data = SettingsStore.read()
+            per_provider = data.get("llm", {}).get("per_provider", {})
+        except Exception:
+            pass
 
         provider_settings = per_provider.get(pid, {})
         base_url = provider_settings.get("base_url")
+
+        # Normalize legacy Anthropic base_url if pointing to spec default with appended /v1
+        if pid == "anthropic" and base_url and base_url.rstrip("/") == "https://api.anthropic.com/v1":
+            base_url = "https://api.anthropic.com"
 
         default_model = model_override or provider_settings.get("default_model")
         if not default_model:
@@ -440,56 +444,6 @@ Answer:
                 provider = await self._resolve_provider_by_id(pid, model, timeout=to_val)
                 try:
                     return await provider.chat(self._build_messages(prompt, history))
-                finally:
-                    await provider.close()
-            except Exception as e:
-                logger.warning(f"Fallback attempt {attempt} for {pid} failed: {e}")
-                last_error = e
-                attempt += 1
-
-        if last_error:
-            return f"LLM unavailable: All providers in fallback chain failed. Last error: {last_error!s}"
-        return "LLM unavailable: No providers configured."
-
-    async def generate_raw(
-        self,
-        messages: list[dict[str, str]],
-        override_provider: str | None = None,
-        override_model: str | None = None,
-    ) -> str:
-        """Raw LLM generation for external sidecars without RAG prompt wrapping."""
-        await self._ensure_token_loaded()
-        fallback_chain = _get_effective_fallback_chain()
-
-        providers_to_try = []
-        if override_provider:
-            providers_to_try.append((override_provider, override_model, 30.0))
-        else:
-            primary_id = None
-            try:
-                temp_prov = await self._resolve()
-                primary_id = temp_prov.spec.id
-                await temp_prov.close()
-            except Exception:  # nosec B110
-                pass
-
-            if primary_id:
-                providers_to_try.append((primary_id, override_model, 30.0))
-
-            for pid in fallback_chain:
-                if pid != primary_id:
-                    providers_to_try.append((pid, None, 10.0))
-
-        max_attempts = len(providers_to_try)
-        attempt = 0
-        last_error = None
-
-        while attempt < max_attempts:
-            pid, model, to_val = providers_to_try[attempt]
-            try:
-                provider = await self._resolve_provider_by_id(pid, model, timeout=to_val)
-                try:
-                    return await provider.chat(messages)
                 finally:
                     await provider.close()
             except Exception as e:

@@ -455,6 +455,56 @@ Answer:
             return f"LLM unavailable: All providers in fallback chain failed. Last error: {last_error!s}"
         return "LLM unavailable: No providers configured."
 
+    async def generate_raw(
+        self,
+        messages: list[dict[str, str]],
+        override_provider: str | None = None,
+        override_model: str | None = None,
+    ) -> str:
+        """Raw LLM generation for external sidecars without RAG prompt wrapping."""
+        await self._ensure_token_loaded()
+        fallback_chain = _get_effective_fallback_chain()
+
+        providers_to_try = []
+        if override_provider:
+            providers_to_try.append((override_provider, override_model, 30.0))
+        else:
+            primary_id = None
+            try:
+                temp_prov = await self._resolve()
+                primary_id = temp_prov.spec.id
+                await temp_prov.close()
+            except Exception:  # nosec B110
+                pass
+
+            if primary_id:
+                providers_to_try.append((primary_id, override_model, 30.0))
+
+            for pid in fallback_chain:
+                if pid != primary_id:
+                    providers_to_try.append((pid, None, 10.0))
+
+        max_attempts = len(providers_to_try)
+        attempt = 0
+        last_error = None
+
+        while attempt < max_attempts:
+            pid, model, to_val = providers_to_try[attempt]
+            try:
+                provider = await self._resolve_provider_by_id(pid, model, timeout=to_val)
+                try:
+                    return await provider.chat(messages)
+                finally:
+                    await provider.close()
+            except Exception as e:
+                logger.warning(f"Fallback attempt {attempt} for {pid} failed: {e}")
+                last_error = e
+                attempt += 1
+
+        if last_error:
+            return f"LLM unavailable: All providers in fallback chain failed. Last error: {last_error!s}"
+        return "LLM unavailable: No providers configured."
+
     async def stream_answer(
         self,
         query: str,

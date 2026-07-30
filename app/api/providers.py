@@ -30,8 +30,9 @@ providers_router = APIRouter(prefix="/providers", tags=["providers"])
 def read_settings() -> dict:
     try:
         return SettingsStore.read()
-    except Exception:
-        return {}
+    except Exception as e:
+        logger.error("Failed to read settings in providers API: %s", e)
+        raise HTTPException(status_code=500, detail=f"Settings file unreadable: {e}") from e
 
 
 def write_settings(data: dict) -> None:

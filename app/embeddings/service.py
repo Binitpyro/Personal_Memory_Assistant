@@ -35,9 +35,18 @@ def _get_models_lock_data() -> dict[str, Any]:
         try:
             with open(lock_file, encoding="utf-8") as f:
                 data = json.load(f)
-                return data.get("models", {})
+                models = data.get("models", {})
+                if not models and not settings.embedding_allow_unpinned:
+                    raise ValueError(f"models.lock.json at {lock_file} contains no models.")
+                return models
         except Exception as e:
-            logger.error("Failed to parse models.lock.json: %s", e)
+            logger.error("Failed to parse models.lock.json at %s: %s", lock_file, e)
+            if not settings.embedding_allow_unpinned:
+                raise ValueError(f"models.lock.json invalid or missing and unpinned loading disallowed: {e}") from e
+    else:
+        if not settings.embedding_allow_unpinned:
+            raise ValueError(f"models.lock.json missing at {lock_file} and embedding_allow_unpinned=False.")
+
     return {}
 
 
@@ -98,41 +107,65 @@ class EmbeddingService:
         if not tokenizer_json.exists():
             raise FileNotFoundError(f"tokenizer.json missing at {model_path}")
 
-        if "tokenizer.json" in expected_files:
-            expected_tok_sha = expected_files["tokenizer.json"].get("sha256")
-            if expected_tok_sha and not self._verify_onnx_checksum(tokenizer_json, expected_tok_sha):
-                raise ValueError(f"tokenizer.json at {tokenizer_json} failed integrity check.")
+        if expected_files:
+            tok_key = next((k for k in expected_files if k.endswith("tokenizer.json")), None)
+            if tok_key:
+                expected_tok_sha = expected_files[tok_key].get("sha256")
+                if expected_tok_sha and not self._verify_onnx_checksum(tokenizer_json, expected_tok_sha):
+                    raise ValueError(f"tokenizer.json at {tokenizer_json} failed integrity check.")
 
         self._tokenizer = Tokenizer.from_file(str(tokenizer_json))
         self._tokenizer.enable_truncation(max_length=512)
         self._tokenizer.enable_padding(pad_id=0, pad_token="[PAD]")  # nosec B106 # noqa: S106
 
-        # Load ONNX session
+        # Load ONNX session (search pinned path first)
         onnx_file = None
-        for candidate_rel in [
-            "onnx/model_quantized.onnx",
-            "onnx/model.onnx",
-            "model_quantized.onnx",
-            "model.onnx",
-        ]:
-            cand = model_path / candidate_rel
-            if cand.exists():
-                onnx_file = cand
-                break
+        if expected_files:
+            for exp_rel in expected_files:
+                if exp_rel.endswith(".onnx"):
+                    cand = model_path / exp_rel
+                    if cand.exists():
+                        onnx_file = cand
+                        break
+
+        if not onnx_file:
+            for candidate_rel in [
+                "onnx/model_quantized.onnx",
+                "onnx/model.onnx",
+                "model_quantized.onnx",
+                "model.onnx",
+            ]:
+                cand = model_path / candidate_rel
+                if cand.exists():
+                    onnx_file = cand
+                    break
 
         if not onnx_file:
             raise FileNotFoundError(f"ONNX model file not found at {model_path}")
 
-        rel_key = None
-        for k in expected_files:
-            if k.endswith(onnx_file.name):
-                rel_key = k
-                break
+        # Check integrity against lockfile (Fail Closed)
+        if expected_files:
+            rel_key = None
+            try:
+                rel_key = str(onnx_file.relative_to(model_path)).replace("\\", "/")
+            except Exception:
+                rel_key = onnx_file.name
 
-        if rel_key and "sha256" in expected_files[rel_key]:
-            expected_sha = expected_files[rel_key]["sha256"]
-            if not self._verify_onnx_checksum(onnx_file, expected_sha):
-                raise ValueError(f"ONNX model at {onnx_file} failed integrity check.")
+            matching_key = None
+            if rel_key in expected_files:
+                matching_key = rel_key
+            else:
+                matching_key = next((k for k in expected_files if k.endswith(onnx_file.name)), None)
+
+            if not matching_key:
+                if not settings.embedding_allow_unpinned:
+                    raise ValueError(
+                        f"Resolved ONNX model file '{rel_key}' is not pinned in models.lock.json expected_files: {list(expected_files.keys())}"
+                    )
+            else:
+                expected_sha = expected_files[matching_key].get("sha256")
+                if expected_sha and not self._verify_onnx_checksum(onnx_file, expected_sha):
+                    raise ValueError(f"ONNX model at {onnx_file} failed integrity check.")
 
         # Use CPU execution provider
         providers = ["CPUExecutionProvider"]

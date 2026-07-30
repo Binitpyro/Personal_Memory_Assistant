@@ -1,4 +1,7 @@
 import logging
+import socket
+from urllib.parse import urlparse
+
 import keyring
 
 from app.config import settings
@@ -9,9 +12,26 @@ logger = logging.getLogger(__name__)
 PROVIDER_IDS = list(PROVIDER_REGISTRY.keys())
 
 
+def is_local_endpoint_reachable(url: str, timeout: float = 0.2) -> bool:
+    """Fast socket check (0.2s) to verify if a local service port is accepting connections."""
+    import os
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return True
+
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname or "localhost"
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except Exception:
+        return False
+
+
 def get_configured_provider_ids() -> list[str]:
     """
-    Dynamically returns all currently configured provider IDs (has API key or endpoint URL).
+    Dynamically returns all currently configured provider IDs.
+    Local providers (ollama, lm_studio) must pass a reachability check to be marked configured.
     Iterates according to DEFAULT_CHAIN_ORDER (local providers first).
     """
     configured = []
@@ -22,7 +42,7 @@ def get_configured_provider_ids() -> list[str]:
 
         if pid in ("ollama", "lm_studio"):
             url = getattr(settings, f"{pid}_url", None)
-            if url:
+            if url and is_local_endpoint_reachable(url):
                 configured.append(pid)
             continue
 

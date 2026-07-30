@@ -67,3 +67,21 @@ def test_set_default_model(mock_write, mock_read):
     )
     assert resp.status_code == 200
     mock_write.assert_called()
+
+
+@patch("app.api.providers.write_settings")
+def test_reading_provider_settings_does_not_write_fallback_chain(mock_write, tmp_path, monkeypatch):
+    import json
+    from app.settings_store import CURRENT_SCHEMA_VERSION
+
+    test_path = tmp_path / "settings.json"
+    test_path.write_text(json.dumps({"schema_version": CURRENT_SCHEMA_VERSION}), encoding="utf-8")
+    monkeypatch.setattr("app.settings_store.SETTINGS_PATH", test_path)
+
+    resp = client.get("/api/providers/settings", headers=headers)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "fallback_chain" in data
+    # Assert GET read endpoint never wrote to disk
+    mock_write.assert_not_called()
+

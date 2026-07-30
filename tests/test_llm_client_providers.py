@@ -360,13 +360,11 @@ async def test_generate_answer():
     async def mock_resolve_with_fallback(pid, model=None, timeout=30.0):
         from app.search.llm_client import ProviderNotConfiguredError
 
-        if pid == "gemini" or pid == "openai":
-            raise ProviderNotConfiguredError("Not configured")
-        if pid == "lm_studio":
-            return mock_lm_studio
         if pid == "ollama":
             return mock_ollama
-        raise Exception("Unknown provider")
+        if pid == "lm_studio":
+            return mock_lm_studio
+        raise ProviderNotConfiguredError(f"Provider {pid} not configured")
 
     client._resolve_provider_by_id = mock_resolve_with_fallback
 
@@ -377,11 +375,9 @@ async def test_generate_answer():
     async def mock_resolve_lm_studio(pid, model=None, timeout=30.0):
         from app.search.llm_client import ProviderNotConfiguredError
 
-        if pid in ("gemini", "openai", "ollama"):
-            raise ProviderNotConfiguredError("Not configured")
         if pid == "lm_studio":
             return mock_lm_studio
-        raise Exception("Unknown provider")
+        raise ProviderNotConfiguredError(f"Provider {pid} not configured")
 
     client._resolve_provider_by_id = mock_resolve_lm_studio
     ans = await client.generate_answer("q", "c", skip_capability_check=True)

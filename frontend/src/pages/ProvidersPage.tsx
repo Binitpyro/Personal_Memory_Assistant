@@ -415,6 +415,15 @@ export function ProvidersPage() {
                   </div>
                 )}
 
+                {selectedId === 'gemini' && (
+                  <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-xl text-xs text-amber-800 flex items-start gap-2">
+                    <Zap className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                    <span>
+                      <strong>Privacy Notice:</strong> Free-tier Google Gemini API keys may process input data for model improvement per Google ToS. Use local models for full privacy.
+                    </span>
+                  </div>
+                )}
+
                 {/* API Key */}
                 {selectedProvider.spec.auth !== 'none' && (
                   <div className="flex flex-col gap-1.5">

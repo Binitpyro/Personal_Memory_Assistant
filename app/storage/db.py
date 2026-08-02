@@ -535,6 +535,25 @@ class DatabaseManager:
         self._in_ingest_mode = False
         logger.info("Exited ingest mode (FTS delta applied, triggers restored).")
 
+    async def get_system_state(self, key: str) -> str | None:
+        """Retrieves a string value from the system_state table."""
+        conn = self._get_conn()
+        async with conn.execute(
+            "SELECT value FROM system_state WHERE key = ?", (key,)
+        ) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else None
+
+    @serialize_write
+    async def set_system_state(self, key: str, value: str) -> None:
+        """Sets a string value in the system_state table."""
+        conn = self._get_conn()
+        await conn.execute(
+            "INSERT OR REPLACE INTO system_state (key, value) VALUES (?, ?)",
+            (key, value),
+        )
+        await conn.commit()
+
     @serialize_write
     async def fts_optimize(self) -> None:
         """Optimizes the FTS5 index to reduce fragmentation and improve search speed."""

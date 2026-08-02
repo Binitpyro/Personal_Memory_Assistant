@@ -63,6 +63,7 @@ class EmbeddingService:
         self._ready = threading.Event()
         self.optimal_batch_size = settings.embedding_batch_size
         self._embedding_dim = 384  # Default, overwritten during load
+        self.model_signature: str | None = None
 
         # LRU cache for query embeddings to avoid redundant computation
         self._query_cache: OrderedDict[str, list[float]] = OrderedDict()
@@ -97,7 +98,13 @@ class EmbeddingService:
             logger.error("Failed to calculate SHA256 for %s: %s", onnx_file, e)
             return False
 
-    def _load_onnx_model(self, model_path: Path, expected_files: dict[str, Any]):
+    def _load_onnx_model(
+        self,
+        model_path: Path,
+        expected_files: dict[str, Any],
+        repo_id: str = "",
+        revision: str | None = None,
+    ):
         import onnxruntime as ort
         from tokenizers import Tokenizer
 
@@ -114,7 +121,7 @@ class EmbeddingService:
             if tok_key:
                 expected_tok_sha = expected_files[tok_key].get("sha256")
                 if not expected_tok_sha:
-                    raise ValueError(f"tokenizer.json entry in models.lock.json missing sha256 digest.")
+                    raise ValueError("tokenizer.json entry in models.lock.json missing sha256 digest.")
                 if not self._verify_onnx_checksum(tokenizer_json, expected_tok_sha):
                     raise ValueError(f"tokenizer.json at {tokenizer_json} failed integrity check.")
 
@@ -169,6 +176,11 @@ class EmbeddingService:
                     )
                 if not self._verify_onnx_checksum(onnx_file, expected_sha):
                     raise ValueError(f"ONNX model at {onnx_file} failed integrity check.")
+        else:
+            try:
+                rel_key = str(onnx_file.relative_to(model_path)).replace("\\", "/")
+            except Exception:
+                rel_key = onnx_file.name
 
         # Use CPU execution provider
         providers = ["CPUExecutionProvider"]
@@ -210,6 +222,10 @@ class EmbeddingService:
         except Exception as prewarm_err:
             logger.warning("Failed to prewarm ONNX session: %s", prewarm_err)
 
+        rev_str = revision or "local"
+        r_id = repo_id or self.model_name
+        self.model_signature = f"{r_id}@{rev_str}:{rel_key}"
+
     def load_model(self) -> None:
         """Loads the embedding model using ONNX Runtime (blocking)."""
         if self._session:
@@ -226,6 +242,9 @@ class EmbeddingService:
             )
 
             expected_files: dict[str, Any] = {}
+            repo_id = self.model_name
+            revision = None
+
             if is_local_dir:
                 model_path = candidate.resolve()
                 if not model_path.is_dir():
@@ -242,17 +261,23 @@ class EmbeddingService:
                             f"Run scripts/pin_models.py or set PMA_EMBEDDING_ALLOW_UNPINNED=true."
                         )
                     logger.warning("Loading UNPINNED, UNVERIFIED model '%s'", self.model_name)
+                    repo_id = self.model_name
                     revision = None
                 else:
+                    repo_id = entry.get("repo_id", self.model_name)
                     revision = entry.get("revision")
                     expected_files = entry.get("files", {})
 
                 from huggingface_hub import snapshot_download
-                from huggingface_hub.errors import LocalEntryNotFoundError
+                from huggingface_hub.errors import (
+                    LocalEntryNotFoundError,
+                    RepositoryNotFoundError,
+                    RevisionNotFoundError,
+                )
 
                 try:
                     model_path_str = snapshot_download(  # nosec B615
-                        repo_id=self.model_name,
+                        repo_id=repo_id,
                         revision=revision,
                         local_files_only=True,
                         allow_patterns=["*.json", "*.txt", "*.onnx", "onnx/*"],
@@ -266,18 +291,33 @@ class EmbeddingService:
                             "Embedding model not present in local cache and downloads are disabled. "
                             "Set PMA_EMBEDDING_ALLOW_DOWNLOAD=true to enable downloads."
                         ) from None
-                    logger.info("Downloading ONNX model '%s' (rev %s)...", self.model_name, revision or "latest")
-                    model_path_str = snapshot_download(  # nosec B615
-                        repo_id=self.model_name,
-                        revision=revision,
-                        local_files_only=False,
-                        allow_patterns=["*.json", "*.txt", "*.onnx", "onnx/*"],
-                        ignore_patterns=["*.safetensors", "*.bin", "*.h5", "*.msgpack"],
+                    logger.info(
+                        "Downloading ONNX model '%s' (repo %s, rev %s)...",
+                        self.model_name,
+                        repo_id,
+                        revision or "latest",
                     )
+                    try:
+                        model_path_str = snapshot_download(  # nosec B615
+                            repo_id=repo_id,
+                            revision=revision,
+                            local_files_only=False,
+                            allow_patterns=["*.json", "*.txt", "*.onnx", "onnx/*"],
+                            ignore_patterns=["*.safetensors", "*.bin", "*.h5", "*.msgpack"],
+                        )
+                    except (RevisionNotFoundError, RepositoryNotFoundError) as e:
+                        raise RuntimeError(
+                            f"models.lock.json points at {repo_id}@{revision}, which does not resolve on HuggingFace: {e}"
+                        ) from e
                     model_path = Path(model_path_str)
 
             logger.info("Loading ONNX embedding model from: %s", model_path)
-            self._load_onnx_model(model_path, expected_files)
+            self._load_onnx_model(
+                model_path,
+                expected_files,
+                repo_id=repo_id if not is_local_dir else self.model_name,
+                revision=revision if not is_local_dir else None,
+            )
             logger.info("Embedding model loaded successfully (ONNX, batch_size=%d).", self.optimal_batch_size)
         except Exception as e:
             self._session = None

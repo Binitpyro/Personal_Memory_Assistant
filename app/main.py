@@ -208,6 +208,42 @@ async def lifespan(fastapi_app: FastAPI):
     state.bg_tasks.add(sync_task)
     sync_task.add_done_callback(state.bg_tasks.discard)
 
+    async def _check_model_signature_task():
+        try:
+            is_ready = await loop.run_in_executor(None, emb.wait_until_ready, 60.0)
+            if not is_ready or not emb.is_ready or emb.has_failed:
+                logger.warning("Embedding service not ready or failed to load. Skipping model signature check.")
+                return
+
+            current_sig = emb.model_signature
+            if not current_sig:
+                return
+
+            stored_sig = await db_manager.get_system_state("embedding_model_signature")
+            if stored_sig is None:
+                await db_manager.set_system_state("embedding_model_signature", current_sig)
+                logger.info("Recorded initial embedding model signature: %s", current_sig)
+            elif stored_sig != current_sig:
+                logger.warning(
+                    "╔══════════════════════════════════════════════════════════════════════════╗\n"
+                    "║ WARNING: EMBEDDING MODEL SIGNATURE MISMATCH DETECTED                    ║\n"
+                    "║ Stored:  %-63s ║\n"
+                    "║ Current: %-63s ║\n"
+                    "║ The vector space has changed. Existing vectors in LanceDB are STALE.    ║\n"
+                    "║ Please manually clear and re-ingest your indexed folders.              ║\n"
+                    "╚══════════════════════════════════════════════════════════════════════════╝",
+                    stored_sig[:63],
+                    current_sig[:63],
+                )
+                await db_manager.set_system_state("embedding_model_signature", current_sig)
+                # TODO: Implement precise vector-only re-embed (LanceDB + chunk_embeddings) without wiping FTS/history
+        except Exception as err:
+            logger.warning("Failed during model signature check: %s", err)
+
+    sig_task = asyncio.create_task(_check_model_signature_task())
+    state.bg_tasks.add(sig_task)
+    sig_task.add_done_callback(state.bg_tasks.discard)
+
     vac_task = asyncio.create_task(_bg_auto_vacuum(db_manager))
     state.bg_tasks.add(vac_task)
     vac_task.add_done_callback(state.bg_tasks.discard)

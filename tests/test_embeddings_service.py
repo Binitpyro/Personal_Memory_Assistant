@@ -171,7 +171,7 @@ class TestColdStart:
         (local_dir / "onnx" / "model_quantized.onnx").write_text("fake", encoding="utf-8")
 
         with patch.object(svc, "_load_onnx_model") as mock_load:
-            def _fake_load(p, exp):
+            def _fake_load(p, exp, *args, **kwargs):
                 svc._session = mock_sess
                 svc._tokenizer = mock_tok
             mock_load.side_effect = _fake_load
@@ -209,10 +209,12 @@ class TestIntegrityFailClosed:
             "onnx/model.onnx": {"sha256": ""}  # Empty digest -> must fail closed
         }
 
-        with patch("tokenizers.Tokenizer.from_file", return_value=MagicMock()):
-            with patch.object(svc, "_verify_onnx_checksum", return_value=True):
-                with pytest.raises(ValueError, match="missing sha256 digest"):
-                    svc._load_onnx_model(model_dir, expected_files)
+        with (
+            patch("tokenizers.Tokenizer.from_file", return_value=MagicMock()),
+            patch.object(svc, "_verify_onnx_checksum", return_value=True),
+            pytest.raises(ValueError, match="missing sha256 digest"),
+        ):
+            svc._load_onnx_model(model_dir, expected_files)
 
     def test_unpinned_file_raises_valueerror(self, tmp_path):
         svc = EmbeddingService("test-model")
@@ -227,9 +229,62 @@ class TestIntegrityFailClosed:
             "onnx/different_model.onnx": {"sha256": "abc"}  # model.onnx not pinned
         }
 
-        with patch("tokenizers.Tokenizer.from_file", return_value=MagicMock()):
-            with patch.object(svc, "_verify_onnx_checksum", return_value=True):
-                with patch("app.config.settings.embedding_allow_unpinned", False):
-                    with pytest.raises(ValueError, match="not pinned in models.lock.json"):
-                        svc._load_onnx_model(model_dir, expected_files)
+        with (
+            patch("tokenizers.Tokenizer.from_file", return_value=MagicMock()),
+            patch.object(svc, "_verify_onnx_checksum", return_value=True),
+            patch("app.config.settings.embedding_allow_unpinned", False),
+            pytest.raises(ValueError, match=r"not pinned in models\.lock\.json"),
+        ):
+            svc._load_onnx_model(model_dir, expected_files)
+
+
+class TestRepoIdOverrideAndExceptions:
+    def test_repo_id_override_passed_to_snapshot_download(self, tmp_path):
+        svc = EmbeddingService("BAAI/bge-small-en-v1.5")
+        mock_lock_data = {
+            "BAAI/bge-small-en-v1.5": {
+                "repo_id": "Xenova/bge-small-en-v1.5",
+                "revision": "ea104dacec62c0de699686887e3f920caeb4f3e3",
+                "files": {}
+            }
+        }
+        with (
+            patch("app.embeddings.service._get_models_lock_data", return_value=mock_lock_data),
+            patch(
+                "huggingface_hub.snapshot_download", return_value=str(tmp_path)
+            ) as mock_download,
+            patch.object(svc, "_load_onnx_model"),
+        ):
+            svc.load_model()
+            assert mock_download.call_count >= 1
+            kwargs = mock_download.call_args[1]
+            assert kwargs["repo_id"] == "Xenova/bge-small-en-v1.5"
+            assert kwargs["revision"] == "ea104dacec62c0de699686887e3f920caeb4f3e3"
+
+    def test_revision_not_found_error_raises_runtime_error(self):
+        from huggingface_hub.errors import LocalEntryNotFoundError, RevisionNotFoundError
+        svc = EmbeddingService("BAAI/bge-small-en-v1.5")
+        mock_lock_data = {
+            "BAAI/bge-small-en-v1.5": {
+                "repo_id": "Xenova/bge-small-en-v1.5",
+                "revision": "invalid_rev",
+                "files": {}
+            }
+        }
+        def _side_effect(*args, **kwargs):
+            if kwargs.get("local_files_only"):
+                raise LocalEntryNotFoundError("Not in cache")
+            mock_resp = MagicMock()
+            mock_resp.status_code = 404
+            mock_resp.headers = {}
+            raise RevisionNotFoundError("Revision invalid_rev not found", response=mock_resp)
+
+        with (
+            patch("app.embeddings.service._get_models_lock_data", return_value=mock_lock_data),
+            patch("huggingface_hub.snapshot_download", side_effect=_side_effect),
+        ):
+            svc.load_model()
+            assert svc.has_failed is True
+            assert "does not resolve on HuggingFace" in svc.load_error
+
 

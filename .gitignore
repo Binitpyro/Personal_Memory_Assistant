@@ -260,3 +260,6 @@ pma_metadata.db*
 /frontend/test-results
 /frontend/test-results
 /frontend/test-results
+
+# Graphify AST extraction output (local tool artifact)
+graphify-out/

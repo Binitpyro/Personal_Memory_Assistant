@@ -203,9 +203,14 @@ async def chat_passthrough(payload: LLMChatRequest) -> dict[str, Any]:
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
     except Exception as e:
+        # P1-3: `e` here can be an arbitrary httpx/provider-client exception.
+        # For a user-configured openai_compatible base_url with embedded
+        # credentials (https://user:token@host/v1), str(e) typically
+        # includes the full request URL - do not put it in the response
+        # body. Full detail still goes to the server log above.
         logger.error("Failed to resolve provider '%s': %s", provider_id, e)
         raise HTTPException(
-            status_code=502, detail=f"Provider '{provider_id}' resolution failed: {e}"
+            status_code=502, detail=f"Provider '{provider_id}' resolution failed."
         ) from e
 
     try:
@@ -223,10 +228,13 @@ async def chat_passthrough(payload: LLMChatRequest) -> dict[str, Any]:
             "content": content,
         }
     except Exception as e:
+        # P1-3: same rationale as the resolution-failure branch above - `e`
+        # can carry request URLs (with embedded credentials) or upstream
+        # response bodies. Keep that out of the client-facing response.
         logger.error(
             "Error during LLM passthrough chat on provider '%s': %s", provider_id, e, exc_info=True
         )
-        raise HTTPException(status_code=502, detail=f"Provider '{provider_id}' error: {e}") from e
+        raise HTTPException(status_code=502, detail=f"Provider '{provider_id}' error.") from e
     finally:
         if hasattr(provider_instance, "close"):
             with contextlib.suppress(Exception):

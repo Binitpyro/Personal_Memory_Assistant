@@ -1,8 +1,18 @@
+import logging
+
 from pydantic import model_validator
 from pydantic_settings import BaseSettings
 
+logger = logging.getLogger(__name__)
+
 # P1-3: Module-level cache for extensions_set to avoid repeated split/strip on each file
 _extensions_cache: dict[str, set[str]] = {}
+
+# Legacy/incorrect suffixes users may have copied into PMA_OLLAMA_URL or an old
+# .env file. Ollama's provider client builds its own paths ("/api/tags",
+# "/api/chat", ...) onto base_url, so any of these turn every request into a
+# 404 (e.g. "http://localhost:11434/api/generate" + "/api/tags").
+_OLLAMA_URL_SUFFIXES = ("/api/generate", "/api/chat", "/api/tags")
 
 
 def _get_extensions_set(raw: str) -> set[str]:
@@ -95,9 +105,34 @@ class Settings(BaseSettings):
     openai_compatible_api_key: str = ""
     openai_compatible_base_url: str = ""
 
-    ollama_url: str = "http://localhost:11434/api/generate"
+    ollama_url: str = "http://localhost:11434"
     ollama_model: str = "llama3"
     ollama_timeout: float = 60.0
+
+    @model_validator(mode="after")
+    def normalize_ollama_url(self):
+        original = self.ollama_url
+        url = original.rstrip("/")
+        suffix_stripped = False
+        # Loop in case someone concatenated more than one suffix.
+        while True:
+            for suffix in _OLLAMA_URL_SUFFIXES:
+                if url.endswith(suffix):
+                    url = url[: -len(suffix)].rstrip("/")
+                    suffix_stripped = True
+                    break
+            else:
+                break
+        if url != original:
+            if suffix_stripped:
+                logger.warning(
+                    "PMA_OLLAMA_URL had a path suffix (e.g. /api/generate) that Ollama's "
+                    "provider client appends itself; normalized %r to %r.",
+                    original,
+                    url,
+                )
+            self.ollama_url = url
+        return self
 
     lm_studio_url: str = "http://localhost:1234/v1"
 

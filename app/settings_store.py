@@ -1,3 +1,4 @@
+import contextlib
 import json
 import logging
 import os
@@ -18,7 +19,7 @@ class SettingsStore:
     @staticmethod
     def read() -> dict[str, Any]:
         """Reads settings from data/settings.json.
-        
+
         Returns empty dict if file does not exist.
         Raises OSError or json.JSONDecodeError if file is corrupted/unreadable
         so callers do not silently overwrite existing settings on error.
@@ -40,7 +41,7 @@ class SettingsStore:
     @staticmethod
     def save(data: dict[str, Any]) -> None:
         """Atomically saves data to data/settings.json with schema versioning.
-        
+
         Includes retry logic for Windows file lock collisions during os.replace.
         """
         SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -72,7 +73,5 @@ class SettingsStore:
                     time.sleep(0.1)
         finally:
             if temp_file and temp_file.exists():
-                try:
+                with contextlib.suppress(Exception):
                     temp_file.unlink()
-                except Exception:
-                    pass

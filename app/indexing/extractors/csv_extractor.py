@@ -5,6 +5,8 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+_MAX_CSV_ROWS = 5000
+
 
 class CsvExtractor:
     def can_handle(self, path: Path) -> bool:
@@ -23,7 +25,12 @@ class CsvExtractor:
 
                 total = 0
                 for i, row in enumerate(reader):
-                    if i > 5000:
+                    if i > _MAX_CSV_ROWS:
+                        logger.warning(
+                            "CSV %s exceeds %d rows; truncating remaining rows.",
+                            path,
+                            _MAX_CSV_ROWS,
+                        )
                         break
                     # Convert to key: value format
                     formatted_row = ", ".join(

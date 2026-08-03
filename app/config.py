@@ -82,6 +82,10 @@ class Settings(BaseSettings):
         ",.swift,.kt,.dart,.vue,.svelte,.graphql,.gql,.proto,.thrift"
         ",.sql,.log,.r,.lua,.zig,.tf,.hcl,.ipynb,.rtf,.odt"
         ",.tsx,.jsx,.lock,.env,.gitignore,.editorconfig,.dockerfile,.makefile"
+        # P0-3: these extractors exist (epub_extractor.py, pptx_extractor.py,
+        # xlsx_extractor.py) but the scanner filters on this list, so files
+        # of these types never reached them during a normal folder scan.
+        ",.epub,.pptx,.xlsx,.xls"
         ","
     )
     index_concurrency: int = 16  # Increased from 12 for better I/O overlap

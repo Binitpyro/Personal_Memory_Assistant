@@ -1497,7 +1497,6 @@ class DatabaseManager:
             DELETE FROM files;
             DELETE FROM query_history;
             DELETE FROM folder_profiles;
-            DROP TABLE IF EXISTS unreal_project_facts;
 
             -- Recreate FTS table with optimized schema and contentless mode.
             -- text_preview is stored zlib-compressed so triggers decompress on the fly.

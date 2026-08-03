@@ -41,3 +41,16 @@ class TestOllamaUrlNormalization:
         with caplog.at_level("WARNING", logger="app.config"):
             Settings()
         assert not any("PMA_OLLAMA_URL" in r.message for r in caplog.records)
+
+
+class TestSupportedExtensions:
+    """P0-3: epub_extractor.py, pptx_extractor.py and xlsx_extractor.py all
+    exist and work, but the scanner filters on supported_extensions before a
+    file ever reaches an extractor - so these formats never reached their
+    extractors during a normal folder scan without a PMA_SUPPORTED_EXTENSIONS
+    override."""
+
+    def test_epub_pptx_xlsx_xls_are_supported(self):
+        extensions = Settings().extensions_set
+        for ext in (".epub", ".pptx", ".xlsx", ".xls"):
+            assert ext in extensions

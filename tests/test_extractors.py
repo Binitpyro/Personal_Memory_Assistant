@@ -71,6 +71,32 @@ class TestCsvExtractor:
         # Should complete without error, not every row expected
         assert isinstance(result, str)
 
+    def test_rows_limit_warns_on_truncation(self, tmp_path, caplog):
+        """P0-3: the row cap used to truncate silently. Now it must log a
+        warning so a truncated import is diagnosable, and the cap itself is
+        a named constant rather than a bare literal in the loop."""
+        from app.indexing.extractors.csv_extractor import _MAX_CSV_ROWS
+
+        f = tmp_path / "large.csv"
+        lines = ["col"] + [str(i) for i in range(_MAX_CSV_ROWS + 500)]
+        f.write_text("\n".join(lines), encoding="utf-8")
+
+        with caplog.at_level("WARNING", logger="app.indexing.extractors.csv_extractor"):
+            rows = list(self.ext.extract_stream(f, MAX_SIZE))
+
+        assert len(rows) == _MAX_CSV_ROWS + 1  # matches pre-existing i > _MAX_CSV_ROWS semantics
+        assert any("exceeds" in r.message and "truncating" in r.message for r in caplog.records)
+
+    def test_under_cap_does_not_warn(self, tmp_path, caplog):
+        f = tmp_path / "small.csv"
+        lines = ["col"] + [str(i) for i in range(10)]
+        f.write_text("\n".join(lines), encoding="utf-8")
+
+        with caplog.at_level("WARNING", logger="app.indexing.extractors.csv_extractor"):
+            list(self.ext.extract_stream(f, MAX_SIZE))
+
+        assert not any("truncating" in r.message for r in caplog.records)
+
 
 # ── JSON ──────────────────────────────────────────────────────────────────────
 
@@ -316,8 +342,10 @@ class TestPptxExtractor:
         mock_shape = MagicMock()
         mock_shape.has_text_frame = False  # use .text attribute path
         mock_shape.text = "Slide text content"
+        mock_shape.has_table = False
         mock_slide = MagicMock()
         mock_slide.shapes = [mock_shape]
+        mock_slide.has_notes_slide = False
         mock_prs = MagicMock()
         mock_prs.slides = [mock_slide]
         mock_pptx.Presentation.return_value = mock_prs
@@ -328,6 +356,152 @@ class TestPptxExtractor:
     def test_missing_file_returns_empty(self, tmp_path):
         result = self.ext.extract(tmp_path / "missing.pptx", MAX_SIZE)
         assert result == ""
+
+    def _make_mock_prs(self, mock_pptx, slide):
+        mock_prs = MagicMock()
+        mock_prs.slides = [slide]
+        mock_pptx.Presentation.return_value = mock_prs
+        return mock_prs
+
+    def test_extract_includes_table_cells_after_title(self, tmp_path):
+        """P0-3: GraphicFrame tables were silently dropped. Cell text must
+        appear, and must come AFTER the regular shape text - the summarizer
+        takes the first line after each slide marker as that slide's title,
+        so table content can't displace it."""
+        fake_path = tmp_path / "table.pptx"
+        fake_path.touch()
+        mock_pptx = MagicMock()
+
+        title_shape = MagicMock()
+        title_shape.has_text_frame = True
+        title_shape.text = "Slide Title"
+        title_shape.has_table = False
+
+        cell_a = MagicMock()
+        cell_a.text = "Revenue"
+        cell_b = MagicMock()
+        cell_b.text = "1000"
+        mock_row = MagicMock()
+        mock_row.cells = [cell_a, cell_b]
+        mock_table = MagicMock()
+        mock_table.rows = [mock_row]
+
+        table_shape = MagicMock()
+        table_shape.has_text_frame = False
+        table_shape.text = ""
+        table_shape.has_table = True
+        table_shape.table = mock_table
+
+        mock_slide = MagicMock()
+        mock_slide.shapes = [title_shape, table_shape]
+        mock_slide.has_notes_slide = False
+        self._make_mock_prs(mock_pptx, mock_slide)
+
+        with patch.dict("sys.modules", {"pptx": mock_pptx}):
+            result = self.ext.extract(fake_path, MAX_SIZE)
+
+        assert "Slide Title" in result
+        assert "Revenue | 1000" in result
+        assert result.index("Slide Title") < result.index("Revenue | 1000")
+
+    def test_extract_includes_speaker_notes(self, tmp_path):
+        """P0-3: speaker notes were silently dropped - often the densest
+        content on a slide."""
+        fake_path = tmp_path / "notes.pptx"
+        fake_path.touch()
+        mock_pptx = MagicMock()
+
+        title_shape = MagicMock()
+        title_shape.has_text_frame = True
+        title_shape.text = "Slide Title"
+        title_shape.has_table = False
+
+        mock_slide = MagicMock()
+        mock_slide.shapes = [title_shape]
+        mock_slide.has_notes_slide = True
+        mock_slide.notes_slide.notes_text_frame.text = "Remember to mention Q4 growth."
+        self._make_mock_prs(mock_pptx, mock_slide)
+
+        with patch.dict("sys.modules", {"pptx": mock_pptx}):
+            result = self.ext.extract(fake_path, MAX_SIZE)
+
+        assert "Remember to mention Q4 growth." in result
+        assert "[Notes]" in result
+        assert result.index("Slide Title") < result.index("Remember to mention Q4 growth.")
+
+    def test_unreadable_table_does_not_abort_slide(self, tmp_path):
+        """A shape that claims has_table=True but whose .table access blows
+        up must be skipped, not crash the whole extraction. Uses a plain
+        class rather than a MagicMock, because setting a property on
+        type(some_mock) would mutate the shared MagicMock class itself and
+        leak into unrelated tests."""
+        fake_path = tmp_path / "broken_table.pptx"
+        fake_path.touch()
+        mock_pptx = MagicMock()
+
+        title_shape = MagicMock()
+        title_shape.has_text_frame = True
+        title_shape.text = "Slide Title"
+        title_shape.has_table = False
+
+        class _BrokenTableShape:
+            has_text_frame = False
+            text = ""
+            has_table = True
+
+            @property
+            def table(self):
+                raise RuntimeError("corrupt table part")
+
+        broken_table_shape = _BrokenTableShape()
+
+        mock_slide = MagicMock()
+        mock_slide.shapes = [title_shape, broken_table_shape]
+        mock_slide.has_notes_slide = False
+        self._make_mock_prs(mock_pptx, mock_slide)
+
+        with patch.dict("sys.modules", {"pptx": mock_pptx}):
+            result = self.ext.extract(fake_path, MAX_SIZE)
+
+        assert "Slide Title" in result
+
+    def test_slide_title_survives_as_first_line_for_summarizer(self, tmp_path):
+        """Integration check against the real summarizer contract
+        (app/indexing/summarizer.py _summarize_doc_text): it takes the first
+        line after each '--- Slide N ---' marker as that slide's title."""
+        fake_path = tmp_path / "summary_check.pptx"
+        fake_path.touch()
+        mock_pptx = MagicMock()
+
+        title_shape = MagicMock()
+        title_shape.has_text_frame = True
+        title_shape.text = "Q4 Overview"
+        title_shape.has_table = False
+
+        cell = MagicMock()
+        cell.text = "Some table cell"
+        mock_row = MagicMock()
+        mock_row.cells = [cell]
+        mock_table = MagicMock()
+        mock_table.rows = [mock_row]
+        table_shape = MagicMock()
+        table_shape.has_text_frame = False
+        table_shape.text = ""
+        table_shape.has_table = True
+        table_shape.table = mock_table
+
+        mock_slide = MagicMock()
+        mock_slide.shapes = [title_shape, table_shape]
+        mock_slide.has_notes_slide = False
+        self._make_mock_prs(mock_pptx, mock_slide)
+
+        with patch.dict("sys.modules", {"pptx": mock_pptx}):
+            result = self.ext.extract(fake_path, MAX_SIZE)
+
+        from app.indexing.summarizer import _summarize_doc_text
+
+        summary = _summarize_doc_text(result, 300)
+        assert "Q4 Overview" in summary
 
 
 # ── EPUB ──────────────────────────────────────────────────────────────────────
@@ -387,6 +561,110 @@ class TestEpubExtractor:
         # Oversized entries are rejected before they are decompressed.
         assert result == ""
         mock_zf.open.assert_not_called()
+
+    def test_epub_uses_opf_spine_order_not_alphabetical(self, tmp_path):
+        """P0-3: alphabetically 'content_a.xhtml' < 'content_z.xhtml', but the
+        spine lists content_z first - a real reader must follow the spine,
+        not the filename. This EPUB is built so alphabetical order would
+        read the chapters backwards."""
+        fake_epub = tmp_path / "spine_order.epub"
+
+        import zipfile
+
+        container_xml = """<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>"""
+        content_opf = """<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <manifest>
+    <item id="chap-z" href="content_z.xhtml" media-type="application/xhtml+xml"/>
+    <item id="chap-a" href="content_a.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine>
+    <itemref idref="chap-z"/>
+    <itemref idref="chap-a"/>
+  </spine>
+</package>"""
+
+        with zipfile.ZipFile(fake_epub, "w") as zf:
+            zf.writestr("mimetype", "application/epub+zip")
+            zf.writestr("META-INF/container.xml", container_xml)
+            zf.writestr("OEBPS/content.opf", content_opf)
+            zf.writestr(
+                "OEBPS/content_z.xhtml",
+                "<html><body><p>This is the FIRST chapter per the spine order, "
+                "padded with enough characters to clear the fifty character floor.</p>"
+                "</body></html>",
+            )
+            zf.writestr(
+                "OEBPS/content_a.xhtml",
+                "<html><body><p>This is the SECOND chapter per the spine order, "
+                "padded with enough characters to clear the fifty character floor.</p>"
+                "</body></html>",
+            )
+
+        result = self.ext.extract(fake_epub, MAX_SIZE)
+        assert "FIRST chapter" in result
+        assert "SECOND chapter" in result
+        assert result.index("FIRST chapter") < result.index("SECOND chapter")
+
+    def test_epub_falls_back_to_alphabetical_without_container_xml(self, tmp_path, caplog):
+        """No META-INF/container.xml at all - must not crash, must fall back,
+        and must log the fallback at INFO so a missing spine is diagnosable."""
+        fake_epub = tmp_path / "no_container.epub"
+
+        import zipfile
+
+        with zipfile.ZipFile(fake_epub, "w") as zf:
+            zf.writestr(
+                "chapter_b.xhtml",
+                "<html><body><p>Content of chapter B, long enough to clear the "
+                "fifty character minimum fragment length floor in the extractor.</p></body></html>",
+            )
+
+        with caplog.at_level("INFO", logger="app.indexing.extractors.epub_extractor"):
+            result = self.ext.extract(fake_epub, MAX_SIZE)
+
+        assert "Content of chapter B" in result
+        assert any("falling back to alphabetical" in r.message for r in caplog.records)
+
+    def test_epub_falls_back_when_spine_references_missing_entries(self, tmp_path):
+        """A spine that points at hrefs not actually present in the zip
+        (malformed/incomplete EPUB) must fall back rather than yield nothing."""
+        fake_epub = tmp_path / "broken_spine.epub"
+
+        import zipfile
+
+        container_xml = """<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>"""
+        content_opf = """<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <manifest>
+    <item id="ghost" href="does_not_exist.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine>
+    <itemref idref="ghost"/>
+  </spine>
+</package>"""
+
+        with zipfile.ZipFile(fake_epub, "w") as zf:
+            zf.writestr("META-INF/container.xml", container_xml)
+            zf.writestr("OEBPS/content.opf", content_opf)
+            zf.writestr(
+                "actual_content.xhtml",
+                "<html><body><p>This is the only real chapter, long enough to clear "
+                "the fifty character minimum fragment floor in the extractor.</p></body></html>",
+            )
+
+        result = self.ext.extract(fake_epub, MAX_SIZE)
+        assert "only real chapter" in result
 
 
 # ── EXTRACTORS registry ───────────────────────────────────────────────────────

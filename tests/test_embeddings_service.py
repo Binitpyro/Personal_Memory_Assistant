@@ -4,8 +4,10 @@ Coverage for app/embeddings/service.py — EmbeddingService with mocked model.
 Tests: LRU cache, is_ready, load_model_background, embed_query, embed_texts.
 """
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import numpy as np
 import pytest
 
 from app.embeddings.service import EmbeddingService
@@ -286,5 +288,92 @@ class TestRepoIdOverrideAndExceptions:
             svc.load_model()
             assert svc.has_failed is True
             assert "does not resolve on HuggingFace" in svc.load_error
+
+
+class TestBatchSizeAndSessionOptions:
+    """P0-4: previously zero coverage for either - intra_op_num_threads
+    could have been set to 999, or embedding_batch_size read from the wrong
+    field, and the suite would stay green."""
+
+    def test_optimal_batch_size_matches_settings(self):
+        from app.config import settings
+
+        svc = EmbeddingService("test-model")
+        assert svc.optimal_batch_size == settings.embedding_batch_size
+        assert svc.optimal_batch_size == 64
+
+    def test_session_options_configured_correctly(self, tmp_path):
+        """Exercises the real _load_onnx_model SessionOptions block via a
+        stub SessionOptions object (not a MagicMock) so unset attributes
+        keep their initialized value instead of auto-vivifying - that's
+        what lets this assert intra_op_num_threads was never touched,
+        rather than just that *some* value was read off it."""
+        svc = EmbeddingService("test-model")
+        model_dir = tmp_path / "model"
+        model_dir.mkdir()
+        (model_dir / "tokenizer.json").write_text("{}", encoding="utf-8")
+        (model_dir / "onnx").mkdir()
+        (model_dir / "onnx" / "model.onnx").write_text("fake_onnx", encoding="utf-8")
+
+        class _StubSessionOptions:
+            def __init__(self):
+                # ORT's real pybind11 defaults.
+                self.intra_op_num_threads = 0
+                self.inter_op_num_threads = 0
+                self.enable_cpu_mem_arena = True
+                self.enable_mem_pattern = True
+
+        stub_options = _StubSessionOptions()
+        mock_session = MagicMock()
+        mock_session.get_inputs.return_value = []
+        mock_session.run.return_value = [np.array([[0.1] * 384])]
+
+        with (
+            patch("tokenizers.Tokenizer.from_file", return_value=MagicMock()),
+            patch("onnxruntime.SessionOptions", return_value=stub_options),
+            patch("onnxruntime.InferenceSession", return_value=mock_session),
+        ):
+            svc._load_onnx_model(model_dir, {})
+
+        # Left at ORT's default (0), which resolves to physical core count
+        # WITH thread affinitization - min(4, cpu_count-1) discarded that.
+        assert stub_options.intra_op_num_threads == 0
+        assert stub_options.inter_op_num_threads == 2
+        # Explicitly disabled - measured 22x peak-RSS reduction (3848 MB ->
+        # 172 MB) on a variable-length corpus, for a 9% throughput cost.
+        assert stub_options.enable_cpu_mem_arena is False
+        # Left on - disabling it too gave no further memory benefit but
+        # roughly halved throughput.
+        assert stub_options.enable_mem_pattern is True
+
+    def test_session_run_call_count_matches_batch_count(self):
+        """encode_batch's mock must scale with input size - the existing
+        cross-repo convention (test_deduplication, test_custom_batch_size)
+        always returns a 1-element list regardless of batch size, which
+        makes batching itself untestable."""
+        svc = EmbeddingService("model")
+        svc._session = MagicMock()
+        svc._session.run = MagicMock(return_value=[np.array([[0.1] * 384])])
+
+        def _encode_batch(batch, **kwargs):
+            encodings = []
+            for _ in batch:
+                enc = MagicMock()
+                enc.ids = [1, 2, 3]
+                enc.attention_mask = [1, 1, 1]
+                enc.type_ids = [0, 0, 0]
+                encodings.append(enc)
+            return encodings
+
+        svc._tokenizer = MagicMock()
+        svc._tokenizer.encode_batch = MagicMock(side_effect=_encode_batch)
+
+        import math
+
+        for n_texts, batch_size in [(10, 4), (64, 64), (65, 64), (128, 64)]:
+            svc._session.run.reset_mock()
+            texts = [f"unique text {i}" for i in range(n_texts)]
+            asyncio.run(svc.embed_texts(texts, batch_size=batch_size))
+            assert svc._session.run.call_count == math.ceil(n_texts / batch_size)
 
 

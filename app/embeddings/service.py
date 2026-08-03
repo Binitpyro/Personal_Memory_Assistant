@@ -184,12 +184,24 @@ class EmbeddingService:
 
         # Use CPU execution provider
         providers = ["CPUExecutionProvider"]
-        import os
 
         options = ort.SessionOptions()
-        options.intra_op_num_threads = min(4, max(1, (os.cpu_count() or 1) - 1))
+        # P0-4: leave intra_op_num_threads at ORT's default (0), which
+        # resolves to physical core count *with* thread affinitization.
+        # min(4, cpu_count-1) discarded that affinity and hard-capped
+        # throughput on anything with more than 5 cores.
         options.inter_op_num_threads = 2
-        options.enable_cpu_mem_arena = True
+        # P0-4: measured on a variable-length synthetic corpus (mixed
+        # 15-400 word texts, batch_size=64) that deliberately stresses
+        # BatchLongest padding - the arena never shrinks, so wide shape
+        # variance compounds its growth: enable_cpu_mem_arena=True peaked
+        # at 3848 MB vs 172 MB with it off (22x), for a 9% throughput cost
+        # (22.12 -> 20.06 texts/sec) - comfortably worth it.
+        options.enable_cpu_mem_arena = False
+        # enable_mem_pattern=True stays on: with the arena already off,
+        # turning this off too gave no further memory benefit (173 MB,
+        # same as above within noise) but roughly halved throughput
+        # (20.06 -> 10.19 texts/sec) - not worth it on its own.
         options.enable_mem_pattern = True
 
         self._session = ort.InferenceSession(

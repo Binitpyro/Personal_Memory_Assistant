@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import os
+import zlib
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -212,12 +213,16 @@ async def test_full_rag_logic(tmp_path):
         ("a.py", ".py", 100, "now"),
     )
     long_text = (
-        b"This is a reasonably long chunk of text that exceeds the fifty character "
-        b"minimum requirement for the hybrid retriever to consider it valid."
+        "This is a reasonably long chunk of text that exceeds the fifty character "
+        "minimum requirement for the hybrid retriever to consider it valid."
     )
+    # Production writes zlib-compressed bytes (see db.py's chunk insert);
+    # inserting the raw string previously "worked" only because
+    # zlib_decompress's corrupt-data fallback returned str(blob) - a bug
+    # fixed in P1-2. Compress here to match the real write path.
     await db.execute_write(
         "INSERT INTO chunks (file_id, text_preview, start_offset, end_offset) VALUES (?,?,?,?)",
-        (1, long_text, 0, 100),
+        (1, zlib.compress(long_text.encode("utf-8")), 0, 100),
     )
     llm = MagicMock()
     llm.generate_answer = AsyncMock(return_value="Ans")

@@ -258,6 +258,7 @@ async def test_detect_local_models_ollama_detected():
 @pytest.mark.asyncio
 async def test_llm_chat_passthrough_rejects_auto():
     from fastapi import HTTPException
+
     from app.api.models import LLMChatRequest, chat_passthrough
 
     payload = LLMChatRequest(
@@ -289,12 +290,83 @@ async def test_llm_chat_passthrough_success():
 
     assert result["provider"] == "ollama"
     assert result["content"] == "Passthrough response"
+
+
+@pytest.mark.asyncio
+async def test_llm_chat_passthrough_resolution_failure_does_not_leak_url(caplog):
+    """P1-3: a user-configured openai_compatible base_url with embedded
+    credentials would previously appear verbatim in the 502 response body,
+    since the raw exception string was interpolated straight into `detail`.
+    httpx's ConnectError.__str__ includes the request URL, which is exactly
+    the shape of exception _resolve_provider_by_id can raise."""
+    import httpx
+    from fastapi import HTTPException
+
+    from app.api.models import LLMChatRequest, chat_passthrough
+
+    leaky_url = "https://user:supersecret@evil-or-not.example/v1/chat"
+    mock_llm = MagicMock()
+    mock_llm._resolve_provider_by_id = AsyncMock(
+        side_effect=httpx.ConnectError(f"Connection refused: {leaky_url}")
+    )
+
+    payload = LLMChatRequest(
+        messages=[{"role": "user", "content": "hi"}],
+        provider="openai_compatible",
+    )
+    with (
+        patch("app.api.models.get_llm", return_value=mock_llm),
+        pytest.raises(HTTPException) as exc_info,
+    ):
+        await chat_passthrough(payload)
+
+    assert exc_info.value.status_code == 502
+    assert "supersecret" not in exc_info.value.detail
+    assert leaky_url not in exc_info.value.detail
+    # Full detail must still reach the server log for debugging.
+    assert any(leaky_url in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_llm_chat_passthrough_chat_failure_does_not_leak_url(caplog):
+    """Same leak vector, but from the provider.chat() call itself rather
+    than provider resolution."""
+    import httpx
+    from fastapi import HTTPException
+
+    from app.api.models import LLMChatRequest, chat_passthrough
+
+    leaky_url = "https://user:supersecret@evil-or-not.example/v1/chat"
+    mock_provider = AsyncMock()
+    mock_provider.chat = AsyncMock(
+        side_effect=httpx.ConnectError(f"Connection refused: {leaky_url}")
+    )
+    mock_provider.close = AsyncMock()
+
+    mock_llm = MagicMock()
+    mock_llm._resolve_provider_by_id = AsyncMock(return_value=mock_provider)
+
+    payload = LLMChatRequest(
+        messages=[{"role": "user", "content": "hi"}],
+        provider="openai_compatible",
+    )
+    with (
+        patch("app.api.models.get_llm", return_value=mock_llm),
+        pytest.raises(HTTPException) as exc_info,
+    ):
+        await chat_passthrough(payload)
+
+    assert exc_info.value.status_code == 502
+    assert "supersecret" not in exc_info.value.detail
+    assert leaky_url not in exc_info.value.detail
+    assert any(leaky_url in r.message for r in caplog.records)
     mock_provider.close.assert_called_once()
 
 
 @pytest.mark.asyncio
 async def test_cloud_privacy_consent_required(tmp_path, monkeypatch):
     from fastapi import HTTPException
+
     from app.api import models as m
 
     settings_file = tmp_path / "data" / "settings.json"

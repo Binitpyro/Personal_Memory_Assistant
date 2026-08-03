@@ -1,7 +1,7 @@
 import asyncio
-import json
+import contextlib
 import logging
-from pathlib import Path
+import time
 from typing import Any
 
 import httpx
@@ -10,12 +10,11 @@ from pydantic import BaseModel
 
 from app.api.deps import get_llm
 from app.search.llm_client import ProviderNotConfiguredError
+from app.settings_store import SettingsStore
 
 logger = logging.getLogger(__name__)
 
 models_router = APIRouter(prefix="/llm", tags=["llm"])
-
-SETTINGS_PATH = Path("data/settings.json")
 
 
 PRIVACY_NOTICE = (
@@ -34,20 +33,20 @@ class LLMPreferences(BaseModel):
 
 
 def _read_settings() -> dict[str, Any]:
-    if not SETTINGS_PATH.exists():
-        return {}
+    # P1-1: was a direct open()/json.load() bypassing SettingsStore - no
+    # schema_version stamping, non-atomic write, and `except Exception:
+    # return {}` on corrupt JSON meant a corrupt file looked identical to
+    # "no settings yet", so the next POST silently overwrote it rather than
+    # surfacing the corruption. Matches app/api/providers.py's read_settings.
     try:
-        with open(SETTINGS_PATH, encoding="utf-8") as f:
-            data = json.load(f)
-            return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
+        return SettingsStore.read()
+    except Exception as e:
+        logger.error("Failed to read settings in models API: %s", e)
+        raise HTTPException(status_code=500, detail=f"Settings file unreadable: {e}") from e
 
 
 def _write_settings(data: dict[str, Any]) -> None:
-    SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+    SettingsStore.save(data)
 
 
 @models_router.get("/preferences")
@@ -84,13 +83,20 @@ async def set_preferences(payload: LLMPreferences, response: Response = None) ->
         )
 
     data = await asyncio.to_thread(_read_settings)
-    data["llm"] = {
-        "provider": normalized_provider,
-        "gemini_model": payload.gemini_model,
-        "ollama_model": payload.ollama_model,
-        "lm_studio_model": payload.lm_studio_model,
-        "cloud_privacy_consent": payload.cloud_privacy_consent,
-    }
+    # P1-1: was `data["llm"] = {...}`, replacing the whole sub-dict and
+    # silently destroying sibling keys written by app/api/providers.py -
+    # llm.fallback_chain (read at llm_client.py:_get_effective_fallback_chain)
+    # and llm.per_provider (read at llm_client.py:_resolve_provider_by_id).
+    # Update in place instead.
+    data.setdefault("llm", {}).update(
+        {
+            "provider": normalized_provider,
+            "gemini_model": payload.gemini_model,
+            "ollama_model": payload.ollama_model,
+            "lm_studio_model": payload.lm_studio_model,
+            "cloud_privacy_consent": payload.cloud_privacy_consent,
+        }
+    )
     await asyncio.to_thread(_write_settings, data)
 
     # Apply at runtime to current singleton LLM client
@@ -143,8 +149,6 @@ async def detect_local_models(response: Response = None) -> dict[str, Any]:  # t
     return results
 
 
-import time
-
 _passthrough_timestamps: list[float] = []
 MAX_PASSTHROUGH_PER_MINUTE = 30
 
@@ -195,12 +199,14 @@ async def chat_passthrough(payload: LLMChatRequest) -> dict[str, Any]:
             provider_id, model_override=payload.model
         )
     except ProviderNotConfiguredError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+        raise HTTPException(status_code=409, detail=str(e)) from e
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from e
     except Exception as e:
         logger.error("Failed to resolve provider '%s': %s", provider_id, e)
-        raise HTTPException(status_code=502, detail=f"Provider '{provider_id}' resolution failed: {e}")
+        raise HTTPException(
+            status_code=502, detail=f"Provider '{provider_id}' resolution failed: {e}"
+        ) from e
 
     try:
         messages_dicts = [m.model_dump() for m in payload.messages]
@@ -217,12 +223,12 @@ async def chat_passthrough(payload: LLMChatRequest) -> dict[str, Any]:
             "content": content,
         }
     except Exception as e:
-        logger.error("Error during LLM passthrough chat on provider '%s': %s", provider_id, e, exc_info=True)
-        raise HTTPException(status_code=502, detail=f"Provider '{provider_id}' error: {e}")
+        logger.error(
+            "Error during LLM passthrough chat on provider '%s': %s", provider_id, e, exc_info=True
+        )
+        raise HTTPException(status_code=502, detail=f"Provider '{provider_id}' error: {e}") from e
     finally:
         if hasattr(provider_instance, "close"):
-            try:
+            with contextlib.suppress(Exception):
                 await provider_instance.close()
-            except Exception:
-                pass
 

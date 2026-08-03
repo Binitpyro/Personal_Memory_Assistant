@@ -147,6 +147,11 @@ def test_telemetry_endpoint(app_client):
 
 
 class TestReadWriteSettings:
+    """P1-1: models.py's _read_settings/_write_settings now delegate to
+    SettingsStore (app/settings_store.py), so these tests patch
+    app.settings_store.SETTINGS_PATH - the module.SETTINGS_PATH attribute
+    these used to patch directly on app.api.models no longer exists there."""
+
     def test_read_missing_returns_empty(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         from app.api.models import _read_settings
@@ -161,28 +166,35 @@ class TestReadWriteSettings:
 
         from app.api import models as m
 
-        # Patch SETTINGS_PATH to tmp
         settings_path = tmp_path / "data" / "settings.json"
-        monkeypatch.setattr(m, "SETTINGS_PATH", settings_path)
+        monkeypatch.setattr("app.settings_store.SETTINGS_PATH", settings_path)
         m._write_settings({"llm": {"provider": "gemini"}})
         result = m._read_settings()
         assert result["llm"]["provider"] == "gemini"
 
-    def test_read_corrupt_json_returns_empty(self, tmp_path, monkeypatch):
+    def test_read_corrupt_json_raises_http_500(self, tmp_path, monkeypatch):
+        """Behavior change from the old bypass: a corrupt settings file used
+        to be silently treated as "no settings yet", so the next write would
+        overwrite it and lose whatever was recoverable. SettingsStore.read()
+        raises instead, and models.py now surfaces that as a 500 rather than
+        swallowing it - matching app/api/providers.py's read_settings."""
+        from fastapi import HTTPException
+
         from app.api import models as m
 
         bad_file = tmp_path / "settings.json"
         bad_file.write_text("{bad json}", encoding="utf-8")
-        monkeypatch.setattr(m, "SETTINGS_PATH", bad_file)
-        result = m._read_settings()
-        assert result == {}
+        monkeypatch.setattr("app.settings_store.SETTINGS_PATH", bad_file)
+        with pytest.raises(HTTPException) as exc_info:
+            m._read_settings()
+        assert exc_info.value.status_code == 500
 
 
 @pytest.mark.asyncio
 async def test_get_preferences_default(tmp_path, monkeypatch):
     from app.api import models as m
 
-    monkeypatch.setattr(m, "SETTINGS_PATH", tmp_path / "missing.json")
+    monkeypatch.setattr("app.settings_store.SETTINGS_PATH", tmp_path / "missing.json")
     result = await m.get_preferences()
     assert result["provider"] == "auto"
 
@@ -193,7 +205,7 @@ async def test_set_preferences_normalizes_invalid_provider(tmp_path, monkeypatch
 
     settings_file = tmp_path / "data" / "settings.json"
     (tmp_path / "data").mkdir()
-    monkeypatch.setattr(m, "SETTINGS_PATH", settings_file)
+    monkeypatch.setattr("app.settings_store.SETTINGS_PATH", settings_file)
     mock_llm = MagicMock()
     mock_llm.apply_preferences = MagicMock()
     with patch("app.api.models.get_llm", return_value=mock_llm):
@@ -287,10 +299,50 @@ async def test_cloud_privacy_consent_required(tmp_path, monkeypatch):
 
     settings_file = tmp_path / "data" / "settings.json"
     (tmp_path / "data").mkdir()
-    monkeypatch.setattr(m, "SETTINGS_PATH", settings_file)
+    monkeypatch.setattr("app.settings_store.SETTINGS_PATH", settings_file)
 
     payload = m.LLMPreferences(provider="gemini", cloud_privacy_consent=False)
     with pytest.raises(HTTPException) as exc_info:
         await m.set_preferences(payload)
     assert exc_info.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_set_preferences_preserves_sibling_llm_keys(tmp_path, monkeypatch):
+    """P1-1: set_preferences used to do `data["llm"] = {...}`, replacing the
+    whole sub-dict and silently destroying fallback_chain/per_provider -
+    written by app/api/providers.py's own preferences endpoints - on every
+    call. It also never stamped schema_version, which made
+    _get_effective_fallback_chain bail to defaults. Both are fixed by
+    routing through SettingsStore.save() with an in-place update."""
+    from app.api import models as m
+    from app.settings_store import CURRENT_SCHEMA_VERSION, SettingsStore
+
+    settings_file = tmp_path / "data" / "settings.json"
+    (tmp_path / "data").mkdir()
+    monkeypatch.setattr("app.settings_store.SETTINGS_PATH", settings_file)
+
+    SettingsStore.save(
+        {
+            "llm": {
+                "provider": "auto",
+                "fallback_chain": ["ollama", "lm_studio"],
+                "per_provider": {"ollama": {"base_url": None, "default_model": "llama3"}},
+            }
+        }
+    )
+
+    mock_llm = MagicMock()
+    mock_llm.apply_preferences = MagicMock()
+    with patch("app.api.models.get_llm", return_value=mock_llm):
+        payload = m.LLMPreferences(provider="ollama", ollama_model="mistral")
+        await m.set_preferences(payload)
+
+    saved = SettingsStore.read()
+    assert saved["llm"]["fallback_chain"] == ["ollama", "lm_studio"]
+    assert saved["llm"]["per_provider"] == {
+        "ollama": {"base_url": None, "default_model": "llama3"}
+    }
+    assert saved["llm"]["ollama_model"] == "mistral"
+    assert saved["schema_version"] == CURRENT_SCHEMA_VERSION
 

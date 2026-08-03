@@ -7,7 +7,12 @@ import httpx
 import keyring
 
 from app.config import settings
-from app.providers import BaseProvider, create_provider, get_configured_provider_ids, get_default_chain
+from app.providers import (
+    BaseProvider,
+    create_provider,
+    get_configured_provider_ids,
+    get_default_chain,
+)
 from app.search.capability_detector import capability_detector
 from app.settings_store import CURRENT_SCHEMA_VERSION, SettingsStore
 
@@ -170,19 +175,23 @@ class LLMClient:
         return "7b_local"
 
     def _load_runtime_preferences(self) -> None:
-        pref_path = Path("data/settings.json")
-        if not pref_path.exists():
-            return
+        # P1-1: was a direct open()/json.load() bypassing SettingsStore, so
+        # it saw torn writes and ignored schema_version. SettingsStore.read()
+        # already returns {} for a missing file; it raises on corrupt JSON
+        # where this method previously degraded silently, so that behavior
+        # is preserved here rather than let a corrupt file start raising
+        # out of _ensure_token_loaded.
         try:
-            with open(pref_path, encoding="utf-8") as f:
-                data = json.load(f)
-            llm_prefs = data.get("llm", {})
-            self.provider_preference = llm_prefs.get("provider", "auto")
-            self.model = llm_prefs.get("gemini_model", self.model)
-            self.ollama_model = llm_prefs.get("ollama_model", self.ollama_model)
-            self.lm_studio_model = llm_prefs.get("lm_studio_model", self.lm_studio_model)
+            data = SettingsStore.read()
         except Exception as e:
             logger.debug("Unable to load runtime LLM preferences: %s", e)
+            return
+
+        llm_prefs = data.get("llm", {})
+        self.provider_preference = llm_prefs.get("provider", "auto")
+        self.model = llm_prefs.get("gemini_model", self.model)
+        self.ollama_model = llm_prefs.get("ollama_model", self.ollama_model)
+        self.lm_studio_model = llm_prefs.get("lm_studio_model", self.lm_studio_model)
 
     def apply_preferences(
         self,

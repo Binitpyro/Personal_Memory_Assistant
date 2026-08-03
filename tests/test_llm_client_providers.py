@@ -65,13 +65,19 @@ def patch_data_paths(tmp_path):
     fake_settings = tmp_path / "settings.json"
     fake_prompt = tmp_path / "rag_system.txt"
 
-    with patch(
-        "app.search.llm_client.Path",
-        lambda *args: {
-            "data/credentials.json": fake_creds,
-            "data/settings.json": fake_settings,
-            "prompts/rag_system.txt": fake_prompt,
-        }.get(os.path.join(*args).replace("\\", "/"), Path(*args)),
+    with (
+        patch(
+            "app.search.llm_client.Path",
+            lambda *args: {
+                "data/credentials.json": fake_creds,
+                "data/settings.json": fake_settings,
+                "prompts/rag_system.txt": fake_prompt,
+            }.get(os.path.join(*args).replace("\\", "/"), Path(*args)),
+        ),
+        # _load_runtime_preferences now goes through SettingsStore.read(),
+        # which resolves data/settings.json via app.settings_store's own
+        # SETTINGS_PATH, not the app.search.llm_client.Path patch above.
+        patch("app.settings_store.SETTINGS_PATH", fake_settings),
     ):
         yield {"credentials": fake_creds, "settings": fake_settings, "prompt": fake_prompt}
 

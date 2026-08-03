@@ -1,8 +1,39 @@
+import zlib
 from pathlib import Path
 
 import pytest
 
-from app.storage.db import DatabaseManager
+from app.storage.db import DatabaseManager, _zlib_decompress_fn
+
+
+class TestZlibDecompressFn:
+    """P1-2: on a decompress failure this used to `return str(blob)` - the
+    Python repr of the raw bytes (e.g. "b'x\\x9c...'") - which then got
+    indexed into FTS as if it were real text, indistinguishable from
+    genuine content via chunk_fts_ai's `zlib_decompress(new.text_preview)`
+    trigger call. It now logs and returns "" instead."""
+
+    def test_valid_compressed_bytes_round_trip(self):
+        original = "hello world, this is chunk text"
+        blob = zlib.compress(original.encode("utf-8"))
+        assert _zlib_decompress_fn(blob) == original
+
+    def test_empty_or_none_returns_empty_string(self):
+        assert _zlib_decompress_fn(None) == ""
+        assert _zlib_decompress_fn(b"") == ""
+
+    def test_string_input_passes_through_unchanged(self):
+        # The isinstance(blob, str) passthrough exists for legacy/test rows
+        # written before compression was added everywhere.
+        assert _zlib_decompress_fn("already text") == "already text"
+
+    def test_corrupt_bytes_returns_empty_and_logs_error(self, caplog):
+        garbage = b"not a valid zlib stream at all"
+        with caplog.at_level("ERROR", logger="app.storage.db"):
+            result = _zlib_decompress_fn(garbage)
+        assert result == ""
+        assert result != str(garbage)  # the old, wrong behavior
+        assert any("zlib_decompress failed" in r.message for r in caplog.records)
 
 
 @pytest.fixture
@@ -12,6 +43,22 @@ async def db(tmp_path: Path):
     await mgr.init_db(schema_path="app/storage/schema.sql")
     yield mgr
     await mgr.close()
+
+
+@pytest.mark.asyncio
+async def test_zlib_decompress_registered_as_sql_function(db: DatabaseManager):
+    """Confirms the Python fix is actually wired into the SQLite connection
+    that production code queries against, not just correct in isolation."""
+    conn = db._get_conn()
+    async with conn.execute(
+        "SELECT zlib_decompress(?)", (zlib.compress(b"round trip via SQL"),)
+    ) as cursor:
+        row = await cursor.fetchone()
+    assert row[0] == "round trip via SQL"
+
+    async with conn.execute("SELECT zlib_decompress(?)", (b"garbage bytes",)) as cursor:
+        row = await cursor.fetchone()
+    assert row[0] == ""
 
 
 def _file_data(path: Path, folder_tag: str = "Test"):

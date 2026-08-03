@@ -1,3 +1,20 @@
+## [Unreleased] - P0 Hardening Sprint (in progress, targeting 2026-08-17)
+
+Fixing four P0 defects found during a pre-deadline audit of the `updates` branch: a config typo that silently broke the local-first Ollama chain, a license-boundary violation (Creative-module code inside MIT Core), three document extractors that misrepresented content, and an embedding-memory ceiling.
+
+### Embedding batch size and ONNX session tuning (P0-4)
+- **Batch size**: `embedding_batch_size` 512 → 64. The tokenizer's `enable_padding` has no `length=`, so every batch pads to its own longest sequence (BatchLongest) - at 512 that was a ~262k-token worst case on a product targeting 4 GB VRAM / 60 MB RAM.
+- **`intra_op_num_threads`**: removed the `min(4, cpu_count-1)` override. ORT's default (`0`) resolves to physical core count *with* thread affinitization, which the override discarded while also hard-capping at 4 threads.
+- **`enable_cpu_mem_arena`**: `True` → `False`. The arena grows to its high-water mark and never shrinks; on a corpus with wide chunk-length variance this compounds badly. Measured on a synthetic 2000-text corpus (mixed 15-400 word lengths, batch_size=64): **3848 MB → 172 MB peak RSS (22x reduction)** for a 9% throughput cost (22.12 → 20.06 texts/sec). Also tested disabling `enable_mem_pattern` in the same pass - no further memory benefit (173 MB, within noise) but roughly halved throughput (→ 10.19 texts/sec), so it stays on.
+- **End-to-end validation** (`scripts/benchmark_ingestion.py`, full 5150-file / 26354-chunk corpus, batch_size=64 + `intra_op_num_threads` fix together): **62.74 → 159.12 chunks/sec (2.5x)**, peak RSS **722.96 → 745.68 MB** (+3%, within the accepted P0-4 decision-rule tolerance).
+
+### Also in this sprint
+- **Ollama base URL** (P0-1): `config.py` defaulted to the legacy `/api/generate` path, which every Ollama request then appended its own path onto (`/api/tags`, `/api/chat`, ...), 404ing everything and silently falling through to cloud providers despite Ollama running. Fixed, with a normalizer for stale `PMA_OLLAMA_URL` values.
+- **License boundary** (P0-2): removed 257 lines of Creative-module RAG handlers from `app/api/modules.py` (MIT Core) - confirmed dead, since the private Creative module runs its own server and never calls Core's WebSocket.
+- **Extractors** (P0-3): EPUB now reads the OPF spine (reading order) instead of alphabetical filename order; PPTX tables and speaker notes are no longer silently dropped; CSV's row cap now logs when it truncates instead of failing silently.
+
+---
+
 # Changelog v0.0.71
 
 Personal Memory Assistant v0.0.71 represents a major milestone release. This update introduces **Multi-Provider AI model support**, **OS-level keyring credential security**, **Graph RAG architectural intelligence**, a **hardware-accelerated 3D WebGPU visualizer**, **zero-loss streaming ingestion**, and an **extensive test suite overhaul**.

@@ -68,7 +68,14 @@ class Settings(BaseSettings):
         return self
 
     embedding_model: str = "BAAI/bge-small-en-v1.5"
-    embedding_batch_size: int = 512  # Doubled: modern GPUs/CPUs handle this well
+    # P0-4: the tokenizer pads each batch to its own longest sequence
+    # (enable_padding has no length=), so peak memory scales with
+    # batch_size * longest_seq_in_batch, not item count. At 512 that's a
+    # ~262k-token worst case on a product targeting 4 GB VRAM / 60 MB RAM.
+    # 64 is still generous - sentence-transformers defaults to 32. The real
+    # fix is token-budget batching (post-deadline); this just bounds the
+    # blast radius until then.
+    embedding_batch_size: int = 64
     embedding_allow_download: bool = True
     embedding_allow_unpinned: bool = False
 

@@ -24,11 +24,28 @@ def _zlib_decompress_fn(blob: Any) -> str:
     if not blob:
         return ""
     if isinstance(blob, str):
+        # TODO(post-P0-2): app/api/modules.py was the only production writer
+        # of uncompressed str into text_preview, and it's gone (see the
+        # license-boundary strip). This passthrough exists for rows already
+        # written before that fix, plus test fixtures. Confirm no legacy
+        # rows remain before removing it - until then it's load-bearing,
+        # not dead code.
         return blob
     try:
         return zlib.decompress(blob).decode("utf-8")
-    except Exception:
-        return str(blob)
+    except Exception as e:
+        # P1-2: this used to `return str(blob)` - the Python repr of the raw
+        # bytes (e.g. "b'x\\x9c...'") - which then got indexed into FTS as
+        # if it were real text, indistinguishable from genuine content.
+        # A blob that fails to decompress is corrupt; surface that instead
+        # of silently fabricating searchable garbage from it.
+        logger.error(
+            "zlib_decompress failed on a %d-byte blob (SQLite scalar function receives "
+            "no chunk id): %s",
+            len(blob) if hasattr(blob, "__len__") else -1,
+            e,
+        )
+        return ""
 
 
 FTS_TABLE_DDL = """

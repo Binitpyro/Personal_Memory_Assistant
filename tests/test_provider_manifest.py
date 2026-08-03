@@ -8,7 +8,6 @@ Coverage for app/providers/manifest.py:
 """
 
 import socket
-import time
 from unittest.mock import patch
 
 import pytest
@@ -65,3 +64,29 @@ async def test_async_helpers():
 
     chain = await manifest.get_default_chain_async()
     assert isinstance(chain, list)
+
+
+def test_default_chain_order_is_local_first_cloud_last():
+    """Pins the privacy invariant: local providers are tried before any cloud
+    provider, and gemini (which persisted queries on read until that was fixed)
+    is last. Nothing else asserted on DEFAULT_CHAIN_ORDER's contents/order
+    before this test - reordering it silently would previously pass CI."""
+    from app.providers.registry import DEFAULT_CHAIN_ORDER
+
+    assert DEFAULT_CHAIN_ORDER[0] == "ollama"
+    assert DEFAULT_CHAIN_ORDER[1] == "lm_studio"
+    assert DEFAULT_CHAIN_ORDER[-1] == "gemini"
+    assert DEFAULT_CHAIN_ORDER.index("ollama") < DEFAULT_CHAIN_ORDER.index("gemini")
+
+
+def test_get_default_chain_preserves_local_first_order():
+    """get_default_chain() must preserve DEFAULT_CHAIN_ORDER, not the order
+    returned by get_configured_provider_ids(). Patches out the reachability
+    probe so this doesn't depend on whether Ollama/LM Studio happen to be
+    running on the machine executing the test."""
+    with patch(
+        "app.providers.manifest.get_configured_provider_ids",
+        return_value=["gemini", "ollama", "lm_studio"],
+    ):
+        chain = manifest.get_default_chain()
+    assert chain == ["ollama", "lm_studio", "gemini"]

@@ -17,6 +17,7 @@ from xml.etree import ElementTree as ET
 
 logger = logging.getLogger(__name__)
 
+_SCRIPT_STYLE_RE = re.compile(r"<(script|style)\b[^>]*>.*?</\1\s*>", re.IGNORECASE | re.DOTALL)
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _NAMED_ENTITY_RE = re.compile(r"&[a-zA-Z]+;")
 _NUMERIC_ENTITY_RE = re.compile(r"&#\d+;")
@@ -180,8 +181,14 @@ class EpubExtractor:
 
                             raw_html = raw_bytes.decode("utf-8", errors="ignore")
 
+                            # Strip script/style blocks (tag + enclosed content) before
+                            # generic tag-stripping, which would otherwise leave the JS/CSS
+                            # body behind as prose. An unclosed <script> tag won't match
+                            # here and still leaks via the tag-strip pass below - acceptable
+                            # for malformed input.
+                            text = _SCRIPT_STYLE_RE.sub(" ", raw_html)
                             # Strip XML/HTML tags and collapse whitespace
-                            text = _HTML_TAG_RE.sub(" ", raw_html)
+                            text = _HTML_TAG_RE.sub(" ", text)
                             text = _NAMED_ENTITY_RE.sub(" ", text)
                             text = _NUMERIC_ENTITY_RE.sub(" ", text)
                             text = _WHITESPACE_RE.sub(" ", text).strip()

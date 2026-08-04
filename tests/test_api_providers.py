@@ -86,6 +86,96 @@ def test_reading_provider_settings_does_not_write_fallback_chain(mock_write, tmp
     mock_write.assert_not_called()
 
 
+# ── Cloud privacy consent gate ───────────────────────────────────────────────
+
+
+@patch("app.api.providers.read_settings")
+def test_get_settings_reports_consent_and_notice(mock_read):
+    mock_read.return_value = {"llm": {"per_provider": {}, "cloud_privacy_consent": True}}
+
+    resp = client.get("/api/providers/settings", headers=headers)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["cloud_privacy_consent"] is True
+    assert data.get("cloud_privacy_notice")
+
+
+@patch("app.api.providers.read_settings")
+@patch("app.api.providers.write_settings")
+def test_put_settings_rejects_cloud_provider_without_consent(mock_write, mock_read):
+    mock_read.return_value = {"llm": {"per_provider": {}}}
+
+    resp = client.put(
+        "/api/providers/settings", json={"provider": "gemini"}, headers=headers
+    )
+    assert resp.status_code == 400
+    mock_write.assert_not_called()
+
+
+@patch("app.api.providers.read_settings")
+@patch("app.api.providers.write_settings")
+def test_put_settings_allows_cloud_provider_when_consent_already_stored(mock_write, mock_read):
+    mock_read.return_value = {"llm": {"per_provider": {}, "cloud_privacy_consent": True}}
+
+    resp = client.put(
+        "/api/providers/settings", json={"provider": "gemini"}, headers=headers
+    )
+    assert resp.status_code == 200
+    mock_write.assert_called()
+
+
+@patch("app.api.providers.read_settings")
+@patch("app.api.providers.write_settings")
+def test_put_settings_allows_cloud_provider_when_consent_given_in_same_request(
+    mock_write, mock_read
+):
+    mock_read.return_value = {"llm": {"per_provider": {}}}
+
+    resp = client.put(
+        "/api/providers/settings",
+        json={"provider": "gemini", "cloud_privacy_consent": True},
+        headers=headers,
+    )
+    assert resp.status_code == 200
+    mock_write.assert_called()
+
+
+@patch("app.api.providers.read_settings")
+@patch("app.api.providers.write_settings")
+def test_put_settings_does_not_gate_local_providers(mock_write, mock_read):
+    mock_read.return_value = {"llm": {"per_provider": {}}}
+
+    resp = client.put("/api/providers/settings", json={"provider": "ollama"}, headers=headers)
+    assert resp.status_code == 200
+    mock_write.assert_called()
+
+
+@patch("app.api.providers.read_settings")
+@patch("app.api.providers.write_settings")
+def test_put_settings_does_not_gate_openai_compatible(mock_write, mock_read):
+    """openai_compatible is a user-supplied endpoint (often self-hosted), excluded from the gate."""
+    mock_read.return_value = {"llm": {"per_provider": {}}}
+
+    resp = client.put(
+        "/api/providers/settings", json={"provider": "openai_compatible"}, headers=headers
+    )
+    assert resp.status_code == 200
+    mock_write.assert_called()
+
+
+@patch("app.api.providers.read_settings")
+@patch("app.api.providers.write_settings")
+def test_put_settings_can_set_consent_alone(mock_write, mock_read):
+    mock_read.return_value = {"llm": {"per_provider": {}}}
+
+    resp = client.put(
+        "/api/providers/settings", json={"cloud_privacy_consent": True}, headers=headers
+    )
+    assert resp.status_code == 200
+    saved = mock_write.call_args[0][0]
+    assert saved["llm"]["cloud_privacy_consent"] is True
+
+
 # ── Local provider launch ──────────────────────────────────────────────────────
 
 

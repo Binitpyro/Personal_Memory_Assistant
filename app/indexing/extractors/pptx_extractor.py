@@ -2,6 +2,8 @@ import logging
 from collections.abc import Iterator
 from pathlib import Path
 
+from app.indexing.extractors._ooxml_guard import check_ooxml_archive
+
 logger = logging.getLogger(__name__)
 
 
@@ -19,6 +21,8 @@ class PptxExtractor:
         content, not the title.
         """
         try:
+            check_ooxml_archive(path)
+
             from pptx import Presentation  # type: ignore
 
             prs = Presentation(str(path))
@@ -64,6 +68,8 @@ class PptxExtractor:
 
                 if total > max_file_size:
                     break
+        except ValueError as ve:
+            logger.warning("PPTX extraction aborted: %s", ve)
         except Exception as e:
             logger.warning("Failed to extract PPTX %s: %s", path, e)
 

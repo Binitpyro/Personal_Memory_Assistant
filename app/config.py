@@ -112,6 +112,7 @@ class Settings(BaseSettings):
     openrouter_api_key: str = ""
 
     nvidia_nim_api_key: str = ""
+    nvidia_nim_base_url: str = ""
 
     openai_compatible_api_key: str = ""
     openai_compatible_base_url: str = ""

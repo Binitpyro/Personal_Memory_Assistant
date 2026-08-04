@@ -236,7 +236,12 @@ async def lifespan(fastapi_app: FastAPI):
                     current_sig[:63],
                 )
                 await db_manager.set_system_state("embedding_model_signature", current_sig)
-                # TODO: Implement precise vector-only re-embed (LanceDB + chunk_embeddings) without wiping FTS/history
+                # TODO: Auto-trigger a vector-only re-embed here using
+                # db_manager.clear_vectors_only() + LanceDBClient.clear_all()
+                # (see scripts/reindex_embeddings.py for the full rebuild flow).
+                # Not wired in automatically: this warn-only path would become
+                # an unprompted destructive wipe on every boot after a config
+                # change. Left as a manual step for now.
         except Exception as err:
             logger.warning("Failed during model signature check: %s", err)
 

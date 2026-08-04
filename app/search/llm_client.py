@@ -8,8 +8,10 @@ import keyring
 
 from app.config import settings
 from app.providers import (
+    PROVIDER_REGISTRY,
     BaseProvider,
     create_provider,
+    env_base_url,
     get_configured_provider_ids,
     get_default_chain,
 )
@@ -317,6 +319,7 @@ Answer:
                 pass
 
         # Load settings for base_url/model
+        data: dict = {}
         per_provider = {}
         try:
             data = SettingsStore.read()
@@ -324,8 +327,22 @@ Answer:
         except Exception:
             pass
 
+        # Cloud/aggregator providers may send data off-device; require explicit,
+        # region-independent opt-in (llm.cloud_privacy_consent) before dispatching.
+        # openai_compatible is exempt - it's a user-supplied endpoint, often self-hosted.
+        spec = PROVIDER_REGISTRY.get(pid)
+        if (
+            spec is not None
+            and spec.kind in ("cloud", "aggregator")
+            and not data.get("llm", {}).get("cloud_privacy_consent", False)
+        ):
+            raise ProviderNotConfiguredError(
+                f"Cloud privacy consent required before using provider {pid}. "
+                "Free-tier cloud dispatches may use inputs for model training."
+            )
+
         provider_settings = per_provider.get(pid, {})
-        base_url = provider_settings.get("base_url")
+        base_url = provider_settings.get("base_url") or env_base_url(pid)
 
         # Normalize legacy Anthropic base_url if pointing to spec default with appended /v1
         if pid == "anthropic" and base_url and base_url.rstrip("/") == "https://api.anthropic.com/v1":

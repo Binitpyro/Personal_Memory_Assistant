@@ -55,10 +55,9 @@ async def main() -> None:
     await lance.clear_all()
 
     logger.info("Clearing existing chunk_embeddings table …")
-    conn = db._get_conn()
-    await conn.execute("DELETE FROM chunk_embeddings")
-    await conn.commit()
+    await db.clear_vectors_only()
 
+    conn = db._get_conn()
     # Count total chunks
     async with conn.execute("SELECT COUNT(*) FROM chunks") as cur:
         row = await cur.fetchone()

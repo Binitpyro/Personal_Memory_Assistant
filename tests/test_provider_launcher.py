@@ -148,6 +148,18 @@ def test_resolve_candidate_returns_none_when_nothing_installed(monkeypatch):
 
 def test_resolve_candidate_picks_first_available(monkeypatch):
     monkeypatch.setattr(
+        launcher,
+        "LAUNCHERS",
+        {
+            "ollama": (
+                LaunchCandidate(
+                    target="C:\\Programs\\Ollama\\ollama app.exe", label="Ollama desktop app"
+                ),
+                LaunchCandidate(target="ollama", args=("serve",), label="ollama serve"),
+            ),
+        },
+    )
+    monkeypatch.setattr(
         launcher, "_resolve_target", lambda target: "C:\\resolved.exe" if "app" in target else None
     )
     resolved = launcher.resolve_candidate("ollama")

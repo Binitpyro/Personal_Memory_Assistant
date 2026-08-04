@@ -46,6 +46,20 @@ def is_local_endpoint_reachable(url: str, timeout: float = 0.2, use_cache: bool 
         return False
 
 
+def env_base_url(provider_id: str) -> str | None:
+    """Base URL from .env for *provider_id*, if any.
+
+    Settings uses two naming shapes: cloud providers carry `<id>_base_url`
+    (openai_base_url, openai_compatible_base_url, nvidia_nim_base_url), local
+    ones carry `<id>_url` (ollama_url, lm_studio_url). Check both.
+    """
+    for attr in (f"{provider_id}_base_url", f"{provider_id}_url"):
+        value = getattr(settings, attr, None)
+        if value:
+            return str(value)
+    return None
+
+
 def get_configured_provider_ids() -> list[str]:
     """
     Dynamically returns all currently configured provider IDs.

@@ -20,6 +20,8 @@ from app.providers import (
 )
 from app.providers.base import ValidationResult
 from app.providers.cache import validation_cache
+from app.providers.launcher import get_launch_status
+from app.providers.launcher import launch as launch_local_provider
 from app.settings_store import CURRENT_SCHEMA_VERSION, SettingsStore
 
 logger = logging.getLogger(__name__)
@@ -281,6 +283,53 @@ async def self_test_provider(provider_id: str):
         return {"ok": False, "error": str(e)}
     finally:
         await provider.close()
+
+
+def _resolve_base_url(provider_id: str, data: dict) -> str:
+    """Saved override -> environment (.env) -> registry default."""
+    per_provider = data.get("llm", {}).get("per_provider", {})
+    saved = (per_provider.get(provider_id) or {}).get("base_url")
+    if saved:
+        return str(saved)
+
+    env_url = getattr(settings, f"{provider_id}_url", None)
+    if env_url:
+        return str(env_url)
+
+    return PROVIDER_REGISTRY[provider_id].default_base_url or ""
+
+
+async def _base_url_for(provider_id: str) -> str:
+    data = await asyncio.to_thread(read_settings)
+    data = migrate_settings_if_needed(data)
+    return _resolve_base_url(provider_id, data)
+
+
+@providers_router.get("/{provider_id}/launch_status")
+async def provider_launch_status(provider_id: str) -> dict:
+    """Can PMA start this provider, and is it already up?"""
+    if provider_id not in PROVIDER_IDS:
+        raise HTTPException(status_code=400, detail=f"Unknown provider: {provider_id}")
+
+    base_url = await _base_url_for(provider_id)
+    return await asyncio.to_thread(get_launch_status, provider_id, base_url)
+
+
+@providers_router.post("/{provider_id}/launch")
+async def launch_provider(provider_id: str) -> dict:
+    """Start a local provider and wait until it answers.
+
+    Takes no request body on purpose: the executable is chosen entirely from a fixed
+    table in app/providers/launcher.py, never from caller input.
+
+    Like /validate, expected failures come back as HTTP 200 with ok=false and an
+    error_code so the UI can render them without treating them as exceptions.
+    """
+    if provider_id not in PROVIDER_IDS:
+        raise HTTPException(status_code=400, detail=f"Unknown provider: {provider_id}")
+
+    base_url = await _base_url_for(provider_id)
+    return await launch_local_provider(provider_id, base_url)
 
 
 @providers_router.put("/{provider_id}/key")

@@ -564,6 +564,34 @@ export const setProviderDefaultModel = (id: string, model: string) =>
   });
 export const getCurrentProvider = () => json<{ provider: string; model: string }>('/providers/current');
 
+/** Whether PMA can start this provider itself (Ollama / LM Studio only). */
+export interface ProviderLaunchStatus {
+  provider_id: string;
+  supported: boolean;
+  installed: boolean;
+  running: boolean;
+  /** Human label for how it would be started, e.g. "Ollama desktop app". */
+  method: string | null;
+  install_url: string | null;
+}
+
+export interface ProviderLaunchResult {
+  ok: boolean;
+  running: boolean;
+  already_running: boolean;
+  message: string;
+  /** not_supported | unsupported_platform | not_installed | launch_failed | timeout | manual_step_required */
+  error_code: string | null;
+  elapsed_ms: number;
+}
+
+export const getProviderLaunchStatus = (id: string) =>
+  json<ProviderLaunchStatus>(`/providers/${id}/launch_status`);
+
+/** Starts the provider and resolves once its port answers (can take ~30s). */
+export const launchProvider = (id: string) =>
+  json<ProviderLaunchResult>(`/providers/${id}/launch`, { method: 'POST' });
+
 export interface ProviderRoutingSettings {
   provider: string;
   fallback_chain: string[];

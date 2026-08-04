@@ -21,10 +21,15 @@ def clear_reachability_cache() -> None:
     _reachability_cache.clear()
 
 
-def is_local_endpoint_reachable(url: str, timeout: float = 0.2) -> bool:
-    """Fast socket check (0.2s) with 5s TTL cache to verify local service availability."""
+def is_local_endpoint_reachable(url: str, timeout: float = 0.2, use_cache: bool = True) -> bool:
+    """Fast socket check (0.2s) with 5s TTL cache to verify local service availability.
+
+    Pass use_cache=False to force a fresh probe. The result is still written to the
+    cache, so a service that just came up is immediately visible to every other caller
+    (see app/providers/launcher.py, which polls a provider it has just started).
+    """
     now = time.monotonic()
-    if url in _reachability_cache:
+    if use_cache and url in _reachability_cache:
         cached_res, cached_ts = _reachability_cache[url]
         if now - cached_ts < _REACHABILITY_TTL:
             return cached_res

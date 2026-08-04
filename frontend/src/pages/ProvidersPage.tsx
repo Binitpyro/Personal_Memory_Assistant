@@ -415,12 +415,29 @@ export function ProvidersPage() {
                   </div>
                 )}
 
-                {selectedId === 'gemini' && (
-                  <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-xl text-xs text-amber-800 flex items-start gap-2">
-                    <Zap className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-                    <span>
-                      <strong>Privacy & Region Notice:</strong> Free-tier Google Gemini API keys may process input data for model training per Google Terms of Service (EEA/CH/UK accounts subject to region restrictions). For full privacy, use local models or a paid API tier.
-                    </span>
+                {(selectedProvider.spec.kind === 'cloud' || selectedProvider.spec.kind === 'aggregator') && (
+                  <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-xl text-xs text-amber-800 flex flex-col gap-2.5">
+                    <div className="flex items-start gap-2">
+                      <Zap className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                      <span>
+                        <strong>Privacy Notice:</strong>{' '}
+                        {routingSettings?.cloud_privacy_notice ||
+                          'Free-tier cloud dispatches may use data inputs for model training/improvement per provider terms and are restricted for EEA, Switzerland, and UK users.'}
+                      </span>
+                    </div>
+                    <label className="flex items-center gap-2 pl-6 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={!!routingSettings?.cloud_privacy_consent}
+                        onChange={async e => {
+                          await setProviderSettings({ cloud_privacy_consent: e.target.checked });
+                          invalidateCache('provider-settings');
+                          refetchSettings();
+                        }}
+                        className="rounded border-amber-500/40"
+                      />
+                      <span className="font-medium">I understand and consent to cloud data processing</span>
+                    </label>
                   </div>
                 )}
 

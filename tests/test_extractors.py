@@ -6,6 +6,7 @@ Covers all 7 file extractors in app/indexing/extractors/:
 """
 
 import json
+import zipfile
 from unittest.mock import MagicMock, patch
 
 from app.indexing.extractors import EXTRACTORS
@@ -217,6 +218,104 @@ class TestDocxExtractor:
         result = self.ext.extract(tmp_path / "missing.docx", MAX_SIZE)
         assert result == ""
 
+    def test_docx_extracts_headers_footers_and_footnotes(self, tmp_path):
+        """Body text comes first; headers/footers/footnotes are appended,
+        each labeled. A linked (inherited) second-section header must not
+        duplicate the first section's header text."""
+        from docx import Document
+        from docx.enum.section import WD_SECTION
+
+        doc = Document()
+        doc.add_paragraph("Body paragraph text")
+
+        section1 = doc.sections[0]
+        section1.header.is_linked_to_previous = False
+        section1.header.paragraphs[0].text = "Header text here"
+        section1.footer.is_linked_to_previous = False
+        section1.footer.paragraphs[0].text = "Footer text here"
+
+        # Second section left linked to the previous one (the default) - its
+        # header/footer must NOT be re-emitted.
+        doc.add_section(WD_SECTION.NEW_PAGE)
+        doc.add_paragraph("Section 2 body")
+
+        buf_path = tmp_path / "sections.docx"
+        doc.save(str(buf_path))
+
+        # Inject a minimal footnotes.xml part - python-docx has no API to
+        # add footnotes, so this is done directly at the OOXML level,
+        # mirroring how a real Word-authored footnote is packaged.
+        with zipfile.ZipFile(str(buf_path)) as zf:
+            contents = {n: zf.read(n) for n in zf.namelist()}
+
+        content_types = contents["[Content_Types].xml"].decode("utf-8")
+        doc_rels = contents["word/_rels/document.xml.rels"].decode("utf-8")
+
+        footnotes_xml = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+            '<w:footnote w:type="separator" w:id="-1">'
+            "<w:p><w:r><w:separator/></w:r></w:p></w:footnote>"
+            '<w:footnote w:type="continuationSeparator" w:id="0">'
+            "<w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>"
+            '<w:footnote w:id="1"><w:p><w:r><w:t>Footnote body text</w:t></w:r></w:p></w:footnote>'
+            "</w:footnotes>"
+        )
+        content_types = content_types.replace(
+            "</Types>",
+            '<Override PartName="/word/footnotes.xml" '
+            "ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml"
+            '.footnotes+xml"/></Types>',
+        )
+        doc_rels = doc_rels.replace(
+            "</Relationships>",
+            '<Relationship Id="rIdFootnotes" '
+            'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes" '
+            'Target="footnotes.xml"/></Relationships>',
+        )
+        contents["[Content_Types].xml"] = content_types.encode("utf-8")
+        contents["word/_rels/document.xml.rels"] = doc_rels.encode("utf-8")
+        contents["word/footnotes.xml"] = footnotes_xml.encode("utf-8")
+
+        with zipfile.ZipFile(str(buf_path), "w", zipfile.ZIP_DEFLATED) as zf:
+            for name, data in contents.items():
+                zf.writestr(name, data)
+
+        result = list(self.ext.extract_stream(buf_path, MAX_SIZE))
+
+        assert result[0] == "Body paragraph text"
+        assert result[1] == "Section 2 body"
+        assert "[Header] Header text here" in result
+        assert "[Footer] Footer text here" in result
+        assert "[Footnote] Footnote body text" in result
+        # Linked second-section header must not duplicate section 1's header.
+        assert result.count("[Header] Header text here") == 1
+        # No boilerplate separator/continuationSeparator entries leaked.
+        assert not any("separator" in r.lower() for r in result if "Footnote" in r)
+
+    def test_docx_zip_bomb_prevention(self, tmp_path):
+        fake_docx = tmp_path / "zip_bomb.docx"
+        fake_docx.touch()
+
+        mock_info = MagicMock()
+        mock_info.file_size = 101 * 1024 * 1024
+        mock_info.compress_size = 1024
+
+        mock_zf = MagicMock()
+        mock_zf.__enter__.return_value = mock_zf
+        mock_zf.infolist.return_value = [mock_info]
+
+        mock_docx = MagicMock()
+
+        with (
+            patch("zipfile.ZipFile", return_value=mock_zf),
+            patch.dict("sys.modules", {"docx": mock_docx}),
+        ):
+            result = self.ext.extract(fake_docx, MAX_SIZE)
+
+        assert result == ""
+        mock_docx.Document.assert_not_called()
+
 
 # ── XLSX (mocked openpyxl) ────────────────────────────────────────────────────
 
@@ -356,6 +455,29 @@ class TestPptxExtractor:
     def test_missing_file_returns_empty(self, tmp_path):
         result = self.ext.extract(tmp_path / "missing.pptx", MAX_SIZE)
         assert result == ""
+
+    def test_pptx_zip_bomb_prevention(self, tmp_path):
+        fake_pptx = tmp_path / "zip_bomb.pptx"
+        fake_pptx.touch()
+
+        mock_info = MagicMock()
+        mock_info.file_size = 101 * 1024 * 1024
+        mock_info.compress_size = 1024
+
+        mock_zf = MagicMock()
+        mock_zf.__enter__.return_value = mock_zf
+        mock_zf.infolist.return_value = [mock_info]
+
+        mock_pptx = MagicMock()
+
+        with (
+            patch("zipfile.ZipFile", return_value=mock_zf),
+            patch.dict("sys.modules", {"pptx": mock_pptx}),
+        ):
+            result = self.ext.extract(fake_pptx, MAX_SIZE)
+
+        assert result == ""
+        mock_pptx.Presentation.assert_not_called()
 
     def _make_mock_prs(self, mock_pptx, slide):
         mock_prs = MagicMock()
@@ -546,6 +668,32 @@ class TestEpubExtractor:
         assert "Welcome to standard text." in result
         assert "This is second page." in result
         assert "ignored" not in result
+
+    def test_epub_strips_inline_script_and_style_content(self, tmp_path):
+        """_HTML_TAG_RE alone strips tags but leaves enclosed text, so a
+        <script> body or <style> ruleset would otherwise land in the index
+        as prose."""
+        fake_epub = tmp_path / "script_style.epub"
+
+        with zipfile.ZipFile(fake_epub, "w") as zf:
+            zf.writestr("mimetype", "application/epub+zip")
+            zf.writestr(
+                "OEBPS/ch1.xhtml",
+                "<html><head><style>body { color: red; font-size: 12px; } "
+                ".warning-class-name { display: none; }</style>"
+                "<script>function trackEvent() { alert('leak-marker-token'); "
+                "console.log('another leak'); }</script></head>"
+                "<body><p>Legitimate chapter prose that is long enough to "
+                "clear the fifty character minimum threshold check easily.</p>"
+                "</body></html>",
+            )
+
+        result = self.ext.extract(fake_epub, MAX_SIZE)
+        assert "Legitimate chapter prose" in result
+        assert "leak-marker-token" not in result
+        assert "trackEvent" not in result
+        assert "color: red" not in result
+        assert "warning-class-name" not in result
 
     def test_epub_zip_bomb_prevention(self, tmp_path):
         fake_epub = tmp_path / "zip_bomb.epub"

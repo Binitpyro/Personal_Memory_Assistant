@@ -9,11 +9,13 @@ import keyring
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Extra
 
+from app.api.models import PRIVACY_NOTICE
 from app.config import settings
 from app.providers import (
     PROVIDER_IDS,
     PROVIDER_REGISTRY,
     create_provider,
+    env_base_url,
     get_configured_provider_ids,
     get_default_chain,
     get_default_chain_async,
@@ -93,9 +95,13 @@ class SetDefaultModelPayload(BaseModel):
 class LLMGeneralSettingsPayload(BaseModel):
     provider: str | None = None
     fallback_chain: list[str] | None = None
+    cloud_privacy_consent: bool | None = None
 
     class Config:
         extra = Extra.ignore
+
+
+_GATED_PROVIDER_KINDS = ("cloud", "aggregator")
 
 
 @providers_router.get("/settings")
@@ -109,6 +115,8 @@ async def get_llm_settings():
     return {
         "provider": llm.get("provider", "auto"),
         "fallback_chain": saved_chain or await get_default_chain_async(),
+        "cloud_privacy_consent": llm.get("cloud_privacy_consent", False),
+        "cloud_privacy_notice": PRIVACY_NOTICE,
     }
 
 
@@ -116,8 +124,26 @@ async def get_llm_settings():
 async def update_llm_settings(payload: LLMGeneralSettingsPayload):
     data = await asyncio.to_thread(read_settings)
     data = migrate_settings_if_needed(data)
+
+    consent = data["llm"].get("cloud_privacy_consent", False)
+    if payload.cloud_privacy_consent is not None:
+        consent = payload.cloud_privacy_consent
+
     if payload.provider is not None:
+        gated_selection = (
+            payload.provider in PROVIDER_REGISTRY
+            and PROVIDER_REGISTRY[payload.provider].kind in _GATED_PROVIDER_KINDS
+        )
+        if gated_selection and not consent:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Explicit consent (cloud_privacy_consent=true) is required to select cloud "
+                    "providers. Free-tier cloud dispatches may use inputs for model training."
+                ),
+            )
         data["llm"]["provider"] = payload.provider
+
     if payload.fallback_chain is not None:
         for pid in payload.fallback_chain:
             if pid not in PROVIDER_IDS:
@@ -125,6 +151,10 @@ async def update_llm_settings(payload: LLMGeneralSettingsPayload):
                     status_code=400, detail=f"Invalid provider ID in fallback chain: {pid}"
                 )
         data["llm"]["fallback_chain"] = payload.fallback_chain
+
+    if payload.cloud_privacy_consent is not None:
+        data["llm"]["cloud_privacy_consent"] = payload.cloud_privacy_consent
+
     await asyncio.to_thread(write_settings, data)
     return {"status": "success"}
 
@@ -161,7 +191,9 @@ async def list_providers():
                 pass
 
         provider_settings = per_provider.get(pid, {})
-        base_url = provider_settings.get("base_url") or spec.default_base_url
+        base_url = (
+            provider_settings.get("base_url") or env_base_url(pid) or spec.default_base_url
+        )
         default_model = provider_settings.get("default_model")
 
         api_key = env_key
@@ -214,7 +246,7 @@ async def validate_provider(provider_id: str, payload: ValidatePayload) -> Valid
     provider_settings = per_provider.get(provider_id, {})
 
     if base_url is None:
-        base_url = provider_settings.get("base_url")
+        base_url = provider_settings.get("base_url") or env_base_url(provider_id)
 
     if api_key is None:
         env_key_name = f"{provider_id}_api_key"
@@ -247,7 +279,7 @@ async def self_test_provider(provider_id: str):
     data = migrate_settings_if_needed(data)
     per_provider = data.get("llm", {}).get("per_provider", {})
     provider_settings = per_provider.get(provider_id, {})
-    base_url = provider_settings.get("base_url")
+    base_url = provider_settings.get("base_url") or env_base_url(provider_id)
     default_model = provider_settings.get("default_model")
 
     env_key_name = f"{provider_id}_api_key"
@@ -292,9 +324,9 @@ def _resolve_base_url(provider_id: str, data: dict) -> str:
     if saved:
         return str(saved)
 
-    env_url = getattr(settings, f"{provider_id}_url", None)
+    env_url = env_base_url(provider_id)
     if env_url:
-        return str(env_url)
+        return env_url
 
     return PROVIDER_REGISTRY[provider_id].default_base_url or ""
 

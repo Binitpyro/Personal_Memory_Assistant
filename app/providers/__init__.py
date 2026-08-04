@@ -5,6 +5,7 @@ from app.providers.groq import GroqProvider
 from app.providers.lm_studio import LMStudioProvider
 from app.providers.manifest import (
     PROVIDER_IDS,
+    env_base_url,
     get_configured_provider_ids,
     get_configured_provider_ids_async,
     get_default_chain,
@@ -34,6 +35,7 @@ __all__ = [
     "ProviderSpec",
     "ValidationResult",
     "create_provider",
+    "env_base_url",
     "get_configured_provider_ids",
     "get_configured_provider_ids_async",
     "get_default_chain",

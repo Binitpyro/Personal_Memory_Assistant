@@ -324,6 +324,45 @@ async def test_check_lm_studio_health():
 
 
 @pytest.mark.asyncio
+async def test_resolve_provider_by_id_blocks_cloud_without_consent(monkeypatch):
+    from app.search.llm_client import ProviderNotConfiguredError
+
+    client = LLMClient()
+    monkeypatch.setattr(
+        "app.search.llm_client.SettingsStore.read",
+        lambda: {"llm": {"per_provider": {}, "cloud_privacy_consent": False}},
+    )
+    with pytest.raises(ProviderNotConfiguredError):
+        await client._resolve_provider_by_id("gemini")
+
+
+@pytest.mark.asyncio
+async def test_resolve_provider_by_id_allows_cloud_with_consent(monkeypatch):
+    client = LLMClient()
+    monkeypatch.setattr(
+        "app.search.llm_client.SettingsStore.read",
+        lambda: {"llm": {"per_provider": {}, "cloud_privacy_consent": True}},
+    )
+    monkeypatch.setattr("app.config.settings.gemini_api_key", "fake-key")
+    provider = await client._resolve_provider_by_id("gemini")
+    assert provider is not None
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_resolve_provider_by_id_does_not_gate_local_providers(monkeypatch):
+    client = LLMClient()
+    client._check_ollama_health = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "app.search.llm_client.SettingsStore.read",
+        lambda: {"llm": {"per_provider": {}, "cloud_privacy_consent": False}},
+    )
+    provider = await client._resolve_provider_by_id("ollama")
+    assert provider is not None
+    await provider.close()
+
+
+@pytest.mark.asyncio
 async def test_generate_answer():
     client = LLMClient()
     client._ensure_token_loaded = AsyncMock()

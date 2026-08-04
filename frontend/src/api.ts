@@ -595,11 +595,13 @@ export const launchProvider = (id: string) =>
 export interface ProviderRoutingSettings {
   provider: string;
   fallback_chain: string[];
+  cloud_privacy_consent?: boolean;
+  cloud_privacy_notice?: string;
 }
 
 export const getProviderSettings = () => json<ProviderRoutingSettings>('/providers/settings');
-export const setProviderSettings = (settings: ProviderRoutingSettings) =>
-  json<ProviderRoutingSettings>('/providers/settings', {
+export const setProviderSettings = (settings: Partial<ProviderRoutingSettings>) =>
+  json<{ status: string }>('/providers/settings', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(settings)

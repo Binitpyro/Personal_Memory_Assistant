@@ -1525,6 +1525,27 @@ class DatabaseManager:
         logger.info("Cleared all data: %d files, %d chunks", files_count, chunks_count)
         return {"files_removed": files_count, "chunks_removed": chunks_count}
 
+    @serialize_write
+    async def clear_vectors_only(self) -> dict[str, int]:
+        """Delete embeddings only, leaving files/chunks/FTS/history intact.
+
+        The model-change-safe counterpart to clear_all(). Must not touch
+        `chunks` - the ON DELETE CASCADE would take chunk_embeddings with it
+        and fire the FTS delete triggers, silently degrading into a full wipe.
+        """
+        async with self._get_read_conn() as read_pool_conn:
+            cur = await read_pool_conn.execute("SELECT COUNT(*) FROM chunk_embeddings")
+            row = await cur.fetchone()
+            embeddings_count = row[0] if row else 0
+            await cur.close()
+
+        conn = self._get_conn()
+        await conn.execute("DELETE FROM chunk_embeddings")
+        await conn.commit()
+
+        logger.info("Cleared vectors only: %d embeddings removed", embeddings_count)
+        return {"embeddings_removed": embeddings_count}
+
     async def get_files_by_filter(
         self,
         file_type: str | None = None,

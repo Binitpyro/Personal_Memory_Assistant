@@ -63,6 +63,28 @@ def anyio_backend():
     return "asyncio"
 
 
+@pytest.fixture(autouse=True)
+def isolate_settings_file(monkeypatch, tmp_path):
+    """Point SettingsStore at a per-test file, never the developer's real one.
+
+    `data/settings.json` is gitignored, so any test that reaches it passes or
+    fails according to how the app happens to be configured on that machine -
+    and a clean checkout can never reproduce the failure. It bit
+    `test_llm_client_providers.py::test_generate_answer`, which assumes the
+    *default* provider fallback chain: once real settings existed with a saved
+    chain, `_get_effective_fallback_chain()` returned that instead and the test
+    failed on a developer machine while passing in CI.
+
+    Individual tests that patch `app.settings_store.SETTINGS_PATH` themselves
+    still work - they simply override this default. This fixture is the floor,
+    not a replacement for deliberate setup.
+
+    Same intent as `settings.db_path = ":memory:"` above: tests must not read
+    or write real user state.
+    """
+    monkeypatch.setattr("app.settings_store.SETTINGS_PATH", tmp_path / "settings.json")
+
+
 @pytest.fixture
 async def mock_db():
     db = DatabaseManager(":memory:")

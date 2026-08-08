@@ -25,7 +25,7 @@ def test_compute_rrf_scores_and_filter_results(monkeypatch):
 
     fts = [{"id": "1"}, {"id": "2"}]
     sem = [{"id": "2"}, {"id": "3"}]
-    ranked = retrieval._compute_rrf_scores(fts, sem, k=3)
+    ranked = retrieval._compute_rrf_scores(fts, sem, None, k=3)
 
     ids = [chunk_id for chunk_id, _ in ranked]
     assert "2" in ids
@@ -143,19 +143,16 @@ def test_build_candidate_results_deduplication(monkeypatch):
     text3 = "different" * 50  # completely different
 
     row_map = {
-        1: (1, text1, "file1.txt", "tag1", 12345, 0, 10, "[]", "1.0"),
-        2: (2, text2, "file2.txt", "tag2", 12345, 0, 10, "[]", "1.0"),
-        3: (3, text3, "file3.txt", "tag3", 12345, 0, 10, "[]", "1.0"),
+        1: (1, text1, "file1.txt", "tag1", 12345, 0, 10, "[]", "1.0", 11),
+        2: (2, text2, "file2.txt", "tag2", 12345, 0, 10, "[]", "1.0", 12),
+        3: (3, text3, "file3.txt", "tag3", 12345, 0, 10, "[]", "1.0", 13),
     }
     chunk_ids_ordered = [1, 2, 3]
     score_map = {1: 1.0, 2: 0.9, 3: 0.8}
-    relevant_doc_paths = set()
 
     monkeypatch.setattr(retrieval.settings, "rrf_score_scale", 1.0)
 
-    results = retrieval._build_candidate_results(
-        chunk_ids_ordered, row_map, score_map, relevant_doc_paths
-    )
+    results = retrieval._build_candidate_results(chunk_ids_ordered, row_map, score_map)
 
     # Expected: chunk 1 and chunk 3. Chunk 2 is a duplicate signature.
     assert len(results) == 2
@@ -170,13 +167,13 @@ def test_build_candidate_results_deduplication(monkeypatch):
 def test_build_candidate_results_short_text():
     # Chunks < 50 chars should be skipped
     row_map = {
-        1: (1, "too short", "file1.txt", "tag1", 12345, 0, 10, "[]", "1.0"),
-        2: (2, "A" * 60, "file2.txt", "tag2", 12345, 0, 10, "[]", "1.0"),
+        1: (1, "too short", "file1.txt", "tag1", 12345, 0, 10, "[]", "1.0", 11),
+        2: (2, "A" * 60, "file2.txt", "tag2", 12345, 0, 10, "[]", "1.0", 12),
     }
     chunk_ids_ordered = [1, 2]
     score_map = {1: 1.0, 2: 0.9}
 
-    results = retrieval._build_candidate_results(chunk_ids_ordered, row_map, score_map, set())
+    results = retrieval._build_candidate_results(chunk_ids_ordered, row_map, score_map)
 
     assert len(results) == 1
     assert results[0]["chunk_id"] == 2

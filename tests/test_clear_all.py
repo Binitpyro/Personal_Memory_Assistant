@@ -65,6 +65,33 @@ async def test_clear_all_and_fts_behavior(mock_db: DatabaseManager):
 
 
 @pytest.mark.asyncio
+async def test_clear_all_drops_the_ocr_queue_but_keeps_the_cache(mock_db: DatabaseManager):
+    """The asymmetry is deliberate and easy to "fix" by mistake.
+
+    `ocr_queue` refers to files that no longer exist after a wipe, so it goes.
+    `ocr_cache` is keyed on content hash, so it stays valid and makes
+    re-indexing the same documents free instead of re-running OCR.
+    """
+    from app.ocr import cache as ocr_cache
+    from app.ocr import queue as ocr_queue
+    from app.ocr.types import OcrLine, OcrPage
+
+    await ocr_queue.enqueue_document(mock_db, r"C:\docs\scan.pdf", [0, 1], 2)
+    await ocr_cache.put_pages(
+        mock_db,
+        "d" * 64,
+        [OcrPage(page_num=0, lines=(OcrLine("cached page text", 0.9, False),), mean_conf=0.9)],
+    )
+
+    await mock_db.clear_all()
+
+    queued = await mock_db.execute_query("SELECT COUNT(*) FROM ocr_queue")
+    cached = await mock_db.execute_query("SELECT COUNT(*) FROM ocr_cache")
+    assert queued[0][0] == 0, "ocr_queue should be cleared with the rest of the index"
+    assert cached[0][0] == 1, "ocr_cache must survive - it is keyed on content, not file id"
+
+
+@pytest.mark.asyncio
 async def test_clear_vectors_only_leaves_files_chunks_and_fts_intact(mock_db: DatabaseManager):
     """clear_vectors_only() is the model-change-safe counterpart to clear_all():
     it must remove chunk_embeddings only, leaving everything else - including

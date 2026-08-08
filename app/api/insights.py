@@ -52,6 +52,18 @@ async def get_insights_by_type(extension: str = Query(...), db: DatabaseManager 
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+@router.get("/insights/portrait")
+async def get_insights_portrait():
+    from app.insights.portrait import generate_portrait
+
+    try:
+        data = await generate_portrait()
+        return data
+    except Exception as e:
+        logger.error(f"Error generating portrait: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
 @router.get("/files/tree")
 async def get_files_tree(db: DatabaseManager = Depends(get_db)):
     from app.state import CACHE_TTL as _CACHE_TTL

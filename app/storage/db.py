@@ -279,6 +279,9 @@ class DatabaseManager:
                 "chunks_segmenter_version",
                 "ALTER TABLE chunks ADD COLUMN segmenter_version TEXT",
             ),
+            # Provenance for OCR: lets a re-OCR replace only the chunks the OCR
+            # worker produced, leaving native text in a mixed PDF intact.
+            ("chunks_source", "ALTER TABLE chunks ADD COLUMN source TEXT"),
         ]
         for col_name, ddl in migrations:
             if await _already_applied(col_name):
@@ -470,6 +473,58 @@ class DatabaseManager:
             logger.debug("kg_edges table ensured.")
         except Exception as exc:
             logger.debug("kg_edges migration note: %s", exc)
+
+        # OCR work queue (deferred: scanned pages are enqueued during indexing
+        # and drained afterwards, so a slow engine never stalls extraction).
+        try:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS ocr_queue (
+                    file_path   TEXT PRIMARY KEY,
+                    pages_json  TEXT NOT NULL DEFAULT '[]',
+                    page_count  INTEGER NOT NULL DEFAULT 0,
+                    pages_done  INTEGER NOT NULL DEFAULT 0,
+                    tier        TEXT NOT NULL DEFAULT 'cpu',
+                    status      TEXT NOT NULL DEFAULT 'pending',
+                    force_ocr   INTEGER NOT NULL DEFAULT 0,
+                    attempts    INTEGER NOT NULL DEFAULT 0,
+                    last_error  TEXT NOT NULL DEFAULT '',
+                    enqueued_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+            """)
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ocr_queue_status ON ocr_queue(status, enqueued_at)"
+            )
+            await conn.commit()
+            logger.debug("ocr_queue table ensured.")
+        except Exception as exc:
+            logger.debug("ocr_queue migration note: %s", exc)
+
+        # OCR page cache, keyed on content hash so it outlives both the file
+        # row and a full index reset. See clear_all() for why it is excluded
+        # from the broad wipe.
+        try:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS ocr_cache (
+                    content_key   TEXT NOT NULL,
+                    page_num      INTEGER NOT NULL,
+                    model_version TEXT NOT NULL,
+                    preproc_hash  TEXT NOT NULL,
+                    text          TEXT NOT NULL DEFAULT '',
+                    mean_conf     REAL NOT NULL DEFAULT 0.0,
+                    bytes         INTEGER NOT NULL DEFAULT 0,
+                    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+                    last_used_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                    PRIMARY KEY (content_key, page_num, model_version, preproc_hash)
+                )
+            """)
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ocr_cache_lru ON ocr_cache(last_used_at)"
+            )
+            await conn.commit()
+            logger.debug("ocr_cache table ensured.")
+        except Exception as exc:
+            logger.debug("ocr_cache migration note: %s", exc)
 
         # Phase 9.1: Drop the heavy covering index that duplicates chunk text
         try:
@@ -756,6 +811,8 @@ class DatabaseManager:
                 else c["text_preview"],
                 "sentence_offsets": c.get("sentence_offsets"),
                 "segmenter_version": c.get("segmenter_version"),
+                # NULL for natively-extracted text; 'ocr' for worker output.
+                "source": c.get("source"),
             }
             for c in chunks
         ]
@@ -765,8 +822,8 @@ class DatabaseManager:
             ids: list[int] = []
             for chunk in insert_data:
                 async with conn.execute(
-                    "INSERT INTO chunks (file_id, start_offset, end_offset, text_preview, sentence_offsets, segmenter_version) "
-                    "VALUES (:file_id, :start_offset, :end_offset, :text_preview, :sentence_offsets, :segmenter_version) RETURNING id;",
+                    "INSERT INTO chunks (file_id, start_offset, end_offset, text_preview, sentence_offsets, segmenter_version, source) "
+                    "VALUES (:file_id, :start_offset, :end_offset, :text_preview, :sentence_offsets, :segmenter_version, :source) RETURNING id;",
                     chunk,
                 ) as cursor:
                     row = await cursor.fetchone()
@@ -809,8 +866,8 @@ class DatabaseManager:
             for i in range(0, len(insert_data), max_rows_per_query):
                 batch = insert_data[i : i + max_rows_per_query]
                 await conn.executemany(
-                    "INSERT INTO chunks (file_id, start_offset, end_offset, text_preview, sentence_offsets, segmenter_version) "
-                    "VALUES (:file_id, :start_offset, :end_offset, :text_preview, :sentence_offsets, :segmenter_version);",
+                    "INSERT INTO chunks (file_id, start_offset, end_offset, text_preview, sentence_offsets, segmenter_version, source) "
+                    "VALUES (:file_id, :start_offset, :end_offset, :text_preview, :sentence_offsets, :segmenter_version, :source);",
                     batch,
                 )
 
@@ -973,6 +1030,74 @@ class DatabaseManager:
                     for r in rows
                 ]
 
+    async def get_chunk_ids_for_paths(
+        self, paths: list[str], per_file_limit: int = 5
+    ) -> dict[str, list[int]]:
+        """Map file paths to their first ``per_file_limit`` chunk ids, in document order.
+
+        Used by retrieval to turn a ranked list of *documents* (from the summary
+        index) into chunk-id candidates that can participate in RRF. Bounded per
+        file so a single long document cannot dominate the fused list.
+        """
+        if not paths or per_file_limit <= 0:
+            return {}
+
+        placeholders = ",".join("?" for _ in paths)
+        query = f"""
+            SELECT f.path, c.id
+            FROM chunks c
+            JOIN files f ON c.file_id = f.id
+            WHERE f.path IN ({placeholders})
+            ORDER BY f.path, c.id
+        """  # nosec B608 # noqa: S608
+
+        by_path: dict[str, list[int]] = {}
+        async with self._get_read_conn() as conn, conn.execute(query, tuple(paths)) as cursor:
+            rows = await cursor.fetchall()
+        for path, chunk_id in rows:
+            bucket = by_path.setdefault(path, [])
+            if len(bucket) < per_file_limit:
+                bucket.append(chunk_id)
+        return by_path
+
+    @staticmethod
+    def _bfs_cte(placeholders: str) -> str:
+        """The recursive traversal CTE, without a projection.
+
+        Split out from `bfs_from_chunks` so the traversal itself is observable:
+        the outer query's `SELECT DISTINCT ... LIMIT` collapses the result set,
+        which means a correct traversal and a re-expanding one return identical
+        rows. The difference is entirely in how large the working table gets on
+        the way there, and that is only measurable against this fragment.
+
+        UNION (not UNION ALL) gives SQLite's working-table dedup, which is the
+        visited set this bidirectional traversal needs. With UNION ALL every
+        edge ping-pongs A->B->A->B to max_depth. SQLite requires all compound
+        operators in one recursive CTE to match, so both terms use UNION.
+        """
+        return f"""
+        WITH RECURSIVE
+        bfs_nodes(id, depth) AS (
+            SELECT id, 0
+            FROM kg_nodes
+            WHERE json_extract(properties, '$.chunk_id') IN ({placeholders})
+
+            UNION
+
+            SELECT e.target, b.depth + 1
+            FROM kg_edges e
+            JOIN bfs_nodes b ON e.source = b.id
+            WHERE b.depth < ?
+
+            UNION
+
+            SELECT e.source, b.depth + 1
+            FROM kg_edges e
+            JOIN bfs_nodes b ON e.target = b.id
+            WHERE b.depth < ?
+        )
+        """  # nosec B608 # noqa: S608
+
     async def bfs_from_chunks(
         self, chunk_ids: list[int], max_depth: int = 3, limit: int = 5
     ) -> list[int]:
@@ -981,34 +1106,15 @@ class DatabaseManager:
             return []
 
         placeholders = ",".join("?" for _ in chunk_ids)
-        # We query for edges traversed from the starting nodes
-        query = f"""
-        WITH RECURSIVE
-        bfs_nodes(id, depth) AS (
-            SELECT id, 0
-            FROM kg_nodes
-            WHERE json_extract(properties, '$.chunk_id') IN ({placeholders})
-
-            UNION ALL
-
-            SELECT e.target, b.depth + 1
-            FROM kg_edges e
-            JOIN bfs_nodes b ON e.source = b.id
-            WHERE b.depth < ?
-
-            UNION ALL
-
-            SELECT e.source, b.depth + 1
-            FROM kg_edges e
-            JOIN bfs_nodes b ON e.target = b.id
-            WHERE b.depth < ?
-        )
+        # Only bound placeholders are interpolated; every value is parameterized.
+        projection = """
         SELECT DISTINCT CAST(json_extract(n.properties, '$.chunk_id') AS INTEGER) as chunk_id
         FROM bfs_nodes b
         JOIN kg_nodes n ON b.id = n.id
         WHERE json_extract(n.properties, '$.chunk_id') IS NOT NULL
         LIMIT ?
-        """  # nosec B608 # noqa: S608
+        """
+        query = self._bfs_cte(placeholders) + projection  # nosec B608
         params = [*chunk_ids, max_depth, max_depth, limit]
 
         async with self._get_read_conn() as conn, conn.execute(query, params) as cursor:
@@ -1089,6 +1195,36 @@ class DatabaseManager:
                 (file_id,),
             )
         await conn.execute("DELETE FROM chunks WHERE file_id = ?", (file_id,))
+        if auto_commit:
+            await self._maybe_commit(conn)
+
+    async def get_ocr_chunk_ids(self, file_id: int) -> list[int]:
+        """Ids of chunks this file got from OCR, so they can be replaced alone."""
+        async with (
+            self._get_read_conn() as conn,
+            conn.execute(
+                "SELECT id FROM chunks WHERE file_id = ? AND source = 'ocr'",
+                (file_id,),
+            ) as cursor,
+        ):
+            return [r[0] for r in await cursor.fetchall()]
+
+    @serialize_write
+    async def delete_ocr_chunks(self, file_id: int, *, auto_commit: bool = True) -> None:
+        """Delete only the OCR-sourced chunks of a file.
+
+        The narrow counterpart to :meth:`delete_file_chunks`. Re-running OCR on
+        a mixed PDF (native body, scanned appendix) must not take the natively
+        extracted text with it.
+        """
+        conn = self._get_conn()
+        if self._in_ingest_mode:
+            await conn.execute(
+                "INSERT OR IGNORE INTO temp_ingest_chunk_deletes(id, text_preview) "
+                "SELECT id, text_preview FROM chunks WHERE file_id = ? AND source = 'ocr'",
+                (file_id,),
+            )
+        await conn.execute("DELETE FROM chunks WHERE file_id = ? AND source = 'ocr'", (file_id,))
         if auto_commit:
             await self._maybe_commit(conn)
 
@@ -1328,6 +1464,36 @@ class DatabaseManager:
                 return 0, 0
             return row[0], row[1]
 
+    async def get_chunks_by_ids(self, chunk_ids: list[int]) -> list[dict[str, Any]]:
+        """Fetch full chunk details for a given list of chunk IDs."""
+        if not chunk_ids:
+            return []
+
+        placeholders = ",".join("?" for _ in chunk_ids)
+        query_sql = (
+            f"SELECT c.id, zlib_decompress(c.text_preview) as text_preview, f.path, f.folder_tag, f.modified_at, c.start_offset, c.end_offset, c.sentence_offsets, c.segmenter_version, c.file_id "  # nosec B608 # noqa: S608
+            f"FROM chunks c JOIN files f ON c.file_id = f.id "
+            f"WHERE c.id IN ({placeholders})"
+        )
+        rows = await self.execute_query(query_sql, tuple(chunk_ids))
+
+        results = []
+        for row in rows:
+            results.append({
+                "chunk_id": row[0],
+                "text": row[1],
+                "file_path": row[2],
+                "folder_tag": row[3],
+                "modified_at": row[4],
+                "start_offset": row[5],
+                "end_offset": row[6],
+                "sentence_offsets": row[7],
+                "segmenter_version": row[8],
+                "file_id": row[9],
+                "score": 1.0,
+            })
+        return results
+
     async def execute_query(self, sql: str, params: tuple = ()) -> list[Any]:
         """Execute a read-only SQL query via the read-pool and return all rows."""
         async with self._get_read_conn() as conn, conn.execute(sql, params) as cursor:
@@ -1339,6 +1505,21 @@ class DatabaseManager:
         conn = self._get_conn()
         await conn.execute(sql, params)
         await self._maybe_commit(conn)
+
+    @serialize_write
+    async def execute_write_returning(self, sql: str, params: tuple = ()) -> list[Any]:
+        """Write and read back rows in one lock-held step.
+
+        The write lock is released between separate calls, so a SELECT-then-
+        UPDATE claim written as two statements could hand the same row to two
+        callers. Doing it as one `UPDATE ... RETURNING` under the lock closes
+        that window.
+        """
+        conn = self._get_conn()
+        async with conn.execute(sql, params) as cursor:
+            rows = list(await cursor.fetchall())
+        await self._maybe_commit(conn)
+        return rows
 
     @serialize_write
     async def save_query(
@@ -1515,6 +1696,14 @@ class DatabaseManager:
             DELETE FROM query_history;
             DELETE FROM folder_profiles;
 
+            -- Pending OCR work refers to files that no longer exist.
+            DELETE FROM ocr_queue;
+
+            -- ocr_cache is deliberately NOT cleared. It is keyed on content
+            -- hash, not on file id, so it stays valid across a wipe and makes
+            -- re-indexing the same documents free instead of re-running OCR.
+            -- Use DELETE /api/ocr/cache to clear it explicitly.
+
             -- Recreate FTS table with optimized schema and contentless mode.
             -- text_preview is stored zlib-compressed so triggers decompress on the fly.
             {FTS_TABLE_DDL}
@@ -1532,6 +1721,10 @@ class DatabaseManager:
         The model-change-safe counterpart to clear_all(). Must not touch
         `chunks` - the ON DELETE CASCADE would take chunk_embeddings with it
         and fire the FTS delete triggers, silently degrading into a full wipe.
+
+        Scope note: this clears the SQLite `chunk_embeddings` table **only**.
+        LanceDB (`pma_chunks`, `pma_summaries`, `query_cache`) is untouched -
+        callers that need both must also call `LanceDBClient.clear_all()`.
         """
         async with self._get_read_conn() as read_pool_conn:
             cur = await read_pool_conn.execute("SELECT COUNT(*) FROM chunk_embeddings")

@@ -378,6 +378,26 @@ class LanceDBClient:
 
         await loop.run_in_executor(None, _delete)
 
+    async def delete_summaries_by_ids(self, ids: list[str]) -> None:
+        """Delete summary rows by doc_id, so re-indexing replaces rather than duplicates."""
+        self.connect()
+        if not ids:
+            return
+        tbl = self._get_table("pma_summaries")
+        if tbl is None:
+            return
+
+        loop = asyncio.get_running_loop()
+
+        def _delete():
+            with self._write_lock:
+                id_list = ", ".join(
+                    f"'{doc_id.replace(chr(39), chr(39) + chr(39))}'" for doc_id in ids
+                )
+                tbl.delete(f"id IN ({id_list})")
+
+        await loop.run_in_executor(None, _delete)
+
     async def delete_folder(self, folder_tag: str) -> None:
         """Delete all vectors matching a folder tag from both chunks and summaries."""
         self.connect()

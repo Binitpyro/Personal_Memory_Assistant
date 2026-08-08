@@ -12,6 +12,7 @@ embedding_service = None
 lancedb_client = None
 llm_client = None
 _planner = None
+_ocr_manager = None
 
 _indexing_service_cls: Any = None
 _progress_obj: Any = None
@@ -62,6 +63,21 @@ def get_llm():
 
         llm_client = LLMClient()
     return llm_client
+
+
+async def get_ocr():
+    """The OCR manager singleton.
+
+    Async because it needs a *connected* DatabaseManager. Normally built once
+    during lifespan; constructing it here covers tests that touch an OCR
+    endpoint without going through startup.
+    """
+    global _ocr_manager
+    if _ocr_manager is None:
+        from app.ocr.manager import OcrManager
+
+        _ocr_manager = OcrManager(await get_db(), get_emb(), get_lancedb())
+    return _ocr_manager
 
 
 def ensure_indexing() -> tuple[Any, Any]:

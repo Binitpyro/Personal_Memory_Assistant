@@ -14,6 +14,14 @@ _extensions_cache: dict[str, set[str]] = {}
 # 404 (e.g. "http://localhost:11434/api/generate" + "/api/tags").
 _OLLAMA_URL_SUFFIXES = ("/api/generate", "/api/chat", "/api/tags")
 
+# Install states for the OCR engine. "cpu" is the only tier shipped today;
+# the DirectML tier is planned but deliberately not selectable yet.
+_OCR_TIERS = frozenset({"none", "cpu"})
+
+
+def _clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
 
 def _get_extensions_set(raw: str) -> set[str]:
     if raw not in _extensions_cache:
@@ -97,6 +105,57 @@ class Settings(BaseSettings):
     )
     index_concurrency: int = 16  # Increased from 12 for better I/O overlap
 
+    # ── OCR (Tier 1, CPU) ────────────────────────────────────────────────
+    # The engine runs in its own venv as a subprocess; nothing here pulls
+    # rapidocr/pypdfium2 into the main interpreter. `ocr_tier` is the install
+    # state, `ocr_enabled` the user switch - normalize_ocr keeps them coherent
+    # so callers only ever need to read one of them.
+    ocr_enabled: bool = False
+    ocr_tier: str = "none"  # "none" | "cpu"  (gpu/dml deferred to P2)
+    ocr_dpi: int = 300
+    ocr_min_chars_per_page: int = 100
+    ocr_garbage_ratio: float = 0.30
+    ocr_blank_stream_bytes: int = 512
+    ocr_conf_floor: float = 0.30
+    ocr_page_timeout_s: int = 30
+    ocr_doc_timeout_s: int = 600
+    ocr_worker_idle_timeout_s: int = 60
+    ocr_worker_max_docs: int = 50
+    ocr_worker_max_pages: int = 2000
+    ocr_cache_max_mb: int = 500
+    ocr_max_attempts: int = 3
+
+    @model_validator(mode="after")
+    def normalize_ocr(self):
+        self.ocr_tier = (self.ocr_tier or "none").strip().lower()
+        if self.ocr_tier not in _OCR_TIERS:
+            logger.warning(
+                "PMA_OCR_TIER=%r is not one of %s; falling back to 'none'.",
+                self.ocr_tier,
+                sorted(_OCR_TIERS),
+            )
+            self.ocr_tier = "none"
+
+        # A tier of "none" means nothing is installed, so enabling OCR cannot
+        # do anything. Collapsing it here means every caller can branch on a
+        # single flag instead of re-deriving the pair.
+        if self.ocr_tier == "none":
+            self.ocr_enabled = False
+
+        self.ocr_garbage_ratio = _clamp(self.ocr_garbage_ratio, 0.0, 1.0)
+        self.ocr_conf_floor = _clamp(self.ocr_conf_floor, 0.0, 1.0)
+        self.ocr_dpi = int(_clamp(self.ocr_dpi, 72, 600))
+        self.ocr_min_chars_per_page = max(0, self.ocr_min_chars_per_page)
+        self.ocr_blank_stream_bytes = max(0, self.ocr_blank_stream_bytes)
+        self.ocr_page_timeout_s = max(1, self.ocr_page_timeout_s)
+        self.ocr_doc_timeout_s = max(1, self.ocr_doc_timeout_s)
+        self.ocr_worker_idle_timeout_s = max(1, self.ocr_worker_idle_timeout_s)
+        self.ocr_worker_max_docs = max(1, self.ocr_worker_max_docs)
+        self.ocr_worker_max_pages = max(1, self.ocr_worker_max_pages)
+        self.ocr_cache_max_mb = max(0, self.ocr_cache_max_mb)
+        self.ocr_max_attempts = max(1, self.ocr_max_attempts)
+        return self
+
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.5-flash-lite"
     gemini_max_output_tokens: int = 4096
@@ -150,11 +209,42 @@ class Settings(BaseSettings):
 
     rrf_fts_weight: float = 0.4
     rrf_semantic_weight: float = 0.6
+    # Document-routing signal. Ranks whole files by summary similarity, then
+    # feeds their chunks into RRF as a third ranked list. Weighted below the two
+    # chunk-level signals: it decides which documents are worth spending chunk
+    # budget on, it does not by itself decide which chunk answers the question.
+    rrf_summary_weight: float = 0.3
+    # Chunks pulled per summary-ranked file. Caps how far one long document can
+    # push into the fused candidate list.
+    summary_expand_chunks_per_file: int = 5
     rrf_k: int = 60
     rrf_score_scale: int = 1000
-    summary_boost_factor: float = 1.25
     retrieval_top_k: int = 15
     context_max_tokens: int = 8000  # Balanced for reliability and depth
+
+    # ── Source-balanced fusion ───────────────────────────────────────────────
+    # Allocate the result window across folder_tag domains rather than taking a
+    # single global ranking. Without this a lexically dense corpus floods every
+    # slot on a multi-domain query.
+    fusion_balance_enabled: bool = True
+    fusion_domain_ceiling: float = 0.6  # max share of k any one domain may take
+
+    # ── Bounded agentic retrieval loop ───────────────────────────────────────
+    # Off by default: decomposition adds an LLM round-trip to the critical path,
+    # which is real latency on a local 4GB provider.
+    agentic_enabled: bool = False
+    agentic_max_iterations: int = 2
+    agentic_subquery_max: int = 4
+    agentic_evidence_score_floor: float = 0.0
+
+    # ── Folder watcher ───────────────────────────────────────────────────────
+    # Re-indexes already-indexed folders on a timer so the corpus does not drift
+    # from disk between manual runs. Polls rather than subscribing to OS events:
+    # the Rust scanner and the indexer's own change detection already do the
+    # work, and polling avoids a third-party dependency plus editor write-burst
+    # and recursive-watch-limit problems. Detection latency is the interval.
+    watcher_enabled: bool = False
+    watcher_interval_seconds: int = 300
 
     dev_mode: bool = False  # Set to True for verbose dev logs and debug endpoints
     log_level: str = "INFO"

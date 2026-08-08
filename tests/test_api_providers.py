@@ -72,6 +72,7 @@ def test_set_default_model(mock_write, mock_read):
 @patch("app.api.providers.write_settings")
 def test_reading_provider_settings_does_not_write_fallback_chain(mock_write, tmp_path, monkeypatch):
     import json
+
     from app.settings_store import CURRENT_SCHEMA_VERSION
 
     test_path = tmp_path / "settings.json"

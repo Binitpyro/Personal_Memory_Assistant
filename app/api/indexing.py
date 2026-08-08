@@ -98,6 +98,14 @@ async def index_start(
             logger.info("FTS optimization completed after indexing.")
         except Exception as e:
             logger.warning("FTS optimization after indexing failed: %s", e)
+        try:
+            # Wake the OCR drain loop now rather than letting it find the new
+            # work on its next 30s poll.
+            from app.api.deps import get_ocr
+
+            await (await get_ocr()).kick()
+        except Exception as e:
+            logger.debug("Could not notify OCR manager after indexing: %s", e)
 
     background_tasks.add_task(_index_then_compact)
     return {"message": "Indexing started"}

@@ -22,7 +22,11 @@ MODEL_SPECS = [
             "onnx/model_quantized.onnx",
             "tokenizer.json",
         ],
-    }
+    },
+    # NOTE: no OCR entry here on purpose. rapidocr-onnxruntime 1.4.x ships its
+    # PP-OCRv4 mobile ONNX models inside the wheel (see its config.yaml, whose
+    # model paths are package-relative), so they arrive already covered by the
+    # pinned dependency rather than needing a separate download and digest.
 ]
 
 

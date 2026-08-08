@@ -1,7 +1,8 @@
 import json
+
 import pytest
 
-from app.settings_store import CURRENT_SCHEMA_VERSION, SettingsStore, SETTINGS_PATH
+from app.settings_store import CURRENT_SCHEMA_VERSION, SettingsStore
 
 
 def test_settings_store_save_and_read(tmp_path, monkeypatch):

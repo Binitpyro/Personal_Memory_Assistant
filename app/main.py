@@ -37,6 +37,7 @@ from app.api.search import router as search_router
 from app.api.system import router as system_router
 from app.api.telemetry import router as telemetry_router
 from app.config import settings
+from app.ocr.api import router as ocr_router
 from app.project_constants import APP_VERSION
 from app.storage.db import DatabaseManager
 
@@ -253,10 +254,49 @@ async def lifespan(fastapi_app: FastAPI):
     state.bg_tasks.add(vac_task)
     vac_task.add_done_callback(state.bg_tasks.discard)
 
+    # OCR drain loop. start() swallows its own errors: a broken OCR install
+    # must never stop the server from coming up.
+    ocr_manager = None
+    try:
+        from app.api.deps import get_ocr
+
+        ocr_manager = await get_ocr()
+        await ocr_manager.start()
+    except Exception as err:
+        logger.warning("OCR manager unavailable: %s", err)
+
+    # Folder watcher. Like OCR above, a failure here must never stop the server
+    # coming up - it is a convenience, not a dependency of serving queries.
+    watcher = None
+    try:
+        from app.indexing.watcher import FolderWatcher
+
+        watcher = FolderWatcher(
+            db_manager,
+            lambda: IndexingService(db_manager, get_emb(), get_lancedb()),
+        )
+        watcher.start()
+    except Exception as err:
+        logger.warning("Folder watcher unavailable: %s", err)
+
     logger.info("Server ready (v%s)", APP_VERSION)
     yield
 
+    if watcher is not None:
+        try:
+            await watcher.stop()
+        except Exception as err:
+            logger.warning("Folder watcher shutdown failed: %s", err)
+
     # 5. Graceful Shutdown
+    # OCR first: the worker subprocess needs an explicit shutdown message and a
+    # wait(), which cancelling its task would not deliver.
+    if ocr_manager is not None:
+        try:
+            await ocr_manager.stop()
+        except Exception as err:
+            logger.warning("OCR manager shutdown failed: %s", err)
+
     logger.info("Shutting down: cleaning up %d background tasks...", len(state.bg_tasks))
     for t in list(state.bg_tasks):
         t.cancel()
@@ -508,6 +548,7 @@ api_router.include_router(insights_router, tags=["insights"])
 api_router.include_router(system_router, tags=["system"])
 api_router.include_router(telemetry_router)
 api_router.include_router(debug_router)
+api_router.include_router(ocr_router)
 
 
 @api_router.get("/health")

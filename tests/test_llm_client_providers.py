@@ -362,6 +362,100 @@ async def test_resolve_provider_by_id_does_not_gate_local_providers(monkeypatch)
     await provider.close()
 
 
+class TestEffectiveFallbackChain:
+    """`_get_effective_fallback_chain()` decides which providers get tried.
+
+    It reads data/settings.json and filters against the providers that are
+    actually configured - and "configured" includes a liveness probe for local
+    providers. Until the autouse settings isolation in conftest.py, this was
+    only ever exercised by whatever happened to be on the developer's disk and
+    whether Ollama was running, which is what made test_generate_answer below
+    fail on real machines and pass in CI.
+    """
+
+    @staticmethod
+    def _write(path, data):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data), encoding="utf-8")
+
+    def test_no_settings_file_uses_the_default_chain(self):
+        from app.providers import get_default_chain
+        from app.search.llm_client import _get_effective_fallback_chain
+
+        assert _get_effective_fallback_chain() == get_default_chain()
+
+    def test_saved_chain_is_honoured_when_providers_are_configured(self, tmp_path, monkeypatch):
+        from app.search.llm_client import _get_effective_fallback_chain
+        from app.settings_store import CURRENT_SCHEMA_VERSION
+
+        path = tmp_path / "settings.json"
+        self._write(
+            path,
+            {
+                "schema_version": CURRENT_SCHEMA_VERSION,
+                "llm": {"fallback_chain": ["ollama", "gemini"]},
+            },
+        )
+        monkeypatch.setattr("app.settings_store.SETTINGS_PATH", path)
+        monkeypatch.setattr(
+            "app.search.llm_client.get_configured_provider_ids",
+            lambda: ["ollama", "gemini", "lm_studio"],
+        )
+
+        assert _get_effective_fallback_chain() == ["ollama", "gemini"]
+
+    def test_unconfigured_entries_are_filtered_out(self, tmp_path, monkeypatch):
+        from app.search.llm_client import _get_effective_fallback_chain
+        from app.settings_store import CURRENT_SCHEMA_VERSION
+
+        path = tmp_path / "settings.json"
+        self._write(
+            path,
+            {
+                "schema_version": CURRENT_SCHEMA_VERSION,
+                "llm": {"fallback_chain": ["openai", "gemini", "ollama"]},
+            },
+        )
+        monkeypatch.setattr("app.settings_store.SETTINGS_PATH", path)
+        monkeypatch.setattr(
+            "app.search.llm_client.get_configured_provider_ids", lambda: ["ollama"]
+        )
+
+        assert _get_effective_fallback_chain() == ["ollama"]
+
+    def test_chain_with_nothing_configured_falls_back_to_default(self, tmp_path, monkeypatch):
+        """Otherwise a stale saved chain would leave the user with no provider."""
+        from app.providers import get_default_chain
+        from app.search.llm_client import _get_effective_fallback_chain
+        from app.settings_store import CURRENT_SCHEMA_VERSION
+
+        path = tmp_path / "settings.json"
+        self._write(
+            path,
+            {
+                "schema_version": CURRENT_SCHEMA_VERSION,
+                "llm": {"fallback_chain": ["openai", "anthropic"]},
+            },
+        )
+        monkeypatch.setattr("app.settings_store.SETTINGS_PATH", path)
+        monkeypatch.setattr("app.search.llm_client.get_configured_provider_ids", lambda: [])
+
+        assert _get_effective_fallback_chain() == get_default_chain()
+
+    def test_stale_schema_version_is_ignored(self, tmp_path, monkeypatch):
+        from app.providers import get_default_chain
+        from app.search.llm_client import _get_effective_fallback_chain
+
+        path = tmp_path / "settings.json"
+        self._write(path, {"schema_version": 0, "llm": {"fallback_chain": ["ollama"]}})
+        monkeypatch.setattr("app.settings_store.SETTINGS_PATH", path)
+        monkeypatch.setattr(
+            "app.search.llm_client.get_configured_provider_ids", lambda: ["ollama"]
+        )
+
+        assert _get_effective_fallback_chain() == get_default_chain()
+
+
 @pytest.mark.asyncio
 async def test_generate_answer():
     client = LLMClient()

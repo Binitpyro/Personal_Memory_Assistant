@@ -377,3 +377,91 @@ class TestBatchSizeAndSessionOptions:
             assert svc._session.run.call_count == math.ceil(n_texts / batch_size)
 
 
+
+
+class TestLengthSortedBatching:
+    """Grouping similar-length texts collapses tokenizer padding waste.
+
+    The correctness property is that every embedding still lands on its own
+    text: batches are no longer contiguous slices, so a missing scatter-back
+    would silently pair every chunk with the wrong vector.
+    """
+
+    def test_batches_partition_every_index_exactly_once(self):
+        from app.embeddings.service import _length_sorted_batches
+
+        texts = ["a" * 100, "b" * 5, "c" * 50, "d", "e" * 200]
+        batches = _length_sorted_batches(texts, 2)
+
+        flat = [i for group in batches for i in group]
+        assert sorted(flat) == list(range(len(texts)))
+        assert len(flat) == len(set(flat)), "an index appeared in two batches"
+        assert all(len(g) <= 2 for g in batches)
+
+    def test_batches_are_ordered_by_length(self):
+        from app.embeddings.service import _length_sorted_batches
+
+        texts = ["a" * 100, "b" * 5, "c" * 50, "d", "e" * 200]
+        order = [i for group in _length_sorted_batches(texts, 1) for i in group]
+
+        lengths = [len(texts[i]) for i in order]
+        assert lengths == sorted(lengths)
+
+    def test_degenerate_batch_size_does_not_hang(self):
+        from app.embeddings.service import _length_sorted_batches
+
+        assert _length_sorted_batches(["a", "b"], 0) == [[0], [1]]
+        assert _length_sorted_batches([], 4) == []
+
+    @pytest.mark.asyncio
+    async def test_embeddings_stay_matched_to_their_own_text(self):
+        """Nearest-neighbour identity, not float equality.
+
+        Padding shifts values slightly - a text's padding depends on which
+        batch it lands in, which was true before this change too. What must
+        hold is that each returned row is still closest to its own text.
+        """
+        from app.embeddings.service import EmbeddingService
+
+        svc = EmbeddingService()
+        svc.load_model()
+
+        # Deliberately length-varied so sorting reorders them, plus a duplicate.
+        texts = [
+            "short",
+            "x " * 400,
+            "a medium length sentence about caching",
+            "short",
+            "y " * 200,
+            "tiny",
+        ]
+
+        batched = await svc.embed_texts(texts, batch_size=2)
+        assert batched.shape == (len(texts), 384)
+
+        singles = np.vstack(
+            [(await svc.embed_texts([t], batch_size=1))[0] for t in texts]
+        )
+
+        # Row i of the batched result must be nearest to single-embedded text i.
+        # Compared by text content, not index: "short" appears twice and its two
+        # rows are identical, so argmax legitimately returns the first of them.
+        similarity = batched @ singles.T
+        nearest = [texts[j] for j in np.argmax(similarity, axis=1)]
+        assert nearest == texts, "an embedding was scattered back to the wrong text"
+
+        # Deduplication must still collapse identical inputs.
+        assert np.allclose(batched[0], batched[3])
+
+    def test_sync_path_stays_matched_to_its_own_text(self):
+        from app.embeddings.service import EmbeddingService
+
+        svc = EmbeddingService()
+        svc.load_model()
+
+        texts = ["short", "z " * 300, "another sentence entirely", "tiny"]
+        batched = svc.embed_texts_sync(texts, batch_size=2)
+        singles = np.vstack([svc.embed_texts_sync([t], batch_size=1)[0] for t in texts])
+
+        similarity = batched @ singles.T
+        assert list(np.argmax(similarity, axis=1)) == list(range(len(texts)))

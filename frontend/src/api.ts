@@ -88,6 +88,92 @@ export interface IndexStatus {
 
 export const getIndexStatus = () => json<IndexStatus>('/index/status');
 
+// ── OCR ──────────────────────────────────────────────────────────────────
+
+export interface OcrQueueCounts {
+  pending: number;
+  running: number;
+  done: number;
+  failed: number;
+  skipped: number;
+  pages_pending: number;
+}
+
+export interface OcrStatus {
+  tier: string;
+  enabled: boolean;
+  installed: boolean;
+  uv_available: boolean;
+  queue: OcrQueueCounts;
+  pages_pending: number;
+  worker_running: boolean;
+  current_file: string;
+  unhealthy: boolean;
+  fatal: string;
+  last_error: string;
+  cache_mb: number;
+  cache_max_mb: number;
+}
+
+export interface OcrInstallState {
+  status: 'idle' | 'running' | 'ok' | 'failed' | 'cancelled';
+  step: string;
+  pct: number;
+  message: string;
+  error_code: string;
+  log_tail: string[];
+}
+
+export interface OcrQueueItem {
+  file_path: string;
+  file_name: string;
+  page_count: number;
+  pages_done: number;
+  pages_pending: number;
+  status: string;
+  attempts: number;
+  last_error: string;
+  updated_at: string;
+}
+
+export const getOcrStatus = () => json<OcrStatus>('/ocr/status');
+export const getOcrInstallState = () => json<OcrInstallState>('/ocr/install/status');
+
+export const installOcrTier = () =>
+  json<OcrInstallState>('/ocr/install', { method: 'POST' });
+
+export const cancelOcrInstall = () =>
+  json<{ ok: boolean }>('/ocr/install/cancel', { method: 'POST' });
+
+export const uninstallOcrTier = () =>
+  json<{ ok: boolean; removed: string[] }>('/ocr/uninstall', { method: 'POST' });
+
+export const setOcrEnabled = (enabled: boolean) =>
+  json<{ ok: boolean; enabled: boolean; error_code?: string }>('/ocr/enable', {
+    method: 'POST',
+    body: JSON.stringify({ enabled }),
+  });
+
+export const getOcrQueue = (status?: string, limit = 50) =>
+  json<{ items: OcrQueueItem[]; counts: OcrQueueCounts }>(
+    `/ocr/queue?limit=${limit}${status ? `&status=${encodeURIComponent(status)}` : ''}`,
+  );
+
+export const retryOcr = (filePath: string) =>
+  json<{ ok: boolean; error_code?: string }>('/ocr/retry', {
+    method: 'POST',
+    body: JSON.stringify({ file_path: filePath }),
+  });
+
+export const forceOcr = (filePath: string) =>
+  json<{ ok: boolean; pages_queued?: number; error_code?: string }>('/ocr/force', {
+    method: 'POST',
+    body: JSON.stringify({ file_path: filePath }),
+  });
+
+export const clearOcrCache = () =>
+  json<{ removed: number }>('/ocr/cache', { method: 'DELETE' });
+
 export async function* streamGenerator(endpoint: string, payload: any, signal?: AbortSignal) {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -330,6 +416,18 @@ export interface InsightsByTypeResponse {
 export const getInsightsByType = (typeFilter: string) =>
   json<InsightsByTypeResponse>(`/insights/by-type?extension=${encodeURIComponent(typeFilter)}`);
 
+export interface PortraitTheme {
+  name: string;
+  description: string;
+  weight: number;
+}
+
+export interface PortraitResponse {
+  themes: PortraitTheme[];
+}
+
+export const getPortrait = () => json<PortraitResponse>('/insights/portrait');
+
 // â”€â”€ Demo â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export const seedDemo = () =>
@@ -380,8 +478,23 @@ export function subscribeProgress(onData: (data: IndexStatus & { current_file: s
 
 // â”€â”€ SSE Query Stream â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+/**
+ * One step of the bounded agentic retrieval loop. `kind` comes from
+ * app/search/agentic.py's TraceEvent; `detail` is already human-readable.
+ * `subqueries` is populated on 'decompose' and 'not_found'.
+ */
+export interface TraceEvent {
+  kind: 'start' | 'decompose' | 'retrieve' | 'not_found' | 'stop' | 'done';
+  detail: string;
+  subqueries?: string[];
+  sources?: string[];
+  count?: number;
+  stop_reason?: string;
+  iterations?: number;
+}
+
 export interface QueryStreamChunk {
-  type: 'content' | 'sources' | 'fast_path' | 'error' | 'cached_full' | 'metadata' | 'done' | 'ping' | 'fallback' | 'usage';
+  type: 'content' | 'sources' | 'fast_path' | 'error' | 'cached_full' | 'metadata' | 'done' | 'ping' | 'fallback' | 'usage' | 'trace';
   mode?: string;
   text?: string;
   answer?: string;
@@ -395,6 +508,7 @@ export interface QueryStreamChunk {
   knowledge_gaps?: string[];
   pattern_annotations?: string[];
   answer_evolution_diff?: string;
+  trace?: TraceEvent[];
   to?: string;
   prompt_tokens?: number;
   completion_tokens?: number;

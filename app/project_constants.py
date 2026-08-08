@@ -38,6 +38,14 @@ APP_VERSION = _get_app_version()
 RETRIEVAL_CACHE_MAX_SIZE = 500
 RAG_CACHE_MAX_SIZE = 200
 
+# Fusion generation. Part of the retrieval cache key so that a change to how
+# results are ranked invalidates cached results even though the index itself is
+# unchanged. Bump this on every change to fusion behaviour - otherwise testing a
+# fusion fix reads pre-fix cached results and concludes the change did nothing.
+#   1 - summary search promoted to a third RRF list (was a post-truncation no-op boost)
+#   2 - per-folder_tag recall allocation (source-balanced fusion)
+FUSION_VERSION = 2
+
 # Regular Expressions for Query Intent
 INVENTORY_RE = re.compile(
     r"\b(?:how many|count|do i have|files? do i|"

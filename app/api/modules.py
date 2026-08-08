@@ -8,12 +8,21 @@ import json
 import logging
 import os
 import secrets
+import time
+from collections import deque
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
+
+from app.api.deps import get_db, get_emb, get_lancedb, get_planner
+from app.search.retrieval import retrieve_only
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/modules", tags=["modules"])
+
+# Per-connection request budget for the module socket.
+RATE_LIMIT_COUNT = 50
+RATE_LIMIT_WINDOW = 60.0
 
 
 @router.websocket("/ws")
@@ -41,6 +50,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(Non
     await websocket.accept()
     logger.info("Secure module WebSocket client connected successfully.")
 
+    request_times: deque[float] = deque()
+
     try:
         while True:
             try:
@@ -48,19 +59,61 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(Non
             except WebSocketDisconnect:
                 raise
             except (json.JSONDecodeError, KeyError, UnicodeDecodeError) as e:
-                # These are the only failure modes that mean "the client sent
-                # a bad frame" (bad JSON, wrong message type, bad encoding).
-                # Any other exception must NOT be treated the same way, or a
-                # persistent failure loops here forever instead of ever
-                # reaching the close(code=1011) below.
                 logger.warning("Malformed WS frame: %s", e)
                 await websocket.send_json({"status": "error", "message": "Invalid JSON payload"})
                 continue
 
+            now = time.time()
+            while request_times and now - request_times[0] > RATE_LIMIT_WINDOW:
+                request_times.popleft()
+
+            if len(request_times) >= RATE_LIMIT_COUNT:
+                await websocket.send_json({"status": "error", "message": "Rate limit exceeded. Too many requests."})
+                continue
+
+            request_times.append(now)
+
             action = data.get("action")
 
             try:
-                if action == "ping":
+                if action == "session.hello":
+                    await websocket.send_json({
+                        "status": "ok",
+                        "version": "0.1",
+                        "capabilities": ["retrieve", "chunk.get", "corpus.stats"]
+                    })
+                elif action == "retrieve":
+                    query = data.get("query", "")
+                    k = data.get("k", 10)
+                    file_type = data.get("file_type")
+                    folder_tag = data.get("folder_tag")
+
+                    db = await get_db()
+                    embedding_service = get_emb()
+                    lancedb_client = get_lancedb()
+                    planner = get_planner()
+
+                    res = await retrieve_only(
+                        query=query,
+                        db=db,
+                        embedding_service=embedding_service,
+                        lancedb_client=lancedb_client,
+                        planner=planner,
+                        k=k,
+                        file_type=file_type,
+                        folder_tag=folder_tag,
+                    )
+                    await websocket.send_json({"status": "ok", "data": res})
+                elif action == "chunk.get":
+                    chunk_ids = data.get("chunk_ids", [])
+                    db = await get_db()
+                    chunks = await db.get_chunks_by_ids(chunk_ids)
+                    await websocket.send_json({"status": "ok", "data": chunks})
+                elif action == "corpus.stats":
+                    db = await get_db()
+                    stats = await db.get_file_stats_summary()
+                    await websocket.send_json({"status": "ok", "data": stats})
+                elif action == "ping":
                     await websocket.send_json({"status": "pong"})
                 else:
                     await websocket.send_json({"status": "error", "message": f"Unknown action '{action}'"})

@@ -1,5 +1,5 @@
 import { useReducer, useCallback, useRef, useEffect } from 'react';
-import { subscribeQuery, type QueryStreamChunk, type QuerySource, type ProviderStatus } from '../api';
+import { subscribeQuery, type QueryStreamChunk, type QuerySource, type ProviderStatus, type TraceEvent } from '../api';
 import { useSessionProvider } from '../context/SessionProviderContext';
 import { queryClient } from '../queryClient';
 
@@ -17,6 +17,7 @@ export interface Message {
   knowledge_gaps?: string[];
   pattern_annotations?: string[];
   answer_evolution_diff?: string;
+  trace?: TraceEvent[];
   fallbackTo?: string;
   prompt_tokens?: number;
   completion_tokens?: number;
@@ -32,6 +33,7 @@ type ChatAction =
   | { type: 'SET_FAST_PATH'; payload: { content: string; sources?: QuerySource[]; latency_ms?: number; graph_hops?: string } }
   | { type: 'SET_SOURCES'; payload: { sources: QuerySource[]; near_misses: QuerySource[]; latency_ms: number; mode: 'fast_path' | 'full_rag' | 'degraded_rag'; graph_hops?: string; contradictions_found?: boolean; knowledge_gaps?: string[] } }
   | { type: 'SET_METADATA'; payload: { pattern_annotations?: string[]; answer_evolution_diff?: string } }
+  | { type: 'SET_TRACE'; payload: { trace: TraceEvent[] } }
   | { type: 'SET_FALLBACK'; payload: { to: string } }
   | { type: 'SET_USAGE'; payload: { prompt_tokens: number; completion_tokens: number; cost: number; isEstimatedCost: boolean } }
   | { type: 'SET_ERROR'; payload: { text: string } }
@@ -104,12 +106,19 @@ function chatReducer(state: Message[], action: ChatAction): Message[] {
       }
       return state;
     }
+    case 'SET_TRACE': {
+      const last = state.at(-1);
+      if (last?.role === 'assistant') {
+        return [...state.slice(0, -1), { ...last, trace: action.payload.trace }];
+      }
+      return state;
+    }
     case 'SET_FALLBACK': {
       const last = state.at(-1);
       if (last?.role === 'assistant') {
-        return [...state.slice(0, -1), { 
-          ...last, 
-          fallbackTo: action.payload.to 
+        return [...state.slice(0, -1), {
+          ...last,
+          fallbackTo: action.payload.to
         }];
       }
       return state;
@@ -198,6 +207,7 @@ export function useChatStream(onHistoryUpdate: () => void) {
       folder_tag?: string;
       mode?: string;
       forced_chunk_id?: number;
+      selected_chunk_ids?: number[];
       isRetry?: boolean;
     }
   ) => {
@@ -233,7 +243,7 @@ export function useChatStream(onHistoryUpdate: () => void) {
         file_type: options.file_type || null,
         folder_tag: options.folder_tag || null,
         mode: options.mode || null,
-        forced_chunk_ids: options.forced_chunk_id ? [options.forced_chunk_id] : null,
+        forced_chunk_ids: options.selected_chunk_ids && options.selected_chunk_ids.length > 0 ? options.selected_chunk_ids : (options.forced_chunk_id ? [options.forced_chunk_id] : null),
         override_provider: sessionModelOverride?.provider || null,
         override_model: sessionModelOverride?.model || null
       }, (chunk: QueryStreamChunk) => {
@@ -284,6 +294,10 @@ export function useChatStream(onHistoryUpdate: () => void) {
               knowledge_gaps: chunk.knowledge_gaps
             }
           });
+        }
+
+        if (chunk.type === 'trace' && chunk.trace) {
+          dispatch({ type: 'SET_TRACE', payload: { trace: chunk.trace } });
         }
 
         if (chunk.type === 'fast_path') {

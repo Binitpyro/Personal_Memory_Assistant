@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Settings, CheckCircle2, AlertCircle, Cpu, HardDrive, RefreshCcw, Trash2, AlertTriangle, DatabaseZap, Play, Download } from 'lucide-react'
+import { Settings, CheckCircle2, AlertCircle, Cpu, HardDrive, RefreshCcw, Trash2, AlertTriangle, DatabaseZap, Play, Download, Loader2, ScanText } from 'lucide-react'
 import { useApi, invalidateCache } from '../useApi'
 import {
   getLocalModels,
@@ -14,11 +14,22 @@ import {
   getProviders,
   getProviderLaunchStatus,
   launchProvider,
+  getOcrStatus,
+  getOcrInstallState,
+  getOcrQueue,
+  installOcrTier,
+  uninstallOcrTier,
+  cancelOcrInstall,
+  setOcrEnabled,
+  retryOcr,
+  clearOcrCache,
   type ProviderStatus,
   type LLMPreferences,
   type LocalModelDetection,
   type SystemInfo,
-  type DriveInfo
+  type DriveInfo,
+  type OcrInstallState,
+  type OcrQueueItem
 } from '../api'
 
 // STATIC_FALLBACK_MODELS removed in favor of dynamic backend discovery and persistent model heaps.
@@ -334,6 +345,221 @@ function LLMPreferencesSection({
   )
 }
 
+function OcrSection() {
+  const { data: ocr, refetch } = useApi(getOcrStatus, {
+    cacheKey: 'ocr-status-settings',
+    refetchInterval: 10_000,
+  })
+  const [install, setInstall] = useState<OcrInstallState | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [failed, setFailed] = useState<OcrQueueItem[]>([])
+  const [note, setNote] = useState('')
+
+  const installing = install?.status === 'running'
+
+  // Only poll while an install is actually in flight.
+  useEffect(() => {
+    if (!installing) return
+    const id = setInterval(async () => {
+      try {
+        const state = await getOcrInstallState()
+        setInstall(state)
+        if (state.status !== 'running') {
+          refetch()
+          setBusy(false)
+        }
+      } catch { /* transient */ }
+    }, 1500)
+    return () => clearInterval(id)
+  }, [installing, refetch])
+
+  const loadFailed = useCallback(async () => {
+    try {
+      const res = await getOcrQueue('failed', 20)
+      setFailed(res.items)
+    } catch { setFailed([]) }
+  }, [])
+
+  useEffect(() => { if (ocr?.installed) loadFailed() }, [ocr?.installed, ocr?.queue?.failed, loadFailed])
+
+  const handleInstall = async () => {
+    setBusy(true)
+    setNote('')
+    try {
+      setInstall(await installOcrTier())
+    } catch (e) {
+      setNote(e instanceof Error ? e.message : 'Install failed.')
+      setBusy(false)
+    }
+  }
+
+  const handleUninstall = async () => {
+    setBusy(true)
+    try { await uninstallOcrTier(); setInstall(null); refetch() }
+    catch (e) { setNote(e instanceof Error ? e.message : 'Uninstall failed.') }
+    finally { setBusy(false) }
+  }
+
+  const handleToggle = async (enabled: boolean) => {
+    try {
+      const res = await setOcrEnabled(enabled)
+      if (!res.ok) setNote(`Cannot enable: ${res.error_code}`)
+      refetch()
+    } catch (e) { setNote(e instanceof Error ? e.message : 'Could not change OCR state.') }
+  }
+
+  const handleClearCache = async () => {
+    try {
+      const res = await clearOcrCache()
+      setNote(`Cleared ${res.removed} cached page(s).`)
+      refetch()
+    } catch (e) { setNote(e instanceof Error ? e.message : 'Could not clear cache.') }
+  }
+
+  return (
+    <div className="glass p-6 rounded-2xl border border-primary/10">
+      <div className="flex items-start gap-4 mb-6">
+        <div className="p-3 bg-primary/10 rounded-xl">
+          <ScanText className="w-6 h-6 text-primary" />
+        </div>
+        <div>
+          <h2 className="text-lg font-bold text-text-primary">OCR for Scanned PDFs</h2>
+          <p className="text-sm text-text-secondary mt-1">
+            Reads text out of scanned pages so they become searchable. Runs on the CPU in
+            its own isolated environment — nothing is added to the main install.
+          </p>
+        </div>
+      </div>
+
+      <div className="p-4 rounded-xl border border-primary/5 bg-white/50 backdrop-blur-md">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="font-semibold text-text-primary">Tier 1 — CPU</h3>
+          {ocr?.installed ? (
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-success/15 text-success">
+              <span className="w-1.5 h-1.5 rounded-full bg-success"></span> Installed
+            </span>
+          ) : (
+            <span className="px-2.5 py-1 rounded-full text-xs font-semibold bg-text-secondary/15 text-text-secondary">
+              Not installed
+            </span>
+          )}
+        </div>
+
+        <p className="text-sm text-text-secondary mb-3">
+          About 230 MB, models included. Around one page per second on a typical
+          CPU — the first page of a run is slower while the model warms up.
+        </p>
+
+        {!ocr?.uv_available && !ocr?.installed && (
+          <p className="text-xs text-warning mb-3">
+            Requires <code className="font-mono">uv</code>, which wasn&apos;t found on this machine.
+            Install it from docs.astral.sh/uv, then reopen this page.
+          </p>
+        )}
+
+        {installing && (
+          <div className="mb-3">
+            <div className="flex justify-between text-xs text-text-secondary mb-1.5">
+              <span>{install?.message}</span>
+              <span>{install?.pct}%</span>
+            </div>
+            <div className="h-2 bg-white/40 rounded-full overflow-hidden">
+              <div className="h-full bg-primary transition-all duration-300" style={{ width: `${install?.pct ?? 0}%` }} />
+            </div>
+          </div>
+        )}
+
+        {install?.status === 'failed' && (
+          <p className="text-xs text-danger mb-3">
+            {install.error_code}: {install.message}
+          </p>
+        )}
+
+        <div className="flex flex-wrap items-center gap-3">
+          {!ocr?.installed ? (
+            <button
+              onClick={handleInstall}
+              disabled={busy || !ocr?.uv_available}
+              className="glass-button flex items-center gap-2 disabled:opacity-50"
+            >
+              {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+              {busy ? 'Installing…' : 'Install'}
+            </button>
+          ) : (
+            <>
+              <label className="flex items-center gap-2 text-sm font-medium text-text-primary cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={!!ocr?.enabled}
+                  onChange={(e) => handleToggle(e.target.checked)}
+                  className="w-4 h-4 accent-primary"
+                />
+                Enabled
+              </label>
+              <button onClick={handleClearCache} className="glass-button text-sm">
+                Clear OCR cache ({ocr?.cache_mb ?? 0} MB)
+              </button>
+              <button onClick={handleUninstall} disabled={busy} className="glass-button text-sm disabled:opacity-50">
+                Uninstall
+              </button>
+            </>
+          )}
+          {installing && (
+            <button onClick={() => cancelOcrInstall()} className="glass-button text-sm">Cancel</button>
+          )}
+        </div>
+
+        {ocr?.installed && (
+          <div className="mt-4 grid grid-cols-3 gap-3 text-center">
+            {[
+              { label: 'Pending pages', value: ocr.pages_pending ?? 0 },
+              { label: 'Done', value: ocr.queue?.done ?? 0 },
+              { label: 'Failed', value: ocr.queue?.failed ?? 0 },
+            ].map(({ label, value }) => (
+              <div key={label} className="p-2 rounded-lg bg-white/40">
+                <div className="text-lg font-bold text-text-primary">{value}</div>
+                <div className="text-[10px] uppercase tracking-wider text-text-secondary">{label}</div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {ocr?.unhealthy && (
+          <p className="mt-3 text-xs text-danger">
+            OCR stopped: {ocr.fatal}. Reinstall the tier, then retry the failed files.
+          </p>
+        )}
+
+        {failed.length > 0 && (
+          <div className="mt-4">
+            <h4 className="text-xs font-bold uppercase tracking-wider text-text-secondary mb-2">
+              Failed files
+            </h4>
+            <div className="flex flex-col gap-2">
+              {failed.map(item => (
+                <div key={item.file_path} className="flex items-center justify-between gap-3 p-2 rounded-lg bg-white/40">
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium text-text-primary truncate">{item.file_name}</div>
+                    <div className="text-[10px] text-danger truncate">{item.last_error}</div>
+                  </div>
+                  <button
+                    onClick={async () => { await retryOcr(item.file_path); loadFailed(); refetch() }}
+                    className="glass-button text-xs shrink-0"
+                  >
+                    Retry
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {note && <p className="mt-3 text-xs text-text-secondary">{note}</p>}
+      </div>
+    </div>
+  )
+}
+
 function StorageSection({ sysInfo }: Readonly<{ sysInfo?: SystemInfo }>) {
   const getProgressColor = (pct: number) => {
     if (pct > 90) return 'bg-error'
@@ -592,6 +818,8 @@ export function SettingsPage() {
         onSave={handleSavePrefs}
         saving={savingPrefs}
       />
+
+      <OcrSection />
 
       <StorageSection sysInfo={sysInfo} />
 

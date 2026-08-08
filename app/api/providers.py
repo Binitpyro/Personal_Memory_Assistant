@@ -1,8 +1,6 @@
 import asyncio
-import json
 import logging
 import time
-from pathlib import Path
 from typing import Any
 
 import keyring
@@ -16,8 +14,6 @@ from app.providers import (
     PROVIDER_REGISTRY,
     create_provider,
     env_base_url,
-    get_configured_provider_ids,
-    get_default_chain,
     get_default_chain_async,
 )
 from app.providers.base import ValidationResult
@@ -165,6 +161,7 @@ async def list_providers():
     data = migrate_settings_if_needed(data)
     llm = data.get("llm", {})
     per_provider = llm.get("per_provider", {})
+    cloud_consent = bool(llm.get("cloud_privacy_consent", False))
 
     results = []
     for pid in PROVIDER_IDS:
@@ -205,8 +202,13 @@ async def list_providers():
 
         last_validation = validation_cache.get(pid, base_url, api_key)
 
-        # Trigger background validation if no validation result is cached yet for active providers
-        if last_validation is None and (is_set or pid in ("ollama", "lm_studio")):
+        # Trigger background validation if no validation result is cached yet for
+        # active providers. Cloud/aggregator kinds stay behind the same consent
+        # gate as dispatch: validate() is only a keyed ping, but it fires on
+        # every Settings page load and would reach an off-device endpoint the
+        # user has not opted into.
+        consent_ok = spec.kind not in _GATED_PROVIDER_KINDS or cloud_consent
+        if last_validation is None and consent_ok and (is_set or pid in ("ollama", "lm_studio")):
             try:
                 p_obj = create_provider(
                     pid, api_key=api_key, base_url=base_url, default_model=default_model

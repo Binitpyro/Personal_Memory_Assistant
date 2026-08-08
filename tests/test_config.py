@@ -54,3 +54,54 @@ class TestSupportedExtensions:
         extensions = Settings().extensions_set
         for ext in (".epub", ".pptx", ".xlsx", ".xls"):
             assert ext in extensions
+
+
+class TestOcrSettings:
+    """normalize_ocr collapses the enabled/tier pair so every caller can branch
+    on a single flag, and clamps the tunables so a bad .env cannot produce a
+    nonsensical DPI or a confidence floor above 1.0."""
+
+    def test_ocr_is_off_by_default(self):
+        s = Settings()
+        assert s.ocr_enabled is False
+        assert s.ocr_tier == "none"
+
+    def test_enabling_without_a_tier_is_collapsed_to_off(self, monkeypatch):
+        """Enabling OCR with nothing installed can't do anything, so it is a lie."""
+        monkeypatch.setenv("PMA_OCR_ENABLED", "true")
+        monkeypatch.setenv("PMA_OCR_TIER", "none")
+        assert Settings().ocr_enabled is False
+
+    def test_enabled_survives_with_a_real_tier(self, monkeypatch):
+        monkeypatch.setenv("PMA_OCR_ENABLED", "true")
+        monkeypatch.setenv("PMA_OCR_TIER", "cpu")
+        s = Settings()
+        assert s.ocr_enabled is True
+        assert s.ocr_tier == "cpu"
+
+    def test_unknown_tier_falls_back_to_none(self, monkeypatch):
+        monkeypatch.setenv("PMA_OCR_TIER", "quantum")
+        s = Settings()
+        assert s.ocr_tier == "none"
+        assert s.ocr_enabled is False
+
+    def test_tier_is_case_insensitive(self, monkeypatch):
+        monkeypatch.setenv("PMA_OCR_TIER", "  CPU  ")
+        assert Settings().ocr_tier == "cpu"
+
+    @pytest.mark.parametrize(
+        "env,value,expected",
+        [
+            ("PMA_OCR_DPI", "10", 72),
+            ("PMA_OCR_DPI", "5000", 600),
+            ("PMA_OCR_DPI", "300", 300),
+            ("PMA_OCR_CONF_FLOOR", "-1", 0.0),
+            ("PMA_OCR_CONF_FLOOR", "5", 1.0),
+            ("PMA_OCR_GARBAGE_RATIO", "2.5", 1.0),
+            ("PMA_OCR_MAX_ATTEMPTS", "0", 1),
+            ("PMA_OCR_PAGE_TIMEOUT_S", "-5", 1),
+        ],
+    )
+    def test_tunables_are_clamped(self, monkeypatch, env, value, expected):
+        monkeypatch.setenv(env, value)
+        assert getattr(Settings(), env.removeprefix("PMA_").lower()) == expected

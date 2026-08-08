@@ -1,4 +1,5 @@
 import logging
+import re
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -63,6 +64,42 @@ def _iter_footnotes_endnotes(doc):
                 yield label, text
 
 
+_HEADING_RE = re.compile(r"^heading\s*(\d+)$", re.IGNORECASE)
+
+
+def _heading_prefix(paragraph) -> str:
+    """Markdown heading marker for a paragraph, or "" if it is body text.
+
+    DOCX carries structure in paragraph styles, and dropping it flattened every
+    document before chunking - a section title became indistinguishable from a
+    sentence. Emitting markdown markers hands the chunker the same structural
+    signal it already uses for .md, and the summarizer's markdown path builds
+    its "Structure: A > B > C" summary from exactly these.
+    """
+    try:
+        style = paragraph.style
+        name = getattr(style, "name", None) if style is not None else None
+        # isinstance, not truthiness: a malformed document can reference a style
+        # missing from styles.xml, and python-docx substitutes are not always
+        # strings. Feeding a non-string to the regex raises, and an exception
+        # here would abort extraction of the entire document over one paragraph.
+        if not isinstance(name, str) or not name.strip():
+            return ""
+
+        name = name.strip()
+        if name.lower() == "title":
+            return "# "
+        match = _HEADING_RE.match(name)
+        if not match:
+            return ""
+        # Word allows Heading 1-9; markdown stops at 6.
+        level = min(int(match.group(1)), 6)
+        return "#" * level + " "
+    except Exception:
+        logger.debug("Could not read paragraph style; treating as body text.", exc_info=True)
+        return ""
+
+
 class DocxExtractor:
     def can_handle(self, path: Path) -> bool:
         return path.suffix.lower() == ".docx"
@@ -87,6 +124,7 @@ class DocxExtractor:
                     p = Paragraph(child, doc)
                     txt = p.text.strip()
                     if txt:
+                        txt = _heading_prefix(p) + txt
                         yield txt
                         total += len(txt)
                         if total > max_file_size:

@@ -33,7 +33,9 @@ import { FileTypeTreemap } from './FileTypeTreemap';
 import { WebGPURenderer } from '../renderer/WebGPURenderer';
 import { WebGL2Renderer } from '../renderer/WebGL2Renderer';
 import { getVisualizerStream, getVisualizerMeta, type FileEntry, type VisualizerNodeMeta } from '../api';
+import { FLAG_FOLDER } from '../interaction/NavigationController';
 import type { NavigationController } from '../interaction/NavigationController';
+import { useDreamscapeStore } from '../store/dreamscapeStore';
 
 interface CachedStream {
     buffer: ArrayBuffer;
@@ -282,6 +284,25 @@ function useDreamscapeCanvas<R extends RendererLike>(
         const bc = renderer.nav.breadcrumbs;
         const name = bc[bc.length - 1]?.name ?? `#${sourceIndex}`;
         onNodeSelected?.(sourceIndex, name);
+
+        // If it's a file, add it to the dreamscape store for chat context.
+        // NavigationController has no metadata side-channel; the node's own
+        // flags are the authoritative folder/file bit (FLAG_FOLDER).
+        const node = renderer.nav.getGraphNode(sourceIndex);
+        const isFolder = ((node?.flags ?? 0) & FLAG_FOLDER) === FLAG_FOLDER;
+        
+        if (!isFolder && e.shiftKey) { // Optional: require shift-click to select? Or just any click on a file? Let's just add any clicked file.
+           // Actually, let's just add it anytime they click a file.
+           useDreamscapeStore.getState().addChunk({
+               id: sourceIndex,
+               filename: name,
+           });
+        } else if (!isFolder) {
+           useDreamscapeStore.getState().addChunk({
+               id: sourceIndex,
+               filename: name,
+           });
+        }
     };
 
     // Wheel handling has to be a native listener so we can passive:false and

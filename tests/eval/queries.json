@@ -1,0 +1,127 @@
+{
+  "_readme": [
+    "Ground truth for tests/eval/corpus. Paths are relative to that directory.",
+    "",
+    "type:",
+    "  single         - answerable from one document",
+    "  multi_domain   - needs evidence from >=2 domains (exercises source-balanced fusion)",
+    "  graph_phrasing - matches _GRAPH_RE ('connection between', 'relates to', 'how is X",
+    "                   used') but targets documents, not code. Before the graph-fallthrough",
+    "                   fix these returned 3 flat-scored chunks.",
+    "",
+    "There is deliberately NO 'routing' type isolating the summary signal. An earlier",
+    "draft had one, built from a document naming its topic only in its headings - but",
+    "markdown headings are body text too, so FTS indexed them and the document was",
+    "found with the summary leg switched off. The construction was measuring nothing.",
+    "",
+    "More generally it cannot be constructed: a summary is derived from the body, so",
+    "the summary leg can never reach a document that chunk-level search cannot. What it",
+    "actually does is rank at the DOCUMENT level - promoting a file that is on-topic",
+    "throughout over one where a single chunk coincidentally matched. That shows up as",
+    "overall recall/nDCG, which is where the ablation asserts. Measured effect on this",
+    "corpus at k=5: solver_state_connection goes 0.67 -> 1.00 recall.",
+    "",
+    "relevant_files is deliberately small and strict: a file is listed only if it",
+    "genuinely answers the query. Adding weakly-related files inflates recall and",
+    "makes the metric useless for comparing configurations."
+  ],
+  "queries": [
+    {
+      "id": "attr_transfer_basic",
+      "query": "what does the attribute transfer node do",
+      "type": "single",
+      "relevant_files": ["docs/attribute_transfer.md"],
+      "expected_domains": ["docs"]
+    },
+    {
+      "id": "scatter_density",
+      "query": "how do I control scatter density with an attribute",
+      "type": "single",
+      "relevant_files": ["docs/scattering_nodes.md"],
+      "expected_domains": ["docs"]
+    },
+    {
+      "id": "farm_batching",
+      "query": "batching frames into farm tasks to amortise startup cost",
+      "type": "multi_domain",
+      "relevant_files": ["research/render_scheduling.md", "code/scheduler.py"],
+      "expected_domains": ["research", "code"]
+    },
+    {
+      "id": "curl_noise_divergence",
+      "query": "why does taking the curl guarantee zero divergence",
+      "type": "multi_domain",
+      "relevant_files": [
+        "research/curl_noise_review.md",
+        "code/curl_noise.py",
+        "docs/noise_nodes.md"
+      ],
+      "expected_domains": ["research", "code", "docs"]
+    },
+    {
+      "id": "stale_cache",
+      "query": "why was stale geometry served and how is the cache keyed",
+      "type": "multi_domain",
+      "relevant_files": [
+        "research/cache_observations.md",
+        "code/cache.py",
+        "docs/caching_nodes.md"
+      ],
+      "expected_domains": ["research", "code", "docs"]
+    },
+    {
+      "id": "colour_ingest",
+      "query": "scene linear versus display encoded textures at ingest",
+      "type": "multi_domain",
+      "relevant_files": ["research/colour_pipeline_notes.md", "code/colour.py"],
+      "expected_domains": ["research", "code"]
+    },
+    {
+      "id": "turbulence_octaves",
+      "query": "turbulence octaves and how much high frequency detail to use",
+      "type": "multi_domain",
+      "relevant_files": ["docs/turbulence_reference.md", "research/turbulence_log.md"],
+      "expected_domains": ["docs", "research"]
+    },
+    {
+      "id": "velocity_advection",
+      "query": "velocity field advection",
+      "type": "multi_domain",
+      "relevant_files": ["docs/velocity_advection.md", "code/advect.py"],
+      "expected_domains": ["docs", "code"],
+      "note": "docs/velocity_advection.md names the topic only in its headings and describes it in the body with different words ('carried along by whatever is moving around it'). Retained because it is a genuine vocabulary-mismatch case, but it is NOT summary-only: the headings are indexed as body text, so it is found either way."
+    },
+    {
+      "id": "solver_state_connection",
+      "query": "what is the connection between the solver notes and the solver reference",
+      "type": "graph_phrasing",
+      "relevant_files": [
+        "research/review_of_solver_paper.md",
+        "docs/solver_nodes.md",
+        "code/solver.py"
+      ],
+      "expected_domains": ["research", "docs", "code"]
+    },
+    {
+      "id": "sampling_used_across",
+      "query": "how is the sampling methodology used across my notes",
+      "type": "graph_phrasing",
+      "relevant_files": ["research/sampling_methodology.md"],
+      "expected_domains": ["research"]
+    },
+    {
+      "id": "attribute_promotion",
+      "query": "promoting a point attribute to a primitive attribute",
+      "type": "multi_domain",
+      "relevant_files": ["docs/geometry_attributes.md", "code/attributes.py"],
+      "expected_domains": ["docs", "code"]
+    },
+    {
+      "id": "open_questions_seed",
+      "query": "does holding the seed fixed across a sequence help continuity",
+      "type": "single",
+      "relevant_files": ["research/open_questions.md"],
+      "expected_domains": ["research"]
+    }
+  ]
+}

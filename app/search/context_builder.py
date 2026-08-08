@@ -47,6 +47,15 @@ def _token_count(text: str) -> int:
     return len(_get_tokens(text))
 
 
+def token_count(text: str) -> int:
+    """Public alias for the module's token counter.
+
+    The agentic loop budgets in the same units the context builder spends in,
+    so both must go through one implementation.
+    """
+    return _token_count(text)
+
+
 def _truncate_to_tokens(text: str, max_tokens: int) -> str:
     if max_tokens <= 0 or not text:
         return ""

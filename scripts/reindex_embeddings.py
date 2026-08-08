@@ -89,6 +89,7 @@ async def main() -> None:
             SELECT c.id, c.text_preview, f.path AS file_path, f.folder_tag
             FROM chunks c
             JOIN files f ON c.file_id = f.id
+            ORDER BY c.id
             LIMIT ? OFFSET ?
             """,
             (batch_size, offset),
@@ -138,13 +139,112 @@ async def main() -> None:
             break
         offset += batch_size
 
+    summaries_written = await _rebuild_summaries(db, embedding_svc, lance, batch_size)
+
     await db.close()
     logger.info(
-        "Done! Re-embedded %d/%d chunks with model '%s'.",
+        "Done! Re-embedded %d/%d chunks and %d summaries with model '%s'.",
         processed,
         total_chunks,
+        summaries_written,
         settings.embedding_model,
     )
+
+
+async def _rebuild_summaries(db, embedding_svc, lance, batch_size: int) -> int:
+    """Rebuild ``pma_summaries`` after ``lance.clear_all()`` dropped it.
+
+    ``clear_all()`` drops ``pma_chunks``, ``pma_summaries`` and ``query_cache``,
+    but the re-embed loop above only repopulates ``pma_chunks``. Without this the
+    run finishes with an empty summary table and the document-routing signal
+    silently contributes nothing to retrieval - which is exactly the failure this
+    function exists to prevent, so it hard-fails rather than warn.
+    """
+    conn = db._get_conn()
+
+    async with conn.execute(
+        "SELECT COUNT(*) FROM files WHERE summary != '' AND summary NOT LIKE '[ERROR:%'"
+    ) as cur:
+        row = await cur.fetchone()
+        expected_files = row[0] if row else 0
+
+    logger.info("Rebuilding summary index: %d file summaries to embed …", expected_files)
+
+    written = 0
+    offset = 0
+    while expected_files:
+        async with conn.execute(
+            """
+            SELECT id, path, folder_tag, summary
+            FROM files
+            WHERE summary != '' AND summary NOT LIKE '[ERROR:%'
+            ORDER BY id
+            LIMIT ? OFFSET ?
+            """,
+            (batch_size, offset),
+        ) as cursor:
+            rows = await cursor.fetchall()
+
+        if not rows:
+            break
+
+        embs = await embedding_svc.embed_texts([str(r[3]) for r in rows])
+        await lance.add_summaries_batch(
+            [
+                {
+                    "doc_id": f"file_{r[0]}",
+                    "embedding": e,
+                    "metadata": {
+                        "file_path": r[1],
+                        "folder_tag": r[2] or "",
+                        "is_folder_profile": "false",
+                    },
+                }
+                for r, e in zip(rows, embs, strict=False)
+            ]
+        )
+        written += len(rows)
+        logger.info("  … summaries %d/%d", written, expected_files)
+
+        if len(rows) < batch_size:
+            break
+        offset += batch_size
+
+    # Folder profiles live in the same table and were dropped too.
+    async with conn.execute(
+        "SELECT folder_tag, folder_path, profile_text FROM folder_profiles WHERE profile_text != ''"
+    ) as cursor:
+        profile_rows = await cursor.fetchall()
+
+    if profile_rows:
+        embs = await embedding_svc.embed_texts([str(r[2]) for r in profile_rows])
+        await lance.add_summaries_batch(
+            [
+                {
+                    "doc_id": f"folder_profile_{r[0]}",
+                    "embedding": e,
+                    "metadata": {
+                        "file_path": r[1],
+                        "folder_tag": r[0],
+                        "is_folder_profile": "true",
+                    },
+                }
+                for r, e in zip(profile_rows, embs, strict=False)
+            ]
+        )
+        written += len(profile_rows)
+        logger.info("Re-added %d folder profiles.", len(profile_rows))
+
+    if expected_files and lance.count_rows("pma_summaries") == 0:
+        logger.error(
+            "pma_summaries is empty after rebuild, but %d files carry summaries. "
+            "The document-routing signal would be dead. Aborting.",
+            expected_files,
+        )
+        await db.close()
+        sys.exit(1)
+
+    return written
 
 
 def cli_main():

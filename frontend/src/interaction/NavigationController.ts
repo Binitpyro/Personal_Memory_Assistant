@@ -291,6 +291,16 @@ export class NavigationController {
     public getRootIndex(): number  { return this.rootIndex; }
 
     /**
+     * The parsed node behind a source/instance index, or undefined if the
+     * index is out of range.
+     *
+     * Callers that pick a crystal or bubble get back a source index and need
+     * the node to answer questions about it — most commonly whether it is a
+     * folder, via `flags & FLAG_FOLDER`.
+     */
+    public getGraphNode(index: number): NavNode | undefined { return this.nodes[index]; }
+
+    /**
      * Build the compacted per-frame instance buffers.
      *
      * Traversal rules:

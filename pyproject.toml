@@ -59,7 +59,14 @@ dev = [
 [tool.ruff]
 target-version = "py312"
 line-length = 100
-extend-exclude = [".pytest_temp"]
+# tests/fixtures is gitignored and generated (scripts/generate_perf_corpus.py
+# emits deliberately sloppy code so the indexer sees realistic input). Linting
+# it produced ~800 findings that drowned out real ones, and "fixing" them would
+# have edited the fixture out from under the benchmarks.
+# tests/eval/corpus is evaluation *content*, not project code - the files exist
+# to be indexed and retrieved, and linting them would eventually rewrite the
+# thing being measured. Same reasoning as tests/fixtures.
+extend-exclude = [".pytest_temp", "tests/fixtures", "tests/eval/corpus"]
 
 [tool.ruff.lint]
 select = [
@@ -86,6 +93,10 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "S106"]
+# The OCR gate enumerates typographic punctuation (curly quotes, en/em dashes,
+# non-breaking space) so it is not scored as mojibake. RUF001 flags exactly
+# those characters as ASCII lookalikes, which is why they are listed at all.
+"app/ocr/gate.py" = ["RUF001"]
 
 [tool.ruff.lint.flake8-bugbear]
 extend-immutable-calls = [
@@ -104,7 +115,13 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 python_files = "test_*.py"
 python_functions = "test_*"
-addopts = "--basetemp=.pytest_temp"
+# The eval suite indexes a real corpus with real embedding and reranker models:
+# tens of seconds, and it needs those models on disk. Deselected by default so
+# `pytest tests/` stays fast and hermetic; run it with `-m eval`.
+addopts = "--basetemp=.pytest_temp -m 'not eval'"
+markers = [
+    "eval: retrieval quality benchmark (opt-in, needs local models)",
+]
 
 [tool.coverage.run]
 source = ["app"]
@@ -125,7 +142,13 @@ warn_unused_configs = true
 disallow_untyped_defs = false
 check_untyped_defs = true
 explicit_package_bases = true
-exclude = ['^\.pytest_temp/', '^tests/', '^dist/']
+# app/ocr/worker/ runs inside a separate virtualenv, not this interpreter. Its
+# modules import each other by bare name (they are copied flat and run by path)
+# and depend on packages that are deliberately absent here - rapidocr,
+# pypdfium2, opencv. Type-checking it against this environment can only produce
+# false positives. tests/test_ocr_protocol.py enforces its real constraint:
+# stdlib plus pinned venv deps, and never app.*.
+exclude = ['^\.pytest_temp/', '^tests/', '^dist/', '^app/ocr/worker/']
 
 [[tool.mypy.overrides]]
 module = [

@@ -16,7 +16,7 @@ import aiosqlite
 from app.config import settings
 from app.embeddings.service import EmbeddingService
 from app.indexing.code_chunker import CodeChunker
-from app.indexing.extractors import EXTRACTORS
+from app.indexing.extractors import EXTRACTORS, ExtractMeta
 from app.indexing.folder_profiler import (
     generate_folder_profiles_async,
 )
@@ -264,6 +264,10 @@ class IndexingService:
         self.max_file_size = settings.max_file_size_bytes
         self._concurrency = settings.index_concurrency
         self.code_chunker = CodeChunker(max_tokens=512)
+        # File ids whose summary changed during the current run. Flushed to the
+        # LanceDB summary index once the pipeline drains - re-embedding only what
+        # this run touched, rather than the whole corpus.
+        self._summary_dirty_file_ids: set[int] = set()
 
     def cancel_indexing(self):
         with progress._lock:
@@ -343,6 +347,11 @@ class IndexingService:
             finally:
                 if use_bulk_mode:
                     await self.db.exit_ingest_mode()
+
+            try:
+                await self._flush_file_summaries()
+            except Exception as e:
+                logger.error("Failed to index file summaries: %s", e, exc_info=True)
 
             await self._generate_folder_profiles(all_files, unique_folders)
             from app.search.retrieval import clear_retrieval_cache
@@ -492,6 +501,7 @@ class IndexingService:
                 chunker = StreamChunker(self.chunk_size, self.chunk_overlap, prefix)
                 hasher = hashlib.sha256()
                 ft_summary = ""
+                meta = None
 
                 hash_failed = False
                 # 1. Consistent raw-byte hashing pass (OS page cache makes extraction pass cheap)
@@ -519,7 +529,14 @@ class IndexingService:
                 try:
                     for fragment in _get_stream():
                         if progress.is_cancelled:
-                            return "CANCELLED", ""
+                            return "CANCELLED", "", None
+
+                        # Out-of-band extractor signal (which pages need OCR).
+                        # Checked before the [BINARY: test because ExtractMeta
+                        # has no .startswith.
+                        if isinstance(fragment, ExtractMeta):
+                            meta = fragment
+                            continue
 
                         # Skip binary stubs — they pollute the vector index with useless noise
                         if isinstance(fragment, str) and fragment.startswith("[BINARY:"):
@@ -529,14 +546,14 @@ class IndexingService:
 
                         for c in chunker.process(fragment):
                             if progress.is_cancelled:
-                                return "CANCELLED", ""
+                                return "CANCELLED", "", None
                             while True:
                                 try:
                                     bridge.put(c, timeout=1.0)
                                     break
                                 except stdlib_queue.Full:
                                     if progress.is_cancelled:
-                                        return "CANCELLED", ""
+                                        return "CANCELLED", "", None
                         if len(ft_summary) < 2000:
                             ft_summary += (
                                 fragment
@@ -546,16 +563,16 @@ class IndexingService:
 
                     for c in chunker.finalize():
                         if progress.is_cancelled:
-                            return "CANCELLED", ""
+                            return "CANCELLED", "", None
                         while True:
                             try:
                                 bridge.put(c, timeout=1.0)
                                 break
                             except stdlib_queue.Full:
                                 if progress.is_cancelled:
-                                    return "CANCELLED", ""
+                                    return "CANCELLED", "", None
                     sha256_result = "ERROR" if hash_failed else hasher.hexdigest()
-                    return sha256_result, ft_summary
+                    return sha256_result, ft_summary, meta
                 finally:
                     bridge.put(sentinel)
 
@@ -568,7 +585,7 @@ class IndexingService:
 
             extract_future = loop.run_in_executor(_EXTRACT_EXECUTOR, _extract_and_chunk)
             await _pump()
-            sha256, full_text_for_summary = await extract_future
+            sha256, full_text_for_summary, extract_meta = await extract_future
 
             summary = await loop.run_in_executor(
                 None, self._generate_summary, full_text_for_summary, path
@@ -576,7 +593,15 @@ class IndexingService:
             # Send footer with CANCELLED if extraction was cancelled, otherwise actual sha256
             if progress.is_cancelled and sha256 != "CANCELLED":
                 sha256 = "CANCELLED"
-            await queue.put({"type": "footer", "path": path, "summary": summary, "sha256": sha256})
+            await queue.put(
+                {
+                    "type": "footer",
+                    "path": path,
+                    "summary": summary,
+                    "sha256": sha256,
+                    "extract_meta": extract_meta,
+                }
+            )
 
         except Exception as e:
             logger.error("Streaming extraction failed for %s: %s", path, e)
@@ -606,6 +631,7 @@ class IndexingService:
                         "path": path,
                         "summary": f"[ERROR: {e!s}]",
                         "sha256": "ERROR",
+                        "extract_meta": None,
                     }
                 )
 
@@ -744,6 +770,10 @@ class IndexingService:
                             "UPDATE files SET summary = ?, sha256 = ? WHERE id = ?",
                             (item["summary"], item.get("sha256", ""), file_info["id"]),
                         )
+                        # The summary is the document-level retrieval signal; it
+                        # has to reach the vector index, not just SQLite.
+                        self._summary_dirty_file_ids.add(file_info["id"])
+                        await self._maybe_enqueue_ocr(path_str, item)
                         progress.update(file_info["chunk_count"], current_file=item["path"].name)
                     else:
                         progress.update(0, current_file=item["path"].name)
@@ -764,6 +794,45 @@ class IndexingService:
                 except Exception as rollback_err:
                     logger.error("Failed to rollback transaction: %s", rollback_err)
             raise
+
+    async def _maybe_enqueue_ocr(self, path_str: str, footer: dict[str, Any]) -> None:
+        """Queue a file's scanned pages for OCR, if it has any.
+
+        Called from the footer branch rather than the header because that is
+        where `files.sha256` finally gets written - the header inserts an empty
+        placeholder. The sentinels the hashing pass writes on failure
+        ("ERROR") or interruption ("CANCELLED") must never become a cache key,
+        so they are excluded here; that single check is also what keeps
+        garbage out of `ocr_cache`.
+
+        Runs on the same connection and commits immediately, matching the
+        sha256 UPDATE just above it. Failures are logged and swallowed - a
+        queue write must never be able to fail an index run.
+        """
+        meta = footer.get("extract_meta")
+        if not meta or not getattr(meta, "ocr_pages", None):
+            return
+        sha = footer.get("sha256") or ""
+        if sha in ("", "ERROR", "CANCELLED"):
+            return
+
+        from app.config import settings
+
+        if not settings.ocr_enabled or settings.ocr_tier == "none":
+            return
+
+        try:
+            from app.ocr.queue import enqueue_document
+
+            await enqueue_document(
+                self.db,
+                path_str,
+                list(meta.ocr_pages),
+                meta.page_count,
+                tier=settings.ocr_tier,
+            )
+        except Exception as exc:
+            logger.warning("Failed to enqueue OCR for %s: %s", path_str, exc)
 
     async def _flush_pending_chunks_sqlite(self, chunks: list[dict[str, Any]], active_files: dict):
         if not chunks:
@@ -862,6 +931,187 @@ class IndexingService:
         if old_ids:
             await self.lancedb_client.delete_documents(old_ids)
         await self.db.delete_file_chunks(file_id, auto_commit=False)
+
+    async def index_ocr_pages(
+        self,
+        path: Path,
+        pages: list[Any],
+        *,
+        replace_existing_ocr: bool = True,
+    ) -> int:
+        """Chunk, embed and store OCR results for an already-indexed file.
+
+        OCR results arrive long after the indexing run that queued them, so
+        they cannot ride the three-stage TaskGroup pipeline. This walks the
+        same machinery by hand - same chunker, same embed batch method, same
+        flush helpers - so OCR chunks are indistinguishable from native ones
+        downstream.
+
+        Only `OcrPage.indexable_text` is stored, which excludes lines below the
+        confidence floor. Since FTS is populated by an INSERT trigger on
+        `chunks`, that exclusion propagates to search for free while the full
+        text stays in `ocr_cache`.
+
+        Must not run concurrently with an index run: `DatabaseManager` releases
+        its write lock between `begin_transaction()` and `commit()`, so writing
+        here while the storer has a transaction open would commit that
+        transaction early. The manager's drain loop enforces this; the assert
+        below is the backstop.
+
+        Returns the number of chunks written.
+        """
+        if progress.status != "idle":
+            raise RuntimeError(
+                "index_ocr_pages() called while indexing is active; "
+                "the OCR drain loop must wait for idle."
+            )
+
+        path_str = str(path.absolute())
+        row = await self.db.get_file_by_path(path_str)
+        if row is None:
+            logger.info("OCR results discarded - %s is no longer indexed.", path.name)
+            return 0
+
+        file_id = row["id"]
+        try:
+            folder_tag = row["folder_tag"] or ""
+        except (KeyError, IndexError):
+            folder_tag = ""
+
+        # Replace only our own chunks. A mixed PDF (native body, scanned
+        # appendix) must keep its natively extracted text.
+        if replace_existing_ocr:
+            old_ids = await self.db.get_ocr_chunk_ids(file_id)
+            if old_ids:
+                try:
+                    await self.lancedb_client.delete_documents([str(i) for i in old_ids])
+                except Exception as exc:
+                    logger.warning("Could not drop old OCR vectors for %s: %s", path.name, exc)
+            await self.db.delete_ocr_chunks(file_id, auto_commit=True)
+
+        prefix = self._build_context_prefix(path_str)
+        chunker = StreamChunker(self.chunk_size, self.chunk_overlap, prefix)
+        raw_chunks: list[dict[str, Any]] = []
+        for page in sorted(pages, key=lambda p: p.page_num):
+            text = page.indexable_text
+            if text:
+                raw_chunks.extend(chunker.process(text + "\n"))
+        raw_chunks.extend(chunker.finalize())
+
+        if not raw_chunks:
+            logger.info("OCR produced no indexable text for %s", path.name)
+            return 0
+
+        for chunk in raw_chunks:
+            chunk["source"] = "ocr"
+
+        items = [
+            {"type": "chunk", "path": path, "chunk": chunk, "file_id": file_id}
+            for chunk in raw_chunks
+        ]
+        # _flush_pending_chunks_sqlite reads folder_tag out of this shape.
+        active_files = {
+            path_str: {
+                "id": file_id,
+                "data": {"folder_tag": folder_tag},
+                "chunk_count": len(items),
+            }
+        }
+
+        # _process_embed_stream_batch writes progress.current_file via its
+        # report_progress callback. Harmless here: we only run when the
+        # indexer is idle, and the SSE stream only emits while it is running.
+        for i in range(0, len(items), 32):
+            await self._process_embed_stream_batch(items[i : i + 32])
+
+        # _flush_pending_chunks_sqlite always defers its commit to the caller.
+        await self.db.begin_transaction()
+        try:
+            result = await self._flush_pending_chunks_sqlite(items, active_files)
+            await self.db.commit()
+        except Exception:
+            try:
+                await self.db.rollback_transaction()
+            except Exception as rollback_err:
+                logger.error("OCR chunk rollback failed for %s: %s", path.name, rollback_err)
+            raise
+
+        if result:
+            l_ids, l_embs, l_metas = result
+            await self._flush_pending_chunks_lancedb(l_ids, l_embs, l_metas)
+
+        try:
+            from app.search.retrieval import clear_retrieval_cache
+
+            clear_retrieval_cache()
+        except Exception as exc:
+            logger.debug("Could not clear retrieval cache after OCR: %s", exc)
+
+        try:
+            from app import state as app_state
+
+            app_state.file_tree_cache["data"] = None
+            app_state.insights_cache["data"] = None
+        except Exception as exc:
+            logger.debug("Could not invalidate UI caches after OCR: %s", exc)
+
+        logger.info("OCR indexed %d chunk(s) for %s", len(items), path.name)
+        return len(items)
+
+    async def _flush_file_summaries(self) -> int:
+        """Embed the summaries of files touched this run into the LanceDB summary index.
+
+        `pma_summaries` backs the document-routing signal in hybrid retrieval:
+        it ranks whole files by summary similarity before chunk budget is spent.
+        Folder profiles live in the same table under `is_folder_profile="true"`;
+        per-file rows are tagged `"false"` so the two can be queried apart. The
+        metadata key set must match the folder-profile rows exactly - LanceDB
+        appends require a stable schema, so the file id rides in `doc_id`.
+        """
+        file_ids = list(self._summary_dirty_file_ids)
+        self._summary_dirty_file_ids.clear()
+        if not file_ids:
+            return 0
+
+        written = 0
+        batch_size = 500
+        for start in range(0, len(file_ids), batch_size):
+            batch = file_ids[start : start + batch_size]
+            placeholders = ",".join("?" for _ in batch)
+            rows = await self.db.execute_query(
+                f"SELECT id, path, folder_tag, summary FROM files WHERE id IN ({placeholders})",  # nosec B608 # noqa: S608
+                tuple(batch),
+            )
+            usable = [r for r in rows if r[3] and not str(r[3]).startswith("[ERROR:")]
+            if not usable:
+                continue
+
+            doc_ids = [f"file_{r[0]}" for r in usable]
+            # Replace rather than append - re-indexing a file must not leave its
+            # previous summary vector behind to compete with the new one.
+            try:
+                await self.lancedb_client.delete_summaries_by_ids(doc_ids)
+            except Exception as e:
+                logger.warning("Could not clear stale file summaries: %s", e)
+
+            embs = await self.embedding_service.embed_texts([str(r[3]) for r in usable])
+            summaries = [
+                {
+                    "doc_id": doc_id,
+                    "embedding": emb,
+                    "metadata": {
+                        "file_path": r[1],
+                        "folder_tag": r[2] or "",
+                        "is_folder_profile": "false",
+                    },
+                }
+                for doc_id, r, emb in zip(doc_ids, usable, embs, strict=False)
+            ]
+            await self.lancedb_client.add_summaries_batch(summaries)
+            written += len(summaries)
+
+        logger.info("Indexed %d file summaries into the document-routing index.", written)
+        return written
 
     async def _generate_folder_profiles(self, all_files, folders) -> None:
         profiles = await generate_folder_profiles_async(all_files, folders)

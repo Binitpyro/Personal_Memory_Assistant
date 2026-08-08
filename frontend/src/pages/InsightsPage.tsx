@@ -2,6 +2,7 @@ import { useMemo, useState, useCallback, useEffect, Suspense, lazy } from 'react
 import { BarChart3, PieChart, TrendingUp, FileType, Loader2, Flame, Snowflake, HardDrive, Box, LayoutGrid } from 'lucide-react'
 import { useApi } from '../useApi'
 import { getInsights, getInsightsByType, getFileTree } from '../api'
+import { KnowledgePortrait } from '../components/KnowledgePortrait'
 
 const WebGPUFallback = lazy(() => import('../components/WebGPUFallback').then(m => ({ default: m.WebGPUFallback })))
 const FileTypeTreemap = lazy(() => import('../components/FileTypeTreemap').then(m => ({ default: m.FileTypeTreemap })))
@@ -262,6 +263,10 @@ export function InsightsPage() {
                 </div>
               )}
             </div>
+          </div>
+
+          <div className="mt-6">
+            <KnowledgePortrait />
           </div>
 
           {/* Error notice */}

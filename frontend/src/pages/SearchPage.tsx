@@ -7,8 +7,12 @@ import { useChatStream } from '../hooks/useChatStream';
 import { MessageBubble } from '../components/chat/MessageBubble';
 import { FilterBar } from '../components/chat/FilterBar';
 import { ModelPicker } from '../components/providers/ModelPicker';
+import { useDreamscapeStore } from '../store/dreamscapeStore';
 
 export function SearchPage() {
+  const selectedChunks = useDreamscapeStore(state => state.selectedChunks);
+  const removeChunk = useDreamscapeStore(state => state.removeChunk);
+  const clearChunks = useDreamscapeStore(state => state.clearChunks);
 
   const [question, setQuestion] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -62,12 +66,13 @@ export function SearchPage() {
         folder_tag: selectedFolderTag || undefined,
         mode: selectedMode || undefined,
         forced_chunk_id: forcedChunkId,
+        selected_chunk_ids: selectedChunks.map(c => c.id),
         isRetry: !!overrideQuestion || !!forcedChunkId
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Search failed');
     }
-  }, [question, isSearching, executeSearch, selectedFileType, selectedFolderTag, selectedMode, messages]);
+  }, [question, isSearching, executeSearch, selectedFileType, selectedFolderTag, selectedMode, messages, selectedChunks]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -181,6 +186,28 @@ export function SearchPage() {
                   </button>
                 ))}
               </div>
+            </div>
+          )}
+          {selectedChunks.length > 0 && (
+            <div className="flex flex-wrap gap-2 items-center mb-1">
+              <span className="text-[10px] uppercase font-black text-text-secondary tracking-wider ml-1">Context:</span>
+              {selectedChunks.map(chunk => (
+                <div key={chunk.id} className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-primary/10 border border-primary/20 text-xs text-primary-light">
+                  <span className="truncate max-w-[150px]">{chunk.filename}</span>
+                  <button 
+                    onClick={() => removeChunk(chunk.id)}
+                    className="hover:text-error transition-colors"
+                  >
+                    &times;
+                  </button>
+                </div>
+              ))}
+              <button 
+                onClick={() => clearChunks()}
+                className="text-[10px] uppercase font-bold text-text-secondary hover:text-error transition-colors ml-1"
+              >
+                Clear
+              </button>
             </div>
           )}
           <div className="relative group">

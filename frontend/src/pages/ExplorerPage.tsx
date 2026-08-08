@@ -1,8 +1,8 @@
 import { useState, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { FolderTree, File, Folder, ChevronRight, ChevronDown, Loader2, LayoutGrid, List, Trash2, Search, Download, Bot } from 'lucide-react'
+import { FolderTree, File, Folder, ChevronRight, ChevronDown, Loader2, LayoutGrid, List, Trash2, Search, Download, Bot, ScanText } from 'lucide-react'
 import { useApi, invalidateCache } from '../useApi'
-import { getFileTree, removeFolderIndex, type FileEntry } from '../api'
+import { getFileTree, removeFolderIndex, getOcrStatus, forceOcr, type FileEntry } from '../api'
 import { FileTypeTreemap } from '../components/FileTypeTreemap'
 
 function formatSize(bytes: number): string {
@@ -127,7 +127,29 @@ export function ExplorerPage() {
   const [viewMode, setViewMode] = useState<'tree' | 'treemap'>('tree')
   const [activeExtension, setActiveExtension] = useState<string | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
+  const [ocrBusy, setOcrBusy] = useState<string | null>(null)
+  const [ocrMessage, setOcrMessage] = useState('')
   const navigate = useNavigate()
+
+  const { data: ocr } = useApi(getOcrStatus, { cacheKey: 'ocr-status' })
+  const ocrReady = !!ocr?.installed && !!ocr?.enabled
+
+  const handleForceOcr = async (path: string) => {
+    setOcrBusy(path)
+    setOcrMessage('')
+    try {
+      const res = await forceOcr(path)
+      setOcrMessage(
+        res.ok
+          ? `Queued ${res.pages_queued ?? 0} page(s) for OCR.`
+          : `Could not queue: ${res.error_code ?? 'unknown error'}`,
+      )
+    } catch (e) {
+      setOcrMessage(e instanceof Error ? e.message : 'Could not queue OCR.')
+    } finally {
+      setOcrBusy(null)
+    }
+  }
 
   const handleExportCSV = () => {
     if (!tree?.folders) return
@@ -423,6 +445,24 @@ export function ExplorerPage() {
                   <Bot className="w-4 h-4" />
                   Ask AI about this file
                 </button>
+                {/* The detection gate only spots *missing* text, never wrong
+                    text. This is the manual override for a PDF whose text
+                    layer extracts but is scrambled or mis-mapped. */}
+                {ocrReady && selectedFile.type.toLowerCase() === '.pdf' && (
+                  <button
+                    onClick={() => handleForceOcr(selectedFile.path)}
+                    disabled={ocrBusy === selectedFile.path}
+                    className="w-full mt-2 flex items-center justify-center gap-2 py-2.5 bg-primary/5 hover:bg-primary/15 text-primary rounded-xl text-sm font-bold transition-all border border-primary/20 disabled:opacity-50"
+                  >
+                    {ocrBusy === selectedFile.path
+                      ? <Loader2 className="w-4 h-4 animate-spin" />
+                      : <ScanText className="w-4 h-4" />}
+                    Force OCR
+                  </button>
+                )}
+                {ocrMessage && (
+                  <p className="mt-2 text-[10px] text-center text-text-secondary">{ocrMessage}</p>
+                )}
               </div>
             ) : (
               <div className="text-center py-4 opacity-30">

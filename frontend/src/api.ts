@@ -173,6 +173,35 @@ export const cancelOcrInstall = () =>
 export const resumeOcr = () =>
   json<{ ok: boolean }>('/ocr/resume', { method: 'POST' });
 
+export interface VlmModel { id: string; vision: boolean }
+
+export interface VlmProviderInfo {
+  provider: string;
+  display_name: string;
+  base_url: string;
+  /** False when the endpoint is off this machine — page images would leave the device. */
+  is_local: boolean;
+  reachable: boolean;
+  models: VlmModel[];
+  error: string | null;
+}
+
+export const getVlmModels = () =>
+  json<{
+    providers: VlmProviderInfo[];
+    has_vision_model: boolean;
+    suggestions: string[];
+  }>('/ocr/vlm/models');
+
+export const getVlmSelection = () =>
+  json<{ selection: { provider: string; model: string } | null }>('/ocr/vlm/selection');
+
+export const selectVlmModel = (provider: string, model: string) =>
+  json<{ ok: boolean; error_code?: string }>('/ocr/vlm/select', {
+    method: 'POST',
+    body: JSON.stringify({ provider, model }),
+  });
+
 export const uninstallOcrTier = () =>
   json<{ ok: boolean; removed: string[] }>('/ocr/uninstall', { method: 'POST' });
 

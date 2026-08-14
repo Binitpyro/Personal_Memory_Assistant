@@ -149,11 +149,19 @@ def read_tier_stamp(tier: str | None = None) -> dict:
 
 
 def is_tier_installed(tier: str | None = None) -> bool:
-    """True when a usable venv exists whose stamp matches this build's protocol.
+    """True when this tier is usable.
 
-    A protocol bump makes an existing venv unusable rather than subtly wrong,
-    so we report not-installed and let the registry re-sync the worker files.
+    For engine tiers that means a venv whose stamp matches this build's
+    protocol - a protocol bump makes an existing venv unusable rather than
+    subtly wrong, so we report not-installed and let the registry re-sync.
+
+    The VLM tier has no venv by design; it is usable once the user has chosen a
+    provider and model. Answering "not installed" for it would have left the
+    drain loop refusing to run forever while documents kept enqueuing.
     """
+    if (tier or _resolve_tier(None)) == VLM_TIER:
+        return bool(vlm_selection())
+
     if not ocr_python(tier).is_file():
         return False
     stamp = read_tier_stamp(tier)
@@ -165,13 +173,50 @@ def is_tier_installed(tier: str | None = None) -> bool:
     return stamp.get("protocol") == PROTOCOL_VERSION
 
 
-def detect_installed_tier() -> str:
-    """Name of the tier actually provisioned on disk, or "" if none is.
+#: Tier that runs no local engine at all - it sends page images to a vision
+#: model in the user's own Ollama or LM Studio. "Installed" therefore cannot
+#: mean "a venv exists"; it means a provider and model have been chosen.
+VLM_TIER = "vlm"
 
-    Reads the filesystem instead of assuming "cpu". With one tier that made no
+
+def vlm_selection() -> dict[str, str]:
+    """The user's chosen Tier 3 provider and model, or empty when unset."""
+    try:
+        from app.settings_store import SettingsStore
+
+        stored = (SettingsStore.read().get("ocr") or {}).get("vlm") or {}
+    except Exception as exc:
+        logger.debug("Could not read persisted VLM selection: %s", exc)
+        return {}
+
+    provider = str(stored.get("provider") or "").strip()
+    model = str(stored.get("model") or "").strip()
+    if not provider or not model:
+        return {}
+    return {"provider": provider, "model": model}
+
+
+def persist_vlm_selection(provider: str, model: str) -> None:
+    try:
+        from app.settings_store import SettingsStore
+
+        data = SettingsStore.read()
+        data.setdefault("ocr", {})["vlm"] = {"provider": provider, "model": model}
+        SettingsStore.save(data)
+    except Exception as exc:
+        logger.warning("Could not persist VLM selection: %s", exc)
+
+
+def detect_installed_tier() -> str:
+    """Name of the tier actually provisioned, or "" if none is.
+
+    Reads real state instead of assuming "cpu". With one tier that made no
     difference; with more, assuming it would relabel a GPU install as CPU on
     every restart - and that label feeds the OCR cache key, so the mislabel
     would not stay cosmetic.
+
+    A provisioned venv outranks a VLM selection: a local engine is faster, free,
+    and fully offline, so if the user has one it is what should run.
     """
     root = ocr_root()
     try:
@@ -185,7 +230,7 @@ def detect_installed_tier() -> str:
         tier = name[len("env_") :]
         if tier and is_tier_installed(tier):
             return tier
-    return ""
+    return VLM_TIER if vlm_selection() else ""
 
 
 #: Execution provider that needs no marker in the cache key. Tier 1 has always
@@ -223,6 +268,15 @@ def expected_engine_identity() -> str:
     will load. Writes are gated on the worker's actual report instead - see
     `OcrManager._engine_identity`.
     """
+    # The VLM tier has no venv and therefore no stamp; its identity is the
+    # model the user picked. Two different vision models produce materially
+    # different transcriptions, so switching must miss cache rather than serve
+    # the previous model's text.
+    if _resolve_tier(None) == VLM_TIER:
+        selection = vlm_selection()
+        if selection:
+            return f"vlm:{selection['provider']}:{selection['model']}"
+
     stamp = read_tier_stamp()
     return engine_identity(stamp.get("model_version"), stamp.get("ep"))
 

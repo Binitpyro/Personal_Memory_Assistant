@@ -39,6 +39,7 @@ from app.ocr import protocol as proto
 from app.ocr import queue as ocr_queue
 from app.ocr import registry
 from app.ocr.settings import (
+    VLM_TIER,
     ensure_dirs,
     is_tier_installed,
     load_persisted_state,
@@ -314,6 +315,53 @@ class OcrManager:
 
     # ── per-document ─────────────────────────────────────────────────────
 
+    async def _run_document_vlm(self, path: Path, pages: list[int]) -> tuple[list[OcrPage], str]:
+        """Transcribe pages with the selected vision model. Returns (pages, error).
+
+        Sequential on purpose. The model is the user's own, usually the same one
+        serving chat, and on a 4 GB card it is already spilling layers to CPU -
+        issuing concurrent requests would contend for the GPU it is running on
+        and slow the whole machine down rather than speed this up.
+
+        Partial results are kept on timeout, matching the worker contract: what
+        has been transcribed is worth indexing even if the document as a whole
+        ran out of budget.
+        """
+        from app.ocr.vlm_engine import VlmNotConfiguredError, recognize_page
+
+        capped = pages[: settings.ocr_vlm_max_pages_per_doc]
+        if len(capped) < len(pages):
+            logger.info(
+                "OCR (VLM): %s has %d pages, transcribing the first %d "
+                "(ocr_vlm_max_pages_per_doc).",
+                path.name,
+                len(pages),
+                len(capped),
+            )
+
+        done: list[OcrPage] = []
+        deadline = time.monotonic() + settings.ocr_vlm_doc_timeout_s
+
+        for page_num in capped:
+            if self._stopping:
+                break
+            if time.monotonic() >= deadline:
+                logger.warning(
+                    "OCR (VLM): %s hit the document budget after %d page(s).",
+                    path.name,
+                    len(done),
+                )
+                return done, proto.E_OCR_DOC_TIMEOUT
+            try:
+                done.append(await recognize_page(path, page_num))
+            except VlmNotConfiguredError as exc:
+                # Fatal for the tier, not for this document: nothing will
+                # succeed until the user picks a model again.
+                logger.error("OCR (VLM) is not configured: %s", exc)
+                return done, proto.E_TIER_NOT_INSTALLED
+
+        return done, ""
+
     async def _process_doc(self, row: OcrQueueRow) -> None:
         path = Path(row.file_path)
         self._current_file = path.name
@@ -346,7 +394,9 @@ class OcrManager:
         fresh: list[OcrPage] = []
         error_code = ""
 
-        if todo:
+        if todo and settings.ocr_tier == VLM_TIER:
+            fresh, error_code = await self._run_document_vlm(path, todo)
+        elif todo:
             ensure_dirs()
             doc_id = f"d-{uuid.uuid4().hex[:12]}"
             ndjson_path = ocr_scratch_dir() / f"{doc_id}.ndjson"
@@ -360,17 +410,19 @@ class OcrManager:
                 with contextlib.suppress(OSError):
                     ndjson_path.unlink(missing_ok=True)
 
-            if fresh:
-                # Written under whatever the worker reported, never under what
-                # the stamp claimed - _run_document has completed by now, so a
-                # handshake has happened and _engine_id reflects reality.
-                await ocr_cache.put_pages(
-                    self.db, content_key, fresh, engine_id=self._active_engine_id()
-                )
-                self._pages_done += len(fresh)
-                if self._pages_done >= 100:
-                    self._pages_done = 0
-                    await ocr_cache.evict_lru(self.db)
+        # Outside the branch above: both the worker path and the VLM path
+        # produce `fresh`, and both must be cached the same way.
+        if fresh:
+            # Written under whatever the engine reported, never under what the
+            # stamp claimed - the run has completed by now, so a handshake has
+            # happened and _engine_id reflects reality.
+            await ocr_cache.put_pages(
+                self.db, content_key, fresh, engine_id=self._active_engine_id()
+            )
+            self._pages_done += len(fresh)
+            if self._pages_done >= 100:
+                self._pages_done = 0
+                await ocr_cache.evict_lru(self.db)
 
         all_pages = list(cached.values()) + fresh
         if all_pages:

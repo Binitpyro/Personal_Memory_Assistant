@@ -144,6 +144,46 @@ async def list_vlm_models():
     }
 
 
+class VlmSelectionPayload(BaseModel):
+    provider: str = Field(..., max_length=64)
+    model: str = Field(..., max_length=256)
+
+
+@router.post("/vlm/select")
+async def select_vlm(payload: VlmSelectionPayload):
+    """Choose the vision model for Tier 3, and switch to it.
+
+    Refuses a provider whose message format we cannot build - sending a
+    text-only message would make the model describe nothing, and that would be
+    cached and indexed as the page's text.
+    """
+    from app.ocr.settings import VLM_TIER, persist_vlm_selection
+    from app.providers.vision import supports_vision_messages
+
+    if not supports_vision_messages(payload.provider):
+        return {"ok": False, "error_code": "PROVIDER_CANNOT_SEND_IMAGES"}
+
+    persist_vlm_selection(payload.provider, payload.model)
+    settings.ocr_tier = VLM_TIER
+    settings.ocr_enabled = True
+    persist_enabled(True)
+
+    manager = await get_ocr()
+    manager.clear_fatal()
+    # A different model transcribes differently, so it must not read the
+    # previous one's cached pages.
+    manager.reset_engine_identity()
+    await manager.kick()
+    return {"ok": True, "provider": payload.provider, "model": payload.model}
+
+
+@router.get("/vlm/selection")
+async def get_vlm_selection():
+    from app.ocr.settings import vlm_selection
+
+    return {"selection": vlm_selection() or None}
+
+
 @router.post("/install")
 @limiter.limit("3/minute")
 async def install(request: Request, payload: InstallPayload | None = None):

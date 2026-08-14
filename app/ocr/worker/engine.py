@@ -3,6 +3,7 @@
 MUST NOT IMPORT `app.*`.
 """
 
+import hashlib
 import os
 
 import postproc
@@ -29,18 +30,76 @@ class Engine:
 
         from rapidocr_onnxruntime import RapidOCR
 
+        # Which venv this is decides the provider: the GPU tier installs
+        # onnxruntime-directml, the CPU tier plain onnxruntime, and they cannot
+        # coexist in one interpreter. Detecting it here rather than being told
+        # over the wire means `ep` reports what is genuinely loaded - which is
+        # what the manager compares against the install stamp.
+        dml = self._directml_kwargs()
+        if dml:
+            self.execution_provider = "DmlExecutionProvider"
+
         overrides = self._custom_model_paths()
         if overrides:
             try:
-                self._ocr = RapidOCR(**overrides)
-                self.model_version = "custom"
+                self._ocr = RapidOCR(**overrides, **dml)
+                # Not the bare string "custom": that is one label for every
+                # possible set of weights, so two different override sets would
+                # share a cache key and serve each other's text. The digest is
+                # taken from the files actually loaded, so the identity changes
+                # whenever the weights do.
+                self.model_version = f"custom-{self._override_digest(overrides)}"
                 return
             except Exception:
-                # Never let a bad override take the engine down - the bundled
-                # models are always present and always work.
+                # A bad override must not take the engine down - the bundled
+                # models are always present and always work. The fallback is not
+                # silent: model_version stays at the bundled value, which the
+                # manager compares against the install stamp and reports as an
+                # engine mismatch.
                 pass
 
-        self._ocr = RapidOCR()
+        self._ocr = RapidOCR(**dml)
+
+    @staticmethod
+    def _directml_kwargs():
+        """`{det,cls,rec}_use_dml=True` when this venv can actually do DirectML.
+
+        rapidocr's own `_check_dml()` additionally requires Windows 10+ and the
+        provider to be registered, and falls back to CPU silently if not - so
+        this is a request, not a guarantee. `execution_provider` is corrected
+        from the live session afterwards rather than assumed from this.
+        """
+        try:
+            import onnxruntime as ort
+
+            if "DmlExecutionProvider" not in ort.get_available_providers():
+                return {}
+        except Exception:
+            return {}
+        return {"det_use_dml": True, "cls_use_dml": True, "rec_use_dml": True}
+
+    @staticmethod
+    def _override_digest(overrides):
+        """Short content digest of the override weights, for the cache key.
+
+        Hashes the model bytes rather than paths or mtimes: the same weights
+        must produce the same identity across machines and reinstalls, and
+        different weights must never collide.
+        """
+        digest = hashlib.sha256()
+        for key in sorted(overrides):
+            path = overrides[key]
+            digest.update(key.encode("utf-8"))
+            try:
+                with open(path, "rb") as handle:
+                    for block in iter(lambda: handle.read(1024 * 1024), b""):
+                        digest.update(block)
+            except OSError:
+                # Unreadable here means unreadable at load time too, so this
+                # branch is effectively unreachable - but a partial digest is
+                # still better than crashing a worker that already loaded.
+                digest.update(b"\0unreadable")
+        return digest.hexdigest()[:12]
 
     def _custom_model_paths(self):
         """Override kwargs, or {} when no user-supplied models are present."""

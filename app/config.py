@@ -14,9 +14,11 @@ _extensions_cache: dict[str, set[str]] = {}
 # 404 (e.g. "http://localhost:11434/api/generate" + "/api/tags").
 _OLLAMA_URL_SUFFIXES = ("/api/generate", "/api/chat", "/api/tags")
 
-# Install states for the OCR engine. "cpu" is the only tier shipped today;
-# the DirectML tier is planned but deliberately not selectable yet.
-_OCR_TIERS = frozenset({"none", "cpu"})
+# Install states for the OCR engine.
+#   "cpu" - PP-OCRv4 mobile weights bundled in the pinned wheel, CPU only.
+#   "gpu" - PP-OCRv4 *server* weights (downloaded, digest-pinned) on DirectML.
+#           Windows-only: onnxruntime-directml publishes win_amd64 wheels only.
+_OCR_TIERS = frozenset({"none", "cpu", "gpu"})
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -87,6 +89,29 @@ class Settings(BaseSettings):
     embedding_allow_download: bool = True
     embedding_allow_unpinned: bool = False
 
+    # The reranker loader never downloads - the model must already be on disk -
+    # so there is no download gate to mirror here, only the integrity gate.
+    reranker_allow_unpinned: bool = False
+    # Padding is batch-longest, so the reranker's peak scales with
+    # len(batch) * longest_sequence. Capping candidate *count* alone leaves that
+    # product unbounded on the interactive query path.
+    reranker_max_batch_chars: int = 60_000
+
+    # The persistent semantic cache is scanned exhaustively on every query (it
+    # has no vector index) and used to grow without bound. At 1,536 bytes per
+    # vector, I/O binds around 5,000 rows at a 50 ms budget; the RAM ceiling is
+    # ~39,000 rows, where one probe streams the whole 60 MB budget.
+    query_cache_max_rows: int = 5_000
+    # Prune every N writes rather than on each one: the cost is the scan and
+    # compaction, not the row.
+    query_cache_prune_interval: int = 100
+
+    # Explicit model -> context-budget class, checked before the parameter-count
+    # heuristic. Parameter count is a proxy for context window and sometimes a
+    # poor one (llama3.1:8b has a 128k window), so this is the honest escape
+    # hatch. Example: {"llama3.1:8b": "cloud"}.
+    model_class_overrides: dict[str, str] = {}
+
     chunk_size: int = 512
     chunk_overlap: int = 50
     max_file_size_mb: int = 50
@@ -111,7 +136,7 @@ class Settings(BaseSettings):
     # state, `ocr_enabled` the user switch - normalize_ocr keeps them coherent
     # so callers only ever need to read one of them.
     ocr_enabled: bool = False
-    ocr_tier: str = "none"  # "none" | "cpu"  (gpu/dml deferred to P2)
+    ocr_tier: str = "none"  # "none" | "cpu" | "gpu"
     ocr_dpi: int = 300
     ocr_min_chars_per_page: int = 100
     ocr_garbage_ratio: float = 0.30
@@ -124,6 +149,25 @@ class Settings(BaseSettings):
     ocr_worker_max_pages: int = 2000
     ocr_cache_max_mb: int = 500
     ocr_max_attempts: int = 3
+
+    # ── OCR Tier 3 (VLM) ─────────────────────────────────────────────────
+    # A vision model reading a 300-DPI page is 1-2 orders of magnitude slower
+    # than PP-OCR: a 2550x3300 render becomes thousands of image tokens, and on
+    # a 4 GB card a 7B vision model does not fit in VRAM at all, so Ollama
+    # spills layers to CPU. The Tier 1/2 budgets (30s per page, 600s per doc)
+    # would time out every multi-page scan, retry it `ocr_max_attempts` times,
+    # and then fail it - hours of compute for nothing. These are separate
+    # settings rather than raised shared ones so the CPU tiers keep their tight
+    # budgets, where a 30s page genuinely does mean something is wrong.
+    ocr_vlm_page_timeout_s: int = 240
+    ocr_vlm_doc_timeout_s: int = 7200
+    #: Provider HTTP timeout for a vision call. The default client timeout is
+    #: 30s (app/providers/__init__.py), which would abort the request long
+    #: before the page timeout ever fired.
+    ocr_vlm_request_timeout_s: float = 300.0
+    #: Refuse to queue a document longer than this to a VLM. At minutes per
+    #: page an unbounded book is a multi-day job the user cannot see the end of.
+    ocr_vlm_max_pages_per_doc: int = 50
 
     @model_validator(mode="after")
     def normalize_ocr(self):
@@ -154,6 +198,10 @@ class Settings(BaseSettings):
         self.ocr_worker_max_pages = max(1, self.ocr_worker_max_pages)
         self.ocr_cache_max_mb = max(0, self.ocr_cache_max_mb)
         self.ocr_max_attempts = max(1, self.ocr_max_attempts)
+        self.ocr_vlm_page_timeout_s = max(1, self.ocr_vlm_page_timeout_s)
+        self.ocr_vlm_doc_timeout_s = max(1, self.ocr_vlm_doc_timeout_s)
+        self.ocr_vlm_request_timeout_s = max(1.0, self.ocr_vlm_request_timeout_s)
+        self.ocr_vlm_max_pages_per_doc = max(1, self.ocr_vlm_max_pages_per_doc)
         return self
 
     gemini_api_key: str = ""
@@ -235,7 +283,12 @@ class Settings(BaseSettings):
     agentic_enabled: bool = False
     agentic_max_iterations: int = 2
     agentic_subquery_max: int = 4
-    agentic_evidence_score_floor: float = 0.0
+    # On the cross-encoder logit scale, NOT the RRF scale. ms-marco-MiniLM-L-6-v2
+    # logits below about -2.0 mean a very poor match. This was 0.0, read against
+    # strictly-positive RRF scores, so every sub-question was marked satisfied by
+    # any hit at all and the not-found list never fired. Calibrate against
+    # tests/eval before moving it.
+    agentic_evidence_score_floor: float = -2.0
 
     # ── Folder watcher ───────────────────────────────────────────────────────
     # Re-indexes already-indexed folders on a timer so the corpus does not drift

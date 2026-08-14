@@ -61,7 +61,7 @@ class AnthropicProvider(OpenAICompatibleProvider):
         return cast(list[ModelInfo], models)
 
     def _build_messages_payload(
-        self, messages: list[dict[str, str]]
+        self, messages: list[dict[str, Any]]
     ) -> tuple[str | None, list[dict[str, str]]]:
         system_prompt = None
         filtered_messages = []
@@ -76,7 +76,7 @@ class AnthropicProvider(OpenAICompatibleProvider):
 
     async def chat(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         *,
         model: str | None = None,
         temperature: float = 0.2,
@@ -105,7 +105,7 @@ class AnthropicProvider(OpenAICompatibleProvider):
 
     async def stream(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         *,
         model: str | None = None,
         temperature: float = 0.2,

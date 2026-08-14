@@ -1,7 +1,9 @@
 import json
 import logging
+import re
 from collections.abc import AsyncGenerator
 from pathlib import Path
+from typing import Any
 
 import httpx
 import keyring
@@ -14,6 +16,7 @@ from app.providers import (
     env_base_url,
     get_configured_provider_ids,
     get_default_chain,
+    is_loopback_url,
 )
 from app.search.capability_detector import capability_detector
 from app.settings_store import CURRENT_SCHEMA_VERSION, SettingsStore
@@ -49,6 +52,7 @@ def _get_effective_fallback_chain() -> list[str]:
 
 async def _get_effective_fallback_chain_async() -> list[str]:
     import asyncio
+
     return await asyncio.to_thread(_get_effective_fallback_chain)
 
 
@@ -56,6 +60,55 @@ class ProviderNotConfiguredError(Exception):
     """Raised when no active LLM provider can be resolved."""
 
     pass
+
+
+# "llama3.2:1b" -> 1, "qwen2.5:14b" -> 14, "qwen2.5:0.5b" -> 0.5. The version
+# number is skipped because it is not followed by a bare "b".
+_PARAM_SIZE_RE = re.compile(r"(?<![\d.])(\d+(?:\.\d+)?)\s*b(?![a-z0-9])")
+
+# Below this many billion parameters a model cannot use a large context, so it
+# gets the tighter budget and the reduced chunk allowance in build_context.
+_SMALL_MODEL_BILLIONS = 4.0
+
+
+def _parse_param_billions(model: str | None) -> float | None:
+    matches = _PARAM_SIZE_RE.findall((model or "").lower())
+    if not matches:
+        return None
+    return min(float(m) for m in matches)
+
+
+def _classify_local_model(model: str | None) -> str:
+    """Map a local model name onto a context-budget class.
+
+    This class is the only input to ``compute_context_budget``, so it decides
+    the constraint the whole system is designed around. It used to be substring
+    matching - ``"3b" in name`` - under which ``llama3.2:1b`` and
+    ``qwen2.5:0.5b`` both fell through to ``7b_local`` and were handed a 10,000
+    token budget they cannot use, which is the exact failure mode the project's
+    design constraints reject.
+
+    Parameter count is parsed numerically instead. It is still a proxy for
+    context length - ``llama3.1:8b`` really has a 128k window - so the map is
+    user-overridable via ``settings.model_class_overrides``, and the heuristic
+    is the last resort rather than the only answer.
+    """
+    name = (model or "").strip().lower()
+    if not name:
+        return "7b_local"
+
+    overrides = settings.model_class_overrides or {}
+    for key, cls in overrides.items():
+        if key.lower() == name:
+            return cls
+
+    billions = _parse_param_billions(name)
+    if billions is None:
+        # "mini"/"small" are the only naming conventions worth trusting blind.
+        if "mini" in name or "small" in name:
+            return "3b_local"
+        return "7b_local"
+    return "3b_local" if billions < _SMALL_MODEL_BILLIONS else "7b_local"
 
 
 class LLMClient:
@@ -123,6 +176,11 @@ class LLMClient:
             logger.warning("Failed to load OAuth token: %s", e)
         return None
 
+    @staticmethod
+    def parse_param_billions(model: str | None) -> float | None:
+        """Parameter count in billions parsed from a model name, or None."""
+        return _parse_param_billions(model)
+
     def get_model_class(
         self, override_provider: str | None = None, override_model: str | None = None
     ) -> str:
@@ -131,21 +189,9 @@ class LLMClient:
         if provider == "gemini":
             return "cloud"
         if provider == "ollama":
-            model = override_model or self.ollama_model
-            model_lower = model.lower() if model else ""
-            if "3b" in model_lower or "2b" in model_lower or "mini" in model_lower:
-                return "3b_local"
-            if "7b" in model_lower or "8b" in model_lower:
-                return "7b_local"
-            return "7b_local"
+            return _classify_local_model(override_model or self.ollama_model)
         if provider == "lm_studio":
-            model = override_model or self.lm_studio_model
-            model_lower = model.lower() if model else ""
-            if "3b" in model_lower or "2b" in model_lower or "mini" in model_lower:
-                return "3b_local"
-            if "7b" in model_lower or "8b" in model_lower:
-                return "7b_local"
-            return "7b_local"
+            return _classify_local_model(override_model or self.lm_studio_model)
 
         if provider in (
             "openai",
@@ -159,22 +205,16 @@ class LLMClient:
 
         if provider == "auto":
             if self.ollama_model or self.lm_studio_model:
-                model = override_model or self.ollama_model or self.lm_studio_model
-                model_lower = model.lower() if model else ""
-                if "3b" in model_lower or "2b" in model_lower or "mini" in model_lower:
-                    return "3b_local"
-                return "7b_local"
+                return _classify_local_model(
+                    override_model or self.ollama_model or self.lm_studio_model
+                )
             if self.api_key or self._oauth_token:
                 return "cloud"
             return "7b_local"
 
         if self.api_key or self._oauth_token:
             return "cloud"
-        model = override_model or self.ollama_model
-        model_lower = model.lower() if model else ""
-        if "3b" in model_lower or "2b" in model_lower or "mini" in model_lower:
-            return "3b_local"
-        return "7b_local"
+        return _classify_local_model(override_model or self.ollama_model)
 
     def _load_runtime_preferences(self) -> None:
         # P1-1: was a direct open()/json.load() bypassing SettingsStore, so
@@ -327,25 +367,35 @@ Answer:
         except Exception:
             pass
 
-        # Cloud/aggregator providers may send data off-device; require explicit,
-        # region-independent opt-in (llm.cloud_privacy_consent) before dispatching.
-        # openai_compatible is exempt - it's a user-supplied endpoint, often self-hosted.
+        provider_settings = per_provider.get(pid, {})
+        base_url = provider_settings.get("base_url") or env_base_url(pid)
+
+        # Anything that leaves this machine needs explicit, region-independent
+        # opt-in (llm.cloud_privacy_consent).
+        #
+        # Gated on the resolved *destination*, not the provider's kind. Kind
+        # describes what a provider usually is; base_url is a free-text setting,
+        # so a provider registered as kind="local" - ollama, lm_studio - can be
+        # aimed at another host and used to be exempt forever. That made the
+        # gate a label check rather than a data-egress check. openai_compatible
+        # is still exempt when it points at this machine, which is the
+        # self-hosted case the exemption was written for.
         spec = PROVIDER_REGISTRY.get(pid)
-        if (
-            spec is not None
-            and spec.kind in ("cloud", "aggregator")
-            and not data.get("llm", {}).get("cloud_privacy_consent", False)
-        ):
+        leaves_device = spec is not None and spec.kind in ("cloud", "aggregator")
+        if not leaves_device and spec is not None and spec.kind == "local":
+            leaves_device = not is_loopback_url(base_url or spec.default_base_url)
+        if leaves_device and not data.get("llm", {}).get("cloud_privacy_consent", False):
             raise ProviderNotConfiguredError(
                 f"Cloud privacy consent required before using provider {pid}. "
                 "Free-tier cloud dispatches may use inputs for model training."
             )
 
-        provider_settings = per_provider.get(pid, {})
-        base_url = provider_settings.get("base_url") or env_base_url(pid)
-
         # Normalize legacy Anthropic base_url if pointing to spec default with appended /v1
-        if pid == "anthropic" and base_url and base_url.rstrip("/") == "https://api.anthropic.com/v1":
+        if (
+            pid == "anthropic"
+            and base_url
+            and base_url.rstrip("/") == "https://api.anthropic.com/v1"
+        ):
             base_url = "https://api.anthropic.com"
 
         default_model = model_override or provider_settings.get("default_model")
@@ -488,7 +538,7 @@ Answer:
 
     async def generate_raw(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         override_provider: str | None = None,
         override_model: str | None = None,
     ) -> str:
@@ -582,11 +632,11 @@ Answer:
 
         # Calculate prompt tokens locally
         try:
-            from app.search.context_builder import _get_tokens
+            from app.search.context_builder import count_tokens_uncached
 
             # Include messages in prompt count
             full_prompt_text = prompt + "\n" + json.dumps(history or [])
-            prompt_tokens = len(_get_tokens(full_prompt_text))
+            prompt_tokens = count_tokens_uncached(full_prompt_text)
         except Exception:
             prompt_tokens = max(len(prompt) // 4, len(prompt.split()) * 4 // 3)
 
@@ -651,9 +701,9 @@ Answer:
 
         # Calculate completion tokens and yield final control usage packet
         try:
-            from app.search.context_builder import _get_tokens
+            from app.search.context_builder import count_tokens_uncached
 
-            completion_tokens = len(_get_tokens(full_answer))
+            completion_tokens = count_tokens_uncached(full_answer)
         except Exception:
             completion_tokens = max(len(full_answer) // 4, len(full_answer.split()) * 4 // 3)
 

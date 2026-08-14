@@ -45,6 +45,7 @@ from app.ocr.settings import (
     ocr_models_dir,
     ocr_python,
     ocr_scratch_dir,
+    ocr_tier_models_dir,
     ocr_worker_dir,
 )
 from app.ocr.types import OcrPage, OcrQueueRow
@@ -94,6 +95,13 @@ class OcrManager:
         self._indexing: Any = None
         self._current_file: str = ""
         self._last_error: str = ""
+        #: Engine identity as reported by the live worker's `ready` message.
+        #: Empty until a worker has handshaked in this session, at which point
+        #: it supersedes the install stamp for both cache reads and writes.
+        self._engine_id: str = ""
+        #: True once a reported identity has disagreed with the install stamp.
+        #: Surfaced through runtime_state so a silently degraded tier is visible.
+        self._engine_mismatch: str = ""
 
     # ── lifecycle ────────────────────────────────────────────────────────
 
@@ -106,6 +114,9 @@ class OcrManager:
                 await self.stop()
 
             ensure_dirs()
+            # A new session re-derives the engine from the stamp, then adopts
+            # whatever the first handshake actually reports.
+            self.reset_engine_identity()
             registry.sweep_stale_installs()
             # An installed venv outranks whatever PMA_OCR_TIER says.
             load_persisted_state()
@@ -158,6 +169,52 @@ class OcrManager:
         """Wake the drain loop immediately (called when an index run finishes)."""
         self._kick_event().set()
 
+    def _record_engine(self, model_version: str | None, ep: str | None) -> None:
+        """Adopt the engine identity the worker reports, and flag disagreement.
+
+        The stamp says what the installer verified; this says what actually
+        loaded. They diverge when the engine falls back - e.g. a user-supplied
+        model in the models dir fails to load and rapidocr quietly uses the
+        weights bundled in the wheel instead. Trusting the stamp there would
+        file that output under the wrong key, so the report wins.
+        """
+        from app.ocr.settings import engine_identity, expected_engine_identity
+
+        reported = engine_identity(model_version, ep)
+        expected = expected_engine_identity()
+        self._engine_id = reported
+        if reported != expected:
+            self._engine_mismatch = f"expected {expected}, worker reported {reported}"
+            logger.warning(
+                "OCR engine mismatch: %s. Caching under the reported identity; "
+                "the installed tier is not running what its stamp claims.",
+                self._engine_mismatch,
+            )
+        else:
+            self._engine_mismatch = ""
+
+    def _active_engine_id(self) -> str:
+        """Identity to key the cache on: the live report if we have one.
+
+        Before the first handshake there is no report, and the cache still has
+        to be consulted, so fall back to what the install stamp promises.
+        """
+        from app.ocr.settings import expected_engine_identity
+
+        return self._engine_id or expected_engine_identity()
+
+    def reset_engine_identity(self) -> None:
+        """Forget the reported engine. Call when the *install* changes.
+
+        Deliberately not called when a worker is merely recycled: the identity
+        describes the installed engine, not the process. Clearing it per-process
+        made writes land under the reported id while the next read fell back to
+        the stamp, so a worker that disagreed with its stamp never got a cache
+        hit again and re-OCR'd the corpus indefinitely.
+        """
+        self._engine_id = ""
+        self._engine_mismatch = ""
+
     def runtime_state(self) -> dict[str, Any]:
         """Live process state. No database access, so HTTP handlers can compose
         this with counts read through their own injected DB session."""
@@ -168,6 +225,10 @@ class OcrManager:
             "unhealthy": bool(self._fatal),
             "fatal": self._fatal,
             "last_error": self._last_error,
+            # Non-empty when the running engine is not the one the install stamp
+            # promises. Without this a degraded tier looks identical to a healthy
+            # one in the UI while producing different text.
+            "engine_mismatch": self._engine_mismatch,
             "stderr_tail": list(self._stderr_tail)[-20:],
         }
 
@@ -209,9 +270,7 @@ class OcrManager:
                     await asyncio.sleep(_BUSY_POLL_S)
                     continue
 
-                row = await ocr_queue.claim_next(
-                    self.db, max_attempts=settings.ocr_max_attempts
-                )
+                row = await ocr_queue.claim_next(self.db, max_attempts=settings.ocr_max_attempts)
                 if row is None:
                     await self._retire_worker("idle")
                     await self._finalize_indexes()
@@ -279,7 +338,9 @@ class OcrManager:
             await ocr_queue.mark_skipped(self.db, row.file_path, "file missing on disk")
             return
 
-        cached = await ocr_cache.get_pages(self.db, content_key, list(row.pages))
+        cached = await ocr_cache.get_pages(
+            self.db, content_key, list(row.pages), engine_id=self._active_engine_id()
+        )
         todo = [p for p in row.pages if p not in cached]
 
         fresh: list[OcrPage] = []
@@ -300,7 +361,12 @@ class OcrManager:
                     ndjson_path.unlink(missing_ok=True)
 
             if fresh:
-                await ocr_cache.put_pages(self.db, content_key, fresh)
+                # Written under whatever the worker reported, never under what
+                # the stamp claimed - _run_document has completed by now, so a
+                # handshake has happened and _engine_id reflects reality.
+                await ocr_cache.put_pages(
+                    self.db, content_key, fresh, engine_id=self._active_engine_id()
+                )
                 self._pages_done += len(fresh)
                 if self._pages_done >= 100:
                     self._pages_done = 0
@@ -476,6 +542,7 @@ class OcrManager:
                     msg.get("model_version", "?"),
                     msg.get("ep", "?"),
                 )
+                self._record_engine(msg.get("model_version"), msg.get("ep"))
                 return
             if msg.get("t") == proto.RSP_ERROR:
                 code = msg.get("code") or proto.E_WORKER_CRASHED
@@ -540,8 +607,14 @@ class OcrManager:
         self._stderr_tail.clear()
         _OCR_ERR_EXECUTOR.submit(self._drain_stderr_sync, self._proc)
 
+        # The tier's own weights when it has any, else the shared user drop-in
+        # slot. Handing a tier the shared directory unconditionally is how a CPU
+        # worker ended up able to load another tier's 194 MB server weights.
+        tier_models = ocr_tier_models_dir()
+        models_dir = tier_models if tier_models.is_dir() else ocr_models_dir()
+
         hello = proto.make_hello(
-            models_dir=str(ocr_models_dir()),
+            models_dir=str(models_dir),
             dpi=settings.ocr_dpi,
             conf_floor=settings.ocr_conf_floor,
             page_timeout_s=settings.ocr_page_timeout_s,
@@ -655,7 +728,5 @@ class OcrManager:
         if self._indexing is None:
             from app.indexing.service import IndexingService
 
-            self._indexing = IndexingService(
-                self.db, self.embedding_service, self.lancedb_client
-            )
+            self._indexing = IndexingService(self.db, self.embedding_service, self.lancedb_client)
         return self._indexing

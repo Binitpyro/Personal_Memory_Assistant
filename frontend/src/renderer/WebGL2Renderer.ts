@@ -281,13 +281,19 @@ export class WebGL2Renderer {
             powerPreference: 'high-performance',
         });
         this.renderer.setClearColor(0x02030a, 1);
-        this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        // Pixel ratio stays 1 because `resize()` is fed DEVICE pixels (the
+        // ResizeObserver reports devicePixelContentBoxSize). Leaving three.js to
+        // apply the ratio as well multiplied the backing store by DPR a second
+        // time - with setSize(..., updateStyle=false) never writing CSS back,
+        // that compounded to DPR^2 per resize cycle.
+        this.renderer.setPixelRatio(1);
         this.renderer.outputColorSpace = THREE.SRGBColorSpace;
         this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
         this.renderer.toneMappingExposure = this.exposure;
 
-        const w = Math.max(1, this.canvas.clientWidth);
-        const h = Math.max(1, this.canvas.clientHeight);
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        const w = Math.max(1, Math.round(this.canvas.clientWidth * dpr));
+        const h = Math.max(1, Math.round(this.canvas.clientHeight * dpr));
         this.renderer.setSize(w, h, false);
 
         this.scene = new THREE.Scene();
@@ -510,6 +516,7 @@ export class WebGL2Renderer {
         });
     }
 
+    /** `width`/`height` are DEVICE pixels - see the setPixelRatio(1) note in init(). */
     public resize(width: number, height: number): void {
         if (!this.renderer) return;
         const w = Math.max(1, width), h = Math.max(1, height);

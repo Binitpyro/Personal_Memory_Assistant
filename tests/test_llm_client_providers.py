@@ -362,6 +362,70 @@ async def test_resolve_provider_by_id_does_not_gate_local_providers(monkeypatch)
     await provider.close()
 
 
+@pytest.mark.asyncio
+async def test_a_local_provider_aimed_off_box_still_needs_consent(monkeypatch):
+    """Consent follows the destination, not the provider's label.
+
+    `ollama` is registered kind="local", but base_url is a free-text setting.
+    Gating on kind meant a user (or a stale .env) could point a "local" provider
+    at another machine and ship the corpus there with no prompt at all.
+    """
+    from app.search.llm_client import ProviderNotConfiguredError
+
+    client = LLMClient()
+    client._check_ollama_health = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "app.search.llm_client.SettingsStore.read",
+        lambda: {
+            "llm": {
+                "per_provider": {"ollama": {"base_url": "http://ollama.corp.example:11434"}},
+                "cloud_privacy_consent": False,
+            }
+        },
+    )
+    with pytest.raises(ProviderNotConfiguredError):
+        await client._resolve_provider_by_id("ollama")
+
+
+@pytest.mark.asyncio
+async def test_a_lan_address_counts_as_off_box(monkeypatch):
+    """Another machine on the LAN is still another machine."""
+    from app.search.llm_client import ProviderNotConfiguredError
+
+    client = LLMClient()
+    client._check_ollama_health = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "app.search.llm_client.SettingsStore.read",
+        lambda: {
+            "llm": {
+                "per_provider": {"ollama": {"base_url": "http://192.168.1.50:11434"}},
+                "cloud_privacy_consent": False,
+            }
+        },
+    )
+    with pytest.raises(ProviderNotConfiguredError):
+        await client._resolve_provider_by_id("ollama")
+
+
+@pytest.mark.asyncio
+async def test_a_local_provider_on_loopback_is_still_ungated(monkeypatch):
+    """The common case must not start demanding consent."""
+    client = LLMClient()
+    client._check_ollama_health = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "app.search.llm_client.SettingsStore.read",
+        lambda: {
+            "llm": {
+                "per_provider": {"ollama": {"base_url": "http://127.0.0.1:11434"}},
+                "cloud_privacy_consent": False,
+            }
+        },
+    )
+    provider = await client._resolve_provider_by_id("ollama")
+    assert provider is not None
+    await provider.close()
+
+
 class TestEffectiveFallbackChain:
     """`_get_effective_fallback_chain()` decides which providers get tried.
 
@@ -417,9 +481,7 @@ class TestEffectiveFallbackChain:
             },
         )
         monkeypatch.setattr("app.settings_store.SETTINGS_PATH", path)
-        monkeypatch.setattr(
-            "app.search.llm_client.get_configured_provider_ids", lambda: ["ollama"]
-        )
+        monkeypatch.setattr("app.search.llm_client.get_configured_provider_ids", lambda: ["ollama"])
 
         assert _get_effective_fallback_chain() == ["ollama"]
 
@@ -449,9 +511,7 @@ class TestEffectiveFallbackChain:
         path = tmp_path / "settings.json"
         self._write(path, {"schema_version": 0, "llm": {"fallback_chain": ["ollama"]}})
         monkeypatch.setattr("app.settings_store.SETTINGS_PATH", path)
-        monkeypatch.setattr(
-            "app.search.llm_client.get_configured_provider_ids", lambda: ["ollama"]
-        )
+        monkeypatch.setattr("app.search.llm_client.get_configured_provider_ids", lambda: ["ollama"])
 
         assert _get_effective_fallback_chain() == get_default_chain()
 

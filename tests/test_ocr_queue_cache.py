@@ -174,12 +174,39 @@ async def test_failed_page_with_no_text_is_not_cached(mock_db):
     assert await ocr_cache.put_pages(mock_db, KEY, [failed]) == 0
 
 
-async def test_model_version_change_invalidates_the_cache(mock_db, monkeypatch):
+async def test_model_version_change_invalidates_the_cache(mock_db):
     await ocr_cache.put_pages(mock_db, KEY, [page(0)])
     assert await ocr_cache.get_pages(mock_db, KEY, [0])
 
-    monkeypatch.setattr(ocr_cache, "MODEL_VERSION", "some-other-model")
-    assert await ocr_cache.get_pages(mock_db, KEY, [0]) == {}
+    assert await ocr_cache.get_pages(mock_db, KEY, [0], engine_id="some-other-model") == {}
+
+
+async def test_pages_are_read_back_only_under_the_engine_that_wrote_them(mock_db):
+    """Two engines must never read each other's text.
+
+    The identity is part of the primary key, but that only protects anything if
+    the value actually varies - it used to be a module constant, so a second
+    model would have silently aliased onto the first model's rows.
+    """
+    await ocr_cache.put_pages(mock_db, KEY, [page(0)], engine_id="ppocrv4-server@dml")
+
+    assert await ocr_cache.get_pages(mock_db, KEY, [0], engine_id="ppocrv4-mobile") == {}
+    assert await ocr_cache.get_pages(mock_db, KEY, [0], engine_id="ppocrv4-server@dml")
+
+
+def test_cpu_engine_identity_is_unqualified():
+    """Existing cached pages must stay readable after this change.
+
+    Every page cached before the execution provider entered the identity was
+    written under a bare model version by a CPU run, so the CPU case has to keep
+    producing exactly that string or the whole corpus silently re-OCRs.
+    """
+    from app.ocr.settings import MODEL_VERSION, engine_identity
+
+    assert engine_identity(MODEL_VERSION, "CPUExecutionProvider") == MODEL_VERSION
+    assert engine_identity(MODEL_VERSION, None) == MODEL_VERSION
+    assert engine_identity(MODEL_VERSION, "") == MODEL_VERSION
+    assert engine_identity("ppocrv4-server", "DmlExecutionProvider") == "ppocrv4-server@dml"
 
 
 async def test_preproc_change_invalidates_the_cache(mock_db, monkeypatch):

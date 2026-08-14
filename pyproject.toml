@@ -15,6 +15,15 @@ dependencies = [
     "httpx>=0.27.0",
     "onnxruntime>=1.17.0",
     "tokenizers>=0.15.0",
+    # Imported directly by app/embeddings/service.py, app/search/reranker.py and
+    # the OCR model fetch, but only ever arrived transitively via tokenizers. A
+    # tokenizers release that drops it would have broken the embedder, the
+    # reranker and OCR at once, with nothing in this file to explain why.
+    "huggingface-hub>=0.23.0",
+    # Imported under try/except in context_builder.py. Undeclared until now, so
+    # every install silently fell back to counting tokens as len(text)//4 - which
+    # is what "context budget is the binding constraint" was actually enforcing.
+    "tiktoken>=0.7.0",
     "lancedb>=0.10.0",
     "pyarrow>=14.0.0",
     "python-dotenv>=1.0.0",
@@ -22,6 +31,12 @@ dependencies = [
     # pdfplumber removed: pypdf (BSD-3) covers all PDF extraction needs
     "python-docx>=1.1.0",
     "pypdf>=4.0.0",
+    # Page rasterization for the VLM OCR tier, which has no worker venv of its
+    # own to borrow one from. pypdfium2 rather than PyMuPDF: PMA is MIT and
+    # PyMuPDF is AGPL - the same license reasoning that already removed one
+    # dependency here. Pinned to match app/ocr/registry.PINNED_DEPS so the main
+    # process and the OCR venv rasterize identically.
+    "pypdfium2==4.30.0",
     "openpyxl>=3.1.0",
     "nltk>=3.8.1",
     "python-pptx>=0.6.0",
@@ -157,8 +172,10 @@ module = [
     "tokenizers.*",
     "sentence_transformers.*",
     "torch.*",
-    "datasketch.*",
-    "nltk.*"
+    "nltk.*",
+    # Ships no py.typed marker. Only touched by app/ocr/raster_png.py, which
+    # wraps every call in its own try/except and returns bytes.
+    "pypdfium2.*"
 ]
 ignore_missing_imports = true
 

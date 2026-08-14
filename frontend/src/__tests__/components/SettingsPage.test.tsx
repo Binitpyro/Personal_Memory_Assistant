@@ -66,6 +66,19 @@ vi.mock('../../api', () => {
     getProviders: vi.fn(),
     getProviderLaunchStatus: vi.fn(),
     launchProvider: vi.fn(),
+    // OcrSection's imports. Absent from the factory these threw at render, which
+    // is what failed all seven SettingsPage cases rather than any assertion.
+    getOcrStatus: vi.fn(),
+    getOcrTiers: vi.fn(),
+    getOcrInstallState: vi.fn(),
+    getOcrQueue: vi.fn(),
+    installOcrTier: vi.fn(),
+    uninstallOcrTier: vi.fn(),
+    cancelOcrInstall: vi.fn(),
+    resumeOcr: vi.fn(),
+    setOcrEnabled: vi.fn(),
+    retryOcr: vi.fn(),
+    clearOcrCache: vi.fn(),
   };
 });
 

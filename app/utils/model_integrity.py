@@ -20,6 +20,7 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,26 @@ from typing import Any
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+#: Set before huggingface_hub is imported anywhere. Defaults there are
+#: privacy-hostile for a local-first product: the user agent carries usage
+#: telemetry, and an implicit token means a user who happens to have an HF
+#: credential on disk has every model fetch attributed to their identity.
+#: Neither is a tradeoff we get to make on their behalf - CLAUDE.md §1.4.
+_HF_PRIVACY_ENV = {
+    "HF_HUB_DISABLE_TELEMETRY": "1",
+    "HF_HUB_DISABLE_IMPLICIT_TOKEN": "1",
+}
+
+
+def configure_hf_env() -> None:
+    """Mute huggingface_hub telemetry and implicit auth. Call before importing it.
+
+    Uses setdefault so an operator who deliberately set one of these keeps their
+    value; we only supply the default the library should have had.
+    """
+    for key, value in _HF_PRIVACY_ENV.items():
+        os.environ.setdefault(key, value)
 
 
 def models_lock_path() -> Path:
@@ -104,5 +125,3 @@ def verify_file_sha256(path: Path, expected_sha256: str, *, label: str = "") -> 
     except Exception as e:
         logger.error("Failed to calculate SHA256 for %s: %s", path, e)
         return False
-
-

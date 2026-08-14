@@ -15,11 +15,13 @@ import {
   getProviderLaunchStatus,
   launchProvider,
   getOcrStatus,
+  getOcrTiers,
   getOcrInstallState,
   getOcrQueue,
   installOcrTier,
   uninstallOcrTier,
   cancelOcrInstall,
+  resumeOcr,
   setOcrEnabled,
   retryOcr,
   clearOcrCache,
@@ -345,11 +347,41 @@ function LLMPreferencesSection({
   )
 }
 
+/** Plain-language copy per tier. "DirectML" and "execution provider" are not
+ *  user vocabulary; size and speed are what the choice actually turns on. */
+const TIER_COPY: Record<string, { short: string; title: string; size: string; blurb: string }> = {
+  cpu: {
+    short: 'Standard',
+    title: 'Standard — runs on the processor',
+    size: '~230 MB',
+    blurb:
+      'About 230 MB, models included. Around one page per second on a typical CPU — ' +
+      'the first page of a run is slower while the model warms up.',
+  },
+  gpu: {
+    short: 'High accuracy',
+    title: 'High accuracy — uses your graphics card',
+    size: '~430 MB',
+    blurb:
+      'Downloads larger, more accurate models (about 194 MB on top of the engine) and ' +
+      'runs them on your graphics card. Windows only, and it falls back to the ' +
+      'processor if your card cannot be used — the card in use is shown once installed.',
+  },
+}
+
 function OcrSection() {
   const { data: ocr, refetch } = useApi(getOcrStatus, {
     cacheKey: 'ocr-status-settings',
     refetchInterval: 10_000,
   })
+  const { data: tierData } = useApi(getOcrTiers, { cacheKey: 'ocr-tiers' })
+  const tiers = tierData?.tiers ?? []
+  const [selectedTier, setSelectedTier] = useState<string>('cpu')
+  const selectedTierInfo = tiers.find((t) => t.id === selectedTier)
+  // Show what is actually installed rather than always opening on "cpu".
+  useEffect(() => {
+    if (tierData?.installed) setSelectedTier(tierData.installed)
+  }, [tierData?.installed])
   const [install, setInstall] = useState<OcrInstallState | null>(null)
   const [busy, setBusy] = useState(false)
   const [failed, setFailed] = useState<OcrQueueItem[]>([])
@@ -386,7 +418,12 @@ function OcrSection() {
     setBusy(true)
     setNote('')
     try {
-      setInstall(await installOcrTier())
+      const state = await installOcrTier(selectedTier)
+      setInstall(state)
+      // The poller clears `busy`, but it only runs while status is 'running'.
+      // Any other status means no poll is coming and nothing else would ever
+      // re-enable the button.
+      if (state.status !== 'running') setBusy(false)
     } catch (e) {
       setNote(e instanceof Error ? e.message : 'Install failed.')
       setBusy(false)
@@ -406,6 +443,14 @@ function OcrSection() {
       if (!res.ok) setNote(`Cannot enable: ${res.error_code}`)
       refetch()
     } catch (e) { setNote(e instanceof Error ? e.message : 'Could not change OCR state.') }
+  }
+
+  const handleResume = async () => {
+    try {
+      await resumeOcr()
+      setNote('OCR resumed.')
+      refetch()
+    } catch (e) { setNote(e instanceof Error ? e.message : 'Could not resume OCR.') }
   }
 
   const handleClearCache = async () => {
@@ -433,8 +478,8 @@ function OcrSection() {
 
       <div className="p-4 rounded-xl border border-primary/5 bg-white/50 backdrop-blur-md">
         <div className="flex items-center justify-between mb-3">
-          <h3 className="font-semibold text-text-primary">Tier 1 — CPU</h3>
-          {ocr?.installed ? (
+          <h3 className="font-semibold text-text-primary">{TIER_COPY[selectedTier].title}</h3>
+          {ocr?.installed && ocr?.tier === selectedTier ? (
             <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-success/15 text-success">
               <span className="w-1.5 h-1.5 rounded-full bg-success"></span> Installed
             </span>
@@ -445,10 +490,39 @@ function OcrSection() {
           )}
         </div>
 
-        <p className="text-sm text-text-secondary mb-3">
-          About 230 MB, models included. Around one page per second on a typical
-          CPU — the first page of a run is slower while the model warms up.
-        </p>
+        {/* Only one tier can be provisioned at a time - the two ONNX Runtime
+            builds cannot share an interpreter - so this is a choice, not a
+            stack. Switching re-provisions from scratch. */}
+        <div className="flex gap-2 mb-3">
+          {tiers.map((t) => {
+            const copy = TIER_COPY[t.id]
+            if (!copy) return null
+            const blocked = !!t.unavailable_reason
+            return (
+              <button
+                key={t.id}
+                onClick={() => setSelectedTier(t.id)}
+                disabled={blocked}
+                title={t.unavailable_reason || copy.blurb}
+                className={`flex-1 text-left px-3 py-2 rounded-xl border text-xs transition-all ${
+                  selectedTier === t.id
+                    ? 'border-primary bg-primary/10 text-text-primary'
+                    : 'border-black/5 text-text-secondary hover:bg-black/5'
+                } ${blocked ? 'opacity-40 cursor-not-allowed' : ''}`}
+              >
+                <span className="block font-bold">{copy.short}</span>
+                <span className="block mt-0.5">{copy.size}</span>
+                {t.installed && <span className="block mt-0.5 text-success font-bold">active</span>}
+              </button>
+            )
+          })}
+        </div>
+
+        <p className="text-sm text-text-secondary mb-3">{TIER_COPY[selectedTier].blurb}</p>
+
+        {selectedTierInfo?.unavailable_reason && (
+          <p className="text-xs text-warning mb-3">{selectedTierInfo.unavailable_reason}</p>
+        )}
 
         {!ocr?.uv_available && !ocr?.installed && (
           <p className="text-xs text-warning mb-3">
@@ -479,11 +553,11 @@ function OcrSection() {
           {!ocr?.installed ? (
             <button
               onClick={handleInstall}
-              disabled={busy || !ocr?.uv_available}
+              disabled={busy || !ocr?.uv_available || !!selectedTierInfo?.unavailable_reason}
               className="glass-button flex items-center gap-2 disabled:opacity-50"
             >
               {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-              {busy ? 'Installing…' : 'Install'}
+              {busy ? 'Installing…' : `Install ${TIER_COPY[selectedTier]?.short ?? ''}`}
             </button>
           ) : (
             <>
@@ -496,6 +570,17 @@ function OcrSection() {
                 />
                 Enabled
               </label>
+              {/* The backend computed and stamped this all along but never
+                  exposed it, so a GPU tier that quietly fell back to the
+                  processor was indistinguishable from one that had not. */}
+              {ocr?.ep && (
+                <span className="text-xs text-text-secondary">
+                  Running on:{' '}
+                  <strong className="text-text-primary">
+                    {ocr.ep === 'DmlExecutionProvider' ? 'your graphics card' : 'the processor'}
+                  </strong>
+                </span>
+              )}
               <button onClick={handleClearCache} className="glass-button text-sm">
                 Clear OCR cache ({ocr?.cache_mb ?? 0} MB)
               </button>
@@ -525,8 +610,27 @@ function OcrSection() {
         )}
 
         {ocr?.unhealthy && (
-          <p className="mt-3 text-xs text-danger">
-            OCR stopped: {ocr.fatal}. Reinstall the tier, then retry the failed files.
+          <div className="mt-3 flex items-center justify-between gap-3">
+            <p className="text-xs text-danger">
+              OCR stopped: {ocr.fatal}. Resume to try again; if it stops again, reinstall the tier.
+            </p>
+            {/* Unconditional: a fatal raised during the worker handshake leaves
+                no failed rows, so the per-file Retry list below does not render
+                and this is the only way out of the stopped state. */}
+            <button
+              onClick={handleResume}
+              className="shrink-0 text-xs font-bold px-3 py-1.5 rounded-lg bg-primary/10 text-primary hover:bg-primary/20 transition-all"
+            >
+              Resume OCR
+            </button>
+          </div>
+        )}
+
+        {ocr?.engine_mismatch && (
+          <p className="mt-3 text-xs text-warning">
+            OCR is not running the engine it was installed with ({ocr.engine_mismatch}).
+            Text is still cached under what actually ran, but accuracy will not match the
+            installed tier.
           </p>
         )}
 

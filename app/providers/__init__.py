@@ -10,6 +10,7 @@ from app.providers.manifest import (
     get_configured_provider_ids_async,
     get_default_chain,
     get_default_chain_async,
+    is_loopback_url,
 )
 from app.providers.nvidia_nim import NvidiaNimProvider
 from app.providers.ollama import OllamaProvider
@@ -40,6 +41,7 @@ __all__ = [
     "get_configured_provider_ids_async",
     "get_default_chain",
     "get_default_chain_async",
+    "is_loopback_url",
     "spec_of",
 ]
 

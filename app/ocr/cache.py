@@ -15,7 +15,7 @@ import contextlib
 import logging
 
 from app.config import settings
-from app.ocr.settings import MODEL_VERSION, preproc_hash
+from app.ocr.settings import expected_engine_identity, preproc_hash
 from app.ocr.types import OcrPage
 
 logger = logging.getLogger(__name__)
@@ -36,16 +36,23 @@ def is_valid_content_key(content_key: str | None) -> bool:
     return bool(content_key) and content_key not in INVALID_CONTENT_KEYS
 
 
-async def get_pages(db, content_key: str, pages: list[int]) -> dict[int, OcrPage]:
+async def get_pages(
+    db, content_key: str, pages: list[int], *, engine_id: str | None = None
+) -> dict[int, OcrPage]:
     """Return cached pages for this content, keyed by page number.
 
     Misses are simply absent from the result. Touches `last_used_at` on hits so
     LRU eviction reflects real usage.
+
+    `engine_id` identifies the engine whose output is acceptable. It defaults to
+    whatever the installed tier is expected to produce, so a page recognized by
+    a different model or execution provider misses rather than being served as
+    if this engine had produced it.
     """
     if not is_valid_content_key(content_key) or not pages:
         return {}
 
-    model_version = MODEL_VERSION
+    model_version = engine_id or expected_engine_identity()
     preproc = preproc_hash()
     found: dict[int, OcrPage] = {}
 
@@ -77,16 +84,24 @@ async def get_pages(db, content_key: str, pages: list[int]) -> dict[int, OcrPage
     return found
 
 
-async def put_pages(db, content_key: str, pages: list[OcrPage]) -> int:
+async def put_pages(
+    db, content_key: str, pages: list[OcrPage], *, engine_id: str | None = None
+) -> int:
     """Cache recognized pages. Returns bytes written.
 
     Refuses invalid content keys outright - a row stored under "ERROR" would
     later be served to any other file whose hash also failed.
+
+    `engine_id` must identify the engine that actually produced `pages` - the
+    caller reads it off the worker's `ready` message rather than assuming it.
+    Labelling output with the engine we *expected* to run would let a silently
+    degraded tier write its text under another tier's key, which is precisely
+    the aliasing the key exists to prevent.
     """
     if not is_valid_content_key(content_key) or not pages:
         return 0
 
-    model_version = MODEL_VERSION
+    model_version = engine_id or expected_engine_identity()
     preproc = preproc_hash()
     written = 0
 

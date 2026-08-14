@@ -15,7 +15,14 @@ export let ENDPOINT = metaEnv.VITE_API_URL || "http://127.0.0.1:8000";
 const params = new URLSearchParams(globalThis.location.search);
 const tokenFromUrl = params.get('token');
 const envToken = metaEnv.VITE_DEV_TOKEN || '';
-export let localToken = tokenFromUrl || envToken || sessionStorage.getItem('pma_token') || '';
+// Injected into index.html by the backend for loopback clients. Without this a
+// browser opening http://127.0.0.1:8000 had no token source at all - ?token= is
+// absent, VITE_DEV_TOKEN is baked in at build time and unset in a release
+// build, and sessionStorage is empty on a first visit - so every /api/ call
+// returned 401 against a page that otherwise looked fine.
+const injectedToken = (globalThis as { __PMA_TOKEN__?: string }).__PMA_TOKEN__ || '';
+export let localToken =
+  tokenFromUrl || injectedToken || envToken || sessionStorage.getItem('pma_token') || '';
 
 if (tokenFromUrl) {
   sessionStorage.setItem('pma_token', tokenFromUrl);
@@ -113,6 +120,10 @@ export interface OcrStatus {
   last_error: string;
   cache_mb: number;
   cache_max_mb: number;
+  /** Execution provider recorded in the install stamp, e.g. "CPUExecutionProvider". */
+  ep?: string | null;
+  /** Non-empty when the running engine disagrees with the install stamp. */
+  engine_mismatch?: string;
 }
 
 export interface OcrInstallState {
@@ -139,11 +150,28 @@ export interface OcrQueueItem {
 export const getOcrStatus = () => json<OcrStatus>('/ocr/status');
 export const getOcrInstallState = () => json<OcrInstallState>('/ocr/install/status');
 
-export const installOcrTier = () =>
-  json<OcrInstallState>('/ocr/install', { method: 'POST' });
+export interface OcrTierInfo {
+  id: string;
+  /** Non-empty when this tier cannot run on this machine; shown instead of Install. */
+  unavailable_reason: string;
+  installed: boolean;
+}
+
+export const getOcrTiers = () =>
+  json<{ installed: string; tiers: OcrTierInfo[] }>('/ocr/tiers');
+
+export const installOcrTier = (tier = 'cpu') =>
+  json<OcrInstallState>('/ocr/install', {
+    method: 'POST',
+    body: JSON.stringify({ tier }),
+  });
 
 export const cancelOcrInstall = () =>
   json<{ ok: boolean }>('/ocr/install/cancel', { method: 'POST' });
+
+/** Clear a fatal stop. The only exit when a handshake failure left no failed rows. */
+export const resumeOcr = () =>
+  json<{ ok: boolean }>('/ocr/resume', { method: 'POST' });
 
 export const uninstallOcrTier = () =>
   json<{ ok: boolean; removed: string[] }>('/ocr/uninstall', { method: 'POST' });
@@ -276,7 +304,7 @@ export const purgeHostCache = () =>
 
 // P2-2: Use native Tauri dialog when running inside the desktop shell,
 // fall back to legacy HTTP endpoint for browser-based dev mode.
-export async function pickFolder(): Promise<{ path: string }> {
+export async function pickFolder(): Promise<{ path: string; error?: string }> {
   if (isTauri) {
     const { open } = await import('@tauri-apps/plugin-dialog');
     const selected = await open({ directory: true, multiple: false, title: 'Select a folder to index' });
@@ -285,7 +313,7 @@ export async function pickFolder(): Promise<{ path: string }> {
     return { path: '' };
   }
   // Browser dev mode: use backend tkinter fallback
-  return json<{ path: string }>('/pick/folder');
+  return json<{ path: string; error?: string }>('/pick/folder');
 }
 
 // â”€â”€ Query â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -336,7 +364,10 @@ export const getQueryHistory = (limit = 20) =>
   json<{ history: HistoryItem[] }>(`/query/history?limit=${limit}`);
 
 export const clearQueryHistory = () =>
-  json<{ message: string }>('/query/history/clear', { method: 'POST' });
+  json<{ message: string; semantic_cache_cleared?: boolean; warning?: string }>(
+    '/query/history/clear',
+    { method: 'POST' },
+  );
 
 // â”€â”€ File tree â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -448,8 +479,12 @@ export function subscribeProgress(onData: (data: IndexStatus & { current_file: s
 
   function connect() {
     if (closed) return;
-    const tokenQuery = localToken ? `?token=${encodeURIComponent(localToken)}` : '';
-    es = new EventSource(`${ENDPOINT}${BASE}/index/progress-stream${tokenQuery}`);
+    // No ?token= here. The endpoint is auth-exempt in main.py and progress_stream
+    // takes no token parameter, so the server never read it - but uvicorn's access
+    // log prints the query string, so it leaked the token to the console on every
+    // index run. EventSource cannot set headers; if this stream ever needs auth it
+    // has to be a short-lived ticket or fetch-based SSE, not a bare token in a URL.
+    es = new EventSource(`${ENDPOINT}${BASE}/index/progress-stream`);
     es.onopen = () => {
     };
     es.addEventListener('progress', (e) => {
@@ -507,7 +542,6 @@ export interface QueryStreamChunk {
   contradictions_found?: boolean;
   knowledge_gaps?: string[];
   pattern_annotations?: string[];
-  answer_evolution_diff?: string;
   trace?: TraceEvent[];
   to?: string;
   prompt_tokens?: number;

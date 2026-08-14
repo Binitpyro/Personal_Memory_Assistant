@@ -151,7 +151,7 @@ class GeminiProvider:
         validation_cache.set(self.spec.id, self.base_url, self.api_key, result)
         return cast(ValidationResult, result)
 
-    def _build_payload(self, messages: list[dict[str, str]]) -> dict[str, Any]:
+    def _build_payload(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
         contents = []
         for msg in messages:
             role = "user" if msg["role"] == "user" else "model"
@@ -167,7 +167,7 @@ class GeminiProvider:
 
     async def chat(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         *,
         model: str | None = None,
         temperature: float = 0.2,
@@ -191,7 +191,7 @@ class GeminiProvider:
 
     async def stream(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         *,
         model: str | None = None,
         temperature: float = 0.2,

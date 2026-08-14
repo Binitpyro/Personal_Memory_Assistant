@@ -217,8 +217,12 @@ export class WebGPURenderer {
             usage: GPUTextureUsage.RENDER_ATTACHMENT, // tonemap writes here; no copy needed
         });
 
-        this.canvas.width  = Math.max(1, this.canvas.clientWidth);
-        this.canvas.height = Math.max(1, this.canvas.clientHeight);
+        // Device pixels, matching what `resize()` is fed by the ResizeObserver.
+        // Seeding in CSS px left the very first frames under-resolved on any
+        // display with DPR > 1 until the observer's first callback corrected it.
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        this.canvas.width  = Math.max(1, Math.round(this.canvas.clientWidth * dpr));
+        this.canvas.height = Math.max(1, Math.round(this.canvas.clientHeight * dpr));
 
         // One camera UBO. There used to be three, existing solely to carry a
         // `currentVariant` discriminant that the crystal vertex shader compared
@@ -1243,8 +1247,14 @@ export class WebGPURenderer {
         const total = this.crystalCount + this.bubbleCount;
         if (total === 0) return null;
 
-        const px = Math.max(0, Math.min(Math.floor(x), this.canvas.width - 1));
-        const py = Math.max(0, Math.min(Math.floor(y), this.canvas.height - 1));
+        // Callers pass CSS pixels (clientX minus getBoundingClientRect), but the
+        // pick texture is sized in device pixels. Scale by the canvas's own
+        // backing-store ratio rather than window.devicePixelRatio: that stays
+        // correct even where the DPR used for sizing was clamped.
+        const sx = this.canvas.clientWidth > 0 ? this.canvas.width / this.canvas.clientWidth : 1;
+        const sy = this.canvas.clientHeight > 0 ? this.canvas.height / this.canvas.clientHeight : 1;
+        const px = Math.max(0, Math.min(Math.floor(x * sx), this.canvas.width - 1));
+        const py = Math.max(0, Math.min(Math.floor(y * sy), this.canvas.height - 1));
 
         // Note: updateCamera() is not called here so picking does not advance camera smoothing lerp
         const encoder = this.device.createCommandEncoder();

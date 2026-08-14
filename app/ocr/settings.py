@@ -52,23 +52,56 @@ def ocr_root() -> Path:
     return _path_cache["root"]
 
 
-def ocr_env_dir() -> Path:
-    """The provisioned virtualenv. One tier at a time; switching re-provisions."""
-    return ocr_root() / "env_cpu"
+#: Env dir used when nothing is installed yet and no tier is named. Keeps a
+#: fresh machine looking exactly where it always has.
+_FALLBACK_TIER = "cpu"
 
 
-def ocr_worker_dir() -> Path:
-    return ocr_env_dir() / "worker"
+def _resolve_tier(tier: str | None) -> str:
+    """Tier to build a path for: explicit, else the active one, else the default."""
+    if tier:
+        return tier
+    active = (settings.ocr_tier or "").strip().lower()
+    return active if active and active != "none" else _FALLBACK_TIER
 
 
-def ocr_python() -> Path:
+def ocr_env_dir(tier: str | None = None) -> Path:
+    """The provisioned virtualenv for a tier. One tier at a time; switching
+    re-provisions.
+
+    Parameterised rather than hardcoded to ``env_cpu`` so a second tier gets its
+    own venv - the ONNX Runtime builds are mutually exclusive within one
+    interpreter, so they cannot share. ``env_cpu`` is unchanged for tier "cpu",
+    so existing installs keep working untouched.
+    """
+    return ocr_root() / f"env_{_resolve_tier(tier)}"
+
+
+def ocr_worker_dir(tier: str | None = None) -> Path:
+    return ocr_env_dir(tier) / "worker"
+
+
+def ocr_python(tier: str | None = None) -> Path:
     if sys.platform == "win32":
-        return ocr_env_dir() / "Scripts" / "python.exe"
-    return ocr_env_dir() / "bin" / "python"
+        return ocr_env_dir(tier) / "Scripts" / "python.exe"
+    return ocr_env_dir(tier) / "bin" / "python"
 
 
 def ocr_models_dir() -> Path:
+    """User drop-in weights, shared across tiers.
+
+    Deliberately not tier-scoped: `registry.MODEL_TARGETS` and
+    `worker/engine.py` both document this as a slot the *user* fills, and
+    re-homing it would orphan anything already dropped there. A tier that
+    downloads its own weights must use `ocr_tier_models_dir()` instead, so it
+    cannot be picked up by a different tier's engine.
+    """
     return ocr_root() / "models"
+
+
+def ocr_tier_models_dir(tier: str | None = None) -> Path:
+    """Weights owned by one tier, never shared. Safe to delete on uninstall."""
+    return ocr_root() / "models" / _resolve_tier(tier)
 
 
 def ocr_scratch_dir() -> Path:
@@ -105,9 +138,9 @@ def protocol_source_file() -> Path:
     return Path(__file__).parent / "protocol.py"
 
 
-def read_tier_stamp() -> dict:
+def read_tier_stamp(tier: str | None = None) -> dict:
     """Contents of ``<ocr_env>/.tier.json``, or ``{}`` if absent/corrupt."""
-    stamp = ocr_env_dir() / TIER_STAMP
+    stamp = ocr_env_dir(tier) / TIER_STAMP
     try:
         data: dict = json.loads(stamp.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -115,21 +148,83 @@ def read_tier_stamp() -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def is_tier_installed() -> bool:
+def is_tier_installed(tier: str | None = None) -> bool:
     """True when a usable venv exists whose stamp matches this build's protocol.
 
     A protocol bump makes an existing venv unusable rather than subtly wrong,
     so we report not-installed and let the registry re-sync the worker files.
     """
-    if not ocr_python().is_file():
+    if not ocr_python(tier).is_file():
         return False
-    stamp = read_tier_stamp()
+    stamp = read_tier_stamp(tier)
     if not stamp:
         return False
 
     from app.ocr.protocol import PROTOCOL_VERSION
 
     return stamp.get("protocol") == PROTOCOL_VERSION
+
+
+def detect_installed_tier() -> str:
+    """Name of the tier actually provisioned on disk, or "" if none is.
+
+    Reads the filesystem instead of assuming "cpu". With one tier that made no
+    difference; with more, assuming it would relabel a GPU install as CPU on
+    every restart - and that label feeds the OCR cache key, so the mislabel
+    would not stay cosmetic.
+    """
+    root = ocr_root()
+    try:
+        candidates = sorted(p.name for p in root.iterdir() if p.is_dir())
+    except OSError:
+        return ""
+
+    for name in candidates:
+        if not name.startswith("env_"):
+            continue
+        tier = name[len("env_") :]
+        if tier and is_tier_installed(tier):
+            return tier
+    return ""
+
+
+#: Execution provider that needs no marker in the cache key. Tier 1 has always
+#: run on it, so leaving it unqualified keeps every already-cached page valid.
+_DEFAULT_EP = "CPUExecutionProvider"
+
+
+def engine_identity(model_version: str | None, ep: str | None = None) -> str:
+    """The `ocr_cache.model_version` value for a given engine.
+
+    Part of the cache primary key, so two engines that produce different text
+    must never map to the same string. DirectML runs many ops in fp16 where CPU
+    uses fp32, so the execution provider is part of the identity, not a detail.
+
+    Deliberately *not* symmetric: a CPU run stays plain ``"ppocrv4-mobile"``
+    rather than ``"ppocrv4-mobile@cpu"``. Qualifying it would change the key for
+    every page cached before this existed and silently force a full re-OCR of
+    the corpus - work the user already paid for.
+    """
+    base = (model_version or MODEL_VERSION).strip() or MODEL_VERSION
+    provider = (ep or "").strip()
+    if not provider or provider == _DEFAULT_EP:
+        return base
+    # "DmlExecutionProvider" -> "dml"; the full name adds length, not meaning.
+    short = provider.removesuffix("ExecutionProvider").lower() or provider.lower()
+    return f"{base}@{short}"
+
+
+def expected_engine_identity() -> str:
+    """Identity the installed tier *should* report, read from the install stamp.
+
+    The cache is consulted before any worker is spawned, so the read path cannot
+    wait for a `ready` message. The stamp is written only after the installer's
+    smoke test passes, so it is the best available statement of what this venv
+    will load. Writes are gated on the worker's actual report instead - see
+    `OcrManager._engine_identity`.
+    """
+    stamp = read_tier_stamp()
+    return engine_identity(stamp.get("model_version"), stamp.get("ep"))
 
 
 def preproc_hash() -> str:
@@ -157,13 +252,15 @@ def load_persisted_state() -> None:
     silently stopped: config re-read tier="none" from env and normalize_ocr
     dutifully forced ocr_enabled back to False.
     """
-    installed = is_tier_installed()
-    if installed and settings.ocr_tier == "none":
-        settings.ocr_tier = "cpu"
-    elif not installed:
+    # Whatever is on disk wins, and it names itself rather than being assumed
+    # to be "cpu" - the adopted tier ends up in the OCR cache key.
+    detected = detect_installed_tier()
+    if not detected:
         settings.ocr_tier = "none"
         settings.ocr_enabled = False
         return
+    if settings.ocr_tier != detected:
+        settings.ocr_tier = detected
 
     try:
         from app.settings_store import SettingsStore

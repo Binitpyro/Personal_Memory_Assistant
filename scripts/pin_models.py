@@ -12,7 +12,7 @@ logger = logging.getLogger("pin_models")
 REPO_ROOT = Path(__file__).parent.parent
 LOCK_FILE = REPO_ROOT / "models.lock.json"
 
-MODEL_SPECS = [
+MODEL_SPECS: list[dict[str, Any]] = [
     {
         "family": "embedding",
         "name": "BAAI/bge-small-en-v1.5",
@@ -23,10 +23,46 @@ MODEL_SPECS = [
             "tokenizer.json",
         ],
     },
-    # NOTE: no OCR entry here on purpose. rapidocr-onnxruntime 1.4.x ships its
-    # PP-OCRv4 mobile ONNX models inside the wheel (see its config.yaml, whose
-    # model paths are package-relative), so they arrive already covered by the
-    # pinned dependency rather than needing a separate download and digest.
+    {
+        # Keyed on the canonical upstream name (which app/search/reranker.py's
+        # _MODEL_NAME matches) while fetching the ONNX mirror - the same split
+        # the embedder above uses.
+        #
+        # The canonical cross-encoder repo does publish ONNX now, but its only
+        # quantized builds are architecture-specific (qint8_arm64,
+        # qint8_avx512, qint8_avx512_vnni, quint8_avx2); pinning one would
+        # break every machine without that instruction set, and its portable
+        # build is fp32 at 91 MB. The Xenova mirror's model_quantized.onnx is
+        # arch-neutral dynamic INT8 at 23 MB, which is what the 4 GB-class
+        # hardware target needs.
+        "family": "reranker",
+        "name": "cross-encoder/ms-marco-MiniLM-L-6-v2",
+        "repo_id": "Xenova/ms-marco-MiniLM-L-6-v2",
+        "revision": "a09144355adeed5f58c8ed011d209bf8ee5a1fec",
+        "target_files": [
+            "onnx/model_quantized.onnx",
+            "tokenizer.json",
+        ],
+    },
+    {
+        # OCR Tier 1 has no entry and needs none: rapidocr-onnxruntime 1.4.x
+        # ships its PP-OCRv4 *mobile* ONNX models inside the wheel (its
+        # config.yaml refers to them by package-relative paths), so pinning the
+        # dependency pins those weights.
+        #
+        # The *server* weights are a different matter - they are not in any
+        # wheel, so the higher-accuracy tier has to fetch and verify them, which
+        # is exactly what this lockfile exists for. Apache-2.0, per the model
+        # card's `license:` field.
+        "family": "ocr",
+        "name": "PP-OCRv4-server",
+        "repo_id": "SWHL/RapidOCR",
+        "revision": "1cfba2e90fc938db55889873735088de210cc173",
+        "target_files": [
+            "PP-OCRv4/ch_PP-OCRv4_det_server_infer.onnx",
+            "PP-OCRv4/ch_PP-OCRv4_rec_server_infer.onnx",
+        ],
+    },
 ]
 
 
@@ -64,7 +100,9 @@ def pin_all_models() -> dict[str, Any]:
         for rel_path in spec["target_files"]:
             file_path = cached_dir / rel_path
             if not file_path.exists():
-                logger.warning("Target file %s does not exist in cached repo %s", rel_path, cached_dir)
+                logger.warning(
+                    "Target file %s does not exist in cached repo %s", rel_path, cached_dir
+                )
                 continue
 
             digest, size_bytes = sha256_file(file_path)

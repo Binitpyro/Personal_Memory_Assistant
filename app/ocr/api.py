@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
+from app import state as app_state
 from app.api.deps import get_db, get_ocr
 from app.api.limiter import limiter
 from app.config import settings
@@ -15,6 +18,7 @@ from app.ocr import cache as ocr_cache
 from app.ocr import queue as ocr_queue
 from app.ocr import registry
 from app.ocr.settings import persist_enabled
+from app.providers import env_base_url
 from app.storage.db import DatabaseManager
 
 logger = logging.getLogger(__name__)
@@ -51,20 +55,133 @@ async def install_status():
     return registry.get_install_state()
 
 
+class InstallPayload(BaseModel):
+    tier: str = "cpu"
+
+
+@router.get("/tiers")
+async def list_tiers():
+    """Tiers this build knows about and whether each can run on this machine.
+
+    Mirrors the `uv_available` precedent: the UI must be able to say *before* a
+    several-hundred-megabyte download whether a tier is even installable here,
+    rather than finding out afterwards.
+    """
+    from app.ocr.settings import detect_installed_tier
+
+    installed = detect_installed_tier()
+    return {
+        "installed": installed,
+        "tiers": [
+            {
+                "id": tier,
+                "unavailable_reason": registry.unavailable_reason(tier),
+                "installed": tier == installed,
+            }
+            for tier in sorted(registry.TIER_DEPS)
+        ],
+    }
+
+
+@router.get("/vlm/models")
+async def list_vlm_models():
+    """Vision models the user already has, per local provider.
+
+    PMA does not download these - the user pulls them in Ollama or LM Studio
+    themselves - so the picker's job is to show what is actually present and,
+    when nothing is, name models that are worth pulling. Reaching the provider
+    only lists model names; no document content leaves the machine here.
+    """
+    from app.providers import create_provider, is_loopback_url
+    from app.providers.registry import PROVIDER_REGISTRY
+    from app.providers.vision import (
+        SUGGESTED_VISION_MODELS,
+        looks_like_vision_model,
+        supports_vision_messages,
+    )
+
+    results = []
+    any_vision = False
+
+    for pid in ("ollama", "lm_studio"):
+        spec = PROVIDER_REGISTRY.get(pid)
+        if spec is None or not supports_vision_messages(pid):
+            continue
+
+        base_url = env_base_url(pid) or spec.default_base_url
+        entry: dict[str, Any] = {
+            "provider": pid,
+            "display_name": spec.display_name,
+            "base_url": base_url,
+            # Surfaced so the UI can warn before page images are sent off-box;
+            # the dispatch path refuses without consent regardless.
+            "is_local": is_loopback_url(base_url),
+            "reachable": False,
+            "models": [],
+            "error": None,
+        }
+        try:
+            provider = create_provider(pid, api_key=None, base_url=base_url, default_model=None)
+            try:
+                models = await provider.list_models()
+            finally:
+                await provider.close()
+            entry["reachable"] = True
+            entry["models"] = [
+                {"id": m["id"], "vision": looks_like_vision_model(str(m["id"]))} for m in models
+            ]
+            any_vision = any_vision or any(m["vision"] for m in entry["models"])
+        except Exception as exc:
+            # Not running is the normal case, not an error worth a 500.
+            entry["error"] = type(exc).__name__
+        results.append(entry)
+
+    return {
+        "providers": results,
+        "has_vision_model": any_vision,
+        # Only meaningful when nothing was found; harmless to always include.
+        "suggestions": list(SUGGESTED_VISION_MODELS),
+    }
+
+
 @router.post("/install")
 @limiter.limit("3/minute")
-async def install(request: Request):
-    """Provision the CPU tier. Rate-limited because it spawns processes."""
-    result = await registry.install_tier1()
-    if result.get("status") == "ok":
+async def install(request: Request, payload: InstallPayload | None = None):
+    """Start provisioning the CPU tier. Returns immediately.
+
+    Rate-limited because it spawns processes.
+
+    This used to await the whole provision - minutes, with a 1800s dependency
+    timeout - so the client's promise did not resolve until it was over. The UI
+    derives "installing" from a status of "running", which it can only learn by
+    polling, and it only polls while "installing": the progress bar and the
+    cancel button were therefore unreachable, and a failure left the button
+    disabled forever. Returning straight away is what makes both usable.
+    """
+    tier = (payload.tier if payload else "cpu") or "cpu"
+    if not registry.begin_install():
+        return registry.get_install_state()
+
+    async def _provision() -> None:
+        result = await registry.install_tier(tier, _armed=True)
+        if result.get("status") != "ok":
+            return
         # The tier only becomes selectable once the install actually succeeded.
-        settings.ocr_tier = "cpu"
+        settings.ocr_tier = tier
         settings.ocr_enabled = True
         persist_enabled(True)
         manager = await get_ocr()
         manager.clear_fatal()
+        # The engine just changed on disk; a remembered identity from the
+        # previous install would key the cache wrongly until the next restart.
+        manager.reset_engine_identity()
         await manager.kick()
-    return result
+
+    task = asyncio.create_task(_provision())
+    # Registered so shutdown awaits it rather than orphaning a uv subprocess.
+    app_state.bg_tasks.add(task)
+    task.add_done_callback(app_state.bg_tasks.discard)
+    return registry.get_install_state()
 
 
 @router.post("/install/cancel")
@@ -78,6 +195,7 @@ async def uninstall(request: Request):
     settings.ocr_tier = "none"
     settings.ocr_enabled = False
     persist_enabled(False)
+    (await get_ocr()).reset_engine_identity()
     return await registry.uninstall_tier1()
 
 
@@ -92,17 +210,36 @@ async def set_enabled(payload: EnablePayload):
     Refuses to enable when nothing is installed - `normalize_ocr` would
     silently flip it back and the UI would look broken.
     """
-    from app.ocr.settings import is_tier_installed
+    from app.ocr.settings import detect_installed_tier
 
-    if payload.enabled and not is_tier_installed():
+    installed = detect_installed_tier()
+    if payload.enabled and not installed:
         return {"ok": False, "error_code": "TIER_NOT_INSTALLED", "enabled": False}
 
     settings.ocr_enabled = bool(payload.enabled)
     if payload.enabled:
-        settings.ocr_tier = "cpu"
+        # The installed tier names itself. Forcing "cpu" here made a toggle
+        # silently relabel any other tier, and that label reaches the cache key.
+        settings.ocr_tier = installed
         await (await get_ocr()).kick()
     persist_enabled(settings.ocr_enabled)
     return {"ok": True, "enabled": settings.ocr_enabled}
+
+
+@router.post("/resume")
+async def resume():
+    """Clear a fatal stop and wake the drain loop.
+
+    `_fatal` halts every document, not just the one that tripped it, and the
+    only other way to clear it was the per-file Retry button - which renders
+    only when there are failed rows. A fatal raised during the worker handshake
+    produces no failed rows at all, so that state had no reachable exit and the
+    user's only documented option was to reinstall the tier.
+    """
+    manager = await get_ocr()
+    manager.clear_fatal()
+    await manager.kick()
+    return {"ok": True}
 
 
 @router.get("/queue")

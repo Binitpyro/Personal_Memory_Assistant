@@ -1,3 +1,4 @@
+import ipaddress
 import logging
 import socket
 import time
@@ -43,6 +44,43 @@ def is_local_endpoint_reachable(url: str, timeout: float = 0.2, use_cache: bool 
             return True
     except Exception:
         _reachability_cache[url] = (False, now)
+        return False
+
+
+#: Hosts that are unambiguously this machine. Mirrors `main._LOOPBACK_HOSTS`.
+#: 0.0.0.0 is deliberately absent: as a *destination* it is ambiguous, and an
+#: ambiguous destination should prompt for consent rather than skip the gate.
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "[::1]"})
+
+
+def is_loopback_url(url: str | None) -> bool:
+    """True when *url* addresses this machine.
+
+    Provider *kind* says what a provider usually is, not where this install
+    actually points it. `ollama` is registered as kind="local", but its base URL
+    is a free-text setting - so a user (or a stale .env) can aim a "local"
+    provider at another host, and the privacy consent gate would never fire.
+    Whether data leaves the device is a property of the destination, so that is
+    what gets checked.
+
+    Unparseable or empty is treated as *not* loopback: the safe default for a
+    gate is to ask.
+    """
+    if not url:
+        return False
+    try:
+        host = urlparse(url if "//" in url else f"//{url}").hostname
+    except ValueError:
+        return False
+    if not host:
+        return False
+    host = host.strip("[]").lower()
+    if host in _LOOPBACK_HOSTS:
+        return True
+    # 127.0.0.0/8 is all loopback, not just 127.0.0.1.
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
         return False
 
 
@@ -107,9 +145,11 @@ def get_default_chain() -> list[str]:
 
 async def get_configured_provider_ids_async() -> list[str]:
     import asyncio
+
     return await asyncio.to_thread(get_configured_provider_ids)
 
 
 async def get_default_chain_async() -> list[str]:
     import asyncio
+
     return await asyncio.to_thread(get_default_chain)

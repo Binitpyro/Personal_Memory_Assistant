@@ -155,6 +155,8 @@ export interface OcrTierInfo {
   /** Non-empty when this tier cannot run on this machine; shown instead of Install. */
   unavailable_reason: string;
   installed: boolean;
+  /** False for the VLM tier: it is chosen, not provisioned, so "Install" is wrong. */
+  needs_install?: boolean;
 }
 
 export const getOcrTiers = () =>

@@ -16,6 +16,9 @@ import {
   launchProvider,
   getOcrStatus,
   getOcrTiers,
+  getVlmModels,
+  getVlmSelection,
+  selectVlmModel,
   getOcrInstallState,
   getOcrQueue,
   installOcrTier,
@@ -364,9 +367,134 @@ const TIER_COPY: Record<string, { short: string; title: string; size: string; bl
     size: '~430 MB',
     blurb:
       'Downloads larger, more accurate models (about 194 MB on top of the engine) and ' +
-      'runs them on your graphics card. Windows only, and it falls back to the ' +
-      'processor if your card cannot be used — the card in use is shown once installed.',
+      'runs them on your graphics card. Windows only. Needs roughly 6 GB of free graphics ' +
+      'memory — measured at 5.2 GB in use — so a 4 GB card is not enough and will fall ' +
+      'back to the processor, which is slower than Standard. The card actually in use is ' +
+      'shown once installed.',
   },
+  vlm: {
+    short: 'Your own AI model',
+    title: 'Your own AI model — uses Ollama or LM Studio',
+    size: 'nothing to install',
+    blurb:
+      'Sends each page to a vision model you already run. Nothing is downloaded here — ' +
+      'you pull the model yourself. Handles messy handwriting and unusual layouts better ' +
+      'than the other options, but takes minutes per page rather than seconds, so it suits ' +
+      'a few important documents rather than a whole library.',
+  },
+}
+
+/** Picks the vision model for OCR Tier 3.
+ *
+ *  PMA never downloads these - the user pulls them in Ollama or LM Studio - so
+ *  this shows what is actually installed and, when nothing is, names models
+ *  worth pulling rather than leaving an empty dropdown with no explanation.
+ */
+function VlmPicker({
+  onChanged,
+  setNote,
+}: Readonly<{ onChanged: () => void; setNote: (s: string) => void }>) {
+  const { data, loading, refetch } = useApi(getVlmModels, { cacheKey: 'ocr-vlm-models' })
+  const { data: current, refetch: refetchSelection } = useApi(getVlmSelection, {
+    cacheKey: 'ocr-vlm-selection',
+  })
+  const [saving, setSaving] = useState('')
+
+  const choose = async (provider: string, model: string) => {
+    setSaving(model)
+    try {
+      const res = await selectVlmModel(provider, model)
+      if (!res.ok) {
+        setNote(`Could not use that model: ${res.error_code}`)
+        return
+      }
+      setNote(`OCR will use ${model}.`)
+      refetchSelection()
+      onChanged()
+    } catch (e) {
+      setNote(e instanceof Error ? e.message : 'Could not select that model.')
+    } finally {
+      setSaving('')
+    }
+  }
+
+  if (loading && !data) {
+    return (
+      <div className="flex items-center gap-2 text-sm text-text-secondary mb-3">
+        <Loader2 className="w-4 h-4 animate-spin" /> Looking for models you already have…
+      </div>
+    )
+  }
+
+  const reachable = (data?.providers ?? []).filter((p) => p.reachable)
+
+  if (reachable.length === 0) {
+    return (
+      <div className="mb-3 p-3 rounded-xl bg-warning/10 border border-warning/20">
+        <p className="text-xs text-warning">
+          Neither Ollama nor LM Studio is running. Start one, then{' '}
+          <button onClick={() => refetch()} className="underline font-bold">
+            check again
+          </button>
+          .
+        </p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="mb-3 space-y-3">
+      {reachable.map((p) => {
+        const vision = p.models.filter((m) => m.vision)
+        return (
+          <div key={p.provider} className="p-3 rounded-xl border border-black/5 bg-white/40">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs font-bold text-text-primary">{p.display_name}</span>
+              {/* Page images are the most sensitive thing PMA sends anywhere.
+                  The dispatch path refuses without consent, but the user should
+                  see it here rather than discover it at a prompt. */}
+              {!p.is_local && (
+                <span className="text-[10px] font-bold text-warning uppercase">
+                  not on this machine
+                </span>
+              )}
+            </div>
+
+            {vision.length === 0 ? (
+              <p className="text-xs text-text-secondary">
+                No vision model found here. Pull one, then check again — these read documents
+                well:{' '}
+                <span className="font-mono">{(data?.suggestions ?? []).join(', ')}</span>
+              </p>
+            ) : (
+              <div className="flex flex-wrap gap-2">
+                {vision.map((m) => {
+                  const active =
+                    current?.selection?.provider === p.provider &&
+                    current?.selection?.model === m.id
+                  return (
+                    <button
+                      key={m.id}
+                      onClick={() => choose(p.provider, m.id)}
+                      disabled={!!saving}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                        active
+                          ? 'bg-primary text-white shadow'
+                          : 'bg-black/5 text-text-secondary hover:bg-black/10'
+                      } ${saving ? 'opacity-50' : ''}`}
+                    >
+                      {saving === m.id ? 'Selecting…' : m.id}
+                      {active && ' ✓'}
+                    </button>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
 }
 
 function OcrSection() {
@@ -518,7 +646,9 @@ function OcrSection() {
           })}
         </div>
 
-        <p className="text-sm text-text-secondary mb-3">{TIER_COPY[selectedTier].blurb}</p>
+        <p className="text-sm text-text-secondary mb-3">{TIER_COPY[selectedTier]?.blurb}</p>
+
+        {selectedTier === 'vlm' && <VlmPicker onChanged={refetch} setNote={setNote} />}
 
         {selectedTierInfo?.unavailable_reason && (
           <p className="text-xs text-warning mb-3">{selectedTierInfo.unavailable_reason}</p>

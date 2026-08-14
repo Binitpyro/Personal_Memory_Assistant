@@ -67,20 +67,30 @@ async def list_tiers():
     several-hundred-megabyte download whether a tier is even installable here,
     rather than finding out afterwards.
     """
-    from app.ocr.settings import detect_installed_tier
+    from app.ocr.settings import VLM_TIER, detect_installed_tier, vlm_selection
 
     installed = detect_installed_tier()
-    return {
-        "installed": installed,
-        "tiers": [
-            {
-                "id": tier,
-                "unavailable_reason": registry.unavailable_reason(tier),
-                "installed": tier == installed,
-            }
-            for tier in sorted(registry.TIER_DEPS)
-        ],
-    }
+    tiers = [
+        {
+            "id": tier,
+            "unavailable_reason": registry.unavailable_reason(tier),
+            "installed": tier == installed,
+            # Engine tiers are provisioned; the VLM tier is chosen. The UI needs
+            # to know which, because "Install" is the wrong control for a model
+            # PMA does not download.
+            "needs_install": True,
+        }
+        for tier in sorted(registry.TIER_DEPS)
+    ]
+    tiers.append(
+        {
+            "id": VLM_TIER,
+            "unavailable_reason": "",
+            "installed": installed == VLM_TIER and bool(vlm_selection()),
+            "needs_install": False,
+        }
+    )
+    return {"installed": installed, "tiers": tiers}
 
 
 @router.get("/vlm/models")

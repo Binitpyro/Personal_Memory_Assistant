@@ -18,7 +18,9 @@ _OLLAMA_URL_SUFFIXES = ("/api/generate", "/api/chat", "/api/tags")
 #   "cpu" - PP-OCRv4 mobile weights bundled in the pinned wheel, CPU only.
 #   "gpu" - PP-OCRv4 *server* weights (downloaded, digest-pinned) on DirectML.
 #           Windows-only: onnxruntime-directml publishes win_amd64 wheels only.
-_OCR_TIERS = frozenset({"none", "cpu", "gpu"})
+#   "vlm"  - a vision model in the user's own Ollama / LM Studio. No local
+#            engine and no venv; "installed" means a model has been chosen.
+_OCR_TIERS = frozenset({"none", "cpu", "gpu", "vlm"})
 
 
 def _clamp(value: float, low: float, high: float) -> float:

@@ -70,6 +70,12 @@ vi.mock('../../api', () => {
     // is what failed all seven SettingsPage cases rather than any assertion.
     getOcrStatus: vi.fn(),
     getOcrTiers: vi.fn(),
+    // Only reached on the VLM tier, so a missing entry here would not fail
+    // until someone selected it - the stale-factory trap this file has hit
+    // before.
+    getVlmModels: vi.fn(),
+    getVlmSelection: vi.fn(),
+    selectVlmModel: vi.fn(),
     getOcrInstallState: vi.fn(),
     getOcrQueue: vi.fn(),
     installOcrTier: vi.fn(),

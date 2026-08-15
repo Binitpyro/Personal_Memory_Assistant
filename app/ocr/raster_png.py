@@ -21,7 +21,13 @@ from pathlib import Path
 
 #: Same ceiling as the worker's renderer. A page declared 200x200 inches at
 #: 300 DPI is 3.6 gigapixels; without a cap one malformed document is an OOM.
-_MAX_PIXELS = 40_000_000
+#:
+#: This one matters more than the worker's copy, because it runs in the *main*
+#: process: colour rather than grayscale, through to_pil(), then a PNG encode
+#: into a BytesIO. Measured peak RSS for a single page at the old 40 MP ceiling
+#: was 322 MB. Held at 20 MP to match the worker - A4 and A3 at 300 DPI both
+#: still pass.
+_MAX_PIXELS = 20_000_000
 
 
 class RasterError(Exception):

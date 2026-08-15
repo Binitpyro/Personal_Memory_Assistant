@@ -23,9 +23,9 @@ from app.scanner.ntfs_mft import NTFSScanner
 from app.scanner.scanner import _list_dir_entries, _scandir_walk, scan_folder
 from app.search.capability_detector import CapabilityDetector
 from app.search.context_builder import (
+    _deduplicate_redundant,
     _get_encoding,
     _get_tokens,
-    _semantic_deduplicate,
     _token_count,
     _truncate_to_tokens,
     build_context,
@@ -390,32 +390,45 @@ def test_context_builder_tiktoken_error(monkeypatch):
     assert _truncate_to_tokens("hello world", 1) == "hell"
 
 
-def test_semantic_deduplicate_with_datasketch(monkeypatch):
-    # Mock datasketch MinHash and MinHashLSH
-    mock_lsh_instance = MagicMock()
-    mock_lsh_instance.query.side_effect = [
-        [],
-        ["res_0"],
-    ]  # first call empty, second call duplicate match
+def _spanned(chunk_id, file_id, start, end, text):
+    return {
+        "chunk_id": chunk_id,
+        "file_id": file_id,
+        "start_offset": start,
+        "end_offset": end,
+        "text": text,
+    }
 
-    mock_lsh_class = MagicMock(return_value=mock_lsh_instance)
-    mock_minhash = MagicMock()
 
-    mock_datasketch = MagicMock()
-    mock_datasketch.MinHash = mock_minhash
-    mock_datasketch.MinHashLSH = mock_lsh_class
+def test_deduplicate_redundant_drops_heavily_overlapping_span():
+    # Same file, 90% of the shorter span shared -> redundant.
+    a = _spanned(1, 7, 0, 500, "A" * 500)
+    b = _spanned(2, 7, 50, 550, "B" * 500)
+    deduped = _deduplicate_redundant([a, b])
+    assert [r["chunk_id"] for r in deduped] == [1]
 
-    with patch.dict("sys.modules", {"datasketch": mock_datasketch}):
-        # Run deduplicate with mocked datasketch
-        # If it finds a match, it won't insert and will drop the second snippet
-        results = [
-            {"text": "This is a long text to hash. 1234567890abcdefghijklmnopqrstuvwxyz"},
-            {"text": "This is a long text to hash. 1234567890abcdefghijklmnopqrstuvwxyz"},
-        ]
-        # Avoid direct import to ensure it resolves inside function
-        deduped = _semantic_deduplicate(results)
-        # First one gets inserted (matches = empty), second matches "res_0" so dropped
-        assert len(deduped) >= 1
+
+def test_deduplicate_redundant_keeps_adjacent_overlap_windows():
+    # chunk_overlap=50 on chunk_size=512 is ~10% shared - not redundant,
+    # the second chunk still carries ~90% text the first does not.
+    a = _spanned(1, 7, 0, 512, "A" * 512)
+    b = _spanned(2, 7, 462, 974, "B" * 512)
+    deduped = _deduplicate_redundant([a, b])
+    assert [r["chunk_id"] for r in deduped] == [1, 2]
+
+
+def test_deduplicate_redundant_ignores_span_overlap_across_files():
+    # Identical offsets in *different* files are unrelated text.
+    a = _spanned(1, 7, 0, 500, "A" * 500)
+    b = _spanned(2, 8, 0, 500, "B" * 500)
+    deduped = _deduplicate_redundant([a, b])
+    assert [r["chunk_id"] for r in deduped] == [1, 2]
+
+
+def test_deduplicate_redundant_drops_identical_text_without_offsets():
+    text = "This is a long text to hash. 1234567890abcdefghijklmnopqrstuvwxyz"
+    deduped = _deduplicate_redundant([{"text": text}, {"text": text}])
+    assert len(deduped) == 1
 
 
 def test_compute_context_budget():

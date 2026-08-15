@@ -5,6 +5,7 @@ Handles API routing, dependency injection, and lifespan events.
 
 import asyncio
 import ctypes
+import json
 import logging
 import os
 import platform as plat
@@ -158,6 +159,9 @@ def _log_startup_info():
 
 @asynccontextmanager
 async def lifespan(fastapi_app: FastAPI):
+    from app.ocr.settings import load_persisted_state
+    load_persisted_state()
+
     _log_startup_info()
     loop = asyncio.get_running_loop()
 
@@ -192,13 +196,23 @@ async def lifespan(fastapi_app: FastAPI):
     await loop.run_in_executor(None, lancedb_client.connect)
 
     async def _bg_preload_reranker_task():
+        # preload_reranker() swallows its own failure, so this except never fired
+        # and "loaded successfully" printed unconditionally - directly under the
+        # line saying the model was not found. Report the actual state instead.
         try:
-            from app.search.reranker import preload_reranker
+            from app.search.reranker import preload_reranker, reranker_status
 
             await loop.run_in_executor(None, preload_reranker)
-            logger.info("Reranker model loaded successfully.")
+            status = reranker_status()
+            if status["available"]:
+                logger.info("Reranker model loaded successfully.")
+            else:
+                logger.warning(
+                    "Reranking is OFF - results will be returned in fusion order. %s",
+                    status["reason"],
+                )
         except Exception as e:
-            logger.debug("Reranker preload skipped or failed: %s", e)
+            logger.warning("Reranker preload failed: %s", e)
 
     rerank_task = asyncio.create_task(_bg_preload_reranker_task())
     state.bg_tasks.add(rerank_task)
@@ -213,7 +227,9 @@ async def lifespan(fastapi_app: FastAPI):
         try:
             is_ready = await loop.run_in_executor(None, emb.wait_until_ready, 60.0)
             if not is_ready or not emb.is_ready or emb.has_failed:
-                logger.warning("Embedding service not ready or failed to load. Skipping model signature check.")
+                logger.warning(
+                    "Embedding service not ready or failed to load. Skipping model signature check."
+                )
                 return
 
             current_sig = emb.model_signature
@@ -564,11 +580,50 @@ def health_root(db: DatabaseManager = Depends(get_db)):
     return health(db)
 
 
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+def _is_loopback(request: Request) -> bool:
+    client = request.client
+    return client is not None and client.host in _LOOPBACK_HOSTS
+
+
+def _serve_index(request: Request):
+    """Serve the SPA, handing the access token to same-machine clients.
+
+    index.html is a static build artifact, so a browser opening
+    http://127.0.0.1:8000 had no way to obtain the token at all: api.ts looks
+    for ?token= (absent), VITE_DEV_TOKEN (baked in at build time, unset in a
+    release build) and sessionStorage (empty on a first visit). Only the Tauri
+    shell worked, via initTauriConnection(). Everything else got a working page
+    whose every /api/ call returned 401, with no way for the user to tell why.
+
+    Injected for loopback clients only. The server can be bound to 0.0.0.0
+    (see __main__.py --host), and the token must never be handed to the
+    network. A remote client still has to supply it explicitly.
+    """
+    if not _REACT_INDEX.exists():
+        return _missing_frontend_response()
+
+    if not _is_loopback(request):
+        return FileResponse(_REACT_INDEX)
+
+    token = os.environ.get("X_LOCAL_ACCESS_TOKEN", "")
+    if not token:
+        return FileResponse(_REACT_INDEX)
+
+    html = _REACT_INDEX.read_text(encoding="utf-8")
+    injected = f"<script>window.__PMA_TOKEN__={json.dumps(token)};</script>"
+    marker = "<head>"
+    html = html.replace(marker, marker + injected, 1) if marker in html else injected + html
+    # no-store: the token is in the body, so it must not be written to the
+    # browser's on-disk HTTP cache.
+    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
+
+
 @app.get("/")
 async def root(request: Request):
-    if _REACT_INDEX.exists():
-        return FileResponse(_REACT_INDEX)
-    return _missing_frontend_response()
+    return _serve_index(request)
 
 
 @app.get("/{full_path:path}")
@@ -583,10 +638,9 @@ async def spa_catch_all(request: Request, full_path: str):
     if candidate.exists() and candidate.is_file():
         return FileResponse(candidate)
 
+    # Deep links (/search, /settings, ...) land here and must get the token too.
     if "text/html" in request.headers.get("accept", ""):
-        if _REACT_INDEX.exists():
-            return FileResponse(_REACT_INDEX)
-        return _missing_frontend_response()
+        return _serve_index(request)
     return JSONResponse(status_code=404, content={"error": "Not found"})
 
 

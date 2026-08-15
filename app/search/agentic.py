@@ -66,7 +66,10 @@ Question: {query}"""
 class SubQuery:
     text: str
     domain_hint: str | None = None
-    status: str = "pending"  # pending | satisfied | unanswered
+    # pending | satisfied | unanswered | unverified
+    # "unverified" means evidence was retrieved but no cross-encoder score was
+    # available to judge it, so we decline to claim either way.
+    status: str = "pending"
     k: int = 5
 
 
@@ -111,7 +114,13 @@ class QueryState:
         return out
 
     def unanswered(self) -> list[str]:
-        return [s.text for s in self.subqueries if s.status != "satisfied"]
+        """Only genuinely unanswered sub-questions reach the not-found list.
+
+        "unverified" is excluded on purpose: telling the user nothing was found
+        when we simply could not assess relevance would be a false claim, and
+        this list is the module's headline honesty feature.
+        """
+        return [s.text for s in self.subqueries if s.status == "unanswered"]
 
     def note(self, kind: str, detail: str, **data: Any) -> None:
         self.trace.append(TraceEvent(kind=kind, detail=detail, data=data))
@@ -282,7 +291,21 @@ async def fanout_node(
 
 
 def sufficiency_node(state: QueryState) -> QueryState:
-    """Mark sub-questions satisfied when they have evidence above the score floor."""
+    """Classify each sub-question against the cross-encoder relevance floor.
+
+    The floor has to be read on the cross-encoder scale, not on ``score``. RRF
+    scores are sums of ``weight / (rrf_k + rank + 1)`` scaled by
+    ``rrf_score_scale``, so they are strictly positive; comparing them against
+    the old ``agentic_evidence_score_floor = 0.0`` marked every sub-question
+    satisfied the moment retrieval returned anything, and the not-found list -
+    the thing this module exists to produce - could never fire.
+
+    ``rerank_score`` is absent whenever the reranker did not run for a query.
+    That is a third state, not a zero: defaulting it low would report "nothing
+    in your files on this" for every question on an install without the model,
+    and defaulting it high would restore the always-satisfied bug. Sub-questions
+    in that state are marked ``unverified`` and kept out of the not-found list.
+    """
     floor = settings.agentic_evidence_score_floor
     by_subquery: dict[str, list[Evidence]] = {}
     for e in state.evidence:
@@ -290,12 +313,17 @@ def sufficiency_node(state: QueryState) -> QueryState:
 
     for sq in state.subqueries:
         hits = by_subquery.get(sq.text, [])
-        if any(h.chunk.get("score", 0.0) > floor for h in hits):
-            sq.status = "satisfied"
-        elif hits:
-            # Retrieved something, but nothing clears the floor.
+        if not hits:
             sq.status = "unanswered"
+            continue
+
+        assessed = [h for h in hits if h.chunk.get("rerank_score") is not None]
+        if not assessed:
+            sq.status = "unverified"
+        elif any(h.chunk["rerank_score"] >= floor for h in assessed):
+            sq.status = "satisfied"
         else:
+            # Retrieved, assessed, and nothing cleared the floor.
             sq.status = "unanswered"
     return state
 
@@ -325,9 +353,18 @@ async def run_agentic_loop(
             state.stop_reason = "iteration_cap"
             break
 
-        pending = [sq for sq in state.subqueries if sq.status != "satisfied"]
+        # "unverified" is not retried: the reason it could not be assessed is a
+        # property of the install, so another fan-out would return the same
+        # evidence and the same non-answer.
+        pending = [sq for sq in state.subqueries if sq.status in ("pending", "unanswered")]
         if not pending:
-            state.stop_reason = "all_satisfied"
+            # Distinguish "every sub-question found good evidence" from "we could
+            # not assess any of it". Both end the loop; only one is a success.
+            state.stop_reason = (
+                "unverified"
+                if any(sq.status == "unverified" for sq in state.subqueries)
+                else "all_satisfied"
+            )
             break
 
         # Pre-commit: declare the round's cost before dispatching it.

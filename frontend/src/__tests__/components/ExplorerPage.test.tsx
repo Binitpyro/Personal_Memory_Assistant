@@ -29,9 +29,15 @@ vi.mock('../../useApi', () => ({
 }));
 
 // Mock api endpoints
+// Must list every export ExplorerPage.tsx imports from '../api'. vi.mock with a
+// factory replaces the whole module, so an export missing here throws at render
+// ("No <name> export is defined on the ... mock") rather than falling through to
+// the real one.
 vi.mock('../../api', () => ({
   getFileTree: vi.fn(),
   removeFolderIndex: vi.fn(),
+  getOcrStatus: vi.fn(),
+  forceOcr: vi.fn(),
 }));
 
 describe('ExplorerPage Component', () => {

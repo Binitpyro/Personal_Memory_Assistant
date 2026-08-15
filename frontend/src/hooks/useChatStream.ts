@@ -11,12 +11,13 @@ export interface Message {
   near_misses?: QuerySource[];
   latency_ms?: number;
   isStreaming?: boolean;
-  mode?: 'fast_path' | 'full_rag' | 'degraded_rag';
+  /** Set when the user stopped generation. The partial answer is kept. */
+  stopped?: boolean;
+  mode?: 'fast_path' | 'full_rag' | 'degraded_rag' | 'cached';
   graph_hops?: string;
   contradictions_found?: boolean;
   knowledge_gaps?: string[];
   pattern_annotations?: string[];
-  answer_evolution_diff?: string;
   trace?: TraceEvent[];
   fallbackTo?: string;
   prompt_tokens?: number;
@@ -29,10 +30,10 @@ type ChatAction =
   | { type: 'ADD_USER_MESSAGE'; payload: { id: string; content: string } }
   | { type: 'START_ASSISTANT_STREAM'; payload: { id: string } }
   | { type: 'APPEND_STREAM'; payload: { text: string } }
-  | { type: 'FINISH_STREAM'; payload: { graph_hops?: string } }
+  | { type: 'FINISH_STREAM'; payload: { graph_hops?: string; stopped?: boolean } }
   | { type: 'SET_FAST_PATH'; payload: { content: string; sources?: QuerySource[]; latency_ms?: number; graph_hops?: string } }
-  | { type: 'SET_SOURCES'; payload: { sources: QuerySource[]; near_misses: QuerySource[]; latency_ms: number; mode: 'fast_path' | 'full_rag' | 'degraded_rag'; graph_hops?: string; contradictions_found?: boolean; knowledge_gaps?: string[] } }
-  | { type: 'SET_METADATA'; payload: { pattern_annotations?: string[]; answer_evolution_diff?: string } }
+  | { type: 'SET_SOURCES'; payload: { sources: QuerySource[]; near_misses: QuerySource[]; latency_ms: number; mode: 'fast_path' | 'full_rag' | 'degraded_rag' | 'cached'; graph_hops?: string; contradictions_found?: boolean; knowledge_gaps?: string[] } }
+  | { type: 'SET_METADATA'; payload: { pattern_annotations?: string[] } }
   | { type: 'SET_TRACE'; payload: { trace: TraceEvent[] } }
   | { type: 'SET_FALLBACK'; payload: { to: string } }
   | { type: 'SET_USAGE'; payload: { prompt_tokens: number; completion_tokens: number; cost: number; isEstimatedCost: boolean } }
@@ -57,10 +58,11 @@ function chatReducer(state: Message[], action: ChatAction): Message[] {
     case 'FINISH_STREAM': {
       const last = state.at(-1);
       if (last?.role === 'assistant') {
-        return [...state.slice(0, -1), { 
-          ...last, 
-          isStreaming: false, 
-          ...(action.payload.graph_hops ? { graph_hops: action.payload.graph_hops } : {})
+        return [...state.slice(0, -1), {
+          ...last,
+          isStreaming: false,
+          ...(action.payload.graph_hops ? { graph_hops: action.payload.graph_hops } : {}),
+          ...(action.payload.stopped ? { stopped: true } : {})
         }];
       }
       return state;
@@ -100,8 +102,7 @@ function chatReducer(state: Message[], action: ChatAction): Message[] {
       if (last?.role === 'assistant') {
         return [...state.slice(0, -1), { 
           ...last, 
-          pattern_annotations: action.payload.pattern_annotations || last.pattern_annotations,
-          answer_evolution_diff: action.payload.answer_evolution_diff || last.answer_evolution_diff
+          pattern_annotations: action.payload.pattern_annotations || last.pattern_annotations
         }];
       }
       return state;
@@ -182,6 +183,12 @@ export function useChatStream(onHistoryUpdate: () => void) {
   const streamBufferRef = useRef('');
   const lastUpdateRef = useRef(0);
   const throttleTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // subscribeQuery's teardown, and the terminal transition for the stream it
+  // belongs to. Aborting the fetch emits no further chunks - api.ts swallows
+  // AbortError deliberately, so 'done' never arrives - which means stopping has
+  // to complete the stream on the client side or the UI stays disabled forever.
+  const unsubscribeRef = useRef<(() => void) | null>(null);
+  const finalizeStreamRef = useRef<((opts?: { stopped?: boolean }) => void) | null>(null);
 
   useEffect(() => {
     return () => {
@@ -198,6 +205,14 @@ export function useChatStream(onHistoryUpdate: () => void) {
 
   const resetChat = useCallback(() => {
     dispatch({ type: 'RESET' });
+  }, []);
+
+  const stopStream = useCallback(() => {
+    const unsubscribe = unsubscribeRef.current;
+    if (!unsubscribe) return;
+    unsubscribeRef.current = null;
+    unsubscribe();
+    finalizeStreamRef.current?.({ stopped: true });
   }, []);
 
   const executeSearch = useCallback(async (
@@ -237,7 +252,53 @@ export function useChatStream(onHistoryUpdate: () => void) {
     let receivedUsage = false;
 
     return new Promise<void>((resolve, reject) => {
-      subscribeQuery({
+      let settled = false;
+
+      /** The stream's single terminal transition, shared by 'done' and stop. */
+      const finalize = (opts: { graph_hops?: string; stopped?: boolean } = {}) => {
+        if (settled) return;
+        settled = true;
+        unsubscribeRef.current = null;
+        finalizeStreamRef.current = null;
+
+        if (throttleTimeoutRef.current) {
+          clearTimeout(throttleTimeoutRef.current);
+          throttleTimeoutRef.current = null;
+        }
+        flushStreamBuffer();
+        dispatch({
+          type: 'FINISH_STREAM',
+          payload: { graph_hops: opts.graph_hops, stopped: opts.stopped }
+        });
+
+        // A stopped or dropped stream never delivers the usage packet.
+        if (!receivedUsage) {
+          const text = streamBufferRef.current;
+          const cTokens = Math.max(Math.ceil(text.length / 4), Math.ceil(text.trim().split(/\s+/).length * 1.3));
+
+          const promptText = userMessageContent + "\n" + JSON.stringify(historyForApi);
+          const pTokens = Math.max(Math.ceil(promptText.length / 4), Math.ceil(promptText.trim().split(/\s+/).length * 1.3));
+
+          const cost = calculateCost(currentProviderId, currentModelId, pTokens, cTokens);
+          addSessionCost(cost);
+          dispatch({
+            type: 'SET_USAGE',
+            payload: {
+              prompt_tokens: pTokens,
+              completion_tokens: cTokens,
+              cost,
+              isEstimatedCost: true
+            }
+          });
+        }
+
+        onHistoryUpdate();
+        resolve();
+      };
+
+      finalizeStreamRef.current = finalize;
+
+      unsubscribeRef.current = subscribeQuery({
         question: userMsg,
         history: historyForApi,
         file_type: options.file_type || null,
@@ -249,6 +310,9 @@ export function useChatStream(onHistoryUpdate: () => void) {
       }, (chunk: QueryStreamChunk) => {
         
         if (chunk.type === 'error') {
+          settled = true;
+          unsubscribeRef.current = null;
+          finalizeStreamRef.current = null;
           dispatch({ type: 'SET_ERROR', payload: { text: chunk.text || 'Search failed' } });
           reject(new Error(chunk.text || 'Search failed'));
           return;
@@ -328,44 +392,14 @@ export function useChatStream(onHistoryUpdate: () => void) {
         }
 
         if (chunk.type === 'done') {
-          if (throttleTimeoutRef.current) {
-            clearTimeout(throttleTimeoutRef.current);
-            throttleTimeoutRef.current = null;
-          }
-          flushStreamBuffer();
-          dispatch({ type: 'FINISH_STREAM', payload: { graph_hops: chunk.graph_hops } });
-          
-          // Estimate usage if we didn't receive the usage chunk (e.g. abort or network drop)
-          if (!receivedUsage) {
-            const text = streamBufferRef.current;
-            const cTokens = Math.max(Math.ceil(text.length / 4), Math.ceil(text.trim().split(/\s+/).length * 1.3));
-            
-            const promptText = userMessageContent + "\n" + JSON.stringify(historyForApi);
-            const pTokens = Math.max(Math.ceil(promptText.length / 4), Math.ceil(promptText.trim().split(/\s+/).length * 1.3));
-            
-            const cost = calculateCost(currentProviderId, currentModelId, pTokens, cTokens);
-            addSessionCost(cost);
-            dispatch({
-              type: 'SET_USAGE',
-              payload: {
-                prompt_tokens: pTokens,
-                completion_tokens: cTokens,
-                cost,
-                isEstimatedCost: true
-              }
-            });
-          }
-
-          onHistoryUpdate();
-          resolve();
+          finalize({ graph_hops: chunk.graph_hops });
         }
 
         if (chunk.type === 'metadata') {
           dispatch({
             type: 'SET_METADATA',
             payload: {
-              pattern_annotations: chunk.pattern_annotations,
-              answer_evolution_diff: chunk.answer_evolution_diff
+              pattern_annotations: chunk.pattern_annotations
             }
           });
         }
@@ -374,6 +408,6 @@ export function useChatStream(onHistoryUpdate: () => void) {
     });
   }, [messages, flushStreamBuffer, onHistoryUpdate, sessionModelOverride, addSessionCost]);
 
-  return { messages, executeSearch, resetChat };
+  return { messages, executeSearch, resetChat, stopStream };
 }
 

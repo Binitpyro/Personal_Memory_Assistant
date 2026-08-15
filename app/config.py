@@ -139,7 +139,7 @@ class Settings(BaseSettings):
     # so callers only ever need to read one of them.
     ocr_enabled: bool = False
     ocr_tier: str = "none"  # "none" | "cpu" | "gpu"
-    ocr_dpi: int = 300
+    ocr_dpi: int = 150
     ocr_min_chars_per_page: int = 100
     ocr_garbage_ratio: float = 0.30
     ocr_blank_stream_bytes: int = 512

@@ -280,9 +280,7 @@ class TestPdfExtractorOcrGate:
 
     def test_disabled_yields_only_strings(self, tmp_path, monkeypatch):
         """With OCR off the stream must be byte-for-byte what it always was."""
-        items = self._run(
-            tmp_path, [self._page("Some text " * 30)], monkeypatch, enabled=False
-        )
+        items = self._run(tmp_path, [self._page("Some text " * 30)], monkeypatch, enabled=False)
         assert all(isinstance(i, str) for i in items)
         assert not any(isinstance(i, ExtractMeta) for i in items)
 
@@ -486,7 +484,7 @@ class TestDocxExtractor:
         content_types = content_types.replace(
             "</Types>",
             '<Override PartName="/word/footnotes.xml" '
-            "ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml"
+            'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml'
             '.footnotes+xml"/></Types>',
         )
         doc_rels = doc_rels.replace(

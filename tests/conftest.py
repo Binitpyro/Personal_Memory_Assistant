@@ -178,6 +178,6 @@ def mock_local_reachability_default(monkeypatch, request):
     if request.module and "test_provider_manifest" in request.module.__name__:
         return
     from app.providers import manifest
+
     manifest.clear_reachability_cache()
     monkeypatch.setattr(manifest, "is_local_endpoint_reachable", lambda url, timeout=0.2: True)
-

@@ -106,9 +106,7 @@ def test_get_settings_reports_consent_and_notice(mock_read):
 def test_put_settings_rejects_cloud_provider_without_consent(mock_write, mock_read):
     mock_read.return_value = {"llm": {"per_provider": {}}}
 
-    resp = client.put(
-        "/api/providers/settings", json={"provider": "gemini"}, headers=headers
-    )
+    resp = client.put("/api/providers/settings", json={"provider": "gemini"}, headers=headers)
     assert resp.status_code == 400
     mock_write.assert_not_called()
 
@@ -118,9 +116,7 @@ def test_put_settings_rejects_cloud_provider_without_consent(mock_write, mock_re
 def test_put_settings_allows_cloud_provider_when_consent_already_stored(mock_write, mock_read):
     mock_read.return_value = {"llm": {"per_provider": {}, "cloud_privacy_consent": True}}
 
-    resp = client.put(
-        "/api/providers/settings", json={"provider": "gemini"}, headers=headers
-    )
+    resp = client.put("/api/providers/settings", json={"provider": "gemini"}, headers=headers)
     assert resp.status_code == 200
     mock_write.assert_called()
 
@@ -234,4 +230,3 @@ def test_launch_uses_saved_base_url(mock_read, mock_launch):
     assert resp.status_code == 200
     assert resp.json()["ok"] is True
     mock_launch.assert_awaited_once_with("ollama", "http://127.0.0.1:9999")
-

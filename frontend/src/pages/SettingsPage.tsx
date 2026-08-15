@@ -16,6 +16,7 @@ import {
   launchProvider,
   getOcrStatus,
   getOcrTiers,
+  selectOcrTier,
   getVlmModels,
   getVlmSelection,
   selectVlmModel,
@@ -399,6 +400,8 @@ function VlmPicker({
     cacheKey: 'ocr-vlm-selection',
   })
   const [saving, setSaving] = useState('')
+  const [isChecking, setIsChecking] = useState(false)
+  const [startingProvider, setStartingProvider] = useState<string | null>(null)
 
   const choose = async (provider: string, model: string) => {
     setSaving(model)
@@ -409,6 +412,8 @@ function VlmPicker({
         return
       }
       setNote(`OCR will use ${model}.`)
+      invalidateCache('ocr-tiers')
+      invalidateCache('ocr-status-settings')
       refetchSelection()
       onChanged()
     } catch (e) {
@@ -418,7 +423,37 @@ function VlmPicker({
     }
   }
 
-  if (loading && !data) {
+  const handleCheckAgain = async () => {
+    setIsChecking(true)
+    invalidateCache('ocr-vlm-models')
+    try {
+      await refetch()
+    } finally {
+      setIsChecking(false)
+    }
+  }
+
+  const handleStartProvider = async (providerId: string, displayName: string) => {
+    setStartingProvider(providerId)
+    setNote(`Starting ${displayName}...`)
+    try {
+      const res = await launchProvider(providerId)
+      if (res.ok) {
+        setNote(`${displayName} started successfully.`)
+        invalidateCache('ocr-vlm-models')
+        invalidateCache('local-models')
+        await refetch()
+      } else {
+        setNote(res.message || `Could not start ${displayName}.`)
+      }
+    } catch (e) {
+      setNote(e instanceof Error ? e.message : `Could not start ${displayName}.`)
+    } finally {
+      setStartingProvider(null)
+    }
+  }
+
+  if (loading && !data && !isChecking) {
     return (
       <div className="flex items-center gap-2 text-sm text-text-secondary mb-3">
         <Loader2 className="w-4 h-4 animate-spin" /> Looking for models you already have…
@@ -430,20 +465,74 @@ function VlmPicker({
 
   if (reachable.length === 0) {
     return (
-      <div className="mb-3 p-3 rounded-xl bg-warning/10 border border-warning/20">
-        <p className="text-xs text-warning">
-          Neither Ollama nor LM Studio is running. Start one, then{' '}
-          <button onClick={() => refetch()} className="underline font-bold">
-            check again
-          </button>
-          .
-        </p>
+      <div className="mb-3 p-4 rounded-xl bg-warning/10 border border-warning/20">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div>
+            <p className="text-xs font-semibold text-warning">
+              Neither Ollama nor LM Studio is currently reachable.
+            </p>
+            <p className="text-[11px] text-text-secondary mt-0.5">
+              Start your local model server, then check again to detect installed vision models.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => handleStartProvider('ollama', 'Ollama')}
+              disabled={!!startingProvider || isChecking}
+              className="glass-button px-2.5 py-1.5 text-xs flex items-center gap-1.5 disabled:opacity-50"
+              title="Start Ollama server"
+            >
+              {startingProvider === 'ollama' ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Play className="w-3.5 h-3.5 text-success" />
+              )}
+              Start Ollama
+            </button>
+            <button
+              type="button"
+              onClick={() => handleStartProvider('lm_studio', 'LM Studio')}
+              disabled={!!startingProvider || isChecking}
+              className="glass-button px-2.5 py-1.5 text-xs flex items-center gap-1.5 disabled:opacity-50"
+              title="Start LM Studio server"
+            >
+              {startingProvider === 'lm_studio' ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Play className="w-3.5 h-3.5 text-success" />
+              )}
+              Start LM Studio
+            </button>
+            <button
+              type="button"
+              onClick={handleCheckAgain}
+              disabled={isChecking || !!startingProvider}
+              className="glass-button px-3 py-1.5 text-xs font-bold flex items-center gap-1.5 text-text-primary hover:bg-black/10 disabled:opacity-50"
+            >
+              <RefreshCcw className={`w-3.5 h-3.5 ${isChecking || loading ? 'animate-spin' : ''}`} />
+              {isChecking || loading ? 'Checking…' : 'Check again'}
+            </button>
+          </div>
+        </div>
       </div>
     )
   }
 
   return (
     <div className="mb-3 space-y-3">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-semibold text-text-secondary">Detected Local Providers</span>
+        <button
+          type="button"
+          onClick={handleCheckAgain}
+          disabled={isChecking || loading}
+          className="text-xs text-text-secondary hover:text-text-primary flex items-center gap-1 transition-colors"
+        >
+          <RefreshCcw className={`w-3 h-3 ${isChecking || loading ? 'animate-spin' : ''}`} />
+          Refresh models
+        </button>
+      </div>
       {reachable.map((p) => {
         const vision = p.models.filter((m) => m.vision)
         return (
@@ -475,6 +564,7 @@ function VlmPicker({
                   return (
                     <button
                       key={m.id}
+                      type="button"
                       onClick={() => choose(p.provider, m.id)}
                       disabled={!!saving}
                       className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
@@ -502,14 +592,20 @@ function OcrSection() {
     cacheKey: 'ocr-status-settings',
     refetchInterval: 10_000,
   })
-  const { data: tierData } = useApi(getOcrTiers, { cacheKey: 'ocr-tiers' })
+  const { data: tierData, refetch: refetchTiers } = useApi(getOcrTiers, { cacheKey: 'ocr-tiers' })
   const tiers = tierData?.tiers ?? []
   const [selectedTier, setSelectedTier] = useState<string>('cpu')
   const selectedTierInfo = tiers.find((t) => t.id === selectedTier)
-  // Show what is actually installed rather than always opening on "cpu".
+
+  // Show what is actually installed / active on first load
+  const [initialised, setInitialised] = useState(false)
   useEffect(() => {
-    if (tierData?.installed) setSelectedTier(tierData.installed)
-  }, [tierData?.installed])
+    if (!initialised && tierData?.installed && tierData.installed !== 'none') {
+      setSelectedTier(tierData.installed)
+      setInitialised(true)
+    }
+  }, [tierData?.installed, initialised])
+
   const [install, setInstall] = useState<OcrInstallState | null>(null)
   const [busy, setBusy] = useState(false)
   const [failed, setFailed] = useState<OcrQueueItem[]>([])
@@ -525,13 +621,16 @@ function OcrSection() {
         const state = await getOcrInstallState()
         setInstall(state)
         if (state.status !== 'running') {
+          invalidateCache('ocr-tiers')
+          invalidateCache('ocr-status-settings')
           refetch()
+          refetchTiers()
           setBusy(false)
         }
       } catch { /* transient */ }
     }, 1500)
     return () => clearInterval(id)
-  }, [installing, refetch])
+  }, [installing, refetch, refetchTiers])
 
   const loadFailed = useCallback(async () => {
     try {
@@ -558,18 +657,53 @@ function OcrSection() {
     }
   }
 
-  const handleUninstall = async () => {
+  const handleSelectActiveTier = async (tier: string) => {
     setBusy(true)
-    try { await uninstallOcrTier(); setInstall(null); refetch() }
-    catch (e) { setNote(e instanceof Error ? e.message : 'Uninstall failed.') }
-    finally { setBusy(false) }
+    setNote('')
+    try {
+      const res = await selectOcrTier(tier)
+      if (!res.ok) {
+        setNote(`Could not switch tier: ${res.error_code}`)
+        return
+      }
+      setNote(`OCR switched to ${TIER_COPY[tier]?.short ?? tier}.`)
+      invalidateCache('ocr-tiers')
+      invalidateCache('ocr-status-settings')
+      refetch()
+      refetchTiers()
+    } catch (e) {
+      setNote(e instanceof Error ? e.message : 'Could not switch tier.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleUninstall = async (tierToUninstall?: string) => {
+    const target = tierToUninstall || selectedTier
+    setBusy(true)
+    try {
+      await uninstallOcrTier(target)
+      setInstall(null)
+      setNote(`Uninstalled ${TIER_COPY[target]?.short ?? target} tier.`)
+      invalidateCache('ocr-tiers')
+      invalidateCache('ocr-status-settings')
+      refetch()
+      refetchTiers()
+    } catch (e) {
+      setNote(e instanceof Error ? e.message : 'Uninstall failed.')
+    } finally {
+      setBusy(false)
+    }
   }
 
   const handleToggle = async (enabled: boolean) => {
     try {
       const res = await setOcrEnabled(enabled)
       if (!res.ok) setNote(`Cannot enable: ${res.error_code}`)
+      invalidateCache('ocr-tiers')
+      invalidateCache('ocr-status-settings')
       refetch()
+      refetchTiers()
     } catch (e) { setNote(e instanceof Error ? e.message : 'Could not change OCR state.') }
   }
 
@@ -589,6 +723,9 @@ function OcrSection() {
     } catch (e) { setNote(e instanceof Error ? e.message : 'Could not clear cache.') }
   }
 
+  const isSelectedActive = ocr?.installed && ocr?.tier === selectedTier
+  const isSelectedInstalled = !!selectedTierInfo?.installed
+
   return (
     <div className="glass p-6 rounded-2xl border border-primary/10">
       <div className="flex items-start gap-4 mb-6">
@@ -598,18 +735,22 @@ function OcrSection() {
         <div>
           <h2 className="text-lg font-bold text-text-primary">OCR for Scanned PDFs</h2>
           <p className="text-sm text-text-secondary mt-1">
-            Reads text out of scanned pages so they become searchable. Runs on the CPU in
-            its own isolated environment — nothing is added to the main install.
+            Reads text out of scanned pages so they become searchable. Runs in its own isolated
+            environment — nothing is added to the main install.
           </p>
         </div>
       </div>
 
       <div className="p-4 rounded-xl border border-primary/5 bg-white/50 backdrop-blur-md">
         <div className="flex items-center justify-between mb-3">
-          <h3 className="font-semibold text-text-primary">{TIER_COPY[selectedTier].title}</h3>
-          {ocr?.installed && ocr?.tier === selectedTier ? (
+          <h3 className="font-semibold text-text-primary">{TIER_COPY[selectedTier]?.title}</h3>
+          {isSelectedActive ? (
             <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-success/15 text-success">
-              <span className="w-1.5 h-1.5 rounded-full bg-success"></span> Installed
+              <span className="w-1.5 h-1.5 rounded-full bg-success"></span> Active
+            </span>
+          ) : isSelectedInstalled ? (
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-primary/15 text-primary">
+              <span className="w-1.5 h-1.5 rounded-full bg-primary"></span> Ready
             </span>
           ) : (
             <span className="px-2.5 py-1 rounded-full text-xs font-semibold bg-text-secondary/15 text-text-secondary">
@@ -618,17 +759,17 @@ function OcrSection() {
           )}
         </div>
 
-        {/* Only one tier can be provisioned at a time - the two ONNX Runtime
-            builds cannot share an interpreter - so this is a choice, not a
-            stack. Switching re-provisions from scratch. */}
+        {/* Tier selection tabs */}
         <div className="flex gap-2 mb-3">
           {tiers.map((t) => {
             const copy = TIER_COPY[t.id]
             if (!copy) return null
             const blocked = !!t.unavailable_reason
+            const isThisActive = ocr?.installed && ocr?.tier === t.id
             return (
               <button
                 key={t.id}
+                type="button"
                 onClick={() => setSelectedTier(t.id)}
                 disabled={blocked}
                 title={t.unavailable_reason || copy.blurb}
@@ -640,7 +781,11 @@ function OcrSection() {
               >
                 <span className="block font-bold">{copy.short}</span>
                 <span className="block mt-0.5">{copy.size}</span>
-                {t.installed && <span className="block mt-0.5 text-success font-bold">active</span>}
+                {isThisActive ? (
+                  <span className="block mt-0.5 text-success font-bold">active</span>
+                ) : t.installed ? (
+                  <span className="block mt-0.5 text-primary font-medium">ready</span>
+                ) : null}
               </button>
             )
           })}
@@ -654,7 +799,7 @@ function OcrSection() {
           <p className="text-xs text-warning mb-3">{selectedTierInfo.unavailable_reason}</p>
         )}
 
-        {!ocr?.uv_available && !ocr?.installed && (
+        {!ocr?.uv_available && !ocr?.installed && selectedTier !== 'vlm' && (
           <p className="text-xs text-warning mb-3">
             Requires <code className="font-mono">uv</code>, which wasn&apos;t found on this machine.
             Install it from docs.astral.sh/uv, then reopen this page.
@@ -680,16 +825,7 @@ function OcrSection() {
         )}
 
         <div className="flex flex-wrap items-center gap-3">
-          {!ocr?.installed ? (
-            <button
-              onClick={handleInstall}
-              disabled={busy || !ocr?.uv_available || !!selectedTierInfo?.unavailable_reason}
-              className="glass-button flex items-center gap-2 disabled:opacity-50"
-            >
-              {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-              {busy ? 'Installing…' : `Install ${TIER_COPY[selectedTier]?.short ?? ''}`}
-            </button>
-          ) : (
+          {isSelectedActive ? (
             <>
               <label className="flex items-center gap-2 text-sm font-medium text-text-primary cursor-pointer">
                 <input
@@ -700,10 +836,7 @@ function OcrSection() {
                 />
                 Enabled
               </label>
-              {/* The backend computed and stamped this all along but never
-                  exposed it, so a GPU tier that quietly fell back to the
-                  processor was indistinguishable from one that had not. */}
-              {ocr?.ep && (
+              {ocr?.ep && selectedTier !== 'vlm' && (
                 <span className="text-xs text-text-secondary">
                   Running on:{' '}
                   <strong className="text-text-primary">
@@ -711,16 +844,57 @@ function OcrSection() {
                   </strong>
                 </span>
               )}
-              <button onClick={handleClearCache} className="glass-button text-sm">
+              <button type="button" onClick={handleClearCache} className="glass-button text-sm">
                 Clear OCR cache ({ocr?.cache_mb ?? 0} MB)
               </button>
-              <button onClick={handleUninstall} disabled={busy} className="glass-button text-sm disabled:opacity-50">
-                Uninstall
-              </button>
+              {selectedTier !== 'vlm' && (
+                <button
+                  type="button"
+                  onClick={() => handleUninstall(selectedTier)}
+                  disabled={busy}
+                  className="glass-button text-sm disabled:opacity-50 text-danger hover:bg-danger/10"
+                >
+                  Uninstall
+                </button>
+              )}
             </>
+          ) : isSelectedInstalled ? (
+            <>
+              <button
+                type="button"
+                onClick={() => handleSelectActiveTier(selectedTier)}
+                disabled={busy}
+                className="glass-button flex items-center gap-2 bg-primary/10 text-primary font-bold hover:bg-primary/20 disabled:opacity-50"
+              >
+                {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
+                Switch to {TIER_COPY[selectedTier]?.short ?? ''}
+              </button>
+              {selectedTier !== 'vlm' && (
+                <button
+                  type="button"
+                  onClick={() => handleUninstall(selectedTier)}
+                  disabled={busy}
+                  className="glass-button text-sm disabled:opacity-50 text-danger hover:bg-danger/10"
+                >
+                  Uninstall
+                </button>
+              )}
+            </>
+          ) : (
+            selectedTier !== 'vlm' && (
+              <button
+                type="button"
+                onClick={handleInstall}
+                disabled={busy || !ocr?.uv_available || !!selectedTierInfo?.unavailable_reason}
+                className="glass-button flex items-center gap-2 disabled:opacity-50"
+              >
+                {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+                {busy ? 'Installing…' : `Install ${TIER_COPY[selectedTier]?.short ?? ''}`}
+              </button>
+            )
           )}
           {installing && (
-            <button onClick={() => cancelOcrInstall()} className="glass-button text-sm">Cancel</button>
+            <button type="button" onClick={() => cancelOcrInstall()} className="glass-button text-sm">Cancel</button>
           )}
         </div>
 

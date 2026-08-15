@@ -177,9 +177,7 @@ def test_one_bad_xobject_entry_does_not_lose_the_others():
 
 def test_content_stream_array_lengths_are_summed():
     page = MagicMock()
-    page.get = MagicMock(
-        return_value=[_FakeDict({"/Length": 300}), _FakeDict({"/Length": 250})]
-    )
+    page.get = MagicMock(return_value=[_FakeDict({"/Length": 300}), _FakeDict({"/Length": 250})])
     assert _content_stream_bytes(page) == 550
 
 

@@ -77,9 +77,7 @@ async def test_graph_plan_falls_through_when_graph_is_empty(monkeypatch):
     db.get_relational_paths = AsyncMock(return_value=[])
 
     plan = MagicMock(original_query="what is the connection between X and Y")
-    results, context = await retrieval._execute_graph_plan(
-        plan, db, MagicMock(), MagicMock(), k=15
-    )
+    results, context = await retrieval._execute_graph_plan(plan, db, MagicMock(), MagicMock(), k=15)
 
     assert results is None, "empty graph must signal fallthrough, not return the seed set"
     assert context == ""
@@ -93,9 +91,7 @@ async def test_full_rag_uses_full_retrieval_when_graph_falls_through(monkeypatch
         for i in range(15)
     ]
 
-    monkeypatch.setattr(
-        retrieval, "_execute_graph_plan", AsyncMock(return_value=(None, ""))
-    )
+    monkeypatch.setattr(retrieval, "_execute_graph_plan", AsyncMock(return_value=(None, "")))
     monkeypatch.setattr(
         retrieval,
         "_gather_full_rag_inputs",
@@ -581,14 +577,10 @@ def _list_providers_with_consent(consent: bool):
         patch("keyring.get_password", return_value="fake_key"),
     ):
         token = os.environ.get("X_LOCAL_ACCESS_TOKEN", "test-token")
-        resp = TestClient(app).get(
-            "/api/providers", headers={"X-Local-Access-Token": token}
-        )
+        resp = TestClient(app).get("/api/providers", headers={"X-Local-Access-Token": token})
         assert resp.status_code == 200
 
-    gated = {
-        pid for pid, spec in PROVIDER_REGISTRY.items() if spec.kind in ("cloud", "aggregator")
-    }
+    gated = {pid for pid, spec in PROVIDER_REGISTRY.items() if spec.kind in ("cloud", "aggregator")}
     return validated, gated
 
 
@@ -744,8 +736,22 @@ async def test_near_misses_survive_the_reranker(monkeypatch):
 # ── Phase 3 Bounded loop ────────────────────────────────────────────────────
 
 
-def _chunk(cid, score=1.0, tag="notes"):
-    return {"chunk_id": cid, "text": f"body {cid}", "folder_tag": tag, "score": score}
+def _chunk(cid, score=1.0, tag="notes", rerank_score=None):
+    """A retrieved chunk.
+
+    ``rerank_score`` defaults to mirroring ``score`` because sufficiency is
+    judged on the cross-encoder scale: a chunk with no ``rerank_score`` is
+    "not assessed", which is deliberately neither satisfied nor unanswered.
+    Tests that want a sub-question to stay unanswered must pass a value below
+    ``agentic_evidence_score_floor``.
+    """
+    return {
+        "chunk_id": cid,
+        "text": f"body {cid}",
+        "folder_tag": tag,
+        "score": score,
+        "rerank_score": score if rerank_score is None else rerank_score,
+    }
 
 
 @pytest.mark.asyncio
@@ -757,8 +763,9 @@ async def test_loop_stops_at_the_iteration_cap(monkeypatch):
 
     async def retrieve(text, k):
         calls["n"] += 1
-        # Always something new, so only the iteration cap can stop the loop.
-        return [_chunk(f"{text}-{calls['n']}", score=0.0)]
+        # Always something new, and always below the relevance floor, so nothing
+        # is ever satisfied and only the iteration cap can stop the loop.
+        return [_chunk(f"{text}-{calls['n']}", score=0.0, rerank_score=-5.0)]
 
     llm = MagicMock()
     llm.generate_raw = AsyncMock(

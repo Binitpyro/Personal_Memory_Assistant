@@ -207,17 +207,33 @@ def persist_vlm_selection(provider: str, model: str) -> None:
         logger.warning("Could not persist VLM selection: %s", exc)
 
 
+def persist_active_tier(tier: str) -> None:
+    """Remember the user's active OCR tier across restarts."""
+    try:
+        from app.settings_store import SettingsStore
+
+        data = SettingsStore.read()
+        data.setdefault("ocr", {})["tier"] = tier
+        SettingsStore.save(data)
+    except Exception as exc:
+        logger.warning("Could not persist active OCR tier: %s", exc)
+
+
 def detect_installed_tier() -> str:
-    """Name of the tier actually provisioned, or "" if none is.
+    """Name of the tier actually provisioned/configured, or "" if none is.
 
-    Reads real state instead of assuming "cpu". With one tier that made no
-    difference; with more, assuming it would relabel a GPU install as CPU on
-    every restart - and that label feeds the OCR cache key, so the mislabel
-    would not stay cosmetic.
-
-    A provisioned venv outranks a VLM selection: a local engine is faster, free,
-    and fully offline, so if the user has one it is what should run.
+    Checks persisted tier preference first so a user's selection (e.g. VLM or GPU)
+    is respected even if another engine venv exists.
     """
+    try:
+        from app.settings_store import SettingsStore
+
+        stored_tier = str((SettingsStore.read().get("ocr") or {}).get("tier") or "").strip().lower()
+        if stored_tier and stored_tier != "none" and is_tier_installed(stored_tier):
+            return stored_tier
+    except Exception as exc:
+        logger.debug("Could not read preferred OCR tier: %s", exc)
+
     root = ocr_root()
     try:
         candidates = sorted(p.name for p in root.iterdir() if p.is_dir())

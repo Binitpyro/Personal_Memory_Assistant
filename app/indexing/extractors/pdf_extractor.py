@@ -39,7 +39,10 @@ class PdfExtractor:
         gate_cfg = None
         try:
             from app.config import settings
+            from app.ocr.settings import load_persisted_state
 
+            if not settings.ocr_enabled or settings.ocr_tier == "none":
+                load_persisted_state()
             ocr_on = bool(settings.ocr_enabled) and settings.ocr_tier != "none"
         except Exception:
             ocr_on = False
@@ -64,7 +67,11 @@ class PdfExtractor:
 
         try:
             from pypdf import PdfReader  # type: ignore
+        except ImportError:
+            logger.warning("pypdf is not installed; skipping PDF extraction for %s", path.name)
+            return
 
+        try:
             reader = PdfReader(str(path), strict=False)
             total = 0
             if reader.is_encrypted:
@@ -141,6 +148,6 @@ class PdfExtractor:
         """Legacy extraction for backward compatibility."""
         # The stream can now carry a trailing ExtractMeta; callers of this
         # method want text only.
-        return "\n".join(
-            f for f in self.extract_stream(path, max_file_size) if isinstance(f, str)
-        )[:max_file_size]
+        return "\n".join(f for f in self.extract_stream(path, max_file_size) if isinstance(f, str))[
+            :max_file_size
+        ]

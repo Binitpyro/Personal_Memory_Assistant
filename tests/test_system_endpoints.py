@@ -277,8 +277,26 @@ async def test_demo_seed_endpoint(client, tmp_path):
 
 @pytest.mark.asyncio
 async def test_pick_folder_mocked(client):
-    # The endpoint now always returns empty path and an error message telling users to use Tauri native dialog.
-    response = await client.get("/api/pick/folder")
+    # Reached only in browser dev mode -- isTauri routes around this endpoint
+    # in the packaged app, so the tkinter dialog runs here and only here.
+    fake_loop = MagicMock()
+    fake_loop.run_in_executor = AsyncMock(return_value="C:/Users/test/Documents")
+    with patch("app.api.system.asyncio.get_running_loop", return_value=fake_loop):
+        response = await client.get("/api/pick/folder")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["path"] == "C:/Users/test/Documents"
+    assert "error" not in data
+
+
+@pytest.mark.asyncio
+async def test_pick_folder_dialog_failure(client):
+    # No display / tkinter unavailable: fails closed with the same error
+    # message the Tauri-context stub used to always return.
+    fake_loop = MagicMock()
+    fake_loop.run_in_executor = AsyncMock(side_effect=RuntimeError("no display"))
+    with patch("app.api.system.asyncio.get_running_loop", return_value=fake_loop):
+        response = await client.get("/api/pick/folder")
     assert response.status_code == 200
     data = response.json()
     assert data["path"] == ""

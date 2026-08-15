@@ -10,12 +10,10 @@ invented:
 * **stderr must be drained continuously.** An undrained stderr pipe deadlocks
   the child once the OS buffer fills. `frontend/src-tauri/src/lib.rs` learned
   this the hard way; we do not repeat it.
-* **Never write to SQLite while indexing runs.** `DatabaseManager` releases its
-  write lock between `begin_transaction()` and `commit()`, so an OCR write
-  landing mid-run would commit the indexing pipeline's open transaction.
-  The drain loop waits for idle instead. It deliberately does *not* take
-  `indexing_lock` - `index_folders` bails out immediately when that is held,
-  which would silently turn the user's Index click into a no-op.
+* **Concurrent Subprocess & Database Safety:** OCR transcription runs
+  concurrently with the indexing pipeline. `DatabaseManager` write serialization
+  and transaction boundaries ensure database writes (queue claims, cache
+  updates, and chunk indexing) do not interfere with indexing transactions.
 """
 
 from __future__ import annotations
@@ -83,8 +81,15 @@ class OcrManager:
         # behind the first - the pool has exactly one thread.
         self._pending_read: Any = None
         self._stderr_tail: deque[str] = deque(maxlen=200)
+        # Three distinct lifetimes, previously collapsed into two counters that
+        # reset on unrelated schedules - which silently disabled recycling.
+        #   _docs_done         : this queue pass, for _finalize_indexes + status
+        #   _pages_since_evict : rolling 100, drives ocr_cache LRU eviction
+        #   _*_since_spawn     : this worker process, drives recycling only
         self._docs_done = 0
-        self._pages_done = 0
+        self._pages_since_evict = 0
+        self._docs_since_spawn = 0
+        self._pages_since_spawn = 0
         self._fatal: str = ""
         self._stopping = False
         self._task: asyncio.Task | None = None
@@ -121,8 +126,15 @@ class OcrManager:
             registry.sweep_stale_installs()
             # An installed venv outranks whatever PMA_OCR_TIER says.
             load_persisted_state()
-            if is_tier_installed():
-                registry.sync_worker_files()
+            if is_tier_installed() and not registry.sync_worker_files():
+                # The return value used to be discarded. sync_worker_files is
+                # what keeps the venv's worker in step with this build after an
+                # upgrade; if the copy fails (locked file, AV, read-only dir)
+                # the worker left in place speaks an older protocol. Dispatching
+                # to it produces wrong results rather than an error, so refuse
+                # to drain at all and let /ocr/resume re-arm once it is fixed.
+                self._fatal = proto.E_TIER_NOT_INSTALLED
+                logger.error("OCR worker files could not be synced; draining disabled.")
             recovered = await ocr_queue.reset_running(self.db)
             if recovered:
                 logger.info("OCR: re-armed %d interrupted document(s).", recovered)
@@ -263,12 +275,6 @@ class OcrManager:
                 if not settings.ocr_enabled or not is_tier_installed():
                     await self._retire_worker("disabled")
                     await self._sleep_or_kick(_DISABLED_POLL_S)
-                    continue
-
-                # See the module docstring: writing during an index run would
-                # commit the pipeline's open transaction.
-                if progress.status != "idle":
-                    await asyncio.sleep(_BUSY_POLL_S)
                     continue
 
                 row = await ocr_queue.claim_next(self.db, max_attempts=settings.ocr_max_attempts)
@@ -419,9 +425,10 @@ class OcrManager:
             await ocr_cache.put_pages(
                 self.db, content_key, fresh, engine_id=self._active_engine_id()
             )
-            self._pages_done += len(fresh)
-            if self._pages_done >= 100:
-                self._pages_done = 0
+            self._pages_since_spawn += len(fresh)
+            self._pages_since_evict += len(fresh)
+            if self._pages_since_evict >= 100:
+                self._pages_since_evict = 0
                 await ocr_cache.evict_lru(self.db)
 
         all_pages = list(cached.values()) + fresh
@@ -438,19 +445,38 @@ class OcrManager:
                     f", error {error_code}" if error_code else "",
                 )
             except Exception as exc:
+                from app.indexing.service import progress
+
+                # index_ocr_pages raises outright if an index run started after
+                # the drain loop's idle check (service.py:1012). That is someone
+                # else's timing, not a bad document, and it heals by itself -
+                # terminally failing it here retired documents for good.
+                if isinstance(exc, RuntimeError) and progress.status != "idle":
+                    logger.info("OCR: deferring %s, indexing started mid-write.", path.name)
+                    await ocr_queue.release_claim(self.db, row.file_path)
+                    return
                 logger.error("Failed to index OCR results for %s: %s", path.name, exc)
                 await ocr_queue.mark_failed(
                     self.db, row.file_path, f"indexing failed: {exc}", terminal=True
                 )
                 return
 
-        if error_code and not all_pages:
+        if not all_pages and row.pages:
+            # Zero pages back when pages were asked for. error_code is usually
+            # set, but a *document*-level failure reported with a page-level
+            # code - open_document failing emits E_RASTER_FAILED, which
+            # protocol.py:72 classes page-level - is only debug-logged by
+            # _run_document, so it arrives here as an empty success. Marking
+            # that done retired the document permanently, because
+            # enqueue_document re-arms only on a content change.
+            reason = error_code or "no pages produced"
             terminal = row.attempts >= settings.ocr_max_attempts
-            self._last_error = f"{path.name}: {error_code}"
-            await ocr_queue.mark_failed(self.db, row.file_path, error_code, terminal=terminal)
+            self._last_error = f"{path.name}: {reason}"
+            await ocr_queue.mark_failed(self.db, row.file_path, reason, terminal=terminal)
         else:
             await ocr_queue.mark_done(self.db, row.file_path, pages_done=len(all_pages))
             self._docs_done += 1
+            self._docs_since_spawn += 1
 
         self._current_file = ""
 
@@ -564,8 +590,8 @@ class OcrManager:
     async def _ensure_worker(self) -> None:
         if self._proc is not None and self._proc.poll() is None:
             if (
-                self._docs_done >= settings.ocr_worker_max_docs
-                or self._pages_done >= settings.ocr_worker_max_pages
+                self._docs_since_spawn >= settings.ocr_worker_max_docs
+                or self._pages_since_spawn >= settings.ocr_worker_max_pages
             ):
                 await self._retire_worker("recycle")
             else:
@@ -573,6 +599,9 @@ class OcrManager:
 
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(_OCR_EXECUTOR, self._spawn_sync)
+        # Recycling is per worker process, so its budget resets with the process.
+        self._docs_since_spawn = 0
+        self._pages_since_spawn = 0
 
         deadline = time.monotonic() + _READY_TIMEOUT_S
         while time.monotonic() < deadline:

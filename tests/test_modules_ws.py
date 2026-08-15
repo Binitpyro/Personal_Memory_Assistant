@@ -44,6 +44,7 @@ def test_websocket_connection_authorized():
         response = websocket.receive_json()
         assert response == {"status": "pong"}
 
+
 def test_websocket_new_actions():
     """Verify session.hello, corpus.stats and rate limiting."""
     client = TestClient(app)

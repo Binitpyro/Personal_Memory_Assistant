@@ -136,6 +136,30 @@ def _make_service():
     return idx.IndexingService(FakeDB(), FakeEmb(), FakeLanceDB())
 
 
+async def test_index_folders_always_releases_the_progress_flag(monkeypatch, tmp_path: Path):
+    """An exception mid-run must not leave progress.status == "running".
+
+    The OCR drain loop refuses to claim work while it is anything else
+    (app/ocr/manager.py) and index_ocr_pages raises on it outright, so a leaked
+    "running" flag starves OCR indefinitely - index_folders' caller is an
+    unhandled background task, and the watcher that would eventually clear it
+    is off by default.
+    """
+    service = _make_service()
+
+    def _boom(*_a, **_kw):
+        raise RuntimeError("scan exploded")
+
+    monkeypatch.setattr(service, "_scan_all_folders", _boom)
+
+    idx.progress.status = "idle"
+    with pytest.raises(RuntimeError, match="scan exploded"):
+        await service.index_folders([str(tmp_path)])
+
+    assert idx.progress.status == "idle"
+    assert not idx.indexing_lock.locked()
+
+
 def test_project_detection_and_overlap_resolution(tmp_path: Path):
     project = tmp_path / "proj"
     src = project / "src"

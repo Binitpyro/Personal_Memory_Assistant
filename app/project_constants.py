@@ -44,7 +44,10 @@ RAG_CACHE_MAX_SIZE = 200
 # fusion fix reads pre-fix cached results and concludes the change did nothing.
 #   1 - summary search promoted to a third RRF list (was a post-truncation no-op boost)
 #   2 - per-folder_tag recall allocation (source-balanced fusion)
-FUSION_VERSION = 2
+#   3 - FTS leg switched from implicit AND over every whitespace token to OR over
+#       stop-word-stripped keywords, and sub-trigram terms dropped. The keyword
+#       leg returned nothing for multi-word natural-language queries before this.
+FUSION_VERSION = 3
 
 # Regular Expressions for Query Intent
 INVENTORY_RE = re.compile(

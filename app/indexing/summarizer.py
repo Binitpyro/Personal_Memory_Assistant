@@ -165,3 +165,37 @@ def _summarize_doc_text(text: str, max_limit: int) -> str:
 
     # Default for PDF/Docx is just the clean start of text
     return text[:max_limit].replace("\n", " ").strip()
+
+
+# Labels generate_deep_summary uses to introduce each structural field. They are
+# identical across every document, so they carry no signal for a similarity
+# search and crowd out the part that does.
+_SUMMARY_FIELD_LABELS = re.compile(
+    r"\b(?:Structure|Functions|Classes|Outline|Slides|Headings|Sections|Columns|Sheets|Keys)\s*:\s*",
+)
+_SUMMARY_TAG = re.compile(r"^\s*\[[^\]]*\]\s*")
+
+
+def summary_embedding_text(path: Path | str, summary: str) -> str:
+    """Content-bearing form of a summary, for the document-routing embedding.
+
+    ``generate_deep_summary`` returns a *display* string that leads with a
+    scaffold shared by the whole corpus - ``[MD: notes.md] Structure: ...``,
+    ``[PY: advect.py] Functions: ...``. Embedded verbatim, that scaffold
+    dominates a ~300-character string and cosine similarity ends up ranking on
+    tokens every document has in common, so the summary leg contributed close to
+    noise. Measured on tests/eval at k=5: recall 0.972 with the leg off, falling
+    monotonically to 0.875 / 0.847 / 0.819 at weights 0.1 / 0.2 / 0.3.
+
+    The file's stem is kept - a name like ``colour_pipeline_notes`` is genuinely
+    topical - while the bracket tag and the field labels are dropped.
+    """
+    body = _SUMMARY_TAG.sub("", summary or "")
+    body = _SUMMARY_FIELD_LABELS.sub("", body)
+    body = re.sub(r"[>,]+", " ", body)
+    body = re.sub(r"\s+", " ", body).strip()
+
+    stem = Path(path).stem.replace("_", " ").replace("-", " ").strip()
+    if stem and stem.lower() not in body.lower():
+        body = f"{stem}. {body}" if body else stem
+    return body

@@ -7,8 +7,8 @@ Tests deduplication, token budgeting, stats formatting, and full build_context.
 from app.search.context_builder import (
     _compress_text,
     _deduplicate_by_file,
+    _deduplicate_redundant,
     _format_file_stats,
-    _semantic_deduplicate,
     _token_count,
     _truncate_to_tokens,
     build_context,
@@ -99,17 +99,17 @@ class TestTruncateToTokens:
         assert len(result) < len(text)
 
 
-# ── _semantic_deduplicate ─────────────────────────────────────────────────────
+# ── _deduplicate_redundant ────────────────────────────────────────────────────
 
 
-class TestSemanticDeduplicate:
+class TestDeduplicateRedundant:
     def make_result(self, text):
         return {"text": text, "file_path": "file.py", "score": 1.0}
 
     def test_identical_texts_deduplicated(self):
         text = "This is a longer text block that definitely exceeds fifty characters minimum limit."
         results = [self.make_result(text), self.make_result(text)]
-        deduped = _semantic_deduplicate(results)
+        deduped = _deduplicate_redundant(results)
         assert len(deduped) == 1
 
     def test_different_texts_kept(self):
@@ -117,16 +117,16 @@ class TestSemanticDeduplicate:
             self.make_result("This is the first unique piece of text in the corpus here."),
             self.make_result("Completely different content about another topic entirely here."),
         ]
-        deduped = _semantic_deduplicate(results)
+        deduped = _deduplicate_redundant(results)
         assert len(deduped) == 2
 
     def test_short_texts_always_kept(self):
         results = [{"text": "hi", "file_path": "a.py"}, {"text": "hi", "file_path": "b.py"}]
-        deduped = _semantic_deduplicate(results)
+        deduped = _deduplicate_redundant(results)
         assert len(deduped) == 2
 
     def test_empty_input(self):
-        assert _semantic_deduplicate([]) == []
+        assert _deduplicate_redundant([]) == []
 
 
 # ── _deduplicate_by_file ──────────────────────────────────────────────────────

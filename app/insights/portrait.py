@@ -6,6 +6,7 @@ from app.api.deps import get_db, get_llm
 
 logger = logging.getLogger(__name__)
 
+
 async def generate_portrait() -> dict[str, Any]:
     """Generates a high-level Knowledge Portrait by clustering themes from folder profiles."""
     try:
@@ -47,12 +48,15 @@ Provide ONLY valid JSON output matching this schema:
         try:
             # Strip markdown formatting if any
             clean_text = response.replace("```json", "").replace("```", "").strip()
-            data = json.loads(clean_text)
+            parsed = json.loads(clean_text)
 
-            if "themes" in data and isinstance(data["themes"], list):
-                return data
-            else:
-                return {"themes": []}
+            # isinstance on the container too, not just on themes: a model that
+            # answers with a bare JSON array parses fine, and `"themes" in
+            # parsed` then searches the list's *elements* rather than raising,
+            # so the old check let a list reach the caller typed as a dict.
+            if isinstance(parsed, dict) and isinstance(parsed.get("themes"), list):
+                return parsed
+            return {"themes": []}
         except json.JSONDecodeError as e:
             logger.error("Failed to parse portrait JSON from LLM: %s\nResponse: %s", e, response)
             return {"themes": []}

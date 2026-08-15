@@ -1,3 +1,4 @@
+import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock
 
@@ -161,6 +162,42 @@ async def test_api_query_stream_standard(
         assert "done" in types
     finally:
         app.dependency_overrides.pop(get_llm, None)
+
+
+@pytest.mark.asyncio
+async def test_stream_keepalive_does_not_truncate_slow_generator(client, monkeypatch):
+    """A gap longer than the keepalive must not end the stream.
+
+    ``asyncio.wait_for`` cancels what it waits on, so the previous
+    implementation threw CancelledError into ``stream_rag`` at its suspension
+    point. The next ``anext()`` then raised StopAsyncIteration, the answer was
+    silently cut short at the first slow token, and the history/telemetry
+    writes at the end of the generator never ran. On a 3 tok/s local provider
+    that gap is the normal first query, not an edge case.
+    """
+    from app.api import search as search_api
+
+    monkeypatch.setattr(search_api, "_KEEPALIVE_SECONDS", 0.05)
+
+    async def slow_stream(*args, **kwargs):
+        yield {"type": "content", "text": "before"}
+        await asyncio.sleep(0.2)  # 4x the keepalive
+        yield {"type": "content", "text": "after"}
+
+    monkeypatch.setattr(retrieval, "stream_rag", slow_stream)
+
+    response = await client.post("/api/query/stream", json={"question": "a slow question"})
+    assert response.status_code == 200
+
+    lines = [json.loads(line) for line in response.text.split("\n") if line.strip()]
+    types = [line["type"] for line in lines]
+
+    assert "ping" in types, f"keepalive never fired: {types}"
+    assert [line["text"] for line in lines if line["type"] == "content"] == [
+        "before",
+        "after",
+    ], f"stream truncated across the keepalive: {types}"
+    assert types[-1] == "done"
 
 
 @pytest.mark.asyncio

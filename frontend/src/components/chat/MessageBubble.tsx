@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Bot, User, Sparkles, RotateCcw, FileText, ChevronDown, ChevronRight, Clock, Plus, Network, SearchX, Split, ExternalLink } from 'lucide-react';
+import { Bot, User, Sparkles, FileText, ChevronDown, ChevronRight, Clock, Plus, Network, SearchX, Split, ExternalLink } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
@@ -233,17 +233,42 @@ export function MessageBubble({ message: msg, onNearMissClick }: Readonly<Messag
           )}
         </div>
 
+        {/* Stopped by the user. Rendered separately from the mode badge below,
+            which only appears once sources arrive - a stream stopped before
+            that point has no mode and would otherwise be indistinguishable
+            from an answer that simply ended. */}
+        {msg.role === 'assistant' && msg.stopped && (
+          <div className="flex items-center gap-2 mt-1">
+            <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full border bg-white/5 text-text-secondary border-white/10">
+              Stopped · partial answer
+            </span>
+          </div>
+        )}
+
         {/* Mode Badge */}
         {msg.role === 'assistant' && !msg.isStreaming && msg.mode && (
           <div className="flex flex-wrap items-center gap-2 mt-1">
+            {/* "cached" is provenance, not a warning: it states what happened
+                rather than that something went wrong, so it reads at the same
+                weight as the rest of the metadata row. Before this, a cached
+                answer arrived with no sources and defaulted to "full_rag" -
+                presented as fresh. */}
             <span className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full border ${
               msg.mode === 'fast_path'
                 ? 'bg-amber-500/10 text-amber-400 border-amber-500/20'
                 : msg.mode === 'degraded_rag'
                   ? 'bg-orange-500/10 text-orange-400 border-orange-500/20'
-                  : 'bg-primary/10 text-primary-light border-primary/20'
+                  : msg.mode === 'cached'
+                    ? 'bg-white/5 text-text-secondary border-white/10'
+                    : 'bg-primary/10 text-primary-light border-primary/20'
               }`}>
-              {msg.mode === 'fast_path' ? '⚡ Fast Answer' : msg.mode === 'degraded_rag' ? '⚠️ Degraded RAG' : '🔍 RAG Answer'}
+              {msg.mode === 'fast_path'
+                ? '⚡ Fast Answer'
+                : msg.mode === 'degraded_rag'
+                  ? '⚠️ Degraded RAG'
+                  : msg.mode === 'cached'
+                    ? '⟳ Saved answer'
+                    : '🔍 RAG Answer'}
             </span>
             {msg.fallbackTo && (
               <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full border bg-red-500/10 text-red-400 border-red-500/20">
@@ -323,19 +348,6 @@ export function MessageBubble({ message: msg, onNearMissClick }: Readonly<Messag
                 ))}
               </div>
             )}
-          </div>
-        )}
-
-        {/* Answer Evolution Panel */}
-        {msg.role === 'assistant' && msg.answer_evolution_diff && (
-          <div className="mt-2 bg-emerald-500/10 border border-emerald-500/20 rounded-lg overflow-hidden">
-            <div className="px-3 py-2 flex items-center gap-2 text-emerald-200/90 text-xs font-bold border-b border-emerald-500/10">
-              <RotateCcw className="w-4 h-4" />
-              Answer Evolution
-            </div>
-            <div className="p-3 text-xs text-emerald-200/70">
-              {msg.answer_evolution_diff}
-            </div>
           </div>
         )}
 

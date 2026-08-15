@@ -880,7 +880,7 @@ async def cancel_install() -> bool:
     return True
 
 
-async def uninstall_tier1() -> dict[str, Any]:
+async def uninstall_tier(tier: str | None = None) -> dict[str, Any]:
     """Remove the venv and this tier's own models.
 
     `ocr_cache` is intentionally untouched, and so is the shared
@@ -891,9 +891,14 @@ async def uninstall_tier1() -> dict[str, Any]:
     removed.
     """
     removed = []
-    for target in (ocr_env_dir(), ocr_tier_models_dir()):
+    for target in (ocr_env_dir(tier), ocr_tier_models_dir(tier)):
         if target.exists():
             await asyncio.to_thread(shutil.rmtree, target, True)
             removed.append(str(target))
-    logger.info("Uninstalled OCR tier: %s", ", ".join(removed) or "nothing to remove")
+    logger.info("Uninstalled OCR tier %s: %s", tier or "active", ", ".join(removed) or "nothing to remove")
     return {"ok": True, "removed": removed}
+
+
+async def uninstall_tier1() -> dict[str, Any]:
+    """Back-compat alias for the CPU tier."""
+    return await uninstall_tier("cpu")

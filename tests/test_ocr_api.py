@@ -110,3 +110,48 @@ async def test_file_path_length_is_bounded(client):
     """Guards against an oversized body reaching the queue table."""
     res = await client.post("/api/ocr/retry", json={"file_path": "x" * 5000})
     assert res.status_code == 422
+
+
+async def test_tiers_endpoint_reports_installed_and_active_states(client, monkeypatch):
+    import app.ocr.settings as ocr_settings
+
+    monkeypatch.setattr(ocr_settings, "is_tier_installed", lambda tier: tier == "cpu")
+    monkeypatch.setattr(settings, "ocr_tier", "cpu")
+    monkeypatch.setattr(settings, "ocr_enabled", True)
+
+    res = await client.get("/api/ocr/tiers")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["installed"] == "cpu"
+    tiers_map = {t["id"]: t for t in data["tiers"]}
+    assert tiers_map["cpu"]["installed"] is True
+    assert tiers_map["cpu"]["active"] is True
+    assert tiers_map["gpu"]["installed"] is False
+    assert tiers_map["gpu"]["active"] is False
+
+
+async def test_select_tier_switches_installed_tier(client, monkeypatch):
+    import app.ocr.settings as ocr_settings
+
+    monkeypatch.setattr(ocr_settings, "is_tier_installed", lambda tier: tier in ("cpu", "gpu"))
+
+    res = await client.post("/api/ocr/select", json={"tier": "gpu"})
+    assert res.status_code == 200
+    data = res.json()
+    assert data["ok"] is True
+    assert data["tier"] == "gpu"
+    assert settings.ocr_tier == "gpu"
+    assert settings.ocr_enabled is True
+
+
+async def test_select_tier_fails_for_uninstalled_tier(client, monkeypatch):
+    import app.ocr.settings as ocr_settings
+
+    monkeypatch.setattr(ocr_settings, "is_tier_installed", lambda tier: False)
+
+    res = await client.post("/api/ocr/select", json={"tier": "gpu"})
+    assert res.status_code == 200
+    data = res.json()
+    assert data["ok"] is False
+    assert data["error_code"] == "TIER_NOT_INSTALLED"
+

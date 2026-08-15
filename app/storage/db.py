@@ -130,7 +130,7 @@ class DatabaseManager:
 
             # 2. Read connection pool
             for _ in range(self.pool_size):
-                conn = await aiosqlite.connect(self.db_path)
+                conn = await aiosqlite.connect(self.db_path, isolation_level=None)
                 await self._configure_conn(conn, is_write_conn=False)
                 await self._read_pool.put(conn)
 
@@ -185,6 +185,9 @@ class DatabaseManager:
         try:
             yield conn
         finally:
+            # Defensive reset: ensure no open transaction lingers on pooled read connection
+            with contextlib.suppress(Exception):
+                await conn.rollback()
             await self._read_pool.put(conn)
 
     def _get_conn(self) -> aiosqlite.Connection:
@@ -610,9 +613,7 @@ class DatabaseManager:
     async def get_system_state(self, key: str) -> str | None:
         """Retrieves a string value from the system_state table."""
         conn = self._get_conn()
-        async with conn.execute(
-            "SELECT value FROM system_state WHERE key = ?", (key,)
-        ) as cur:
+        async with conn.execute("SELECT value FROM system_state WHERE key = ?", (key,)) as cur:
             row = await cur.fetchone()
             return row[0] if row else None
 
@@ -1129,19 +1130,32 @@ class DatabaseManager:
             return []
 
         placeholders = ",".join("?" for _ in src_chunk_ids)
+        # H-4: UNION ALL is correct here - unlike bfs_from_chunks this enumerates
+        # distinct *paths*, not a visited set, so SQLite's working-table dedup
+        # would collapse two genuinely different routes to the same node. That
+        # leaves cycles unguarded though: with A->B->A the only brake was
+        # p.depth < max_depth, so a 2-cycle emitted "A -> B -> A -> B" as a
+        # relational fact. The visited list carries the ids already on this path
+        # and excludes an edge that would revisit one. Direction is preserved
+        # deliberately: the rendered string asserts "source -[rel]-> target", so
+        # traversing an edge backwards would state the relation in reverse.
         query = f"""
         WITH RECURSIVE
-        paths(id, path_str, depth) AS (
-            SELECT id, label || ' ' || id, 0
+        paths(id, path_str, depth, visited) AS (
+            SELECT id, label || ' ' || id, 0, ',' || id || ','
             FROM kg_nodes
             WHERE json_extract(properties, '$.chunk_id') IN ({placeholders})
 
             UNION ALL
 
-            SELECT e.target, p.path_str || ' -[' || e.relation || ']-> ' || (SELECT label || ' ' || id FROM kg_nodes WHERE id = e.target), p.depth + 1
+            SELECT e.target,
+                   p.path_str || ' -[' || e.relation || ']-> ' || (SELECT label || ' ' || id FROM kg_nodes WHERE id = e.target),
+                   p.depth + 1,
+                   p.visited || e.target || ','
             FROM kg_edges e
             JOIN paths p ON e.source = p.id
             WHERE p.depth < ?
+              AND instr(p.visited, ',' || e.target || ',') = 0
         )
         SELECT path_str FROM paths
         WHERE depth > 0
@@ -1154,32 +1168,90 @@ class DatabaseManager:
             return [r[0] for r in rows]
 
     async def _maybe_commit(self, conn: aiosqlite.Connection) -> None:
-        """Commit the connection."""
-        await conn.commit()
+        """Commit the connection only if not within an external transaction."""
+        if not self._in_external_transaction:
+            await conn.commit()
 
     @serialize_write
     async def commit(self) -> None:
         """Explicitly commits the current transaction."""
-        if self.conn:
-            await self.conn.commit()
+        if self._write_conn:
+            try:
+                await self._write_conn.commit()
+            finally:
+                self._in_external_transaction = False
 
     @serialize_write
     async def begin_transaction(self) -> None:
         """Begin an external write transaction."""
         conn = self._get_conn()
-        await conn.execute("BEGIN IMMEDIATE")
+        if not self._in_external_transaction:
+            try:
+                await conn.execute("BEGIN IMMEDIATE")
+                self._in_external_transaction = True
+            except Exception as e:
+                if "cannot start a transaction within a transaction" in str(e):
+                    self._in_external_transaction = True
+                else:
+                    raise
 
     @serialize_write
     async def commit_transaction(self) -> None:
         """Commit the external write transaction."""
         conn = self._get_conn()
-        await conn.commit()
+        try:
+            await conn.commit()
+        finally:
+            self._in_external_transaction = False
 
     @serialize_write
     async def rollback_transaction(self) -> None:
         """Rollback the external write transaction."""
         conn = self._get_conn()
-        await conn.rollback()
+        try:
+            await conn.rollback()
+        finally:
+            self._in_external_transaction = False
+
+    @contextlib.asynccontextmanager
+    async def write_transaction(self):
+        """Context manager that acquires the write lock and manages an isolated transaction/savepoint."""
+        async with self._write_lock:
+            conn = self._get_conn()
+            savepoint_name = None
+            in_tx = self._in_external_transaction
+            if not in_tx:
+                self._in_external_transaction = True
+                try:
+                    await conn.execute("BEGIN IMMEDIATE")
+                except Exception as e:
+                    if "cannot start a transaction within a transaction" in str(e):
+                        savepoint_name = f"sp_{uuid.uuid4().hex}"
+                        await conn.execute(f"SAVEPOINT {savepoint_name}")
+                    else:
+                        self._in_external_transaction = False
+                        raise
+            else:
+                savepoint_name = f"sp_{uuid.uuid4().hex}"
+                await conn.execute(f"SAVEPOINT {savepoint_name}")
+
+            try:
+                yield conn
+                if savepoint_name:
+                    await conn.execute(f"RELEASE {savepoint_name}")
+                elif not in_tx:
+                    await conn.commit()
+            except Exception:
+                if savepoint_name:
+                    with contextlib.suppress(Exception):
+                        await conn.execute(f"ROLLBACK TO {savepoint_name}")
+                elif not in_tx:
+                    with contextlib.suppress(Exception):
+                        await conn.rollback()
+                raise
+            finally:
+                if not in_tx:
+                    self._in_external_transaction = False
 
     @serialize_write
     async def delete_file_chunks(self, file_id: int, *, auto_commit: bool = True) -> None:
@@ -1479,19 +1551,21 @@ class DatabaseManager:
 
         results = []
         for row in rows:
-            results.append({
-                "chunk_id": row[0],
-                "text": row[1],
-                "file_path": row[2],
-                "folder_tag": row[3],
-                "modified_at": row[4],
-                "start_offset": row[5],
-                "end_offset": row[6],
-                "sentence_offsets": row[7],
-                "segmenter_version": row[8],
-                "file_id": row[9],
-                "score": 1.0,
-            })
+            results.append(
+                {
+                    "chunk_id": row[0],
+                    "text": row[1],
+                    "file_path": row[2],
+                    "folder_tag": row[3],
+                    "modified_at": row[4],
+                    "start_offset": row[5],
+                    "end_offset": row[6],
+                    "sentence_offsets": row[7],
+                    "segmenter_version": row[8],
+                    "file_id": row[9],
+                    "score": 1.0,
+                }
+            )
         return results
 
     async def execute_query(self, sql: str, params: tuple = ()) -> list[Any]:
@@ -1671,18 +1745,17 @@ class DatabaseManager:
 
         Returns counts of removed files and chunks.
         """
-        async with self._get_read_conn() as read_pool_conn:
-            cur = await read_pool_conn.execute("SELECT COUNT(*) FROM files")
-            row = await cur.fetchone()
-            files_count = row[0] if row else 0
-            await cur.close()
-
-            cur = await read_pool_conn.execute("SELECT COUNT(*) FROM chunks")
-            row = await cur.fetchone()
-            chunks_count = row[0] if row else 0
-            await cur.close()
-
         conn = self._get_conn()
+        cur = await conn.execute("SELECT COUNT(*) FROM files")
+        row = await cur.fetchone()
+        files_count = row[0] if row else 0
+        await cur.close()
+
+        cur = await conn.execute("SELECT COUNT(*) FROM chunks")
+        row = await cur.fetchone()
+        chunks_count = row[0] if row else 0
+        await cur.close()
+
         query = f"""
             -- Remove triggers so chunk deletes don't touch FTS
             {FTS_DROP_TRIGGERS_DDL}
@@ -1726,13 +1799,12 @@ class DatabaseManager:
         LanceDB (`pma_chunks`, `pma_summaries`, `query_cache`) is untouched -
         callers that need both must also call `LanceDBClient.clear_all()`.
         """
-        async with self._get_read_conn() as read_pool_conn:
-            cur = await read_pool_conn.execute("SELECT COUNT(*) FROM chunk_embeddings")
-            row = await cur.fetchone()
-            embeddings_count = row[0] if row else 0
-            await cur.close()
-
         conn = self._get_conn()
+        cur = await conn.execute("SELECT COUNT(*) FROM chunk_embeddings")
+        row = await cur.fetchone()
+        embeddings_count = row[0] if row else 0
+        await cur.close()
+
         await conn.execute("DELETE FROM chunk_embeddings")
         await conn.commit()
 

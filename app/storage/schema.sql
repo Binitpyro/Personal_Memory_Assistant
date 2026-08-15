@@ -1,7 +1,3 @@
--- SQLite Configuration Pragmas
-PRAGMA auto_vacuum = INCREMENTAL;
-PRAGMA journal_mode = WAL;
-
 -- Files table for storing metadata
 CREATE TABLE IF NOT EXISTS files (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

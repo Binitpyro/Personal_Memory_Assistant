@@ -1,0 +1,69 @@
+# cargo-audit configuration.
+#
+# Location matters: cargo-audit reads `.cargo/audit.toml` relative to the
+# working directory and has no flag to point elsewhere (`cargo audit --help`
+# offers only --color, --file and --ignore). This file previously sat at the
+# crate root as `audit.toml`, where it was never read at all - which is why the
+# ignores below had to be duplicated as --ignore flags in
+# scripts/run_ci_checks.bat for them to take effect.
+#
+# Keep in step with deny.toml, which cargo-deny reads from the crate root.
+
+[advisories]
+ignore = [
+    # Tauri's GTK3 bindings, unmaintained upstream. Linux-only, and PMA ships
+    # the Windows shell; all of these are advisory-kind "unmaintained", which
+    # cargo-audit reports as warnings rather than failures.
+    "RUSTSEC-2024-0411",
+    "RUSTSEC-2024-0412",
+    "RUSTSEC-2024-0413",
+    "RUSTSEC-2024-0414",
+    "RUSTSEC-2024-0415",
+    "RUSTSEC-2024-0416",
+    "RUSTSEC-2024-0417",
+    "RUSTSEC-2024-0418",
+    "RUSTSEC-2024-0419",
+    "RUSTSEC-2024-0420",
+
+    # Other unmaintained crates pulled in transitively.
+    "RUSTSEC-2024-0370", # proc-macro-error
+    "RUSTSEC-2025-0075", # unic-char-range
+    "RUSTSEC-2025-0080", # unic-common
+    "RUSTSEC-2025-0081", # unic-char-property
+    "RUSTSEC-2025-0098", # unic-ucd-version
+    "RUSTSEC-2025-0100", # unic-ucd-ident
+    "RUSTSEC-2024-0429", # glib, unsound VariantStrIter
+
+    # rkyv 0.7.46 - out-of-bounds read validating archives containing Rc/Arc.
+    #
+    # This is a cargo-audit FALSE POSITIVE: rkyv is never compiled. cargo-audit
+    # scans Cargo.lock, which records optional dependencies whether or not their
+    # feature is enabled. rkyv is optional in rust_decimal 1.42.1
+    # (`rkyv = ["dep:rkyv"]`), and the chain that reaches us -
+    # pma-desktop -> tauri-plugin-log -> byte-unit 5.2.5 -> rust_decimal - does
+    # not turn that feature on. `cargo tree -i rkyv --target all` prints
+    # "nothing to print", i.e. it is absent from the resolved graph on every
+    # target, while `cargo tree -i rust_decimal --target all` does show the
+    # chain above. cargo-deny, which resolves the real feature graph rather than
+    # the lockfile, agrees: it reports "no crate matched advisory criteria".
+    #
+    # Kept because cargo-audit fails the build on it regardless. Recheck if
+    # anything ever enables rust_decimal's rkyv feature - then it becomes real
+    # and there is no in-semver fix (rust_decimal pins ^0.7; the advisory wants
+    # >=0.8.17; `cargo update -p rust_decimal` locks 0 packages).
+    "RUSTSEC-2026-0235",
+]
+
+# Every id above is one cargo-audit actually reports. Established by running it
+# with no config in effect (`cargo audit -f frontend/src-tauri/Cargo.lock` from
+# the repo root, which has no .cargo directory): 1 vulnerability (rkyv) and 17
+# warnings, matching this list exactly.
+#
+# Dropped as unreported by that run:
+#   RUSTSEC-2026-0194/0195 quick-xml - needed >=0.41.0, lockfile is on 0.41.0
+#   RUSTSEC-2025-0057      fxhash    - no longer in the tree at all
+#   RUSTSEC-2026-0190      anyhow
+#   RUSTSEC-2026-0097      rand
+#
+# Only the rkyv entry changes the exit code; the other 17 are warning-kind and
+# are listed to keep the output clean, not to prevent a failure.

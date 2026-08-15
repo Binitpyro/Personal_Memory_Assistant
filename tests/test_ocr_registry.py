@@ -8,6 +8,8 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 from app.ocr import registry
 from app.ocr.protocol import PROTOCOL_VERSION
 
@@ -233,7 +235,8 @@ def test_smoke_fixture_is_a_readable_one_page_pdf(tmp_path):
     Hand-built because the OCR venv has no PDF writer and adding one for a
     self-test would enlarge every install.
     """
-    from pypdf import PdfReader
+    pypdf = pytest.importorskip("pypdf")
+    PdfReader = pypdf.PdfReader
 
     pdf = registry._smoke_test_pdf(tmp_path / "smoke.pdf")
     reader = PdfReader(str(pdf))
@@ -434,8 +437,8 @@ async def test_uninstall_keeps_user_supplied_weights(monkeypatch, tmp_path):
     Uninstall used to rmtree it wholesale.
     """
     monkeypatch.setattr(registry, "ocr_root", lambda: tmp_path)
-    monkeypatch.setattr(registry, "ocr_env_dir", lambda: tmp_path / "env_cpu")
-    monkeypatch.setattr(registry, "ocr_tier_models_dir", lambda: tmp_path / "models" / "cpu")
+    monkeypatch.setattr(registry, "ocr_env_dir", lambda tier=None: tmp_path / "env_cpu")
+    monkeypatch.setattr(registry, "ocr_tier_models_dir", lambda tier=None: tmp_path / "models" / "cpu")
 
     (tmp_path / "env_cpu").mkdir()
     tier_models = tmp_path / "models" / "cpu"

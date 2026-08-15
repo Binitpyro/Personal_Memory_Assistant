@@ -86,8 +86,12 @@ class TestEmbedQuery:
         mock_emb = [0.2] * 384
         with patch.object(svc, "embed_texts", AsyncMock(return_value=[mock_emb])):
             result = await svc.embed_query("new query")
-        assert result == mock_emb
+        # Stored as float32 - the model already emits float32, so this only
+        # narrows a float64 test fixture, and it is what makes the cache 8x
+        # smaller than a list of boxed Python floats.
+        assert result == pytest.approx(mock_emb, rel=1e-6)
         assert "new query" in svc._query_cache
+        assert svc._query_cache["new query"].dtype == np.float32
 
     @pytest.mark.asyncio
     async def test_embed_query_lru_eviction(self):
@@ -173,9 +177,11 @@ class TestColdStart:
         (local_dir / "onnx" / "model_quantized.onnx").write_text("fake", encoding="utf-8")
 
         with patch.object(svc, "_load_onnx_model") as mock_load:
+
             def _fake_load(p, exp, *args, **kwargs):
                 svc._session = mock_sess
                 svc._tokenizer = mock_tok
+
             mock_load.side_effect = _fake_load
             with patch.object(Path, "expanduser", return_value=local_dir):
                 svc.load_model()
@@ -187,7 +193,10 @@ class TestColdStart:
 
     def test_cold_start_failure_assertions(self):
         svc = EmbeddingService("test-model")
-        with patch("app.embeddings.service._get_models_lock_data", side_effect=ValueError("Corrupt lockfile")):
+        with patch(
+            "app.embeddings.service._get_models_lock_data",
+            side_effect=ValueError("Corrupt lockfile"),
+        ):
             svc.load_model()
         assert svc.is_ready is False
         assert svc.has_failed is True
@@ -208,7 +217,7 @@ class TestIntegrityFailClosed:
 
         expected_files = {
             "tokenizer.json": {"sha256": "fake_hash"},
-            "onnx/model.onnx": {"sha256": ""}  # Empty digest -> must fail closed
+            "onnx/model.onnx": {"sha256": ""},  # Empty digest -> must fail closed
         }
 
         with (
@@ -228,7 +237,7 @@ class TestIntegrityFailClosed:
 
         expected_files = {
             "tokenizer.json": {"sha256": "fake_hash"},
-            "onnx/different_model.onnx": {"sha256": "abc"}  # model.onnx not pinned
+            "onnx/different_model.onnx": {"sha256": "abc"},  # model.onnx not pinned
         }
 
         with (
@@ -247,14 +256,12 @@ class TestRepoIdOverrideAndExceptions:
             "BAAI/bge-small-en-v1.5": {
                 "repo_id": "Xenova/bge-small-en-v1.5",
                 "revision": "ea104dacec62c0de699686887e3f920caeb4f3e3",
-                "files": {}
+                "files": {},
             }
         }
         with (
             patch("app.embeddings.service._get_models_lock_data", return_value=mock_lock_data),
-            patch(
-                "huggingface_hub.snapshot_download", return_value=str(tmp_path)
-            ) as mock_download,
+            patch("huggingface_hub.snapshot_download", return_value=str(tmp_path)) as mock_download,
             patch.object(svc, "_load_onnx_model"),
         ):
             svc.load_model()
@@ -265,14 +272,16 @@ class TestRepoIdOverrideAndExceptions:
 
     def test_revision_not_found_error_raises_runtime_error(self):
         from huggingface_hub.errors import LocalEntryNotFoundError, RevisionNotFoundError
+
         svc = EmbeddingService("BAAI/bge-small-en-v1.5")
         mock_lock_data = {
             "BAAI/bge-small-en-v1.5": {
                 "repo_id": "Xenova/bge-small-en-v1.5",
                 "revision": "invalid_rev",
-                "files": {}
+                "files": {},
             }
         }
+
         def _side_effect(*args, **kwargs):
             if kwargs.get("local_files_only"):
                 raise LocalEntryNotFoundError("Not in cache")
@@ -377,8 +386,6 @@ class TestBatchSizeAndSessionOptions:
             assert svc._session.run.call_count == math.ceil(n_texts / batch_size)
 
 
-
-
 class TestLengthSortedBatching:
     """Grouping similar-length texts collapses tokenizer padding waste.
 
@@ -439,9 +446,7 @@ class TestLengthSortedBatching:
         batched = await svc.embed_texts(texts, batch_size=2)
         assert batched.shape == (len(texts), 384)
 
-        singles = np.vstack(
-            [(await svc.embed_texts([t], batch_size=1))[0] for t in texts]
-        )
+        singles = np.vstack([(await svc.embed_texts([t], batch_size=1))[0] for t in texts])
 
         # Row i of the batched result must be nearest to single-embedded text i.
         # Compared by text content, not index: "short" appears twice and its two

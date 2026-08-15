@@ -156,6 +156,23 @@ async def mark_failed(db, file_path: str, error: str, *, terminal: bool) -> None
     )
 
 
+async def release_claim(db, file_path: str) -> None:
+    """Hand a claimed row back untouched, refunding the attempt.
+
+    Distinct from `mark_failed(terminal=False)`: that re-arms the row but leaves
+    the claim-time attempt spent, which is correct when the *document* failed.
+    This is for when the claim itself could not be acted on - the indexer went
+    busy, or the worker died before this row was dispatched - where charging the
+    document for someone else's timing would eventually retire it permanently.
+    """
+    await db.execute_write(
+        "UPDATE ocr_queue SET status = 'pending', "
+        "attempts = MAX(0, attempts - 1), updated_at = datetime('now') "
+        "WHERE file_path = ?",
+        (file_path,),
+    )
+
+
 async def mark_skipped(db, file_path: str, reason: str) -> None:
     await db.execute_write(
         "UPDATE ocr_queue SET status = 'skipped', last_error = ?, "

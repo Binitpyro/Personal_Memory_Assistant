@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import logging
 
@@ -15,6 +16,27 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 query_semaphore = asyncio.Semaphore(5)
+
+# How long the stream may go quiet before we emit a keepalive frame. This is a
+# liveness signal for the client, not a deadline on the model: a local 3 tok/s
+# provider routinely spends longer than this on retrieval plus prompt
+# processing before the first content token.
+_KEEPALIVE_SECONDS = 15.0
+
+_STREAM_END = object()
+
+
+async def _next_chunk_or_end(agen):
+    """Await one chunk from *agen*, mapping exhaustion onto a sentinel.
+
+    Returning a sentinel rather than letting ``StopAsyncIteration`` escape keeps
+    this safe to wrap in a Task, and lets the caller tell "generator finished"
+    apart from "generator was torn down".
+    """
+    try:
+        return await anext(agen)
+    except StopAsyncIteration:
+        return _STREAM_END
 
 
 class QueryRequest(BaseModel):
@@ -128,6 +150,7 @@ async def query(
 @router.post("/stream")
 async def query_stream(
     request: QueryRequest,
+    http_request: Request,
     db: DatabaseManager = Depends(get_db),
     emb=Depends(get_emb),
     lancedb_client=Depends(get_lancedb),
@@ -143,6 +166,8 @@ async def query_stream(
     from app.search.retrieval import stream_rag
 
     async def stream_results():
+        agen = None
+        pending = None
         try:
             async with query_semaphore:
                 agen = stream_rag(
@@ -162,16 +187,45 @@ async def query_stream(
                 )
 
                 while True:
-                    try:
-                        chunk = await asyncio.wait_for(anext(agen), timeout=15.0)
-                        yield json.dumps(chunk) + "\n"
-                    except TimeoutError:
+                    if pending is None:
+                        pending = asyncio.ensure_future(_next_chunk_or_end(agen))
+
+                    # asyncio.wait leaves an unfinished task running. wait_for
+                    # does not: it cancels what it is waiting on, which threw
+                    # CancelledError into this generator at its suspension
+                    # point and left it unusable, so the next anext() raised
+                    # StopAsyncIteration and the answer was silently truncated
+                    # at the first 15s gap.
+                    done, _ = await asyncio.wait({pending}, timeout=_KEEPALIVE_SECONDS)
+
+                    if not done:
+                        if await http_request.is_disconnected():
+                            logger.info("Client disconnected; abandoning generation.")
+                            return
                         yield json.dumps({"type": "ping"}) + "\n"
-        except StopAsyncIteration:
+                        continue
+
+                    chunk = pending.result()
+                    pending = None
+                    if chunk is _STREAM_END:
+                        break
+                    yield json.dumps(chunk) + "\n"
+
             yield json.dumps({"type": "done"}) + "\n"
         except Exception as e:
             logger.exception("Stream errored: %s", e)
             yield json.dumps({"type": "error", "text": str(e)}) + "\n"
+        finally:
+            # Let the cancelled task finish unwinding before closing the
+            # generator: aclose() on a generator with an in-flight anext()
+            # raises "already running".
+            if pending is not None:
+                pending.cancel()
+                with contextlib.suppress(BaseException):
+                    await pending
+            if agen is not None:
+                with contextlib.suppress(Exception):
+                    await agen.aclose()
 
     return StreamingResponse(stream_results(), media_type="application/x-ndjson")
 
@@ -191,9 +245,25 @@ async def query_history(limit: int = 20, db: DatabaseManager = Depends(get_db)):
 
 
 @router.post("/history/clear")
-async def clear_query_history(db: DatabaseManager = Depends(get_db)):
+async def clear_query_history(
+    db: DatabaseManager = Depends(get_db), lancedb_client=Depends(get_lancedb)
+):
     try:
         await db.clear_query_history()
-        return {"message": "Query history cleared"}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
+
+    # The LanceDB semantic cache holds verbatim question *and* answer text and
+    # used to survive this entirely, so clearing history left every question on
+    # disk. Reported rather than swallowed: a user who clears their history
+    # needs to know if any of it is still there.
+    try:
+        await lancedb_client.clear_query_cache()
+    except Exception as e:
+        logger.warning("Semantic query cache not cleared: %s", e)
+        return {
+            "message": "Query history cleared",
+            "semantic_cache_cleared": False,
+            "warning": str(e),
+        }
+    return {"message": "Query history cleared", "semantic_cache_cleared": True}

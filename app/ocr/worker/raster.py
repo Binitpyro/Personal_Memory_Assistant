@@ -13,7 +13,14 @@ import math
 #: 200x200 inches at 300 DPI is 3.6 gigapixels - without this cap a single
 #: malformed document takes the worker down with an OOM instead of failing one
 #: page and moving on.
-_MAX_PIXELS = 40_000_000
+#:
+#: 20 MP, not the 40 MP this used to be. The cost is 4 bytes per pixel, not one:
+#: render_page holds the grayscale array *and* the 3-channel copy the recognizer
+#: needs (see the expansion below). Measured resident delta for the pair:
+#: 76.3 MB at 20 MP, 152.6 MB at 40 MP. A4 at 300 DPI is 8.7 MP and A3 at
+#: 300 DPI is 17.4 MP, so both still pass; only genuinely outsized scans are now
+#: refused, and with a clear per-page error rather than an OOM.
+_MAX_PIXELS = 20_000_000
 
 
 class RasterError(Exception):

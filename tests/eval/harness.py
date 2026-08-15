@@ -171,9 +171,7 @@ class EvalIndex:
         out: list[QueryResult] = []
         for q in queries:
             results = await self.retrieve(q.query, k)
-            out.append(
-                QueryResult(query=q, results=results, ranked=metrics.ranked_files(results))
-            )
+            out.append(QueryResult(query=q, results=results, ranked=metrics.ranked_files(results)))
         return out
 
 
@@ -182,9 +180,7 @@ _METRIC_KEYS = ("recall", "precision", "ndcg", "mrr", "domain_coverage")
 
 def aggregate(run: list[QueryResult], k: int, query_type: str | None = None) -> dict[str, float]:
     """Mean metrics over a run, optionally restricted to one query type."""
-    rows = [
-        r.scores(k) for r in run if query_type is None or r.query.type == query_type
-    ]
+    rows = [r.scores(k) for r in run if query_type is None or r.query.type == query_type]
     return metrics.summarize(rows, _METRIC_KEYS)
 
 

@@ -37,6 +37,12 @@ dependencies = [
     # dependency here. Pinned to match app/ocr/registry.PINNED_DEPS so the main
     # process and the OCR venv rasterize identically.
     "pypdfium2==4.30.0",
+    # raster_png.py calls bitmap.to_pil() on the Tier 3 path, so Pillow is a
+    # direct requirement of the main process - but it only ever arrived
+    # transitively via python-pptx. A python-pptx release that dropped it would
+    # have broken VLM OCR with nothing here to explain why. Same failure mode
+    # the tiktoken comment above records.
+    "pillow>=10.0.0",
     "openpyxl>=3.1.0",
     "nltk>=3.8.1",
     "python-pptx>=0.6.0",

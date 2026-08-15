@@ -412,9 +412,6 @@ async def test_set_preferences_preserves_sibling_llm_keys(tmp_path, monkeypatch)
 
     saved = SettingsStore.read()
     assert saved["llm"]["fallback_chain"] == ["ollama", "lm_studio"]
-    assert saved["llm"]["per_provider"] == {
-        "ollama": {"base_url": None, "default_model": "llama3"}
-    }
+    assert saved["llm"]["per_provider"] == {"ollama": {"base_url": None, "default_model": "llama3"}}
     assert saved["llm"]["ollama_model"] == "mistral"
     assert saved["schema_version"] == CURRENT_SCHEMA_VERSION
-

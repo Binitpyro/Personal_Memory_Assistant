@@ -221,7 +221,9 @@ async def chat_passthrough(payload: LLMChatRequest) -> dict[str, Any]:
             temperature=payload.temperature,
             max_tokens=payload.max_tokens,
         )
-        resolved_model = payload.model or getattr(provider_instance, "model_name", None) or "default"
+        resolved_model = (
+            payload.model or getattr(provider_instance, "model_name", None) or "default"
+        )
         return {
             "provider": provider_id,
             "model": resolved_model,
@@ -239,4 +241,3 @@ async def chat_passthrough(payload: LLMChatRequest) -> dict[str, Any]:
         if hasattr(provider_instance, "close"):
             with contextlib.suppress(Exception):
                 await provider_instance.close()
-

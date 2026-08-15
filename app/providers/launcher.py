@@ -151,9 +151,7 @@ def _posix_launchers() -> dict[str, tuple[LaunchCandidate, ...]]:
             )
         )
     lm_studio.append(
-        LaunchCandidate(
-            target="lms", args=("server", "start"), label="LM Studio headless server"
-        )
+        LaunchCandidate(target="lms", args=("server", "start"), label="LM Studio headless server")
     )
 
     return {
@@ -259,9 +257,7 @@ def _spawn_detached(executable: str, candidate: LaunchCandidate) -> None:
             raise
         # The surrounding job object forbids breakaway -- an app shell built before
         # BREAKAWAY_OK was added. Start it anyway; it just won't outlive PMA.
-        logger.warning(
-            "Job object forbids breakaway; %s will shut down when PMA does.", executable
-        )
+        logger.warning("Job object forbids breakaway; %s will shut down when PMA does.", executable)
         _popen(argv, creationflags=_WINDOWS_SPAWN_FLAGS & ~CREATE_BREAKAWAY_FROM_JOB)
 
 
@@ -293,9 +289,7 @@ async def _warm_validation_cache(provider_id: str, base_url: str) -> None:
         logger.debug("Post-launch validation of %s failed: %s", provider_id, e)
 
 
-async def launch(
-    provider_id: str, base_url: str, deadline_s: float = DEFAULT_DEADLINE_S
-) -> dict:
+async def launch(provider_id: str, base_url: str, deadline_s: float = DEFAULT_DEADLINE_S) -> dict:
     """Start a local provider and wait until its port answers.
 
     deadline_s is a parameter so tests can use a short budget instead of really waiting.
@@ -336,9 +330,7 @@ async def launch(
 
         resolved = resolve_candidate(provider_id)
         if resolved is None:
-            return result(
-                False, False, f"{name} doesn't appear to be installed.", "not_installed"
-            )
+            return result(False, False, f"{name} doesn't appear to be installed.", "not_installed")
 
         logger.info("Starting %s via %s", name, resolved.executable)
         try:

@@ -188,9 +188,7 @@ async def list_providers():
                 pass
 
         provider_settings = per_provider.get(pid, {})
-        base_url = (
-            provider_settings.get("base_url") or env_base_url(pid) or spec.default_base_url
-        )
+        base_url = provider_settings.get("base_url") or env_base_url(pid) or spec.default_base_url
         default_model = provider_settings.get("default_model")
 
         api_key = env_key

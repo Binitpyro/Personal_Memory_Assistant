@@ -360,6 +360,23 @@ async def demo_seed(
 
 @router.get("/pick/folder")
 async def pick_folder():
-    # P2-2: This endpoint is deprecated in Tauri context.
-    # Folder picking must be done via the native Tauri dialog plugin in the frontend.
-    return {"path": "", "error": "Use the native Tauri dialog instead."}
+    # P2-2: In the packaged Tauri app, folder picking goes through the native
+    # Tauri dialog plugin in the frontend -- isTauri routes around this
+    # endpoint entirely, so tkinter never runs inside the sidecar process.
+    # This is reached only in browser-mode dev (npm run dev), where there is
+    # no Tauri dialog to fall back on.
+    def _dialog():
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        root.wm_attributes("-topmost", 1)
+        return filedialog.askdirectory(parent=root, title="Select Folder") or ""
+
+    try:
+        path = await asyncio.get_running_loop().run_in_executor(None, _dialog)
+    except Exception as e:
+        logger.warning("tkinter folder picker failed: %s", e)
+        return {"path": "", "error": "Use the native Tauri dialog instead."}
+    return {"path": path}

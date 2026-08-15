@@ -104,9 +104,7 @@ class Worker:
         except Exception as exc:
             _log(f"Failed to open {path}: {exc}")
             _emit(
-                protocol.make_error(
-                    code=protocol.E_RASTER_FAILED, detail=str(exc), doc_id=doc_id
-                )
+                protocol.make_error(code=protocol.E_RASTER_FAILED, detail=str(exc), doc_id=doc_id)
             )
             _emit(
                 protocol.make_doc_done(
@@ -195,18 +193,31 @@ class Worker:
 
         except KeyboardInterrupt:
             # Raised in this thread by the watchdog above.
-            return {"page": page_num, "lines": [], "mean_conf": 0.0,
-                    "error": protocol.E_OCR_PAGE_TIMEOUT}
+            return {
+                "page": page_num,
+                "lines": [],
+                "mean_conf": 0.0,
+                "error": protocol.E_OCR_PAGE_TIMEOUT,
+            }
         except MemoryError:
             raise
         except raster.RasterError as exc:
             _log(f"Raster failed on page {page_num}: {exc}")
-            return {"page": page_num, "lines": [], "mean_conf": 0.0,
-                    "error": protocol.E_RASTER_FAILED}
+            return {
+                "page": page_num,
+                "lines": [],
+                "mean_conf": 0.0,
+                "error": protocol.E_RASTER_FAILED,
+            }
         except Exception as exc:
             _log(f"Page {page_num} failed:\n{traceback.format_exc()}")
-            return {"page": page_num, "lines": [], "mean_conf": 0.0,
-                    "error": protocol.E_RASTER_FAILED, "detail": str(exc)[:200]}
+            return {
+                "page": page_num,
+                "lines": [],
+                "mean_conf": 0.0,
+                "error": protocol.E_RASTER_FAILED,
+                "detail": str(exc)[:200],
+            }
         finally:
             if timer is not None:
                 timer.cancel()

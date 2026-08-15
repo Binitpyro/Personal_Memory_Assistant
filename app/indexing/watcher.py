@@ -68,9 +68,7 @@ class FolderWatcher:
 
         self._stopping.clear()
         self._task = asyncio.create_task(self._run())
-        logger.info(
-            "Folder watcher started (interval=%ss).", settings.watcher_interval_seconds
-        )
+        logger.info("Folder watcher started (interval=%ss).", settings.watcher_interval_seconds)
         return True
 
     async def stop(self) -> None:

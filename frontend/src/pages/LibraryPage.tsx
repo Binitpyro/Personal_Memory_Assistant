@@ -74,8 +74,9 @@ export function LibraryPage() {
 
   const handleBrowse = useCallback(async () => {
     try {
-      const { path } = await pickFolder()
+      const { path, error } = await pickFolder()
       if (path) setFolderPath(path)
+      else if (error) setMessage({ type: 'err', text: error })
     } catch {
       setMessage({ type: 'err', text: 'Could not open folder picker' })
     }

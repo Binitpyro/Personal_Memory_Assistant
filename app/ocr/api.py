@@ -67,14 +67,14 @@ async def list_tiers():
     several-hundred-megabyte download whether a tier is even installable here,
     rather than finding out afterwards.
     """
-    from app.ocr.settings import VLM_TIER, detect_installed_tier, vlm_selection
+    from app.ocr.settings import VLM_TIER, is_tier_installed, vlm_selection
 
-    installed = detect_installed_tier()
     tiers = [
         {
             "id": tier,
             "unavailable_reason": registry.unavailable_reason(tier),
-            "installed": tier == installed,
+            "installed": is_tier_installed(tier),
+            "active": tier == settings.ocr_tier and bool(settings.ocr_enabled),
             # Engine tiers are provisioned; the VLM tier is chosen. The UI needs
             # to know which, because "Install" is the wrong control for a model
             # PMA does not download.
@@ -86,11 +86,12 @@ async def list_tiers():
         {
             "id": VLM_TIER,
             "unavailable_reason": "",
-            "installed": installed == VLM_TIER and bool(vlm_selection()),
+            "installed": bool(vlm_selection()),
+            "active": settings.ocr_tier == VLM_TIER and bool(settings.ocr_enabled),
             "needs_install": False,
         }
     )
-    return {"installed": installed, "tiers": tiers}
+    return {"installed": settings.ocr_tier, "tiers": tiers}
 
 
 @router.get("/vlm/models")
@@ -131,7 +132,8 @@ async def list_vlm_models():
             "error": None,
         }
         try:
-            provider = create_provider(pid, api_key=None, base_url=base_url, default_model=None)
+            # Use 2.0s connect/read timeout for local probes to keep the UI snappy
+            provider = create_provider(pid, api_key=None, base_url=base_url, default_model=None, timeout=2.0)
             try:
                 models = await provider.list_models()
             finally:
@@ -167,13 +169,14 @@ async def select_vlm(payload: VlmSelectionPayload):
     text-only message would make the model describe nothing, and that would be
     cached and indexed as the page's text.
     """
-    from app.ocr.settings import VLM_TIER, persist_vlm_selection
+    from app.ocr.settings import VLM_TIER, persist_active_tier, persist_vlm_selection
     from app.providers.vision import supports_vision_messages
 
     if not supports_vision_messages(payload.provider):
         return {"ok": False, "error_code": "PROVIDER_CANNOT_SEND_IMAGES"}
 
     persist_vlm_selection(payload.provider, payload.model)
+    persist_active_tier(VLM_TIER)
     settings.ocr_tier = VLM_TIER
     settings.ocr_enabled = True
     persist_enabled(True)
@@ -192,6 +195,37 @@ async def get_vlm_selection():
     from app.ocr.settings import vlm_selection
 
     return {"selection": vlm_selection() or None}
+
+
+class SelectTierPayload(BaseModel):
+    tier: str = Field(..., max_length=32)
+
+
+@router.post("/select")
+async def select_tier(payload: SelectTierPayload):
+    """Switch active OCR engine to an already installed tier (or configured VLM)."""
+    from app.ocr.settings import VLM_TIER, is_tier_installed, persist_active_tier, vlm_selection
+
+    tier = payload.tier.strip().lower()
+    if tier == VLM_TIER:
+        if not vlm_selection():
+            return {"ok": False, "error_code": "NO_VLM_MODEL_SELECTED"}
+    elif tier in registry.TIER_DEPS:
+        if not is_tier_installed(tier):
+            return {"ok": False, "error_code": "TIER_NOT_INSTALLED"}
+    else:
+        return {"ok": False, "error_code": "UNKNOWN_TIER"}
+
+    settings.ocr_tier = tier
+    settings.ocr_enabled = True
+    persist_enabled(True)
+    persist_active_tier(tier)
+
+    manager = await get_ocr()
+    manager.clear_fatal()
+    manager.reset_engine_identity()
+    await manager.kick()
+    return {"ok": True, "tier": tier}
 
 
 @router.post("/install")
@@ -213,6 +247,8 @@ async def install(request: Request, payload: InstallPayload | None = None):
         return registry.get_install_state()
 
     async def _provision() -> None:
+        from app.ocr.settings import persist_active_tier
+
         result = await registry.install_tier(tier, _armed=True)
         if result.get("status") != "ok":
             return
@@ -220,6 +256,7 @@ async def install(request: Request, payload: InstallPayload | None = None):
         settings.ocr_tier = tier
         settings.ocr_enabled = True
         persist_enabled(True)
+        persist_active_tier(tier)
         manager = await get_ocr()
         manager.clear_fatal()
         # The engine just changed on disk; a remembered identity from the
@@ -239,14 +276,32 @@ async def cancel_install():
     return {"ok": await registry.cancel_install()}
 
 
+class UninstallPayload(BaseModel):
+    tier: str | None = None
+
+
 @router.post("/uninstall")
 @limiter.limit("3/minute")
-async def uninstall(request: Request):
-    settings.ocr_tier = "none"
-    settings.ocr_enabled = False
-    persist_enabled(False)
+async def uninstall(request: Request, payload: UninstallPayload | None = None):
+    from app.ocr.settings import detect_installed_tier, persist_active_tier
+
+    target_tier = (payload.tier if payload and payload.tier else settings.ocr_tier) or "cpu"
+    res = await registry.uninstall_tier(target_tier)
+
+    # If the uninstalled tier was active, fall back to another installed tier or disable
+    if settings.ocr_tier == target_tier or target_tier == "all":
+        remaining = detect_installed_tier()
+        if remaining:
+            settings.ocr_tier = remaining
+            persist_active_tier(remaining)
+        else:
+            settings.ocr_tier = "none"
+            settings.ocr_enabled = False
+            persist_enabled(False)
+            persist_active_tier("none")
+
     (await get_ocr()).reset_engine_identity()
-    return await registry.uninstall_tier1()
+    return res
 
 
 class EnablePayload(BaseModel):

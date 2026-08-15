@@ -5,6 +5,13 @@ import { defineConfig, devices } from '@playwright/test';
  */
 export default defineConfig({
   testDir: './e2e',
+  /* Per-test budget. The default 30s is not enough for the first navigation of a
+   * cold run: webServer starts Vite, then four parallel workers each trigger
+   * on-demand compilation of a bundle whose heaviest chunks are ~1.1 MB
+   * (echarts) and ~680 KB (WebGPUFallback), and page.goto waits for `load`.
+   * Every test failed on exactly that with an empty node_modules/.vite, and all
+   * four passed unchanged once the cache was warm. */
+  timeout: 90_000,
   /* Run tests in files in parallel */
   fullyParallel: true,
   /* Fail the build on CI if you accidentally left test.only in the source code. */

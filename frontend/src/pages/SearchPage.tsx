@@ -1,7 +1,8 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { Search, Send, Loader2, Sparkles, Clock, Trash2, RotateCcw } from 'lucide-react';
+import { Search, Send, Square, Sparkles, Clock, Trash2, RotateCcw } from 'lucide-react';
+import { toast } from 'sonner';
 import { useApi, invalidateCache } from '../useApi';
-import { getQueryHistory, clearQueryHistory, getFileTree, type HistoryItem } from '../api';
+import { getQueryHistory, clearQueryHistory, getFileTree, subscribeProgress, type HistoryItem } from '../api';
 
 import { useChatStream } from '../hooks/useChatStream';
 import { MessageBubble } from '../components/chat/MessageBubble';
@@ -23,14 +24,34 @@ export function SearchPage() {
 
   const { data: historyData, refetch: refetchHistory } = useApi(getQueryHistory, { cacheKey: 'query-history' });
   
-  const { messages, executeSearch, resetChat: resetChatStream } = useChatStream(() => {
+  const { messages, executeSearch, resetChat: resetChatStream, stopStream } = useChatStream(() => {
     invalidateCache('query-history');
     refetchHistory();
   });
 
   const isSearching = messages.at(-1)?.isStreaming ?? false;
 
-  const { data: fileTree } = useApi(getFileTree, { cacheKey: 'files-tree', refetchInterval: isSearching ? 0 : 15_000 });
+  // U-5: the file tree changes only when indexing does, and subscribeProgress
+  // already pushes those events. A fixed 15s poll re-fetched the whole tree
+  // forever on a corpus that had not moved.
+  const { data: fileTree, refetch: refetchFileTree } = useApi(getFileTree, {
+    cacheKey: 'files-tree',
+  });
+
+  useEffect(() => {
+    let last = '';
+    const unsubscribe = subscribeProgress((evt) => {
+      // Refresh on the transition into a settled state, not on every progress
+      // frame - those arrive continuously during a scan.
+      const status = evt?.status ?? '';
+      if (status !== last && (status === 'completed' || status === 'idle')) {
+        invalidateCache('files-tree');
+        refetchFileTree();
+      }
+      last = status;
+    });
+    return unsubscribe;
+  }, [refetchFileTree]);
 
 
   const inputRef = useRef<HTMLInputElement>(null);
@@ -81,16 +102,33 @@ export function SearchPage() {
     }
   };
 
-  const handleClearHistory = useCallback(async () => {
-    if (!confirm('Are you sure you want to clear all chat history?')) return;
-    try {
-      await clearQueryHistory();
-      invalidateCache('query-history');
-      refetchHistory();
-      resetChatStream();
-    } catch (e) {
-      alert(`Failed to clear history: ${e instanceof Error ? e.message : 'Unknown error'}`);
-    }
+  // Native confirm()/alert() rendered as platform dialogs that do not match the
+  // app's visual language, and confirm() blocks the event loop. sonner was
+  // already a declared dependency and imported nowhere.
+  const handleClearHistory = useCallback(() => {
+    const doClear = async () => {
+      try {
+        const res = await clearQueryHistory();
+        invalidateCache('query-history');
+        refetchHistory();
+        resetChatStream();
+        // The backend reports whether the persistent semantic cache went with
+        // it. Saying "cleared" when verbatim questions are still on disk is the
+        // kind of claim this app cannot afford to get wrong.
+        if (res && res.semantic_cache_cleared === false) {
+          toast.warning('History cleared, but the saved-answer cache could not be cleared.');
+        } else {
+          toast.success('Chat history cleared.');
+        }
+      } catch (e) {
+        toast.error(`Failed to clear history: ${e instanceof Error ? e.message : 'Unknown error'}`);
+      }
+    };
+
+    toast('Clear all chat history?', {
+      action: { label: 'Clear', onClick: () => void doClear() },
+      cancel: { label: 'Cancel', onClick: () => {} },
+    });
   }, [refetchHistory, resetChatStream]);
 
   const resetChat = () => {
@@ -224,13 +262,25 @@ export function SearchPage() {
                 disabled={isSearching}
                 aria-expanded={showHistory}
               />
-              <button
-                onClick={() => handleSearch()}
-                disabled={!question.trim() || isSearching}
-                className="p-3 mr-2 bg-primary hover:bg-primary-dark disabled:bg-white/5 text-white rounded-xl transition-all shadow-lg"
-              >
-                {isSearching ? <Loader2 className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
-              </button>
+              {isSearching ? (
+                <button
+                  onClick={stopStream}
+                  aria-label="Stop generating"
+                  title="Stop generating"
+                  className="p-3 mr-2 bg-white/10 hover:bg-white/20 text-white rounded-xl transition-all shadow-lg"
+                >
+                  <Square className="w-5 h-5 fill-current" />
+                </button>
+              ) : (
+                <button
+                  onClick={() => handleSearch()}
+                  disabled={!question.trim()}
+                  aria-label="Send question"
+                  className="p-3 mr-2 bg-primary hover:bg-primary-dark disabled:bg-white/5 text-white rounded-xl transition-all shadow-lg"
+                >
+                  <Send className="w-5 h-5" />
+                </button>
+              )}
             </div>
           </div>
           

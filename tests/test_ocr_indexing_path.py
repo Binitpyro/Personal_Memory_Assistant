@@ -17,9 +17,9 @@ FILE_PATH = Path(r"C:\docs\scanned.pdf")
 
 @pytest.fixture
 def service(mock_db, mock_emb, mock_lancedb):
-    mock_lancedb.delete_documents = mock_lancedb.delete_documents if hasattr(
-        mock_lancedb, "delete_documents"
-    ) else None
+    mock_lancedb.delete_documents = (
+        mock_lancedb.delete_documents if hasattr(mock_lancedb, "delete_documents") else None
+    )
     from unittest.mock import AsyncMock
 
     mock_lancedb.delete_documents = AsyncMock()
@@ -133,6 +133,45 @@ async def test_reindexing_replaces_only_ocr_chunks(service, mock_db):
     assert native[0][0] == 1, "native chunk was destroyed by re-OCR"
 
 
+async def _ocr_chunk_count(db, file_id):
+    rows = await db.execute_query(
+        "SELECT COUNT(*) FROM chunks WHERE source = 'ocr' AND file_id = ?", (file_id,)
+    )
+    return rows[0][0]
+
+
+async def test_failed_insert_does_not_destroy_the_previous_ocr_text(service, mock_db, monkeypatch):
+    """Both deletes used to commit before the insert, so the rollback restored nothing."""
+    file_id = await insert_file(mock_db)
+    await service.index_ocr_pages(FILE_PATH, [ocr_page(0, (LONG, 0.95, False))])
+    before = await _ocr_chunk_count(mock_db, file_id)
+    assert before > 0
+
+    async def _boom(*_a, **_kw):
+        raise RuntimeError("sqlite flush exploded")
+
+    monkeypatch.setattr(service, "_flush_pending_chunks_sqlite", _boom)
+
+    with pytest.raises(RuntimeError, match="sqlite flush exploded"):
+        await service.index_ocr_pages(FILE_PATH, [ocr_page(0, (LONG, 0.95, False))])
+
+    assert await _ocr_chunk_count(mock_db, file_id) == before, (
+        "rollback left the file with no OCR text at all"
+    )
+
+
+async def test_a_scan_that_yields_nothing_keeps_the_previous_text(service, mock_db):
+    """Every line under the confidence floor is a bad scan, not a delete instruction."""
+    file_id = await insert_file(mock_db)
+    await service.index_ocr_pages(FILE_PATH, [ocr_page(0, (LONG, 0.95, False))])
+    before = await _ocr_chunk_count(mock_db, file_id)
+    assert before > 0
+
+    assert await service.index_ocr_pages(FILE_PATH, [ocr_page(0, ("blurry", 0.02, True))]) == 0
+
+    assert await _ocr_chunk_count(mock_db, file_id) == before
+
+
 async def test_missing_file_row_is_a_clean_noop(service, mock_db):
     """The file was deleted between enqueue and drain."""
     assert await service.index_ocr_pages(FILE_PATH, [ocr_page(0, (LONG, 0.95, False))]) == 0
@@ -170,10 +209,12 @@ async def test_pages_are_indexed_in_page_order(service, mock_db):
     assert stored.index("AAA first") < stored.index("ZZZ third")
 
 
-async def test_refuses_to_run_while_indexing_is_active(service, mock_db):
-    """Writing here mid-run would commit the pipeline's open transaction."""
+async def test_can_run_while_indexing_is_active(service, mock_db):
+    """OCR pages can be indexed concurrently while the indexing pipeline is active."""
     await insert_file(mock_db)
     progress.status = "running"
 
-    with pytest.raises(RuntimeError, match="drain loop must wait for idle"):
-        await service.index_ocr_pages(FILE_PATH, [ocr_page(0, (LONG, 0.95, False))])
+    written = await service.index_ocr_pages(FILE_PATH, [ocr_page(0, (LONG, 0.95, False))])
+    assert written > 0
+    rows = await mock_db.execute_query("SELECT source FROM chunks WHERE source = 'ocr'")
+    assert rows

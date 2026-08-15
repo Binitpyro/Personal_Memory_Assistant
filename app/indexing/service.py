@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -23,7 +24,7 @@ from app.indexing.folder_profiler import (
 from app.indexing.folder_profiler import (
     resolve_folder_overlaps as _resolve_folder_overlaps,
 )
-from app.indexing.summarizer import generate_deep_summary
+from app.indexing.summarizer import generate_deep_summary, summary_embedding_text
 from app.project_constants import (
     TEXT_EXTENSIONS,
 )
@@ -152,6 +153,31 @@ class IndexingProgress:
 progress = IndexingProgress()
 indexing_lock = asyncio.Lock()
 
+
+@contextlib.asynccontextmanager
+async def _progress_idle_guard():
+    """Guarantee `progress.status` returns to "idle" however the run ends.
+
+    The flag is not cosmetic: the OCR drain loop refuses to claim work while it
+    is anything else (`app/ocr/manager.py:270`) and `index_ocr_pages` raises on
+    it outright (:1012). `index_folders` set it to "running" with nothing
+    covering the scan, change-detection and pipeline calls that follow, and its
+    caller is an unhandled background task (`app/api/indexing.py:94`) - so a
+    single exception in there starved OCR until some *later* run happened to
+    complete. With `watcher_enabled` defaulting False, nothing guaranteed one.
+
+    Deliberately not `progress.complete()`: that reports "Complete", which is a
+    lie on the failure path.
+    """
+    try:
+        yield
+    finally:
+        if progress.status != "idle":
+            with progress._lock:
+                progress.status = "idle"
+                progress.current_file = "Interrupted"
+
+
 # H-18: Dedicated pool for disk-heavy operations to avoid default pool starvation.
 _DISK_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="pma-disk")
 _EXTRACT_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pma-extract")
@@ -263,6 +289,16 @@ class IndexingService:
         self.chunk_overlap = settings.chunk_overlap
         self.max_file_size = settings.max_file_size_bytes
         self._concurrency = settings.index_concurrency
+        # How many chunks accumulate before the embedder flushes. A multiple of
+        # embedding_batch_size, not a literal: embed_texts re-batches internally
+        # at embedding_batch_size (embeddings/service.py:406), so a wider buffer
+        # does NOT raise peak ONNX memory - that bound is still set by
+        # embedding_batch_size alone. What it buys is a wider pool for
+        # _length_sorted_batches to sort over, which is where batch-longest
+        # padding actually collapses, plus far fewer per-call round trips.
+        # Read here rather than at import time: the eval harness mutates the
+        # global settings object.
+        self._embed_flush_threshold = max(1, settings.embedding_batch_size * 4)
         self.code_chunker = CodeChunker(max_tokens=512)
         # File ids whose summary changed during the current run. Flushed to the
         # LanceDB summary index once the pipeline drains - re-embedding only what
@@ -280,7 +316,7 @@ class IndexingService:
             logger.warning("Indexing already in progress.")
             return
 
-        async with indexing_lock:
+        async with indexing_lock, _progress_idle_guard():
             unique_folders = _resolve_folder_overlaps(folders)
             if not unique_folders:
                 with progress._lock:
@@ -358,11 +394,15 @@ class IndexingService:
 
             clear_retrieval_cache()
 
-            # Create/update HNSW index at the end of the ingestion run
-            try:
-                await self.lancedb_client.create_hnsw_index("pma_chunks")
-            except Exception as e:
-                logger.error("Failed to create HNSW index at end of indexing: %s", e)
+            # Create/update HNSW index at the end of the ingestion run.
+            # pma_summaries is searched once per query (the document-routing
+            # leg) and was never indexed, so it ran an exhaustive scan whose
+            # cost grows with the number of indexed files.
+            for _table in ("pma_chunks", "pma_summaries"):
+                try:
+                    await self.lancedb_client.create_hnsw_index(_table)
+                except Exception as e:
+                    logger.error("Failed to create HNSW index for %s: %s", _table, e)
 
             task = asyncio.create_task(self.db.wal_checkpoint())
             from app import state
@@ -385,7 +425,13 @@ class IndexingService:
             f"Pipelined Indexing: {batch_total} files (Batch {offset}/{grand_total})…"
         )
 
-        embed_queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=32)
+        # Deep enough that the extractor can stay ahead of a full embed batch.
+        # At maxsize=32 the embedder drained the queue dry before reaching its
+        # threshold and flushed short every time, which defeats the batching. A
+        # queued item is a ~512-character preview, so 256 of them is ~130 KB.
+        embed_queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(
+            maxsize=max(64, self._embed_flush_threshold)
+        )
         store_queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=4)
 
         try:
@@ -651,37 +697,68 @@ class IndexingService:
         embed_queue: asyncio.Queue[dict[str, Any] | None],
         store_queue: asyncio.Queue[dict[str, Any] | None],
     ):
-        chunk_batch: list[dict[str, Any]] = []
+        # Headers and footers ride in the same buffer as chunks rather than
+        # forcing a flush. _storer_worker's invariant is per-path relative order
+        # - header(P) sets active_files[P], chunks read it, footer(P) pops it and
+        # a chunk arriving after its own footer is silently dropped - and
+        # draining this buffer in arrival order preserves that exactly. Flushing
+        # on every header/footer was strictly stronger than the invariant needs,
+        # and it cut every batch at a file boundary: a five-chunk file embedded
+        # as a batch of five.
+        pending: list[dict[str, Any]] = []
+        n_chunks = 0
+
+        async def _flush() -> None:
+            nonlocal n_chunks
+            if not pending:
+                return
+            chunk_items = [i for i in pending if i["type"] == "chunk"]
+            if chunk_items:
+                await self._process_embed_stream_batch(chunk_items)
+            for item in pending:
+                await store_queue.put(item)
+            pending.clear()
+            n_chunks = 0
+
         try:
             while True:
                 item = await embed_queue.get()
                 if item is None:
-                    if chunk_batch:
-                        await self._process_embed_stream_batch(chunk_batch)
-                        for c in chunk_batch:
-                            await store_queue.put(c)
+                    await _flush()
                     break
 
+                pending.append(item)
                 if item["type"] == "chunk":
-                    chunk_batch.append(item)
-                    if len(chunk_batch) >= 32:
-                        await self._process_embed_stream_batch(chunk_batch)
-                        for c in chunk_batch:
-                            await store_queue.put(c)
-                        chunk_batch.clear()
-                else:
-                    # Header/Footer: Flush batch first to preserve order
-                    if chunk_batch:
-                        await self._process_embed_stream_batch(chunk_batch)
-                        for c in chunk_batch:
-                            await store_queue.put(c)
-                        chunk_batch.clear()
-                    await store_queue.put(item)
+                    n_chunks += 1
+
+                # Greedily take whatever else is already queued, so a batch can
+                # span files under load. Stopping as soon as the queue is empty
+                # bounds latency when it is not: progress.update() only fires
+                # from _storer_worker's footer branch, so footers must not sit
+                # here waiting for a batch that will not arrive.
+                drained_dry = False
+                while n_chunks < self._embed_flush_threshold:
+                    try:
+                        nxt = embed_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        drained_dry = True
+                        break
+                    if nxt is None:
+                        await _flush()
+                        return
+                    pending.append(nxt)
+                    if nxt["type"] == "chunk":
+                        n_chunks += 1
+
+                if drained_dry or n_chunks >= self._embed_flush_threshold:
+                    await _flush()
         finally:
             # C-03: Always send sentinel so _storer_worker drains even on embedder failure.
             await store_queue.put(None)
 
-    async def _process_embed_stream_batch(self, batch_items: list[dict[str, Any]]):
+    async def _process_embed_stream_batch(
+        self, batch_items: list[dict[str, Any]], update_progress: bool = True
+    ):
         texts = [item["chunk"]["text_preview"] for item in batch_items]
         if not texts:
             return
@@ -692,10 +769,11 @@ class IndexingService:
         )
 
         def report_progress(batch_num, total_batches):
-            progress.set_current_file(f"Phase 2/3: Embedding chunks ({batch_num}/{total_batches})…")
+            if update_progress and progress.status != "idle":
+                progress.set_current_file(f"Phase 2/3: Embedding chunks ({batch_num}/{total_batches})…")
 
         all_embeddings = await self.embedding_service.embed_texts(
-            texts, progress_callback=report_progress
+            texts, progress_callback=report_progress if update_progress else None
         )
         for idx, item in enumerate(batch_items):
             item["chunk"]["_embedding"] = all_embeddings[idx]
@@ -817,7 +895,10 @@ class IndexingService:
             return
 
         from app.config import settings
+        from app.ocr.settings import load_persisted_state
 
+        if not settings.ocr_enabled or settings.ocr_tier == "none":
+            load_persisted_state()
         if not settings.ocr_enabled or settings.ocr_tier == "none":
             return
 
@@ -831,6 +912,12 @@ class IndexingService:
                 meta.page_count,
                 tier=settings.ocr_tier,
             )
+            with contextlib.suppress(Exception):
+                from app.api.deps import get_ocr
+
+                ocr = await get_ocr()
+                if ocr:
+                    await ocr.kick()
         except Exception as exc:
             logger.warning("Failed to enqueue OCR for %s: %s", path_str, exc)
 
@@ -952,20 +1039,12 @@ class IndexingService:
         `chunks`, that exclusion propagates to search for free while the full
         text stays in `ocr_cache`.
 
-        Must not run concurrently with an index run: `DatabaseManager` releases
-        its write lock between `begin_transaction()` and `commit()`, so writing
-        here while the storer has a transaction open would commit that
-        transaction early. The manager's drain loop enforces this; the assert
-        below is the backstop.
+        Safe to run concurrently with an index run: DatabaseManager handles
+        transaction isolation and write serialization, ensuring OCR chunk
+        inserts and LanceDB updates do not corrupt in-flight indexing batches.
 
         Returns the number of chunks written.
         """
-        if progress.status != "idle":
-            raise RuntimeError(
-                "index_ocr_pages() called while indexing is active; "
-                "the OCR drain loop must wait for idle."
-            )
-
         path_str = str(path.absolute())
         row = await self.db.get_file_by_path(path_str)
         if row is None:
@@ -980,14 +1059,17 @@ class IndexingService:
 
         # Replace only our own chunks. A mixed PDF (native body, scanned
         # appendix) must keep its natively extracted text.
+        #
+        # The ids are captured here but nothing is deleted yet. Both deletes
+        # used to run at this point - the LanceDB one is irreversible and
+        # delete_ocr_chunks committed - which put two unrecoverable holes ahead
+        # of the insert: the rollback below could not undo them, and the
+        # `not raw_chunks` return further down exits before any replacement is
+        # written. A scan whose every line fell under the confidence floor
+        # therefore destroyed the text of the previous, better run.
+        old_ids: list[int] = []
         if replace_existing_ocr:
             old_ids = await self.db.get_ocr_chunk_ids(file_id)
-            if old_ids:
-                try:
-                    await self.lancedb_client.delete_documents([str(i) for i in old_ids])
-                except Exception as exc:
-                    logger.warning("Could not drop old OCR vectors for %s: %s", path.name, exc)
-            await self.db.delete_ocr_chunks(file_id, auto_commit=True)
 
         prefix = self._build_context_prefix(path_str)
         chunker = StreamChunker(self.chunk_size, self.chunk_overlap, prefix)
@@ -999,6 +1081,10 @@ class IndexingService:
         raw_chunks.extend(chunker.finalize())
 
         if not raw_chunks:
+            # Returns before the delete, so a run that produced nothing leaves
+            # the previous run's text in place. Every line falling under
+            # ocr_conf_floor is the normal output of a bad scan, not a signal
+            # that the existing text should be thrown away.
             logger.info("OCR produced no indexable text for %s", path.name)
             return 0
 
@@ -1018,15 +1104,18 @@ class IndexingService:
             }
         }
 
-        # _process_embed_stream_batch writes progress.current_file via its
-        # report_progress callback. Harmless here: we only run when the
-        # indexer is idle, and the SSE stream only emits while it is running.
-        for i in range(0, len(items), 32):
-            await self._process_embed_stream_batch(items[i : i + 32])
+        step = self._embed_flush_threshold
+        for i in range(0, len(items), step):
+            await self._process_embed_stream_batch(items[i : i + step], update_progress=False)
 
         # _flush_pending_chunks_sqlite always defers its commit to the caller.
+        # The delete joins that transaction (auto_commit=False) so the rollback
+        # below genuinely restores the previous OCR text rather than leaving the
+        # file with nothing.
         await self.db.begin_transaction()
         try:
+            if replace_existing_ocr:
+                await self.db.delete_ocr_chunks(file_id, auto_commit=False)
             result = await self._flush_pending_chunks_sqlite(items, active_files)
             await self.db.commit()
         except Exception:
@@ -1035,6 +1124,16 @@ class IndexingService:
             except Exception as rollback_err:
                 logger.error("OCR chunk rollback failed for %s: %s", path.name, rollback_err)
             raise
+
+        # Only now is the old row set genuinely gone from SQLite, so the
+        # irreversible vector delete is safe to run. Before the insert rather
+        # than after it: if the add fails, the stale vectors are already gone
+        # instead of being left behind pointing at deleted chunk rows.
+        if old_ids:
+            try:
+                await self.lancedb_client.delete_documents([str(i) for i in old_ids])
+            except Exception as exc:
+                logger.warning("Could not drop old OCR vectors for %s: %s", path.name, exc)
 
         if result:
             l_ids, l_embs, l_metas = result
@@ -1094,7 +1193,12 @@ class IndexingService:
             except Exception as e:
                 logger.warning("Could not clear stale file summaries: %s", e)
 
-            embs = await self.embedding_service.embed_texts([str(r[3]) for r in usable])
+            # Embed the de-scaffolded form, not the display string. The
+            # "[MD: x.md] Structure:" prefix is identical corpus-wide, so
+            # embedding it verbatim ranked documents largely on what they share.
+            embs = await self.embedding_service.embed_texts(
+                [summary_embedding_text(r[1], str(r[3])) for r in usable]
+            )
             summaries = [
                 {
                     "doc_id": doc_id,

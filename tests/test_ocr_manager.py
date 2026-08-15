@@ -40,9 +40,7 @@ def write_stub(tmp_path: Path, body: str) -> Path:
     (worker_dir / "protocol.py").write_text(
         real_protocol.read_text(encoding="utf-8"), encoding="utf-8"
     )
-    (worker_dir / "__main__.py").write_text(
-        STUB_HEADER + textwrap.dedent(body), encoding="utf-8"
-    )
+    (worker_dir / "__main__.py").write_text(STUB_HEADER + textwrap.dedent(body), encoding="utf-8")
     return worker_dir
 
 
@@ -56,9 +54,11 @@ def stub_env(tmp_path, monkeypatch):
         monkeypatch.setattr(manager_mod, "ocr_worker_dir", lambda: worker_dir)
         monkeypatch.setattr(manager_mod, "ocr_models_dir", lambda: tmp_path / "models")
         monkeypatch.setattr(manager_mod, "ocr_scratch_dir", lambda: tmp_path / "scratch")
-        monkeypatch.setattr(manager_mod, "ensure_dirs", lambda: (tmp_path / "scratch").mkdir(
-            parents=True, exist_ok=True
-        ))
+        monkeypatch.setattr(
+            manager_mod,
+            "ensure_dirs",
+            lambda: (tmp_path / "scratch").mkdir(parents=True, exist_ok=True),
+        )
         monkeypatch.setattr(manager_mod, "is_tier_installed", lambda: True)
         return worker_dir
 
@@ -278,6 +278,45 @@ async def test_noisy_stderr_does_not_deadlock(mgr, mock_db, stub_env, pdf_path):
     await mgr.stop()
 
 
+DOC_OPEN_FAILED_STUB = """
+for line in sys.stdin:
+    try:
+        msg = protocol.decode(line)
+    except protocol.ProtocolError:
+        continue
+    if msg["t"] == protocol.REQ_HELLO:
+        emit(protocol.make_ready(model_version="stub", ep="CPU"))
+    elif msg["t"] == protocol.REQ_DOC:
+        # What worker/__main__.py does when open_document() raises: a whole
+        # *document* failure reported with a page-level code, then doc_done.
+        emit(protocol.make_error(
+            code=protocol.E_RASTER_FAILED, detail="cannot open PDF", doc_id=msg["doc_id"]))
+        emit(protocol.make_doc_done(
+            doc_id=msg["doc_id"], pages_ok=0, pages_failed=1, mean_conf=0.0))
+"""
+
+
+async def test_document_that_produced_nothing_is_not_marked_done(mgr, mock_db, stub_env, pdf_path):
+    """Zero pages back when pages were asked for is a failure, not a success.
+
+    E_RASTER_FAILED is page-level (protocol.py), so _run_document only debug-logs
+    it and returns "". With error_code empty and all_pages empty, the old guard
+    `if error_code and not all_pages` was False and the row was marked *done* -
+    retiring the document permanently, because enqueue_document re-arms only on
+    a content change.
+    """
+    stub_env(DOC_OPEN_FAILED_STUB)
+    row = await seed(mock_db, pdf_path)
+
+    await mgr._process_doc(row)
+
+    stored = await ocr_queue.get_row(mock_db, row.file_path)
+    assert stored.status.value != "done"
+    assert stored.last_error
+    mgr._indexing.index_ocr_pages.assert_not_awaited()
+    await mgr.stop()
+
+
 # ── guards that need no subprocess ───────────────────────────────────────
 
 
@@ -292,6 +331,34 @@ async def test_sentinel_hash_skips_the_document(mgr, mock_db, pdf_path, sentinel
     mgr._indexing.index_ocr_pages.assert_not_awaited()
 
 
+async def test_indexer_going_busy_mid_write_refunds_the_claim(mgr, mock_db, stub_env, pdf_path):
+    """Losing the idle race is someone else's timing, not a bad document.
+
+    index_ocr_pages raises if an index run starts after the drain loop's idle
+    check. Treating that as a terminal indexing failure burned the document for
+    good; it must go back to pending with its attempt refunded.
+    """
+    from app.indexing.service import progress
+
+    stub_env(GOOD_STUB)
+    row = await seed(mock_db, pdf_path)
+    mgr._indexing.index_ocr_pages = AsyncMock(
+        side_effect=RuntimeError("index_ocr_pages() called while indexing is active")
+    )
+
+    original = progress.status
+    progress.status = "running"
+    try:
+        await mgr._process_doc(row)
+    finally:
+        progress.status = original
+
+    stored = await ocr_queue.get_row(mock_db, row.file_path)
+    assert stored.status.value == "pending"
+    assert stored.attempts == 0
+    await mgr.stop()
+
+
 async def test_deleted_file_is_skipped(mgr, mock_db, pdf_path):
     row = await seed(mock_db, pdf_path)
     await mock_db.execute_write("DELETE FROM files")
@@ -301,8 +368,8 @@ async def test_deleted_file_is_skipped(mgr, mock_db, pdf_path):
     assert (await ocr_queue.get_row(mock_db, row.file_path)).status.value == "skipped"
 
 
-async def test_drain_loop_waits_while_indexing_runs(mgr, mock_db, monkeypatch):
-    """A write here would commit the indexing pipeline's open transaction."""
+async def test_drain_loop_runs_concurrently_with_indexing(mgr, mock_db, monkeypatch):
+    """OCR drain loop processes queue items concurrently with active indexing."""
     from app.indexing.service import progress
 
     monkeypatch.setattr(settings, "ocr_enabled", True)
@@ -324,7 +391,7 @@ async def test_drain_loop_waits_while_indexing_runs(mgr, mock_db, monkeypatch):
     finally:
         progress.status = original
 
-    claim.assert_not_awaited()
+    claim.assert_awaited()
 
 
 async def test_ndjson_truncated_tail_is_tolerated(mgr, tmp_path):

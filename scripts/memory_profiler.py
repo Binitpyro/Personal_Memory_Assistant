@@ -30,7 +30,11 @@ async def run_profiling():
     lancedb_client = LanceDBClient()
     await asyncio.get_running_loop().run_in_executor(None, lancedb_client.connect)
     with contextlib.suppress(Exception):
-        await lancedb_client.add_documents([])
+        # Three empty lists, not one: add_documents takes ids/embeddings/
+        # metadatas and returns early on empty ids. The one-argument call raised
+        # TypeError, which contextlib.suppress swallowed, so this table warm-up
+        # had silently never run.
+        await lancedb_client.add_documents([], [], [])
 
     dummy_text_512 = "word " * 512
     for b_size in [64, 512]:
@@ -41,7 +45,10 @@ async def run_profiling():
         snap_after = tracemalloc.take_snapshot()
         diff = snap_after.compare_to(snap_before, "filename")
         total_allocated = sum(stat.size for stat in diff)
-        print(f"Batch {b_size} @ seq_len 512 produced {len(embs)} vectors ({len(embs[0])} dim). Memory delta: {total_allocated / (1024 * 1024):.2f} MB", flush=True)
+        print(
+            f"Batch {b_size} @ seq_len 512 produced {len(embs)} vectors ({len(embs[0])} dim). Memory delta: {total_allocated / (1024 * 1024):.2f} MB",
+            flush=True,
+        )
 
     print("Memory profiling complete.", flush=True)
 

@@ -12,13 +12,37 @@ const mockDriveInfo = { is_portable_fs: false, lancedb_mode: 'local', mount_path
 const mockProviders: any[] = [];
 const mockRefetch = vi.fn();
 
-// Mutable per-test state. vi.hoisted keeps it initialised before the mock factories run.
 const state = vi.hoisted(() => ({
   localModels: {
     ollama: { detected: false, models: [] as string[] },
     lm_studio: { detected: false, models: [] as string[] },
   },
   launchStatus: {} as Record<string, unknown>,
+  ocrStatus: {
+    installed: true,
+    tier: 'cpu',
+    enabled: true,
+    ep: 'CPUExecutionProvider',
+    uv_available: true,
+    cache_mb: 10,
+    queue: { done: 5, failed: 0 },
+  } as Record<string, unknown>,
+  ocrTiers: {
+    installed: 'cpu',
+    tiers: [
+      { id: 'cpu', unavailable_reason: '', installed: true, active: true, needs_install: true },
+      { id: 'gpu', unavailable_reason: '', installed: true, active: false, needs_install: true },
+      { id: 'vlm', unavailable_reason: '', installed: false, active: false, needs_install: false },
+    ],
+  } as Record<string, unknown>,
+  vlmModels: {
+    providers: [
+      { provider: 'ollama', display_name: 'Ollama', base_url: 'http://localhost:11434', is_local: true, reachable: false, models: [], error: null },
+      { provider: 'lm_studio', display_name: 'LM Studio', base_url: 'http://localhost:1234', is_local: true, reachable: false, models: [], error: null },
+    ],
+    has_vision_model: false,
+    suggestions: ['llama3.2-vision', 'minicpm-v'],
+  } as Record<string, unknown>,
 }));
 
 const offlineInstalled = (id: string) => ({
@@ -41,6 +65,10 @@ vi.mock('../../useApi', () => ({
     if (opts?.cacheKey === 'llm-prefs') return wrap(mockLLMPrefs);
     if (opts?.cacheKey === 'drive-info') return wrap(mockDriveInfo);
     if (opts?.cacheKey === 'providers-list') return wrap(mockProviders);
+    if (opts?.cacheKey === 'ocr-status-settings') return wrap(state.ocrStatus);
+    if (opts?.cacheKey === 'ocr-tiers') return wrap(state.ocrTiers);
+    if (opts?.cacheKey === 'ocr-vlm-models') return wrap(state.vlmModels);
+    if (opts?.cacheKey === 'ocr-vlm-selection') return wrap({ selection: null });
     if (opts?.cacheKey?.startsWith('launch-status-')) {
       return wrap(state.launchStatus[opts.cacheKey.replace('launch-status-', '')]);
     }
@@ -70,6 +98,7 @@ vi.mock('../../api', () => {
     // is what failed all seven SettingsPage cases rather than any assertion.
     getOcrStatus: vi.fn(),
     getOcrTiers: vi.fn(),
+    selectOcrTier: vi.fn(),
     // Only reached on the VLM tier, so a missing entry here would not fail
     // until someone selected it - the stale-factory trap this file has hit
     // before.
@@ -172,4 +201,32 @@ describe('SettingsPage Component', () => {
 
     expect(await screen.findByText(/doesn't appear to be installed/i)).toBeDefined();
   });
+
+  it('switches between installed OCR tiers', async () => {
+    const { selectOcrTier } = await import('../../api');
+    vi.mocked(selectOcrTier).mockResolvedValue({ ok: true, tier: 'gpu' });
+
+    renderWithProviders(<SettingsPage />);
+
+    // Click GPU tier tab ("High accuracy")
+    fireEvent.click(screen.getByRole('button', { name: /High accuracy/i }));
+
+    // Click "Switch to High accuracy" button
+    const switchBtn = screen.getByRole('button', { name: /Switch to High accuracy/i });
+    expect(switchBtn).toBeDefined();
+    fireEvent.click(switchBtn);
+
+    await waitFor(() => expect(selectOcrTier).toHaveBeenCalledWith('gpu'));
+  });
+
+  it('renders VLM picker with check again and start buttons when offline', async () => {
+    renderWithProviders(<SettingsPage />);
+
+    // Click Vision model tab ("Your own AI model")
+    fireEvent.click(screen.getByRole('button', { name: /Your own AI model/i }));
+
+    expect(screen.getByText(/Neither Ollama nor LM Studio is currently reachable/i)).toBeDefined();
+    expect(screen.getByRole('button', { name: /Check again/i })).toBeDefined();
+  });
 });
+

@@ -60,11 +60,15 @@ class SettingsStore:
                 tf.flush()
                 os.fsync(tf.fileno())
 
-            # Atomic replace with retry for Windows PermissionError
+            # Atomic replace with retry for Windows PermissionError.
+            # Bound to a separate name: the loop clears temp_file on success so
+            # the finally block does not unlink the file it just moved into
+            # place, which leaves temp_file Optional from the loop's view.
+            source = temp_file
             max_retries = 3
             for attempt in range(max_retries):
                 try:
-                    os.replace(temp_file, SETTINGS_PATH)
+                    os.replace(source, SETTINGS_PATH)
                     temp_file = None
                     break
                 except PermissionError as pe:

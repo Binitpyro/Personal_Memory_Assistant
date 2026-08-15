@@ -63,10 +63,16 @@ vi.mock('../../useApi', () => {
 });
 
 // Mock api endpoints
+// getPortrait belongs to KnowledgePortrait, which InsightsPage renders as a
+// child - the factory has to cover the whole rendered tree's imports, not just
+// the page's own.
 vi.mock('../../api', () => ({
   getInsights: vi.fn(),
   getInsightsByType: vi.fn(),
   getFileTree: vi.fn(),
+  // Resolved promise, not a bare vi.fn(): KnowledgePortrait calls this directly
+  // in a useEffect and chains .then/.catch on the result, so undefined throws.
+  getPortrait: vi.fn(() => Promise.resolve({ themes: [] })),
 }));
 
 describe('InsightsPage Component', () => {

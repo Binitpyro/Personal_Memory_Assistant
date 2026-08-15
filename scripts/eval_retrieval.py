@@ -29,15 +29,64 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import itertools
 import json
 import logging
+import shutil
+import subprocess  # nosec B404
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(message)s")
+
+
+def _provenance(k: int, use_reranker: bool) -> dict:
+    """Everything a recorded baseline must pin to stay comparable.
+
+    A score is only meaningful against another score from the same pipeline.
+    Reranker presence in particular differs between a dev checkout, a packaged
+    build and CI, and silently produces two different pipelines under one
+    number - so it is recorded rather than assumed.
+    """
+    from app.config import settings
+    from app.search import reranker
+
+    root = Path(__file__).resolve().parent.parent
+    git = shutil.which("git")
+    commit = ""
+    if git:
+        try:
+            commit = subprocess.run(  # nosec B603
+                [git, "rev-parse", "--short", "HEAD"],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                check=False,
+            ).stdout.strip()
+        except Exception:
+            commit = ""
+
+    lock = root / "models.lock.json"
+    lock_digest = hashlib.sha256(lock.read_bytes()).hexdigest()[:16] if lock.exists() else ""
+
+    status = reranker.reranker_status()
+    return {
+        "commit": commit,
+        "models_lock_sha256": lock_digest,
+        "reranker_requested": use_reranker,
+        "reranker_available": status["available"],
+        "reranker_reason": status["reason"],
+        "k": k,
+        "chunk_size": settings.chunk_size,
+        "chunk_overlap": settings.chunk_overlap,
+        "embedding_batch_size": settings.embedding_batch_size,
+        "retrieval_top_k": settings.retrieval_top_k,
+        "fusion_balance_enabled": settings.fusion_balance_enabled,
+        "fusion_version": __import__("app.project_constants", fromlist=["x"]).FUSION_VERSION,
+    }
 
 
 def _relativize(path: str, root: str) -> str:
@@ -132,13 +181,16 @@ async def run_unlabelled(queries: list[str], k: int, use_reranker: bool) -> int:
     return empty
 
 
-async def run_labelled(path: Path, k: int, use_reranker: bool, corpus_root: str) -> int:
+async def run_labelled(
+    path: Path, k: int, use_reranker: bool, corpus_root: str, json_out: Path | None = None
+) -> int:
     from tests.eval import metrics
 
     data = json.loads(path.read_text(encoding="utf-8"))
     entries = data["queries"] if isinstance(data, dict) else data
 
     rows = []
+    per_query = []
     print(f"{'query':<28}{'recall':>8}{'ndcg':>8}{'mrr':>8}{'domains':>9}")
     print("-" * 61)
     for entry in entries:
@@ -157,6 +209,9 @@ async def run_labelled(path: Path, k: int, use_reranker: bool, corpus_root: str)
             "domain_coverage": metrics.domain_coverage(results, expected, k),
         }
         rows.append(row)
+        per_query.append(
+            {"id": entry.get("id", entry["query"]), "type": entry.get("type", ""), **row}
+        )
         print(
             f"{entry.get('id', entry['query'])[:27]:<28}"
             f"{row['recall']:>8.2f}{row['ndcg']:>8.2f}{row['mrr']:>8.2f}"
@@ -169,6 +224,26 @@ async def run_labelled(path: Path, k: int, use_reranker: bool, corpus_root: str)
         f"{'MEAN':<28}{overall['recall']:>8.2f}{overall['ndcg']:>8.2f}"
         f"{overall['mrr']:>8.2f}{overall['domain_coverage']:>9.2f}"
     )
+
+    if json_out:
+        json_out.write_text(
+            json.dumps(
+                {
+                    "provenance": _provenance(k, use_reranker),
+                    "queries_file": str(path),
+                    "n_queries": len(entries),
+                    "mean": overall,
+                    "per_query": per_query,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        print(f"\nBaseline written to {json_out}")
+        print(
+            "Note: this corpus and query set support direction of change only. "
+            "Do not report a delta as an effect size."
+        )
     return 0
 
 
@@ -210,6 +285,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="LanceDB directory to query. Defaults to the configured one.",
     )
+    p.add_argument(
+        "--json-out",
+        type=Path,
+        help="Write a baseline JSON (metrics + provenance) for before/after comparison.",
+    )
     return p
 
 
@@ -218,7 +298,9 @@ async def main_async(args) -> int:
     use_reranker = not args.no_reranker
 
     if args.labelled:
-        return await run_labelled(args.labelled, args.k, use_reranker, args.corpus_root)
+        return await run_labelled(
+            args.labelled, args.k, use_reranker, args.corpus_root, args.json_out
+        )
 
     queries = list(args.queries)
     if args.queries_file:

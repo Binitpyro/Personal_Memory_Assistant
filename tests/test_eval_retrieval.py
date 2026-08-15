@@ -217,4 +217,9 @@ async def test_agentic_loop_runs_and_reports_gaps(index, queries):
         "budget_exhausted",
         "no_results",
         "complete",
+        # Sufficiency is judged on the cross-encoder scale, and this harness
+        # runs with use_reranker=False, so no evidence carries a rerank_score.
+        # That is "not assessed" - deliberately neither satisfied nor reported
+        # as missing, because claiming either would be a false statement.
+        "unverified",
     }

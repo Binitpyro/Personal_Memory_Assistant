@@ -1,6 +1,7 @@
 """API Router for external sidecar modules communicating with PMA Core.
 Provides a secure WebSocket endpoint for real-time bidirectional messaging.
 """
+
 from __future__ import annotations
 
 import contextlib
@@ -68,7 +69,9 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(Non
                 request_times.popleft()
 
             if len(request_times) >= RATE_LIMIT_COUNT:
-                await websocket.send_json({"status": "error", "message": "Rate limit exceeded. Too many requests."})
+                await websocket.send_json(
+                    {"status": "error", "message": "Rate limit exceeded. Too many requests."}
+                )
                 continue
 
             request_times.append(now)
@@ -77,11 +80,13 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(Non
 
             try:
                 if action == "session.hello":
-                    await websocket.send_json({
-                        "status": "ok",
-                        "version": "0.1",
-                        "capabilities": ["retrieve", "chunk.get", "corpus.stats"]
-                    })
+                    await websocket.send_json(
+                        {
+                            "status": "ok",
+                            "version": "0.1",
+                            "capabilities": ["retrieve", "chunk.get", "corpus.stats"],
+                        }
+                    )
                 elif action == "retrieve":
                     query = data.get("query", "")
                     k = data.get("k", 10)
@@ -116,7 +121,9 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(Non
                 elif action == "ping":
                     await websocket.send_json({"status": "pong"})
                 else:
-                    await websocket.send_json({"status": "error", "message": f"Unknown action '{action}'"})
+                    await websocket.send_json(
+                        {"status": "error", "message": f"Unknown action '{action}'"}
+                    )
             except Exception as e:
                 logger.error("Error handling module action %s: %s", action, e, exc_info=True)
                 await websocket.send_json({"status": "error", "action": action, "message": str(e)})

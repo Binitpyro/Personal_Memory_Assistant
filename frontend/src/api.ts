@@ -155,12 +155,19 @@ export interface OcrTierInfo {
   /** Non-empty when this tier cannot run on this machine; shown instead of Install. */
   unavailable_reason: string;
   installed: boolean;
+  active?: boolean;
   /** False for the VLM tier: it is chosen, not provisioned, so "Install" is wrong. */
   needs_install?: boolean;
 }
 
 export const getOcrTiers = () =>
   json<{ installed: string; tiers: OcrTierInfo[] }>('/ocr/tiers');
+
+export const selectOcrTier = (tier: string) =>
+  json<{ ok: boolean; tier: string; error_code?: string }>('/ocr/select', {
+    method: 'POST',
+    body: JSON.stringify({ tier }),
+  });
 
 export const installOcrTier = (tier = 'cpu') =>
   json<OcrInstallState>('/ocr/install', {
@@ -204,8 +211,11 @@ export const selectVlmModel = (provider: string, model: string) =>
     body: JSON.stringify({ provider, model }),
   });
 
-export const uninstallOcrTier = () =>
-  json<{ ok: boolean; removed: string[] }>('/ocr/uninstall', { method: 'POST' });
+export const uninstallOcrTier = (tier?: string) =>
+  json<{ ok: boolean; removed: string[] }>('/ocr/uninstall', {
+    method: 'POST',
+    body: JSON.stringify({ tier }),
+  });
 
 export const setOcrEnabled = (enabled: boolean) =>
   json<{ ok: boolean; enabled: boolean; error_code?: string }>('/ocr/enable', {

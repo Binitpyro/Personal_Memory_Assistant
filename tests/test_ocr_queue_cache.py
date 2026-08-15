@@ -71,6 +71,33 @@ async def test_attempts_accumulate_and_then_exhaust(mock_db):
     assert await ocr_queue.claim_next(mock_db, max_attempts=3) is None
 
 
+async def test_release_claim_refunds_the_attempt(mock_db):
+    """A claim that could not be acted on must not cost the document anything.
+
+    mark_failed(terminal=False) re-arms the row but leaves the claim-time
+    attempt spent, which is right when the document failed. When the *claim*
+    was unusable - the indexer went busy mid-write - charging it would retire
+    an innocent document after three unlucky collisions.
+    """
+    await ocr_queue.enqueue_document(mock_db, PATH_A, [0], 1)
+
+    for _ in range(5):
+        claimed = await ocr_queue.claim_next(mock_db, max_attempts=3)
+        assert claimed is not None, "release_claim must not consume the budget"
+        assert claimed.attempts == 1
+        await ocr_queue.release_claim(mock_db, PATH_A)
+        row = await ocr_queue.get_row(mock_db, PATH_A)
+        assert row.status == QueueStatus.PENDING
+        assert row.attempts == 0
+
+
+async def test_release_claim_does_not_underflow_attempts(mock_db):
+    await ocr_queue.enqueue_document(mock_db, PATH_A, [0], 1)
+    await ocr_queue.release_claim(mock_db, PATH_A)
+    row = await ocr_queue.get_row(mock_db, PATH_A)
+    assert row.attempts == 0
+
+
 async def test_requeue_clears_the_attempt_budget(mock_db):
     await ocr_queue.enqueue_document(mock_db, PATH_A, [0], 1)
     for _ in range(3):

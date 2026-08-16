@@ -72,11 +72,10 @@ def render_page(doc, page_num, dpi):
 
         bitmap = page.render(scale=scale, grayscale=True)
         array = bitmap.to_numpy()
-        # RapidOCR expects 3 channels; grayscale render gives us one.
-        if array.ndim == 2:
-            array = np.stack([array] * 3, axis=-1)
-        elif array.ndim == 3 and array.shape[2] == 1:
-            array = np.repeat(array, 3, axis=2)
+        # RapidOCR accepts 2D grayscale arrays directly or handles conversion in C++.
+        # Keeping this 2D avoids an unnecessary 3x byte allocation on the Python heap.
+        if array.ndim == 3 and array.shape[2] == 1:
+            array = array.squeeze(axis=-1)
         return array
     except RasterError:
         raise

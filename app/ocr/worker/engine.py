@@ -39,10 +39,11 @@ class Engine:
         if dml:
             self.execution_provider = "DmlExecutionProvider"
 
+        base_kwargs = {**dml, "rec_batch_num": 8}
         overrides = self._custom_model_paths()
         if overrides:
             try:
-                self._ocr = RapidOCR(**overrides, **dml)
+                self._ocr = RapidOCR(**overrides, **base_kwargs)
                 # Not the bare string "custom": that is one label for every
                 # possible set of weights, so two different override sets would
                 # share a cache key and serve each other's text. The digest is
@@ -58,7 +59,7 @@ class Engine:
                 # engine mismatch.
                 pass
 
-        self._ocr = RapidOCR(**dml)
+        self._ocr = RapidOCR(**base_kwargs)
 
     @staticmethod
     def _directml_kwargs():

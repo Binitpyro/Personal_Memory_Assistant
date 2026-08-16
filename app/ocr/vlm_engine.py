@@ -111,8 +111,27 @@ def looks_like_commentary(text: str) -> bool:
     return any(first.startswith(prefix) for prefix in _REFUSAL_PREFIXES)
 
 
+#: Maximum allowed character count for a VLM transcription response.
+#: Prevents misbehaving or looping local models from inflating memory in the main process.
+_MAX_VLM_REPLY_CHARS = 500_000
+
+
 def to_page(page_num: int, text: str, elapsed_ms: int) -> OcrPage:
     """Turn a model reply into an `OcrPage`."""
+    if text and len(text) > _MAX_VLM_REPLY_CHARS:
+        logger.warning(
+            "VLM reply for page %s exceeded max length (%d chars), rejecting",
+            page_num,
+            len(text),
+        )
+        return OcrPage(
+            page_num=page_num,
+            lines=(),
+            mean_conf=0.0,
+            elapsed_ms=elapsed_ms,
+            error="VLM_PAYLOAD_TOO_LARGE",
+        )
+
     cleaned = _strip_wrapper(text)
     if not cleaned:
         return OcrPage(page_num=page_num, lines=(), mean_conf=0.0, elapsed_ms=elapsed_ms)

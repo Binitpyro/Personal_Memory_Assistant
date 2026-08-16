@@ -58,6 +58,32 @@ CREATE_NO_WINDOW = 0x08000000
 _OCR_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pma-ocr")
 _OCR_ERR_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pma-ocr-err")
 
+
+def _format_page_ranges(pages: list[int], max_items: int = 5) -> str:
+    """Turn a list of page integers into compact ranges like '41-200, 205'.
+
+    Keeps output concise to prevent log or database column blowups.
+    """
+    if not pages:
+        return ""
+    sorted_pages = sorted(set(pages))
+    ranges: list[str] = []
+    start = sorted_pages[0]
+    end = start
+
+    for p in sorted_pages[1:]:
+        if p == end + 1:
+            end = p
+        else:
+            ranges.append(f"{start}-{end}" if start != end else f"{start}")
+            start = end = p
+    ranges.append(f"{start}-{end}" if start != end else f"{start}")
+
+    if len(ranges) > max_items:
+        return ", ".join(ranges[:max_items]) + f" (+{len(ranges) - max_items} more)"
+    return ", ".join(ranges)
+
+
 _READY_TIMEOUT_S = 60
 _IDLE_POLL_S = 30.0
 _BUSY_POLL_S = 2.0
@@ -466,12 +492,17 @@ class OcrManager:
             # Document encountered a crash, OOM, or timeout mid-run.
             terminal = row.attempts >= settings.ocr_max_attempts
             reason = error_code
-            self._last_error = f"{path.name}: {reason} ({len(all_pages)}/{expected_count} pages)"
+            missing = [p for p in row.pages if p not in {pg.page_num for pg in all_pages}]
+            missing_str = f"missing pages {_format_page_ranges(missing)}" if missing else "incomplete"
+            self._last_error = f"{path.name}: {reason} ({len(all_pages)}/{expected_count} pages, {missing_str})"
             if terminal:
                 if all_pages:
                     # Retries exhausted, but partial progress was indexed and cached.
-                    # Mark done with actual completed page count.
-                    await ocr_queue.mark_done(self.db, row.file_path, pages_done=len(all_pages))
+                    # Mark done with actual completed page count and informative last_error.
+                    detail = f"OCR incomplete: {len(all_pages)}/{expected_count} pages, {missing_str} ({reason})"
+                    await ocr_queue.mark_done(
+                        self.db, row.file_path, pages_done=len(all_pages), last_error=detail
+                    )
                     self._docs_done += 1
                     self._docs_since_spawn += 1
                 else:

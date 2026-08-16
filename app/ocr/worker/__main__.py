@@ -155,7 +155,7 @@ class Worker:
                     try:
                         item = page_queue.get(timeout=0.5)
                     except queue.Empty:
-                        if not raster_thread.is_alive():
+                        if not raster_thread.is_alive() and page_queue.empty():
                             break
                         continue
 
@@ -233,6 +233,8 @@ class Worker:
                 with contextlib.suppress(Exception):
                     page_queue.get_nowait()
             raster_thread.join(timeout=3.0)
+            if raster_thread.is_alive():
+                _log(f"Warning: raster thread for {doc_id} did not terminate within timeout")
             self._cancelled.discard(doc_id)
 
         mean_conf = (conf_total / pages_ok) if pages_ok else 0.0

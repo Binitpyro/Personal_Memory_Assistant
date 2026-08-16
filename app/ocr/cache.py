@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+from datetime import datetime, timezone
 
 from app.config import settings
 from app.ocr.settings import expected_engine_identity, preproc_hash
@@ -71,14 +72,15 @@ async def get_pages(
 
     if found:
         hit_pages = sorted(found)
+        now_ts = datetime.now(timezone.utc).isoformat()
         for i in range(0, len(hit_pages), _SQLITE_MAX_VARS):
             batch = hit_pages[i : i + _SQLITE_MAX_VARS]
             placeholders = ",".join("?" * len(batch))
             await db.execute_write(
-                f"UPDATE ocr_cache SET last_used_at = datetime('now') "  # noqa: S608
+                f"UPDATE ocr_cache SET last_used_at = ? "  # noqa: S608
                 f"WHERE content_key = ? AND model_version = ? AND preproc_hash = ? "
                 f"AND page_num IN ({placeholders})",
-                (content_key, model_version, preproc, *batch),
+                (now_ts, content_key, model_version, preproc, *batch),
             )
 
     return found
@@ -122,11 +124,12 @@ async def put_pages(
         )
         old_size = int(prev_rows[0][0]) if prev_rows and prev_rows[0][0] is not None else 0
 
+        now_ts = datetime.now(timezone.utc).isoformat()
         await db.execute_write(
             "INSERT OR REPLACE INTO ocr_cache "
             "(content_key, page_num, model_version, preproc_hash, text, mean_conf, "
             " bytes, created_at, last_used_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 content_key,
                 int(page.page_num),
@@ -135,6 +138,8 @@ async def put_pages(
                 payload,
                 float(page.mean_conf),
                 size,
+                now_ts,
+                now_ts,
             ),
         )
         written += size

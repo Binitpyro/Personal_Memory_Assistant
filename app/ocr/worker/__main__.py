@@ -17,6 +17,7 @@ mismatch from an OOM without parsing anything.
 import contextlib
 import json
 import os
+import queue
 import sys
 import threading
 import time
@@ -95,42 +96,118 @@ class Worker:
         pages_ok = 0
         pages_failed = 0
         conf_total = 0.0
-        doc = None
 
-        try:
-            # Opened once for the whole document: PDFium is not thread-safe,
-            # and reopening per page dominates the cost on large scans.
-            doc = raster.open_document(path)
-        except Exception as exc:
-            _log(f"Failed to open {path}: {exc}")
-            _emit(
-                protocol.make_error(code=protocol.E_RASTER_FAILED, detail=str(exc), doc_id=doc_id)
-            )
-            _emit(
-                protocol.make_doc_done(
-                    doc_id=doc_id, pages_ok=0, pages_failed=len(pages), mean_conf=0.0
-                )
-            )
-            return
+        # Bounded 2-slot prefetch queue: the background thread rasterizes page N+1
+        # while the main thread recognizes page N. Bounded to 2 images so peak
+        # memory stays strictly O(1) (~17 MB extra at 300 DPI).
+        page_queue: queue.Queue = queue.Queue(maxsize=2)
+        stop_event = threading.Event()
+
+        def _raster_worker():
+            doc = None
+            try:
+                try:
+                    # Opened exclusively inside the raster thread; PDFium handles
+                    # are never shared across threads.
+                    doc = raster.open_document(path)
+                except Exception as exc:
+                    _log(f"Failed to open {path}: {exc}")
+                    page_queue.put((-1, str(exc), "OPEN_FAILED"))
+                    return
+
+                for p_num in pages:
+                    if stop_event.is_set() or doc_id in self._cancelled:
+                        break
+                    try:
+                        img = raster.render_page(doc, p_num, dpi)
+                        while not stop_event.is_set() and doc_id not in self._cancelled:
+                            try:
+                                page_queue.put((p_num, img, None), timeout=0.2)
+                                break
+                            except queue.Full:
+                                continue
+                    except MemoryError:
+                        page_queue.put((p_num, "MemoryError", "OOM"))
+                        break
+                    except raster.RasterError as r_exc:
+                        page_queue.put((p_num, str(r_exc), "RASTER_FAILED"))
+                    except Exception as g_exc:
+                        page_queue.put((p_num, str(g_exc), "RASTER_ERROR"))
+            finally:
+                with contextlib.suppress(Exception):
+                    raster.close_document(doc)
+                with contextlib.suppress(Exception):
+                    page_queue.put(None)
+
+        raster_thread = threading.Thread(
+            target=_raster_worker, name=f"ocr-raster-{doc_id}", daemon=True
+        )
+        raster_thread.start()
 
         try:
             with open(ndjson_path, "a", encoding="utf-8") as sink:
-                for i, page_num in enumerate(pages):
+                page_idx = 0
+                while True:
                     if doc_id in self._cancelled:
+                        stop_event.set()
                         break
 
+                    try:
+                        item = page_queue.get(timeout=0.5)
+                    except queue.Empty:
+                        if not raster_thread.is_alive():
+                            break
+                        continue
+
+                    if item is None:
+                        break
+
+                    page_num, payload, err_type = item
+
+                    if err_type == "OPEN_FAILED":
+                        _emit(
+                            protocol.make_error(
+                                code=protocol.E_RASTER_FAILED, detail=payload, doc_id=doc_id
+                            )
+                        )
+                        _emit(
+                            protocol.make_doc_done(
+                                doc_id=doc_id, pages_ok=0, pages_failed=len(pages), mean_conf=0.0
+                            )
+                        )
+                        return
+
+                    if err_type == "OOM":
+                        _log(f"Out of memory on {path}")
+                        _emit(
+                            protocol.make_error(
+                                code=protocol.E_OCR_OOM, detail=path, doc_id=doc_id
+                            )
+                        )
+                        sys.exit(protocol.EXIT_OOM)
+
                     started = time.time()
-                    record = self._do_page(raster, doc, page_num, dpi)
+                    if err_type is not None:
+                        # Page raster failed
+                        record = {
+                            "page": page_num,
+                            "lines": [],
+                            "mean_conf": 0.0,
+                            "error": protocol.E_RASTER_FAILED,
+                            "detail": str(payload)[:200],
+                        }
+                    else:
+                        # Valid raster image, run recognition with watchdog
+                        record = self._recognize_with_watchdog(page_num, payload)
+
                     elapsed_ms = int((time.time() - started) * 1000)
                     record["ms"] = elapsed_ms
 
                     sink.write(json.dumps(record, ensure_ascii=False) + "\n")
-                    # Flush every page so a kill loses at most the current one.
-                    # fsync is far more expensive and only guards power loss,
-                    # which costs us a re-OCR rather than corruption.
                     sink.flush()
-                    if i % 25 == 24:
+                    if page_idx % 25 == 24:
                         os.fsync(sink.fileno())
+                    page_idx += 1
 
                     if record.get("error"):
                         pages_failed += 1
@@ -151,9 +228,12 @@ class Worker:
             _emit(protocol.make_error(code=protocol.E_OCR_OOM, detail=path, doc_id=doc_id))
             sys.exit(protocol.EXIT_OOM)
         finally:
+            stop_event.set()
+            while not page_queue.empty():
+                with contextlib.suppress(Exception):
+                    page_queue.get_nowait()
+            raster_thread.join(timeout=3.0)
             self._cancelled.discard(doc_id)
-            with contextlib.suppress(Exception):
-                raster.close_document(doc)
 
         mean_conf = (conf_total / pages_ok) if pages_ok else 0.0
         _emit(
@@ -165,18 +245,15 @@ class Worker:
             )
         )
 
-    def _do_page(self, raster, doc, page_num, dpi):
-        """Render and recognize one page. Never raises - returns an error record.
-
-        A single bad page must not fail the document; that guarantee is what
-        makes partial results worth indexing.
-        """
+    def _recognize_with_watchdog(self, page_num, image):
+        """Recognize one page image with an interruptible watchdog timer. Never raises."""
         timer = None
+        disarmed = False
         try:
-            # Watchdog: a pathological page can wedge the decoder indefinitely.
-            # Interrupting the main thread is crude but it is the only way to
-            # break out of a C extension call without killing the process.
             def _fire():
+                nonlocal disarmed
+                if disarmed:
+                    return
                 _log(f"Page {page_num} exceeded {self.page_timeout_s}s")
                 if hasattr(_thread_interrupt, "interrupt_main"):
                     _thread_interrupt.interrupt_main()
@@ -187,18 +264,37 @@ class Worker:
             timer.daemon = True
             timer.start()
 
-            image = raster.render_page(doc, page_num, dpi)
             lines, mean_conf = self.engine.recognize(image)
             return {"page": page_num, "lines": lines, "mean_conf": mean_conf}
 
         except KeyboardInterrupt:
-            # Raised in this thread by the watchdog above.
             return {
                 "page": page_num,
                 "lines": [],
                 "mean_conf": 0.0,
                 "error": protocol.E_OCR_PAGE_TIMEOUT,
             }
+        except MemoryError:
+            raise
+        except Exception as exc:
+            _log(f"Page {page_num} failed:\n{traceback.format_exc()}")
+            return {
+                "page": page_num,
+                "lines": [],
+                "mean_conf": 0.0,
+                "error": protocol.E_RASTER_FAILED,
+                "detail": str(exc)[:200],
+            }
+        finally:
+            disarmed = True
+            if timer is not None:
+                timer.cancel()
+
+    def _do_page(self, raster, doc, page_num, dpi):
+        """Render and recognize one page synchronously. Preserved for direct invocation."""
+        try:
+            image = raster.render_page(doc, page_num, dpi)
+            return self._recognize_with_watchdog(page_num, image)
         except MemoryError:
             raise
         except raster.RasterError as exc:
@@ -218,27 +314,37 @@ class Worker:
                 "error": protocol.E_RASTER_FAILED,
                 "detail": str(exc)[:200],
             }
-        finally:
-            if timer is not None:
-                timer.cancel()
 
     # ── loop ─────────────────────────────────────────────────────────────
     def run(self):
-        for line in sys.stdin:
+        while True:
+            try:
+                line = sys.stdin.readline()
+                if not line:
+                    break
+            except KeyboardInterrupt:
+                # Stray interrupt after page watchdog timeout; continue message loop safely
+                continue
+            except Exception:
+                break
+
             try:
                 msg = protocol.decode(line)
             except protocol.ProtocolError:
                 continue
 
-            kind = msg.get("t")
-            if kind == protocol.REQ_HELLO:
-                self.handle_hello(msg)
-            elif kind == protocol.REQ_DOC:
-                self.handle_doc(msg)
-            elif kind == protocol.REQ_CANCEL:
-                self._cancelled.add(msg.get("doc_id") or "")
-            elif kind == protocol.REQ_SHUTDOWN:
-                return protocol.EXIT_OK
+            try:
+                kind = msg.get("t")
+                if kind == protocol.REQ_HELLO:
+                    self.handle_hello(msg)
+                elif kind == protocol.REQ_DOC:
+                    self.handle_doc(msg)
+                elif kind == protocol.REQ_CANCEL:
+                    self._cancelled.add(msg.get("doc_id") or "")
+                elif kind == protocol.REQ_SHUTDOWN:
+                    return protocol.EXIT_OK
+            except KeyboardInterrupt:
+                continue
         return protocol.EXIT_OK
 
 

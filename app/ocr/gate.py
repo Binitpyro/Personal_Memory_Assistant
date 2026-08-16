@@ -145,6 +145,30 @@ def _content_stream_bytes(page: Any) -> int:
         return 0
 
 
+def layout_fragmentation_score(text: str) -> float:
+    """Detect severely fragmented extraction (e.g. single-char words, extreme newline density).
+
+    When pypdf scrambles reading order or vertical column positions, it often emits
+    an extreme proportion of 1-character tokens or very short disjointed lines.
+    """
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines or len(lines) < 10:
+        return 0.0
+
+    avg_len = sum(len(line) for line in lines) / len(lines)
+    if avg_len < 3.5 and len(lines) >= 15:
+        return 1.0
+
+    words = text.split()
+    if len(words) >= 20:
+        single_chars = sum(1 for w in words if len(w) == 1 and w.isalnum())
+        single_ratio = single_chars / len(words)
+        if single_ratio > 0.40:
+            return single_ratio
+
+    return 0.0
+
+
 def classify_page(page: Any, text: str, cfg: GateConfig | None = None) -> PageSignal:
     """Decide NATIVE / OCR / BLANK for one page.
 
@@ -158,9 +182,10 @@ def classify_page(page: Any, text: str, cfg: GateConfig | None = None) -> PageSi
     stripped = text.strip() if text else ""
     n = len(stripped)
     gr = garbage_ratio(stripped)
+    frag = layout_fragmentation_score(stripped)
 
-    # 2. Enough clean text -> done. No resource inspection whatsoever.
-    if n >= cfg.min_chars and gr < cfg.garbage_ratio:
+    # 2. Enough clean, coherent text -> done. No resource inspection whatsoever.
+    if n >= cfg.min_chars and gr < cfg.garbage_ratio and frag < 0.40:
         return PageSignal(PageVerdict.NATIVE, n, gr, -1, -1)
 
     # 3-4. Any image on the page means there is probably ink we can't read.

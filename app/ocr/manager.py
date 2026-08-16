@@ -461,14 +461,27 @@ class OcrManager:
                 )
                 return
 
-        if not all_pages and row.pages:
-            # Zero pages back when pages were asked for. error_code is usually
-            # set, but a *document*-level failure reported with a page-level
-            # code - open_document failing emits E_RASTER_FAILED, which
-            # protocol.py:72 classes page-level - is only debug-logged by
-            # _run_document, so it arrives here as an empty success. Marking
-            # that done retired the document permanently, because
-            # enqueue_document re-arms only on a content change.
+        expected_count = row.page_count or len(row.pages)
+        if error_code and len(all_pages) < expected_count:
+            # Document encountered a crash, OOM, or timeout mid-run.
+            terminal = row.attempts >= settings.ocr_max_attempts
+            reason = error_code
+            self._last_error = f"{path.name}: {reason} ({len(all_pages)}/{expected_count} pages)"
+            if terminal:
+                if all_pages:
+                    # Retries exhausted, but partial progress was indexed and cached.
+                    # Mark done with actual completed page count.
+                    await ocr_queue.mark_done(self.db, row.file_path, pages_done=len(all_pages))
+                    self._docs_done += 1
+                    self._docs_since_spawn += 1
+                else:
+                    await ocr_queue.mark_failed(self.db, row.file_path, reason, terminal=True)
+            else:
+                # Re-arm row for retry; previous finished pages are in ocr_cache,
+                # so the next attempt will skip straight to the remaining pages.
+                await ocr_queue.mark_failed(self.db, row.file_path, reason, terminal=False)
+        elif not all_pages and row.pages:
+            # Zero pages back when pages were asked for.
             reason = error_code or "no pages produced"
             terminal = row.attempts >= settings.ocr_max_attempts
             self._last_error = f"{path.name}: {reason}"

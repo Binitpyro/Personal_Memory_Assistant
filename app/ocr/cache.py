@@ -104,6 +104,7 @@ async def put_pages(
     model_version = engine_id or expected_engine_identity()
     preproc = preproc_hash()
     written = 0
+    net_delta = 0
 
     for page in pages:
         # A page that failed outright has no text worth remembering, and
@@ -112,6 +113,15 @@ async def put_pages(
             continue
         payload = page.to_cache_json()
         size = len(payload.encode("utf-8"))
+
+        # Compute exact byte delta if row already exists under this primary key
+        prev_rows = await db.execute_query(
+            "SELECT bytes FROM ocr_cache "
+            "WHERE content_key = ? AND page_num = ? AND model_version = ? AND preproc_hash = ?",
+            (content_key, int(page.page_num), model_version, preproc),
+        )
+        old_size = int(prev_rows[0][0]) if prev_rows and prev_rows[0][0] is not None else 0
+
         await db.execute_write(
             "INSERT OR REPLACE INTO ocr_cache "
             "(content_key, page_num, model_version, preproc_hash, text, mean_conf, "
@@ -128,9 +138,10 @@ async def put_pages(
             ),
         )
         written += size
+        net_delta += (size - old_size)
 
-    if written:
-        await _bump_bytes(db, written)
+    if net_delta:
+        await _bump_bytes(db, net_delta)
     return written
 
 
@@ -180,16 +191,17 @@ async def evict_lru(db, *, max_bytes: int | None = None, target_ratio: float = 0
         if total <= target:
             break
         rows = await db.execute_query(
-            "SELECT rowid, bytes FROM ocr_cache ORDER BY last_used_at ASC LIMIT 200"
+            "SELECT rowid, bytes, last_used_at FROM ocr_cache ORDER BY last_used_at ASC LIMIT 200"
         )
         if not rows:
             break
-        rowids = [int(r[0]) for r in rows]
+        row_pairs = [(int(r[0]), str(r[2] or "")) for r in rows]
         batch_bytes = sum(int(r[1] or 0) for r in rows)
-        placeholders = ",".join("?" * len(rowids))
+        placeholders = " OR ".join(["(rowid = ? AND last_used_at = ?)"] * len(row_pairs))
+        flat_params = [val for pair in row_pairs for val in pair]
         await db.execute_write(
-            f"DELETE FROM ocr_cache WHERE rowid IN ({placeholders})",  # noqa: S608
-            tuple(rowids),
+            f"DELETE FROM ocr_cache WHERE {placeholders}",  # noqa: S608
+            tuple(flat_params),
         )
         freed += batch_bytes
         total -= batch_bytes

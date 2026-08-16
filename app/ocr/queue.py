@@ -128,18 +128,20 @@ async def mark_progress(db, file_path: str, pages_done: int) -> None:
     )
 
 
-async def mark_done(db, file_path: str, *, pages_done: int | None = None) -> None:
+async def mark_done(
+    db, file_path: str, *, pages_done: int | None = None, last_error: str = ""
+) -> None:
     if pages_done is None:
         await db.execute_write(
-            "UPDATE ocr_queue SET status = 'done', last_error = '', "
+            "UPDATE ocr_queue SET status = 'done', last_error = ?, "
             "updated_at = datetime('now') WHERE file_path = ?",
-            (file_path,),
+            ((last_error or "")[:500], file_path),
         )
     else:
         await db.execute_write(
-            "UPDATE ocr_queue SET status = 'done', pages_done = ?, last_error = '', "
+            "UPDATE ocr_queue SET status = 'done', pages_done = ?, last_error = ?, "
             "updated_at = datetime('now') WHERE file_path = ?",
-            (int(pages_done), file_path),
+            (int(pages_done), (last_error or "")[:500], file_path),
         )
 
 

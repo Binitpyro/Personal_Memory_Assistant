@@ -618,6 +618,15 @@ def test_get_sentence_offsets_nltk_exception(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_indexing_pipeline_taskgroup_exception():
+    """A dead pipeline stage must propagate, not be swallowed.
+
+    This test previously asserted the opposite - that _batch_index_pipeline
+    "should catch the ExceptionGroup / Exception cleanly and not crash the
+    caller". That swallow was the defect: index_folders carried straight on to
+    progress.complete() and reported a successful run whose extractor, embedder
+    or storer had died, and every file the dead stage never reached stayed
+    absent from the index with nothing recording that anything went wrong.
+    """
     service = IndexingService(
         db=AsyncMock(), embedding_service=AsyncMock(), lancedb_client=AsyncMock()
     )
@@ -628,9 +637,8 @@ async def test_indexing_pipeline_taskgroup_exception():
 
     service._extractor_worker = fake_extractor
 
-    # Run pipelined indexing, it should catch the ExceptionGroup / Exception cleanly
-    # and not crash the caller
-    await service._batch_index_pipeline(
-        files_to_index=[(Path("C:/a.py"), "A")], offset=0, total_to_index=1
-    )
-    # The TaskGroup catches ExceptionGroup and prints/logs the error.
+    with pytest.raises(BaseExceptionGroup) as excinfo:
+        await service._batch_index_pipeline(
+            files_to_index=[(Path("C:/a.py"), "A")], offset=0, total_to_index=1
+        )
+    assert any("simulated pipeline error" in str(e) for e in excinfo.value.exceptions)

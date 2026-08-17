@@ -1270,6 +1270,20 @@ class DatabaseManager:
         if auto_commit:
             await self._maybe_commit(conn)
 
+    async def get_file_chunk_ids(self, file_id: int) -> list[int]:
+        """Ids of every chunk for a file, without decompressing any of them.
+
+        `get_file_chunks` projects `zlib_decompress(text_preview)`, and
+        zlib_decompress is a per-connection Python callback - so using it just to
+        collect ids dragged every chunk of every re-indexed file across the
+        C-to-Python boundary and threw the text away.
+        """
+        async with (
+            self._get_read_conn() as conn,
+            conn.execute("SELECT id FROM chunks WHERE file_id = ?", (file_id,)) as cursor,
+        ):
+            return [r[0] for r in await cursor.fetchall()]
+
     async def get_ocr_chunk_ids(self, file_id: int) -> list[int]:
         """Ids of chunks this file got from OCR, so they can be replaced alone."""
         async with (

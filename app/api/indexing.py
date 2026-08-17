@@ -148,6 +148,9 @@ async def index_status(db: DatabaseManager = Depends(get_db)):
         "scan_method": progress.scan_method,
         "processed_files": progress.processed_files,
         "total_files": progress.total_files,
+        "failed_files": progress.failed_files,
+        "run_failed": progress.run_failed,
+        "last_error": progress.last_error,
     }
 
 
@@ -176,6 +179,10 @@ async def progress_stream(db: DatabaseManager = Depends(get_db)):
                 "skipped_files": progress.skipped_files,
                 "new_files": progress.new_files,
                 "changed_files": progress.changed_files,
+                "failed_files": progress.failed_files,
+                "unchanged_files": progress.unchanged_files,
+                "run_failed": progress.run_failed,
+                "last_error": progress.last_error,
                 "current_file": progress.current_file,
                 "scan_method": progress.scan_method,
                 "scan_duration_ms": progress.scan_duration_ms,

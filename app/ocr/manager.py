@@ -290,7 +290,6 @@ class OcrManager:
     # ── drain loop ───────────────────────────────────────────────────────
 
     async def _drain_loop(self) -> None:
-        from app.indexing.service import progress
 
         while not self._stopping:
             try:
@@ -493,8 +492,12 @@ class OcrManager:
             terminal = row.attempts >= settings.ocr_max_attempts
             reason = error_code
             missing = [p for p in row.pages if p not in {pg.page_num for pg in all_pages}]
-            missing_str = f"missing pages {_format_page_ranges(missing)}" if missing else "incomplete"
-            self._last_error = f"{path.name}: {reason} ({len(all_pages)}/{expected_count} pages, {missing_str})"
+            missing_str = (
+                f"missing pages {_format_page_ranges(missing)}" if missing else "incomplete"
+            )
+            self._last_error = (
+                f"{path.name}: {reason} ({len(all_pages)}/{expected_count} pages, {missing_str})"
+            )
             if terminal:
                 if all_pages:
                     # Retries exhausted, but partial progress was indexed and cached.

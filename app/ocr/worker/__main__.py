@@ -180,9 +180,7 @@ class Worker:
                     if err_type == "OOM":
                         _log(f"Out of memory on {path}")
                         _emit(
-                            protocol.make_error(
-                                code=protocol.E_OCR_OOM, detail=path, doc_id=doc_id
-                            )
+                            protocol.make_error(code=protocol.E_OCR_OOM, detail=path, doc_id=doc_id)
                         )
                         sys.exit(protocol.EXIT_OOM)
 
@@ -252,6 +250,7 @@ class Worker:
         timer = None
         disarmed = False
         try:
+
             def _fire():
                 nonlocal disarmed
                 if disarmed:

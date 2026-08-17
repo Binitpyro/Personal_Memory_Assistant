@@ -895,7 +895,9 @@ async def uninstall_tier(tier: str | None = None) -> dict[str, Any]:
         if target.exists():
             await asyncio.to_thread(shutil.rmtree, target, True)
             removed.append(str(target))
-    logger.info("Uninstalled OCR tier %s: %s", tier or "active", ", ".join(removed) or "nothing to remove")
+    logger.info(
+        "Uninstalled OCR tier %s: %s", tier or "active", ", ".join(removed) or "nothing to remove"
+    )
     return {"ok": True, "removed": removed}
 
 

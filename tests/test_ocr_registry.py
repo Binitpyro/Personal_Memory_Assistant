@@ -236,10 +236,9 @@ def test_smoke_fixture_is_a_readable_one_page_pdf(tmp_path):
     self-test would enlarge every install.
     """
     pypdf = pytest.importorskip("pypdf")
-    PdfReader = pypdf.PdfReader
 
     pdf = registry._smoke_test_pdf(tmp_path / "smoke.pdf")
-    reader = PdfReader(str(pdf))
+    reader = pypdf.PdfReader(str(pdf))
 
     assert len(reader.pages) == 1
     assert registry.SMOKE_TEST_PHRASE in reader.pages[0].extract_text()
@@ -438,7 +437,9 @@ async def test_uninstall_keeps_user_supplied_weights(monkeypatch, tmp_path):
     """
     monkeypatch.setattr(registry, "ocr_root", lambda: tmp_path)
     monkeypatch.setattr(registry, "ocr_env_dir", lambda tier=None: tmp_path / "env_cpu")
-    monkeypatch.setattr(registry, "ocr_tier_models_dir", lambda tier=None: tmp_path / "models" / "cpu")
+    monkeypatch.setattr(
+        registry, "ocr_tier_models_dir", lambda tier=None: tmp_path / "models" / "cpu"
+    )
 
     (tmp_path / "env_cpu").mkdir()
     tier_models = tmp_path / "models" / "cpu"

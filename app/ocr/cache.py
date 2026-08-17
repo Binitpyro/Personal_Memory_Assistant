@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from app.config import settings
 from app.ocr.settings import expected_engine_identity, preproc_hash
@@ -72,7 +72,7 @@ async def get_pages(
 
     if found:
         hit_pages = sorted(found)
-        now_ts = datetime.now(timezone.utc).isoformat()
+        now_ts = datetime.now(UTC).isoformat()
         for i in range(0, len(hit_pages), _SQLITE_MAX_VARS):
             batch = hit_pages[i : i + _SQLITE_MAX_VARS]
             placeholders = ",".join("?" * len(batch))
@@ -124,7 +124,7 @@ async def put_pages(
         )
         old_size = int(prev_rows[0][0]) if prev_rows and prev_rows[0][0] is not None else 0
 
-        now_ts = datetime.now(timezone.utc).isoformat()
+        now_ts = datetime.now(UTC).isoformat()
         await db.execute_write(
             "INSERT OR REPLACE INTO ocr_cache "
             "(content_key, page_num, model_version, preproc_hash, text, mean_conf, "
@@ -143,7 +143,7 @@ async def put_pages(
             ),
         )
         written += size
-        net_delta += (size - old_size)
+        net_delta += size - old_size
 
     if net_delta:
         await _bump_bytes(db, net_delta)

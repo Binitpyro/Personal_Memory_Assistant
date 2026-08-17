@@ -77,6 +77,9 @@ class FakeDB:
     async def get_file_chunks(self, file_id):
         return [{"id": cid} for cid in self.file_chunks.get(file_id, [])]
 
+    async def get_file_chunk_ids(self, file_id):
+        return list(self.file_chunks.get(file_id, []))
+
     async def delete_file_chunks(self, file_id, *, auto_commit=True):
         self.file_chunks[file_id] = []
 
@@ -412,3 +415,160 @@ async def test_update_path_deletes_old_chunks(tmp_path: Path):
         assert (await c.fetchone())[0] == 0
 
     await db.close()
+
+
+# ── completeness invariant ───────────────────────────────────────────────
+#
+# A file must never be recorded with a content hash unless it actually produced
+# content. Hashing succeeding says nothing about whether extraction did, so
+# `sha256_result = "ERROR" if hash_failed else hasher.hexdigest()` handed a valid
+# digest to files that yielded nothing - and _detect_changes then skipped them on
+# every later run, permanently. A damage assessment against the working DBs at
+# 5ff4d4e found three such rows, including a 97 KB requirements.txt.
+
+
+@pytest.mark.asyncio
+async def test_file_that_extracts_to_nothing_is_not_marked_complete(tmp_path: Path):
+    """Content in, nothing out: must not get a completion hash."""
+    idx.progress.reset(0)
+    svc = _make_service()
+    f = tmp_path / "unextractable.txt"
+    f.write_text("this file has real content", encoding="utf-8")
+
+    # An extractor that yields nothing at all, the shape the audit found.
+    svc._extract_plain_text_stream = lambda _p: iter(())
+
+    q: asyncio.Queue = asyncio.Queue()
+    await svc._stream_extract_and_prepare(f, "tag", None, q)
+
+    items = []
+    while not q.empty():
+        items.append(q.get_nowait())
+
+    footers = [i for i in items if i["type"] == "footer"]
+    assert footers, "a footer must still be emitted"
+    assert footers[0]["sha256"] == "NOCONTENT"
+    assert not [i for i in items if i["type"] == "chunk"]
+
+
+@pytest.mark.asyncio
+async def test_empty_file_is_still_marked_complete(tmp_path: Path):
+    """A genuinely empty file produced nothing correctly - it must not retry forever."""
+    idx.progress.reset(0)
+    svc = _make_service()
+    f = tmp_path / "empty.txt"
+    f.write_text("", encoding="utf-8")
+
+    q: asyncio.Queue = asyncio.Queue()
+    await svc._stream_extract_and_prepare(f, "tag", None, q)
+
+    footers = []
+    while not q.empty():
+        item = q.get_nowait()
+        if item["type"] == "footer":
+            footers.append(item)
+
+    assert footers
+    assert len(footers[0]["sha256"]) == 64, "empty files are legitimately complete"
+
+
+@pytest.mark.parametrize(
+    "stub",
+    [
+        "[BINARY: x] Binary content not indexed.",
+        "[UNREADABLE: x]",
+        "[ENCRYPTED PDF: x] Cannot extract text from an encrypted document.",
+    ],
+)
+@pytest.mark.asyncio
+async def test_extractor_stubs_are_never_indexed_as_content(tmp_path: Path, stub: str):
+    """These describe a failure. Only [BINARY: was filtered; the others were stored."""
+    idx.progress.reset(0)
+    svc = _make_service()
+    f = tmp_path / "doc.txt"
+    f.write_text("placeholder", encoding="utf-8")
+
+    q: asyncio.Queue = asyncio.Queue()
+    await svc._stream_extract_and_prepare(f, "tag", stub, q)
+
+    items = []
+    while not q.empty():
+        items.append(q.get_nowait())
+
+    chunks = [i for i in items if i["type"] == "chunk"]
+    assert not chunks, f"{stub!r} must not reach the index"
+
+
+@pytest.mark.asyncio
+async def test_unchanged_content_skips_reindex(tmp_path: Path):
+    """An mtime touch with identical bytes must not re-chunk or re-embed."""
+    idx.progress.reset(0)
+    svc = _make_service()
+    f = tmp_path / "stable.txt"
+    f.write_text("unchanged bytes", encoding="utf-8")
+
+    digest, failed = idx._hash_file(f)
+    assert not failed
+    svc._known_hashes = {str(f.absolute()): digest}
+
+    q: asyncio.Queue = asyncio.Queue()
+    await svc._stream_extract_and_prepare(f, "tag", None, q)
+
+    items = []
+    while not q.empty():
+        items.append(q.get_nowait())
+
+    assert [i["type"] for i in items] == ["touch"]
+    assert not [i for i in items if i["type"] in ("header", "chunk")]
+
+
+@pytest.mark.asyncio
+async def test_changed_content_still_reindexes(tmp_path: Path):
+    """The early-out must key on content, not merely on having a prior hash."""
+    idx.progress.reset(0)
+    svc = _make_service()
+    f = tmp_path / "edited.txt"
+    f.write_text("the new contents of this file", encoding="utf-8")
+    svc._known_hashes = {str(f.absolute()): "0" * 64}
+
+    q: asyncio.Queue = asyncio.Queue()
+    await svc._stream_extract_and_prepare(f, "tag", None, q)
+
+    types = []
+    while not q.empty():
+        types.append(q.get_nowait()["type"])
+
+    assert "header" in types
+    assert "chunk" in types
+    assert "touch" not in types
+
+
+def test_crashed_run_cannot_report_complete():
+    """progress.complete() must not overwrite a recorded run failure."""
+    p = idx.IndexingProgress()
+    p.reset(5)
+    p.fail("storer worker died")
+    p.complete()
+
+    assert p.run_failed is True
+    assert p.current_file == "Failed"
+    assert p.last_error == "storer worker died"
+    # ...but status must still return to idle, or the OCR drain loop stalls.
+    assert p.status == "idle"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_propagates_stage_failure(tmp_path: Path):
+    """A dead pipeline stage must surface, not be logged and swallowed."""
+    svc = _make_service()
+    f = tmp_path / "a.txt"
+    f.write_text("content", encoding="utf-8")
+
+    async def boom(*_a, **_k):
+        raise RuntimeError("storer exploded")
+
+    svc._storer_worker = boom
+
+    with pytest.raises(BaseExceptionGroup) as excinfo:
+        await svc._batch_index_pipeline([(f, "tag")])
+    assert any("storer exploded" in str(e) for e in excinfo.value.exceptions)

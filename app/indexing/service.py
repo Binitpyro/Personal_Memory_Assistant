@@ -113,11 +113,19 @@ class IndexingProgress:
         self.skipped_files = 0
         self.new_files = 0
         self.changed_files = 0
+        # Distinct from skipped_files, which means "unchanged, nothing to do".
+        # A file counted here was attempted and produced nothing indexable.
+        self.failed_files = 0
+        # Selected for indexing because the mtime moved, then found to be
+        # byte-identical. Proves the content-hash early-out is working.
+        self.unchanged_files = 0
         self.status = "idle"
         self.scan_method = ""
         self.scan_duration_ms = 0.0
         self.current_file = "Ready"
         self.is_cancelled = False
+        self.last_error = ""
+        self.run_failed = False
 
     def reset(self, total_files: int, initial_status: str = "running"):
         with self._lock:
@@ -127,11 +135,15 @@ class IndexingProgress:
             self.skipped_files = 0
             self.new_files = 0
             self.changed_files = 0
+            self.failed_files = 0
+            self.unchanged_files = 0
             self.status = initial_status
             self.scan_method = ""
             self.scan_duration_ms = 0.0
             self.current_file = "Starting…"
             self.is_cancelled = False
+            self.last_error = ""
+            self.run_failed = False
 
     def update(self, chunks_added: int, current_file: str = ""):
         with self._lock:
@@ -144,10 +156,45 @@ class IndexingProgress:
         with self._lock:
             self.current_file = current_file
 
+    def record_failure(self, message: str = "") -> None:
+        """A single file was attempted and yielded nothing indexable."""
+        with self._lock:
+            self.failed_files += 1
+            if message:
+                self.last_error = message[:300]
+
+    def record_unchanged(self) -> None:
+        """Re-scanned because its mtime moved, but its bytes were identical."""
+        with self._lock:
+            self.unchanged_files += 1
+
+    def fail(self, message: str) -> None:
+        """The run itself did not finish.
+
+        Deliberately does not park `status` on a non-idle value: the OCR drain
+        loop treats any non-"idle" status as "indexer busy" and refunds its claim
+        (`app/ocr/manager.py:480`), so a sticky failure state here would stall OCR
+        until the next index run. The failure is carried by `run_failed` instead,
+        which `complete()` and the idle guard both honour.
+        """
+        with self._lock:
+            self.run_failed = True
+            self.current_file = "Failed"
+            self.last_error = message[:300]
+
     def complete(self):
         with self._lock:
             self.status = "idle"
-            self.current_file = "Complete"
+            # A crashed run must not be able to report success. Before this,
+            # _batch_index_pipeline swallowed its TaskGroup's ExceptionGroup and
+            # the run still finished on "Complete".
+            if self.run_failed:
+                return
+            self.current_file = (
+                "Complete"
+                if not self.failed_files
+                else f"Complete — {self.failed_files} file(s) failed"
+            )
 
 
 progress = IndexingProgress()
@@ -175,7 +222,56 @@ async def _progress_idle_guard():
         if progress.status != "idle":
             with progress._lock:
                 progress.status = "idle"
-                progress.current_file = "Interrupted"
+                # Do not overwrite a recorded failure with the generic
+                # "Interrupted" - fail() already wrote something specific.
+                if not progress.run_failed:
+                    progress.current_file = "Interrupted"
+
+
+# Extractor stubs that describe a failure rather than carrying file content.
+# rust_core returns "[UNREADABLE: <path>]" *as* the text when a read fails
+# (app/scanner/rust_core/src/lib.rs:515), and the PDF/DOCX extractors yield an
+# "[ENCRYPTED …]" notice. Only "[BINARY:" was ever filtered, so the other two
+# were chunked, embedded and stored as though they were document content.
+_STUB_PREFIXES = ("[BINARY:", "[UNREADABLE:", "[ENCRYPTED")
+
+# sha256 values that mean "this file is not successfully indexed", so
+# _detect_changes must re-attempt it rather than treating it as up to date.
+#   ""          - the header's placeholder (service.py:534). The storer's commit
+#                 window can persist it before the footer writes the real digest,
+#                 so an interrupted run leaves rows here. Also the pre-migration
+#                 default from db.py:700/:749, which re-indexes once and settles.
+#   NOCONTENT   - extraction produced no chunks from a non-empty file.
+_INCOMPLETE_SHA_STATES = ("", "ERROR", "CANCELLED", "NOCONTENT")
+
+
+def _looks_binary(head: bytes) -> bool:
+    """Mirror of rust_core's _is_binary_buffer (lib.rs:481-489).
+
+    Any NUL, or more than 30% control bytes, in the first 8 KB.
+    """
+    if not head:
+        return False
+    if b"\x00" in head:
+        return True
+    non_text = sum(1 for b in head if b < 32 and b not in (9, 10, 13))
+    return non_text / len(head) > 0.30
+
+
+def _hash_file(path: Path) -> tuple[str, bool]:
+    """Raw-byte sha256 of a file. Returns (digest, hash_failed)."""
+    hasher = hashlib.sha256()
+    try:
+        with open(path, "rb") as f:
+            while True:
+                b = f.read(128 * 1024)
+                if not b:
+                    break
+                hasher.update(b)
+    except Exception as e:
+        logger.debug("Failed to hash %s: %s", path, e)
+        return "", True
+    return hasher.hexdigest(), False
 
 
 # H-18: Dedicated pool for disk-heavy operations to avoid default pool starvation.
@@ -304,6 +400,10 @@ class IndexingService:
         # LanceDB summary index once the pipeline drains - re-embedding only what
         # this run touched, rather than the whole corpus.
         self._summary_dirty_file_ids: set[int] = set()
+        # {absolute path: stored sha256} for the files selected by the current
+        # run, so _stream_extract_and_prepare can early-out on unchanged content.
+        # Populated by _detect_changes, cleared when the run ends.
+        self._known_hashes: dict[str, str] = {}
 
     def cancel_indexing(self):
         with progress._lock:
@@ -380,6 +480,13 @@ class IndexingService:
                 # Phase 1: Resolve pending GraphRAG edges
                 progress.set_current_file("Resolving code graph edges…")
                 await self.db.resolve_pending_graph_edges()
+            except Exception as exc:
+                # index_folders runs as an unhandled FastAPI background task, so
+                # this is the only place the failure can be recorded anywhere the
+                # caller can see it.
+                logger.error("Indexing run failed: %s", exc, exc_info=True)
+                progress.fail(f"{type(exc).__name__}: {exc}")
+                return
             finally:
                 if use_bulk_mode:
                     await self.db.exit_ingest_mode()
@@ -445,8 +552,13 @@ class IndexingService:
             for exc in eg.exceptions:
                 logger.error("Pipeline stage sub-exception:", exc_info=exc)
             logger.error("Pipeline stage failed or cancelled due to TaskGroup exceptions.")
+            # Must propagate. Swallowing this let index_folders carry on to
+            # progress.complete() and report a successful run whose extractor,
+            # embedder or storer had died.
+            raise
         except Exception as e:
             logger.error("Pipeline stage failed or cancelled:", exc_info=e)
+            raise
 
     async def _rust_pre_extract(self, files_to_index: list[tuple[Path, str]]) -> dict[str, str]:
         pre_extracted: dict[str, str] = {}
@@ -520,6 +632,22 @@ class IndexingService:
         header_sent = False
         try:
             stat = await loop.run_in_executor(_DISK_EXECUTOR, path.stat)
+            mtime_iso = datetime.fromtimestamp(stat.st_mtime).isoformat()
+
+            # The hashing pass runs *before* the header is queued, not inside
+            # _extract_and_chunk as it used to. The header is what makes the
+            # storer call _delete_existing_chunks, so anything that wants to keep
+            # this file's existing chunks has to decide before it is sent.
+            digest, hash_failed = await loop.run_in_executor(_DISK_EXECUTOR, _hash_file, path)
+
+            # Change detection is mtime-only, so a touch, a git checkout or a
+            # sync client rewriting a file re-extracted, re-chunked, re-embedded
+            # and re-wrote every chunk of it for no gain. The content hash
+            # settles that: identical bytes, nothing to do but record the mtime.
+            prior_sha = self._known_hashes.get(str(path.absolute()), "")
+            if digest and prior_sha == digest:
+                await queue.put({"type": "touch", "path": path, "modified_at": mtime_iso})
+                return
 
             header = {
                 "type": "header",
@@ -528,7 +656,7 @@ class IndexingService:
                 "file_data": {
                     "path": str(path.absolute()),
                     "size": stat.st_size,
-                    "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                    "modified_at": mtime_iso,
                     "type": path.suffix.lower(),
                     "folder_tag": folder_tag,
                     "sha256": "",  # placeholder, updated in footer
@@ -545,22 +673,12 @@ class IndexingService:
 
             def _extract_and_chunk():
                 chunker = StreamChunker(self.chunk_size, self.chunk_overlap, prefix)
-                hasher = hashlib.sha256()
                 ft_summary = ""
                 meta = None
 
-                hash_failed = False
-                # 1. Consistent raw-byte hashing pass (OS page cache makes extraction pass cheap)
-                try:
-                    with open(path, "rb") as f:
-                        while True:
-                            b = f.read(128 * 1024)
-                            if not b:
-                                break
-                            hasher.update(b)
-                except Exception as e:
-                    logger.debug("Failed to hash %s: %s", path, e)
-                    hash_failed = True
+                chunks_emitted = 0
+                stub_skipped = False
+                source_size = stat.st_size
 
                 def _get_stream():
                     if pre_text is not None:
@@ -578,21 +696,28 @@ class IndexingService:
                             return "CANCELLED", "", None
 
                         # Out-of-band extractor signal (which pages need OCR).
-                        # Checked before the [BINARY: test because ExtractMeta
+                        # Checked before the stub test because ExtractMeta
                         # has no .startswith.
                         if isinstance(fragment, ExtractMeta):
                             meta = fragment
                             continue
 
-                        # Skip binary stubs — they pollute the vector index with useless noise
-                        if isinstance(fragment, str) and fragment.startswith("[BINARY:"):
-                            logger.debug("Skipping binary stub for %s — no indexable text.", path)
+                        # Skip extractor stubs — they pollute the vector index
+                        # with useless noise. [BINARY: was filtered here already;
+                        # [UNREADABLE: (rust_core returns it *as* the file's text
+                        # on a read failure) and [ENCRYPTED …: were not, so an
+                        # unreadable or password-protected document was indexed
+                        # with the error message as its content.
+                        if isinstance(fragment, str) and fragment.startswith(_STUB_PREFIXES):
+                            logger.debug("Skipping stub for %s — no indexable text.", path)
                             ft_summary = ""
+                            stub_skipped = True
                             break
 
                         for c in chunker.process(fragment):
                             if progress.is_cancelled:
                                 return "CANCELLED", "", None
+                            chunks_emitted += 1
                             while True:
                                 try:
                                     bridge.put(c, timeout=1.0)
@@ -610,6 +735,7 @@ class IndexingService:
                     for c in chunker.finalize():
                         if progress.is_cancelled:
                             return "CANCELLED", "", None
+                        chunks_emitted += 1
                         while True:
                             try:
                                 bridge.put(c, timeout=1.0)
@@ -617,7 +743,25 @@ class IndexingService:
                             except stdlib_queue.Full:
                                 if progress.is_cancelled:
                                     return "CANCELLED", "", None
-                    sha256_result = "ERROR" if hash_failed else hasher.hexdigest()
+
+                    if hash_failed:
+                        sha256_result = "ERROR"
+                    elif chunks_emitted == 0 and not stub_skipped and source_size > 0:
+                        # The completeness invariant: a file is never recorded
+                        # with a content hash unless it actually produced
+                        # content. Hashing succeeding says nothing about whether
+                        # extraction did, so this used to return a valid digest
+                        # for a file that yielded nothing - and _detect_changes
+                        # then skipped it on every subsequent run, permanently.
+                        logger.warning(
+                            "No indexable content extracted from %s (%d bytes); "
+                            "will retry on the next run.",
+                            path,
+                            source_size,
+                        )
+                        sha256_result = "NOCONTENT"
+                    else:
+                        sha256_result = digest
                     return sha256_result, ft_summary, meta
                 finally:
                     bridge.put(sentinel)
@@ -632,6 +776,8 @@ class IndexingService:
             extract_future = loop.run_in_executor(_EXTRACT_EXECUTOR, _extract_and_chunk)
             await _pump()
             sha256, full_text_for_summary, extract_meta = await extract_future
+            if sha256 in ("ERROR", "NOCONTENT"):
+                progress.record_failure(f"{path.name}: {sha256}")
 
             summary = await loop.run_in_executor(
                 None, self._generate_summary, full_text_for_summary, path
@@ -682,7 +828,26 @@ class IndexingService:
                 )
 
     def _extract_plain_text_stream(self, path: Path) -> Iterator[str]:
+        """Last-resort reader for any extension no extractor claimed.
+
+        Gated on a binary sniff. Without it this opened *anything* as
+        utf-8/errors="replace" - and `settings.supported_extensions` contains
+        types that are not in TEXT_EXTENSIONS (.rtf, .odt, .ipynb), so they never
+        met rust_core's binary check either. An .odt is a zip: it was chunked
+        into U+FFFD noise, embedded, and stored under a valid content hash.
+
+        Emits the same "[BINARY:" stub rust_core uses rather than yielding
+        nothing, so the file is recorded as deliberately skipped instead of
+        being re-attempted on every subsequent run.
+        """
         try:
+            with open(path, "rb") as fb:
+                head = fb.read(8192)
+            if _looks_binary(head):
+                logger.debug("Plain-text fallback: %s looks binary, not indexing.", path)
+                yield f"[BINARY: {path}] Binary content not indexed."
+                return
+
             with open(path, encoding="utf-8", errors="replace") as f:
                 while True:
                     chunk = f.read(128 * 1024)
@@ -770,7 +935,9 @@ class IndexingService:
 
         def report_progress(batch_num, total_batches):
             if update_progress and progress.status != "idle":
-                progress.set_current_file(f"Phase 2/3: Embedding chunks ({batch_num}/{total_batches})…")
+                progress.set_current_file(
+                    f"Phase 2/3: Embedding chunks ({batch_num}/{total_batches})…"
+                )
 
         all_embeddings = await self.embedding_service.embed_texts(
             texts, progress_callback=report_progress if update_progress else None
@@ -841,6 +1008,15 @@ class IndexingService:
                         pending_chunks.append(item)
                         file_info["chunk_count"] += 1
                         chunks_since_commit += 1
+                elif ptype == "touch":
+                    # Content is byte-identical; only the mtime moved. Recording
+                    # it stops the next run re-hashing this file forever.
+                    await self.db.execute_write(
+                        "UPDATE files SET modified_at = ? WHERE path = ?",
+                        (item["modified_at"], path_str),
+                    )
+                    progress.record_unchanged()
+                    progress.update(0, current_file=item["path"].name)
                 elif ptype == "footer":
                     file_info = active_files.pop(path_str, None)
                     if file_info:
@@ -1013,8 +1189,7 @@ class IndexingService:
             gc.collect()
 
     async def _delete_existing_chunks(self, file_id: int) -> None:
-        old_chunks = await self.db.get_file_chunks(file_id)
-        old_ids = [str(chunk["id"]) for chunk in old_chunks]
+        old_ids = [str(cid) for cid in await self.db.get_file_chunk_ids(file_id)]
         if old_ids:
             await self.lancedb_client.delete_documents(old_ids)
         await self.db.delete_file_chunks(file_id, auto_commit=False)
@@ -1343,6 +1518,7 @@ class IndexingService:
             else:
                 failed_paths.add(key)
 
+        self._known_hashes = {}
         for fp, tag in all_files:
             key = str(fp.absolute())
             if key in failed_paths:
@@ -1350,11 +1526,14 @@ class IndexingService:
                 continue
             mtime = stat_map.get(key, "")
             stored = change_map.get(key)
-            if stored and stored[0] == mtime and stored[1] not in ("ERROR", "CANCELLED"):
+            if stored and stored[0] == mtime and stored[1] not in _INCOMPLETE_SHA_STATES:
                 skipped += 1
             elif stored:
                 changed_c += 1
                 to_index.append((fp, tag))
+                # Only a complete prior hash can authorise the early-out.
+                if stored[1] not in _INCOMPLETE_SHA_STATES:
+                    self._known_hashes[key] = stored[1]
             else:
                 new_c += 1
                 to_index.append((fp, tag))

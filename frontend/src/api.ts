@@ -146,7 +146,10 @@ export interface OcrInstallState {
 export interface OcrQueueItem {
   file_path: string;
   file_name: string;
+  /** Whole document page count. */
   page_count: number;
+  /** Pages actually queued for OCR - the denominator for pages_done. */
+  pages_queued?: number;
   pages_done: number;
   pages_pending: number;
   status: string;

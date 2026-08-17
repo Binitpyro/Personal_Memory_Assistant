@@ -40,8 +40,12 @@ async def test_queue_reports_enqueued_work(client, mock_db):
     assert len(body["items"]) == 1
     item = body["items"][0]
     assert item["file_name"] == "a.pdf"
-    assert item["pages_pending"] == 5
-    assert body["counts"]["pages_pending"] == 5
+    # 2 pages queued for OCR out of a 5-page document. Both figures used to
+    # report 5, counting the 3 native pages as OCR work that would never land.
+    assert item["page_count"] == 5
+    assert item["pages_queued"] == 2
+    assert item["pages_pending"] == 2
+    assert body["counts"]["pages_pending"] == 2
 
 
 async def test_queue_status_filter(client, mock_db):

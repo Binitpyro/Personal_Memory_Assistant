@@ -1,3 +1,4 @@
+import contextlib
 import zlib
 
 import pytest
@@ -141,6 +142,7 @@ async def test_clear_vectors_only_leaves_files_chunks_and_fts_intact(mock_db: Da
 async def test_clear_all_with_concurrent_read_activity(tmp_path):
     """Verify clear_all() succeeds on a file-backed WAL database with active/pooled read connections."""
     import asyncio
+
     db_path = str(tmp_path / "pooled_test.db")
     db = DatabaseManager(db_path, pool_size=4)
     await db.connect()
@@ -149,13 +151,15 @@ async def test_clear_all_with_concurrent_read_activity(tmp_path):
     try:
         # 1. Insert files and chunks
         for i in range(5):
-            fid = await db.insert_file({
-                "path": f"doc_{i}.txt",
-                "size": 200,
-                "modified_at": "2026-08-15T00:00:00",
-                "type": ".txt",
-                "folder_tag": "docs",
-            })
+            fid = await db.insert_file(
+                {
+                    "path": f"doc_{i}.txt",
+                    "size": 200,
+                    "modified_at": "2026-08-15T00:00:00",
+                    "type": ".txt",
+                    "folder_tag": "docs",
+                }
+            )
             text = f"Sample text content for document number {i}"
             compressed = zlib.compress(text.encode("utf-8"))
             await db.execute_write(
@@ -173,10 +177,8 @@ async def test_clear_all_with_concurrent_read_activity(tmp_path):
 
         async def background_reader():
             while not stop_reads:
-                try:
+                with contextlib.suppress(Exception):
                     await db.execute_query("SELECT COUNT(*) FROM files")
-                except Exception:
-                    pass
                 await asyncio.sleep(0.001)
 
         read_task = asyncio.create_task(background_reader())

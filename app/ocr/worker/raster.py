@@ -52,7 +52,6 @@ def render_page(doc, page_num, dpi):
 
     `scale` is dpi/72 because PDF user-space units are points.
     """
-    import numpy as np
 
     try:
         page = doc[page_num]

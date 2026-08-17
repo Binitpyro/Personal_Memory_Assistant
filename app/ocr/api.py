@@ -133,7 +133,9 @@ async def list_vlm_models():
         }
         try:
             # Use 2.0s connect/read timeout for local probes to keep the UI snappy
-            provider = create_provider(pid, api_key=None, base_url=base_url, default_model=None, timeout=2.0)
+            provider = create_provider(
+                pid, api_key=None, base_url=base_url, default_model=None, timeout=2.0
+            )
             try:
                 models = await provider.list_models()
             finally:

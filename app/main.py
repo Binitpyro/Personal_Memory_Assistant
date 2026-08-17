@@ -160,6 +160,7 @@ def _log_startup_info():
 @asynccontextmanager
 async def lifespan(fastapi_app: FastAPI):
     from app.ocr.settings import load_persisted_state
+
     load_persisted_state()
 
     _log_startup_info()

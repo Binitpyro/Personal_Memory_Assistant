@@ -154,4 +154,3 @@ async def test_select_tier_fails_for_uninstalled_tier(client, monkeypatch):
     data = res.json()
     assert data["ok"] is False
     assert data["error_code"] == "TIER_NOT_INSTALLED"
-

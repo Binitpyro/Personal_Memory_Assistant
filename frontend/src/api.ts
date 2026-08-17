@@ -91,6 +91,14 @@ export interface IndexStatus {
   changed_files: number;
   total_files: number;
   processed_files: number;
+  /** Attempted but produced nothing indexable. Distinct from skipped_files,
+   *  which means "unchanged, nothing to do". */
+  failed_files?: number;
+  /** True when the run itself died rather than finishing. */
+  run_failed?: boolean;
+  /** Only on /index/status, which is token-gated - the SSE stream omits it
+   *  because it is exempt from the token check and this can carry a path. */
+  last_error?: string;
 }
 
 export const getIndexStatus = () => json<IndexStatus>('/index/status');

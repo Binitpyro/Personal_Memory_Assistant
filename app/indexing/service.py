@@ -235,6 +235,12 @@ async def _progress_idle_guard():
 # were chunked, embedded and stored as though they were document content.
 _STUB_PREFIXES = ("[BINARY:", "[UNREADABLE:", "[ENCRYPTED")
 
+# The subset of the above that means "try again later" rather than "deliberately
+# not indexed". rust_core emits "[UNREADABLE:" when File::open or read_to_end
+# fails (lib.rs:513, :530, :533) - a transient condition. Recording such a file
+# as complete would retire it on an antivirus lock.
+_TRANSIENT_STUB_PREFIXES = ("[UNREADABLE:",)
+
 # sha256 values that mean "this file is not successfully indexed", so
 # _detect_changes must re-attempt it rather than treating it as up to date.
 #   ""          - the header's placeholder (service.py:534). The storer's commit
@@ -245,12 +251,43 @@ _STUB_PREFIXES = ("[BINARY:", "[UNREADABLE:", "[ENCRYPTED")
 _INCOMPLETE_SHA_STATES = ("", "ERROR", "CANCELLED", "NOCONTENT")
 
 
-def _looks_binary(head: bytes) -> bool:
-    """Mirror of rust_core's _is_binary_buffer (lib.rs:481-489).
+#: UTF-16/32 byte-order marks. Text in these encodings is full of NUL bytes, so
+#: a plain NUL test calls it binary. On Windows that is not an edge case:
+#: PowerShell's `>`, `Out-File` and `Export-Csv` wrote UTF-16LE by default
+#: through 5.1, so ordinary .csv/.json/.sql/.log files land here routinely.
+_TEXT_BOMS = (
+    b"\xff\xfe\x00\x00",  # UTF-32 LE
+    b"\x00\x00\xfe\xff",  # UTF-32 BE
+    b"\xff\xfe",  # UTF-16 LE
+    b"\xfe\xff",  # UTF-16 BE
+    b"\xef\xbb\xbf",  # UTF-8
+)
 
-    Any NUL, or more than 30% control bytes, in the first 8 KB.
+
+def _encoding_for(head: bytes) -> str:
+    """Codec implied by a leading BOM, else UTF-8.
+
+    The "utf-16"/"utf-32" codecs read the endianness from the BOM and strip it;
+    "utf-8-sig" strips a UTF-8 BOM and is identical to "utf-8" without one.
+    """
+    if head.startswith((b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")):
+        return "utf-32"
+    if head.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return "utf-16"
+    return "utf-8-sig"
+
+
+def _looks_binary(head: bytes) -> bool:
+    """Mirror of rust_core's _is_binary_buffer (lib.rs:481-489), plus a BOM check.
+
+    Any NUL, or more than 30% control bytes, in the first 8 KB - except that a
+    recognised text BOM settles it first. rust_core only ever sees
+    TEXT_EXTENSIONS files, which are overwhelmingly UTF-8; this fallback sees
+    everything else in `supported_extensions`, so it needs the wider test.
     """
     if not head:
+        return False
+    if head.startswith(_TEXT_BOMS):
         return False
     if b"\x00" in head:
         return True
@@ -402,7 +439,10 @@ class IndexingService:
         self._summary_dirty_file_ids: set[int] = set()
         # {absolute path: stored sha256} for the files selected by the current
         # run, so _stream_extract_and_prepare can early-out on unchanged content.
-        # Populated by _detect_changes, cleared when the run ends.
+        # Populated by _detect_changes and released with the service instance -
+        # every caller builds a throwaway IndexingService per run
+        # (app/api/indexing.py, app/indexing/watcher.py), so it does not
+        # accumulate. It is O(changed files) resident for the length of a run.
         self._known_hashes: dict[str, str] = {}
 
     def cancel_indexing(self):
@@ -484,9 +524,16 @@ class IndexingService:
                 # index_folders runs as an unhandled FastAPI background task, so
                 # this is the only place the failure can be recorded anywhere the
                 # caller can see it.
+                #
+                # Recorded, but NOT returned on. Files whose footers did commit
+                # already hold a valid sha256 and matching mtime, so
+                # _detect_changes will skip them forever - returning here would
+                # skip _flush_file_summaries and drop their summary vectors
+                # permanently, and would leave the retrieval cache serving
+                # pre-run results. Finishing the tail is what makes the partial
+                # work usable.
                 logger.error("Indexing run failed: %s", exc, exc_info=True)
                 progress.fail(f"{type(exc).__name__}: {exc}")
-                return
             finally:
                 if use_bulk_mode:
                     await self.db.exit_ingest_mode()
@@ -678,6 +725,7 @@ class IndexingService:
 
                 chunks_emitted = 0
                 stub_skipped = False
+                transient_stub = False
                 source_size = stat.st_size
 
                 def _get_stream():
@@ -712,6 +760,12 @@ class IndexingService:
                             logger.debug("Skipping stub for %s — no indexable text.", path)
                             ft_summary = ""
                             stub_skipped = True
+                            # "[UNREADABLE:" is rust_core's *transient* I/O
+                            # failure stub - an AV lock, a network share blip, a
+                            # file held open elsewhere. Treating it as a
+                            # deliberate skip would hand the file a real digest
+                            # and retire it permanently on a temporary error.
+                            transient_stub = fragment.startswith(_TRANSIENT_STUB_PREFIXES)
                             break
 
                         for c in chunker.process(fragment):
@@ -744,9 +798,22 @@ class IndexingService:
                                 if progress.is_cancelled:
                                     return "CANCELLED", "", None
 
-                    if hash_failed:
+                    # A scanned document legitimately yields no *native* text:
+                    # that is the OCR case, not a failure. It must keep its real
+                    # digest, because `files.sha256` is the OCR cache's
+                    # content_key (app/ocr/manager.py:407 -> ocr/cache.py). A
+                    # sentinel there would be shared by every scanned document in
+                    # the corpus and the cache PK would collide across them.
+                    ocr_pending = bool(meta is not None and getattr(meta, "ocr_pages", ()))
+
+                    if hash_failed or transient_stub:
                         sha256_result = "ERROR"
-                    elif chunks_emitted == 0 and not stub_skipped and source_size > 0:
+                    elif (
+                        chunks_emitted == 0
+                        and not stub_skipped
+                        and not ocr_pending
+                        and source_size > 0
+                    ):
                         # The completeness invariant: a file is never recorded
                         # with a content hash unless it actually produced
                         # content. Hashing succeeding says nothing about whether
@@ -848,7 +915,9 @@ class IndexingService:
                 yield f"[BINARY: {path}] Binary content not indexed."
                 return
 
-            with open(path, encoding="utf-8", errors="replace") as f:
+            # Passing the binary gate is not enough: UTF-16 read as UTF-8 still
+            # decodes to U+FFFD noise, which is the same defect one layer down.
+            with open(path, encoding=_encoding_for(head), errors="replace") as f:
                 while True:
                     chunk = f.read(128 * 1024)
                     if not chunk:

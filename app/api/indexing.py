@@ -182,7 +182,11 @@ async def progress_stream(db: DatabaseManager = Depends(get_db)):
                 "failed_files": progress.failed_files,
                 "unchanged_files": progress.unchanged_files,
                 "run_failed": progress.run_failed,
-                "last_error": progress.last_error,
+                # `last_error` is deliberately NOT on this payload. This endpoint
+                # is on the token exemption list (app/main.py:509) and the field
+                # carries exception text, which for OSError/PermissionError
+                # embeds the full filesystem path. It is served on
+                # /api/index/status instead, which is token-gated.
                 "current_file": progress.current_file,
                 "scan_method": progress.scan_method,
                 "scan_duration_ms": progress.scan_duration_ms,

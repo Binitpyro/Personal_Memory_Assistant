@@ -139,13 +139,20 @@ async def test_reset_running_recovers_orphaned_rows(mock_db):
 
 
 async def test_counts_reports_pages_pending(mock_db):
+    """Owed pages come from the queued set, not the document page count.
+
+    This previously asserted (10 - 4) + 4, i.e. page_count as the denominator,
+    and to make that arithmetic work it recorded 4 pages done against a
+    document that had only 3 pages queued. Both halves were artefacts of the
+    same bug: page_count is the whole PDF, pages_json is what OCR was asked for.
+    """
     await ocr_queue.enqueue_document(mock_db, PATH_A, [0, 1, 2], 10)
     await ocr_queue.enqueue_document(mock_db, PATH_B, [0], 4)
-    await ocr_queue.mark_progress(mock_db, PATH_A, 4)
+    await ocr_queue.mark_progress(mock_db, PATH_A, 2)
 
     counts = await ocr_queue.counts(mock_db)
     assert counts["pending"] == 2
-    assert counts["pages_pending"] == (10 - 4) + 4
+    assert counts["pages_pending"] == (3 - 2) + 1
 
 
 async def test_list_queue_filters_by_status(mock_db):
@@ -291,3 +298,36 @@ async def test_clear_cache_resets_the_byte_counter(mock_db):
     await ocr_cache.put_pages(mock_db, KEY, [page(0), page(1)])
     assert await ocr_cache.clear_cache(mock_db) == 2
     assert await ocr_cache.total_bytes(mock_db) == 0
+
+
+async def test_pages_pending_counts_queued_pages_not_document_pages(mock_db):
+    """A mixed native/scanned PDF must not report its native pages as pending.
+
+    `page_count` is the whole document (service.py passes meta.page_count
+    alongside meta.ocr_pages); only `pages_json` holds what OCR was asked for.
+    Deriving the backlog from page_count left a 10-page PDF with 3 scanned
+    pages reporting 7 pages pending forever, so the Library backlog banner
+    never cleared.
+    """
+    await ocr_queue.enqueue_document(mock_db, r"C:\docs\mixed.pdf", [4, 5, 6], 10)
+
+    counts = await ocr_queue.counts(mock_db)
+    assert counts["pages_pending"] == 3, "only the queued pages are owed"
+
+    await ocr_queue.claim_next(mock_db, max_attempts=3)
+    await ocr_queue.mark_progress(mock_db, r"C:\docs\mixed.pdf", 3)
+
+    counts = await ocr_queue.counts(mock_db)
+    assert counts["pages_pending"] == 0, "all queued pages done means nothing pending"
+
+
+async def test_pages_pending_survives_corrupt_pages_json(mock_db):
+    """json_array_length raises on invalid JSON; the count must not blow up."""
+    await ocr_queue.enqueue_document(mock_db, r"C:\docs\bad.pdf", [0, 1], 2)
+    await mock_db.execute_write(
+        "UPDATE ocr_queue SET pages_json = ? WHERE file_path = ?",
+        ("{not json", r"C:\docs\bad.pdf"),
+    )
+
+    counts = await ocr_queue.counts(mock_db)
+    assert counts["pages_pending"] == 0

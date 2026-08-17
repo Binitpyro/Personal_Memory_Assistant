@@ -486,7 +486,15 @@ class OcrManager:
                 )
                 return
 
-        expected_count = row.page_count or len(row.pages)
+        # The pages actually queued for OCR, NOT the document's page count.
+        # row.page_count is the whole PDF (service.py passes meta.page_count
+        # alongside meta.ocr_pages), so for a mixed native/scanned document
+        # this used to compare 3 recovered pages against a 10-page document:
+        # a fully successful run read as incomplete, was retried to
+        # exhaustion, then marked done with "3/10 pages, incomplete" - a
+        # message whose two halves contradicted each other, because `missing`
+        # was correctly empty.
+        expected_count = len(row.pages)
         if error_code and len(all_pages) < expected_count:
             # Document encountered a crash, OOM, or timeout mid-run.
             terminal = row.attempts >= settings.ocr_max_attempts

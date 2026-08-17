@@ -238,14 +238,22 @@ async def list_queue(
 
 
 async def counts(db) -> dict[str, int]:
-    """Row counts per status, plus pages still owed across pending/running."""
+    """Row counts per status, plus pages still owed across pending/running.
+
+    Owed pages come from `pages_json`, the set actually queued for OCR - not
+    from `page_count`, which is the whole document. Using the latter left a
+    mixed native/scanned PDF reporting its native pages as permanently
+    pending, so the Library backlog banner never cleared.
+    """
     result = {s.value: 0 for s in QueueStatus}
     rows = await db.execute_query("SELECT status, COUNT(*) FROM ocr_queue GROUP BY status")
     for status, count in rows:
         result[str(status)] = int(count)
 
     pending_pages = await db.execute_query(
-        "SELECT COALESCE(SUM(MAX(page_count - pages_done, 0)), 0) FROM ocr_queue "
+        "SELECT COALESCE(SUM(MAX("
+        "  CASE WHEN json_valid(pages_json) THEN json_array_length(pages_json) "
+        "       ELSE 0 END - pages_done, 0)), 0) FROM ocr_queue "
         "WHERE status IN ('pending', 'running')"
     )
     result["pages_pending"] = int(pending_pages[0][0]) if pending_pages else 0

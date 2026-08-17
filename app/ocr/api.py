@@ -364,7 +364,10 @@ async def list_queue(
                 "file_name": Path(r.file_path).name,
                 "page_count": r.page_count,
                 "pages_done": r.pages_done,
-                "pages_pending": max(r.page_count - r.pages_done, 0),
+                # page_count is the whole document; the OCR denominator is
+                # the queued subset.
+                "pages_queued": len(r.pages),
+                "pages_pending": max(len(r.pages) - r.pages_done, 0),
                 "status": r.status.value,
                 "attempts": r.attempts,
                 "last_error": r.last_error,

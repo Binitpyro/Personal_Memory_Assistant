@@ -16,9 +16,13 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.config import settings
+from app.ocr import cache as ocr_cache
 from app.ocr import manager as manager_mod
+from app.ocr import protocol as proto
 from app.ocr import queue as ocr_queue
 from app.ocr.manager import OcrManager
+from app.ocr.settings import VLM_TIER
+from app.ocr.types import OcrLine, OcrPage
 
 STUB_HEADER = """
 import json, os, sys, time
@@ -527,3 +531,64 @@ for line in sys.stdin:
     elif msg["t"] == protocol.REQ_SHUTDOWN:
         break
 """
+
+
+async def test_force_ocr_ignores_the_cache(mgr, mock_db, stub_env, pdf_path, monkeypatch):
+    """The documented escape hatch was inert: the flag was written, never read.
+
+    _process_doc consulted ocr_cache unconditionally, so Force OCR on a file
+    with cached pages handed back exactly the text the user was overriding -
+    which is the whole point of the gate's blind spot (gate.py:9-11).
+    """
+    monkeypatch.setattr(settings, "ocr_conf_floor", 0.3)
+    stub_env(GOOD_STUB)
+    row = await seed(mock_db, pdf_path, pages=(0,))
+
+    # Seed the cache with text the forced run must NOT return.
+    await ocr_cache.put_pages(
+        mock_db,
+        "c" * 64,
+        [OcrPage(page_num=0, lines=(OcrLine("stale cached text", 0.9, False),), mean_conf=0.9)],
+        engine_id=mgr._active_engine_id(),
+    )
+
+    # Same path POST /ocr/force takes (api.py:412): re-enqueue with force=True.
+    await ocr_queue.enqueue_document(mock_db, row.file_path, [0], 1, force=True)
+    forced = await ocr_queue.get_row(mock_db, row.file_path)
+    assert forced.force_ocr is True
+
+    await mgr._process_doc(forced)
+
+    _p, pages = mgr._indexing.index_ocr_pages.await_args.args
+    assert pages[0].indexable_text == "page 0 text", "must re-OCR, not serve the cache"
+    await mgr.stop()
+
+
+def test_stale_claim_window_tracks_the_active_tier(mgr, monkeypatch):
+    """A fixed threshold would steal a VLM document mid-run.
+
+    ocr_vlm_doc_timeout_s is 7200s against 600s for the worker tiers, so the
+    reclaim window has to follow whichever tier is active.
+    """
+    monkeypatch.setattr(settings, "ocr_tier", "cpu")
+    monkeypatch.setattr(settings, "ocr_doc_timeout_s", 600)
+    assert mgr._stale_claim_seconds() == 1200
+
+    monkeypatch.setattr(settings, "ocr_tier", VLM_TIER)
+    monkeypatch.setattr(settings, "ocr_vlm_doc_timeout_s", 7200)
+    assert mgr._stale_claim_seconds() == 14400
+    assert mgr._stale_claim_seconds() > settings.ocr_vlm_doc_timeout_s
+
+
+def test_crash_reason_carries_the_worker_stderr(mgr):
+    """_spawn_sync clears the tail, so the traceback had to be captured here."""
+    mgr._stderr_tail.extend(["Traceback (most recent call last):", "  ...", "RuntimeError: boom"])
+
+    enriched = mgr._with_stderr_tail(proto.E_WORKER_CRASHED)
+    assert enriched.startswith(proto.E_WORKER_CRASHED)
+    assert "RuntimeError: boom" in enriched
+
+    # Non-crash codes are passed through untouched.
+    assert mgr._with_stderr_tail("OCR_PAGE_TIMEOUT") == "OCR_PAGE_TIMEOUT"
+    mgr._stderr_tail.clear()
+    assert mgr._with_stderr_tail(proto.E_WORKER_CRASHED) == proto.E_WORKER_CRASHED

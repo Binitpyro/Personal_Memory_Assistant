@@ -331,3 +331,50 @@ async def test_pages_pending_survives_corrupt_pages_json(mock_db):
 
     counts = await ocr_queue.counts(mock_db)
     assert counts["pages_pending"] == 0
+
+
+async def test_stale_running_row_is_reclaimed(mock_db):
+    """A process that died mid-document must not strand the row until restart.
+
+    reset_running() only runs at OcrManager.start(); on a desktop app that can
+    be days away. claim_next had no age predicate, so the row was invisible to
+    every subsequent pass.
+    """
+    await ocr_queue.enqueue_document(mock_db, PATH_A, [0], 1)
+    claimed = await ocr_queue.claim_next(mock_db, max_attempts=3)
+    assert claimed is not None
+
+    # Nothing to take while the claim is fresh, even with the predicate on.
+    assert await ocr_queue.claim_next(mock_db, max_attempts=3, stale_after_s=600) is None
+
+    # Backdate the claim past the threshold.
+    await mock_db.execute_write(
+        "UPDATE ocr_queue SET updated_at = datetime('now', '-3600 seconds') WHERE file_path = ?",
+        (PATH_A,),
+    )
+    reclaimed = await ocr_queue.claim_next(mock_db, max_attempts=3, stale_after_s=600)
+    assert reclaimed is not None
+    assert reclaimed.file_path == PATH_A
+    assert reclaimed.attempts == 2, "a reclaim is another attempt, not a free retry"
+
+
+async def test_stale_reclaim_is_off_by_default(mock_db):
+    """Without an explicit threshold the predicate must not fire at all."""
+    await ocr_queue.enqueue_document(mock_db, PATH_A, [0], 1)
+    await ocr_queue.claim_next(mock_db, max_attempts=3)
+    await mock_db.execute_write(
+        "UPDATE ocr_queue SET updated_at = datetime('now', '-99999 seconds') WHERE file_path = ?",
+        (PATH_A,),
+    )
+    assert await ocr_queue.claim_next(mock_db, max_attempts=3) is None
+
+
+async def test_stale_reclaim_still_respects_the_attempt_budget(mock_db):
+    await ocr_queue.enqueue_document(mock_db, PATH_A, [0], 1)
+    for _ in range(3):
+        await ocr_queue.claim_next(mock_db, max_attempts=3, stale_after_s=1)
+        await mock_db.execute_write(
+            "UPDATE ocr_queue SET updated_at = datetime('now', '-60 seconds') WHERE file_path = ?",
+            (PATH_A,),
+        )
+    assert await ocr_queue.claim_next(mock_db, max_attempts=3, stale_after_s=1) is None

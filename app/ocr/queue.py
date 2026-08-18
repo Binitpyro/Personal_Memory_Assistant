@@ -93,12 +93,22 @@ async def enqueue_document(
     )
 
 
-async def claim_next(db, *, max_attempts: int) -> OcrQueueRow | None:
+async def claim_next(
+    db, *, max_attempts: int, stale_after_s: int | None = None
+) -> OcrQueueRow | None:
     """Atomically take the oldest pending row and mark it running.
 
     Increments `attempts` on claim, not on failure: a worker that hard-crashes
     never gets to report anything, and without this a crash-loop would retry
     the same document forever.
+
+    With `stale_after_s`, also reclaims rows left in `running` by a process
+    that died mid-document. `reset_running()` only runs at startup, so without
+    this such a row was stuck until the next restart - and on a desktop app
+    that can be days. The caller supplies the threshold because it is
+    tier-dependent: the VLM tier allows ocr_vlm_doc_timeout_s (7200s) per
+    document against 600s for the worker tiers, and a fixed value would
+    reclaim a legitimately-running document out from under itself.
     """
     rows = await db.execute_write_returning(
         f"""
@@ -108,13 +118,21 @@ async def claim_next(db, *, max_attempts: int) -> OcrQueueRow | None:
                updated_at = datetime('now')
          WHERE file_path = (
                SELECT file_path FROM ocr_queue
-                WHERE status = 'pending' AND attempts < ?
+                WHERE attempts < ?
+                  AND (status = 'pending'
+                       OR (? IS NOT NULL
+                           AND status = 'running'
+                           AND updated_at <= datetime('now', ?)))
                 ORDER BY enqueued_at
                 LIMIT 1
          )
         RETURNING {_COLUMNS}
         """,  # nosec B608 # noqa: S608
-        (int(max_attempts),),
+        (
+            int(max_attempts),
+            None if stale_after_s is None else int(stale_after_s),
+            f"-{int(stale_after_s or 0)} seconds",
+        ),
     )
     if not rows:
         return None

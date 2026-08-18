@@ -302,7 +302,11 @@ class OcrManager:
                     await self._sleep_or_kick(_DISABLED_POLL_S)
                     continue
 
-                row = await ocr_queue.claim_next(self.db, max_attempts=settings.ocr_max_attempts)
+                row = await ocr_queue.claim_next(
+                    self.db,
+                    max_attempts=settings.ocr_max_attempts,
+                    stale_after_s=self._stale_claim_seconds(),
+                )
                 if row is None:
                     await self._retire_worker("idle")
                     await self._finalize_indexes()
@@ -393,6 +397,36 @@ class OcrManager:
 
         return done, ""
 
+    def _stale_claim_seconds(self) -> int:
+        """How long a `running` row may sit before another pass may reclaim it.
+
+        Keyed to the active tier's document timeout rather than a constant:
+        ocr_vlm_doc_timeout_s is 7200s against 600s for the worker tiers
+        (config.py:148, :165), so one fixed value would either never reclaim a
+        worker-tier row or would steal a VLM document mid-run. Doubled, because
+        a document that hits its own timeout is killed and reported normally -
+        anything still `running` past twice that had no one left to report it.
+        """
+        base = (
+            settings.ocr_vlm_doc_timeout_s
+            if settings.ocr_tier == VLM_TIER
+            else settings.ocr_doc_timeout_s
+        )
+        return max(int(base) * 2, 300)
+
+    def _with_stderr_tail(self, code: str) -> str:
+        """Attach the worker's dying words to a crash code.
+
+        _spawn_sync clears _stderr_tail and the drain loop spawns the next
+        worker immediately, so the traceback explaining a crash was gone before
+        anyone could read it - runtime_state() only ever exposed the tail of
+        whichever worker is current. Folding it into the failure reason gets it
+        into ocr_queue.last_error, which the queue UI already renders.
+        """
+        if code != proto.E_WORKER_CRASHED or not self._stderr_tail:
+            return code
+        return f"{code}: {' | '.join(list(self._stderr_tail)[-3:])}"
+
     async def _process_doc(self, row: OcrQueueRow) -> None:
         path = Path(row.file_path)
         self._current_file = path.name
@@ -417,9 +451,21 @@ class OcrManager:
             await ocr_queue.mark_skipped(self.db, row.file_path, "file missing on disk")
             return
 
-        cached = await ocr_cache.get_pages(
-            self.db, content_key, list(row.pages), engine_id=self._active_engine_id()
-        )
+        # force_ocr is the documented escape hatch for the gate's blind spot
+        # (gate.py:9-11): a page whose text layer looked native but was garbage.
+        # Consulting the cache would hand back exactly the text the user is
+        # trying to override, which made the whole feature inert - the API wrote
+        # the flag, the row carried it, and nothing ever read it. The re-OCR
+        # then overwrites the stale rows, since put_pages is INSERT OR REPLACE.
+        cached: dict[int, OcrPage] = {}
+        if row.force_ocr:
+            logger.info(
+                "OCR forced for %s - ignoring %d cached page(s).", path.name, len(row.pages)
+            )
+        else:
+            cached = await ocr_cache.get_pages(
+                self.db, content_key, list(row.pages), engine_id=self._active_engine_id()
+            )
         todo = [p for p in row.pages if p not in cached]
 
         fresh: list[OcrPage] = []
@@ -503,7 +549,7 @@ class OcrManager:
         if error_code and len(all_pages) < expected_count:
             # Document encountered a crash, OOM, or timeout mid-run.
             terminal = row.attempts >= settings.ocr_max_attempts
-            reason = error_code
+            reason = self._with_stderr_tail(error_code)
             missing = [p for p in row.pages if p not in {pg.page_num for pg in all_pages}]
             missing_str = (
                 f"missing pages {_format_page_ranges(missing)}" if missing else "incomplete"
@@ -529,7 +575,7 @@ class OcrManager:
                 await ocr_queue.mark_failed(self.db, row.file_path, reason, terminal=False)
         elif not all_pages and row.pages:
             # Zero pages back when pages were asked for.
-            reason = error_code or "no pages produced"
+            reason = self._with_stderr_tail(error_code) if error_code else "no pages produced"
             terminal = row.attempts >= settings.ocr_max_attempts
             self._last_error = f"{path.name}: {reason}"
             await ocr_queue.mark_failed(self.db, row.file_path, reason, terminal=terminal)

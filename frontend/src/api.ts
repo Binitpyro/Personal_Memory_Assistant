@@ -62,6 +62,15 @@ export interface HealthResponse {
   indexing: string;
   /** Boot-time sync status for Split-Brain mode: idle | syncing | done | error */
   split_brain_sync_status?: 'idle' | 'syncing' | 'done' | 'error';
+  /**
+   * Startup outcome of the optional subsystems. Each begins its life inside a
+   * try/except that only logs, so a failure was previously invisible outside
+   * the server console — the user found out when PDFs never got text.
+   *
+   * 'disabled' is a config choice, not a fault: do not render it as one.
+   * 'unknown' means startup has not been attempted, which is not 'down'.
+   */
+  subsystems?: Record<string, { state: 'up' | 'down' | 'disabled' | 'unknown'; detail: string }>;
 }
 
 export const getHealth = () => json<HealthResponse>('/health');

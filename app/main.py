@@ -122,6 +122,11 @@ def health(db: DatabaseManager):
         "model_ready": model_ready,
         "indexing": "idle",
         "split_brain_sync_status": state.split_brain_sync_status,
+        # Copied, not aliased: the payload must not hand a caller a live handle
+        # on process state. `status` deliberately ignores these — OCR being off
+        # does not degrade search, and ocr_enabled defaults to False, so folding
+        # it in would report a healthy default install as degraded.
+        "subsystems": {k: dict(v) for k, v in state.subsystems.items()},
     }
 
 
@@ -207,13 +212,16 @@ async def lifespan(fastapi_app: FastAPI):
             status = reranker_status()
             if status["available"]:
                 logger.info("Reranker model loaded successfully.")
+                state.set_subsystem("reranker", "up")
             else:
                 logger.warning(
                     "Reranking is OFF - results will be returned in fusion order. %s",
                     status["reason"],
                 )
+                state.set_subsystem("reranker", "down", str(status["reason"]))
         except Exception as e:
             logger.warning("Reranker preload failed: %s", e)
+            state.set_subsystem("reranker", "down", str(e))
 
     rerank_task = asyncio.create_task(_bg_preload_reranker_task())
     state.bg_tasks.add(rerank_task)
@@ -279,8 +287,13 @@ async def lifespan(fastapi_app: FastAPI):
 
         ocr_manager = await get_ocr()
         await ocr_manager.start()
+        # "disabled" rather than "up" when the feature is off: ocr_enabled
+        # defaults to False, and a red pip on a default install is a bug report
+        # waiting to happen.
+        state.set_subsystem("ocr", "up" if settings.ocr_enabled else "disabled")
     except Exception as err:
         logger.warning("OCR manager unavailable: %s", err)
+        state.set_subsystem("ocr", "down", str(err))
 
     # Folder watcher. Like OCR above, a failure here must never stop the server
     # coming up - it is a convenience, not a dependency of serving queries.
@@ -293,8 +306,10 @@ async def lifespan(fastapi_app: FastAPI):
             lambda: IndexingService(db_manager, get_emb(), get_lancedb()),
         )
         watcher.start()
+        state.set_subsystem("watcher", "up")
     except Exception as err:
         logger.warning("Folder watcher unavailable: %s", err)
+        state.set_subsystem("watcher", "down", str(err))
 
     logger.info("Server ready (v%s)", APP_VERSION)
     yield

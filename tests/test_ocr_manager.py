@@ -21,7 +21,7 @@ from app.ocr import manager as manager_mod
 from app.ocr import protocol as proto
 from app.ocr import queue as ocr_queue
 from app.ocr.manager import OcrManager
-from app.ocr.settings import VLM_TIER
+from app.ocr.settings import GPU_TIER, VLM_TIER
 from app.ocr.types import OcrLine, OcrPage
 
 STUB_HEADER = """
@@ -592,3 +592,65 @@ def test_crash_reason_carries_the_worker_stderr(mgr):
     assert mgr._with_stderr_tail("OCR_PAGE_TIMEOUT") == "OCR_PAGE_TIMEOUT"
     mgr._stderr_tail.clear()
     assert mgr._with_stderr_tail(proto.E_WORKER_CRASHED) == proto.E_WORKER_CRASHED
+
+
+class _FakeProc:
+    """Stands in for a live worker process in the idle-linger tests."""
+
+    def poll(self):
+        return None
+
+
+async def test_idle_worker_lingers_before_retiring(mgr, monkeypatch):
+    """ocr_worker_idle_timeout_s existed in config and was read nowhere.
+
+    The worker was killed the instant the queue drained, so under the normal
+    one-file-at-a-time watcher pattern every document paid a fresh venv start
+    plus an ONNX model load.
+    """
+    monkeypatch.setattr(settings, "ocr_tier", "cpu")
+    monkeypatch.setattr(settings, "ocr_worker_idle_timeout_s", 60)
+    mgr._proc = _FakeProc()
+    retired = []
+    monkeypatch.setattr(mgr, "_retire_worker", AsyncMock(side_effect=lambda r: retired.append(r)))
+
+    # First drain starts the clock and keeps the worker.
+    wait = await mgr._retire_if_idle_long_enough()
+    assert retired == []
+    assert mgr._idle_since is not None
+    assert 0 < wait <= 60, "should wake when the linger expires, not a poll later"
+
+    # Still inside the window.
+    assert await mgr._retire_if_idle_long_enough() is not None
+    assert retired == []
+
+    # Past it.
+    mgr._idle_since -= 61
+    await mgr._retire_if_idle_long_enough()
+    assert retired == ["idle"]
+    assert mgr._idle_since is None
+
+
+async def test_gpu_tier_never_lingers(mgr, monkeypatch):
+    """A resident DirectML session holds VRAM against a budget already over."""
+    monkeypatch.setattr(settings, "ocr_tier", GPU_TIER)
+    monkeypatch.setattr(settings, "ocr_worker_idle_timeout_s", 600)
+    mgr._proc = _FakeProc()
+    retired = []
+    monkeypatch.setattr(mgr, "_retire_worker", AsyncMock(side_effect=lambda r: retired.append(r)))
+
+    await mgr._retire_if_idle_long_enough()
+
+    assert retired == ["idle"], "GPU tier must retire immediately"
+    assert mgr._idle_since is None
+
+
+async def test_no_worker_means_nothing_to_linger_on(mgr, monkeypatch):
+    monkeypatch.setattr(settings, "ocr_tier", "cpu")
+    mgr._proc = None
+    retired = []
+    monkeypatch.setattr(mgr, "_retire_worker", AsyncMock(side_effect=lambda r: retired.append(r)))
+
+    assert await mgr._retire_if_idle_long_enough() > 0
+    assert retired == []
+    assert mgr._idle_since is None

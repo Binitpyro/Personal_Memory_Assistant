@@ -24,7 +24,7 @@ import time
 from pathlib import Path
 
 from app.config import settings
-from app.ocr.raster_png import RasterError, render_page_png
+from app.ocr.raster_png import RasterError, render_page_from, render_page_png
 from app.ocr.types import OcrLine, OcrPage
 
 logger = logging.getLogger(__name__)
@@ -158,11 +158,15 @@ def to_page(page_num: int, text: str, elapsed_ms: int) -> OcrPage:
     )
 
 
-async def recognize_page(path: str | Path, page_num: int) -> OcrPage:
+async def recognize_page(path: str | Path, page_num: int, *, doc=None) -> OcrPage:
     """Rasterize one page and transcribe it with the selected vision model.
 
     Never raises for a page-level problem: a bad page returns an error record so
     the rest of the document still indexes, matching the worker's contract.
+
+    `doc` is an optional already-open pypdfium2 document from
+    `raster_png.open_pdf`. Without it this opens and closes the file itself,
+    which for a multi-page document meant one full PDF parse per page.
     """
     from app.ocr.settings import vlm_selection
     from app.providers import create_provider, env_base_url
@@ -180,7 +184,10 @@ async def recognize_page(path: str | Path, page_num: int) -> OcrPage:
 
     started = time.time()
     try:
-        image = await asyncio.to_thread(render_page_png, path, page_num, settings.ocr_dpi)
+        if doc is None:
+            image = await asyncio.to_thread(render_page_png, path, page_num, settings.ocr_dpi)
+        else:
+            image = await asyncio.to_thread(render_page_from, doc, page_num, settings.ocr_dpi)
     except RasterError as exc:
         logger.debug("raster failed on page %s: %s", page_num, exc)
         return OcrPage(

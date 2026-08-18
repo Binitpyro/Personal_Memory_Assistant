@@ -218,3 +218,77 @@ async def test_can_run_while_indexing_is_active(service, mock_db):
     assert written > 0
     rows = await mock_db.execute_query("SELECT source FROM chunks WHERE source = 'ocr'")
     assert rows
+
+
+async def test_ocr_write_cannot_commit_the_indexers_transaction(service, mock_db):
+    """The defect this savepoint exists for.
+
+    index_ocr_pages used begin_transaction()/commit(). begin_transaction()
+    no-ops when _in_external_transaction is already set, so the commit() that
+    followed committed *the indexer's* open transaction and cleared the flag -
+    making a half-finished index batch durable and leaving the storer writing
+    outside any transaction for the rest of its window.
+    """
+    await insert_file(mock_db)
+
+    # Stand in for the storer holding its commit window open.
+    conn = mock_db._get_conn()
+    await mock_db.begin_transaction()
+    await conn.execute(
+        "INSERT INTO files (path, size, modified_at, type, folder_tag, sha256) "
+        "VALUES ('indexer-in-flight.txt', 1, '2026-01-01T00:00:00', '.txt', 'docs', 'x')"
+    )
+
+    written = await service.index_ocr_pages(FILE_PATH, [ocr_page(0, (LONG, 0.95, False))])
+    assert written > 0
+
+    assert mock_db._in_external_transaction is True, (
+        "the indexer's transaction must still be open after an OCR write"
+    )
+
+    # And it is still *its* transaction: rolling back drops the indexer's row.
+    await mock_db.rollback_transaction()
+    rows = await mock_db.execute_query(
+        "SELECT COUNT(*) FROM files WHERE path = 'indexer-in-flight.txt'"
+    )
+    assert rows[0][0] == 0, "the indexer must still own its own rollback"
+
+
+async def test_failed_ocr_write_does_not_discard_the_indexers_work(service, mock_db):
+    """The mirror image: rollback_transaction() used to bin the indexer's chunks."""
+    file_id = await insert_file(mock_db)
+
+    conn = mock_db._get_conn()
+    await mock_db.begin_transaction()
+    await conn.execute(
+        "INSERT INTO chunks (file_id, start_offset, end_offset, text_preview) VALUES (?,?,?,?)",
+        (file_id, 0, 5, zlib.compress(b"indexer chunk, uncommitted")),
+    )
+
+    # Make the OCR insert blow up midway.
+    async def boom(*_a, **_kw):
+        raise RuntimeError("insert exploded")
+
+    service._flush_pending_chunks_sqlite = boom
+
+    with pytest.raises(RuntimeError, match="insert exploded"):
+        await service.index_ocr_pages(FILE_PATH, [ocr_page(0, (LONG, 0.95, False))])
+
+    assert mock_db._in_external_transaction is True
+    rows = await mock_db.execute_query("SELECT COUNT(*) FROM chunks WHERE file_id = ?", (file_id,))
+    assert rows[0][0] >= 1, "the indexer's uncommitted chunk must survive an OCR rollback"
+    await mock_db.rollback_transaction()
+
+
+async def test_savepoint_commits_normally_with_no_indexer_transaction(service, mock_db):
+    """Standalone OCR must still be durable - SAVEPOINT/RELEASE outside a
+    transaction has to behave like BEGIN/COMMIT."""
+    await insert_file(mock_db)
+    assert mock_db._in_external_transaction is False
+
+    written = await service.index_ocr_pages(FILE_PATH, [ocr_page(0, (LONG, 0.95, False))])
+    assert written > 0
+    assert mock_db._in_external_transaction is False
+
+    rows = await mock_db.execute_query("SELECT COUNT(*) FROM chunks WHERE source = 'ocr'")
+    assert rows[0][0] > 0

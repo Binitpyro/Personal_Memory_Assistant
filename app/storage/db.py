@@ -1213,6 +1213,50 @@ class DatabaseManager:
         finally:
             self._in_external_transaction = False
 
+    @serialize_write
+    async def begin_savepoint(self) -> str:
+        """Open a nested savepoint and return its name.
+
+        The isolation primitive for a writer that may run while another holds
+        an external transaction open on the same connection.
+        begin_transaction()/commit() cannot do this: begin_transaction() no-ops
+        when `_in_external_transaction` is already set, and the matching
+        commit() then commits *the other writer's* transaction and clears the
+        flag - while rollback_transaction() discards its uncommitted work.
+
+        SAVEPOINT nests instead. Outside a transaction it behaves like
+        BEGIN/COMMIT; inside one it is a marker, so RELEASE and ROLLBACK TO
+        leave the enclosing transaction exactly as they found it.
+
+        Unlike write_transaction(), this does not hold `_write_lock` across the
+        caller's work - it could not, since every write it would make is
+        @serialize_write and asyncio.Lock is not reentrant. The tradeoff is in
+        the docstring of the caller.
+        """
+        conn = self._get_conn()
+        name = f"sp_{uuid.uuid4().hex}"
+        await conn.execute(f"SAVEPOINT {name}")  # nosec B608 - name is a local uuid
+        return name
+
+    @serialize_write
+    async def release_savepoint(self, name: str) -> None:
+        """Keep the savepoint's work. Commits only if we opened the transaction."""
+        conn = self._get_conn()
+        await conn.execute(f"RELEASE {name}")  # nosec B608 - name from begin_savepoint
+        if not self._in_external_transaction:
+            await conn.commit()
+
+    @serialize_write
+    async def rollback_savepoint(self, name: str) -> None:
+        """Undo back to the savepoint, leaving any enclosing transaction intact."""
+        conn = self._get_conn()
+        with contextlib.suppress(Exception):
+            await conn.execute(f"ROLLBACK TO {name}")  # nosec B608 - internal name
+            await conn.execute(f"RELEASE {name}")  # nosec B608 - internal name
+        if not self._in_external_transaction:
+            with contextlib.suppress(Exception):
+                await conn.rollback()
+
     @contextlib.asynccontextmanager
     async def write_transaction(self):
         """Context manager that acquires the write lock and manages an isolated transaction/savepoint."""

@@ -576,12 +576,26 @@ class OcrManager:
             except Exception as exc:
                 from app.indexing.service import progress
 
-                # index_ocr_pages raises outright if an index run started after
-                # the drain loop's idle check (service.py:1012). That is someone
-                # else's timing, not a bad document, and it heals by itself -
-                # terminally failing it here retired documents for good.
+                # There is no such raise, and there never was: the comment here
+                # used to cite "service.py:1012" for an index_ocr_pages that
+                # raises when an index run is active, and no such line exists.
+                # index_ocr_pages now writes inside a SAVEPOINT, so a concurrent
+                # index run is genuinely safe rather than merely believed to be.
+                #
+                # The branch stays as a defensive deferral for a transient
+                # RuntimeError raised while an index run happens to be up.
+                #
+                # Known, deliberately NOT changed here: release_claim() refunds
+                # the attempt, so a *persistent* RuntimeError during a long
+                # index run retries the same document indefinitely with no
+                # budget to exhaust. Making the deferral cost an attempt would
+                # bound it, but that inverts
+                # test_indexer_going_busy_mid_write_refunds_the_claim, whose
+                # rationale is that losing the idle race is someone else's
+                # timing rather than a bad document. That is a separate call
+                # from this transaction fix and does not belong in it.
                 if isinstance(exc, RuntimeError) and progress.status != "idle":
-                    logger.info("OCR: deferring %s, indexing started mid-write.", path.name)
+                    logger.info("OCR: deferring %s, indexing active mid-write.", path.name)
                     await ocr_queue.release_claim(self.db, row.file_path)
                     return
                 logger.error("Failed to index OCR results for %s: %s", path.name, exc)

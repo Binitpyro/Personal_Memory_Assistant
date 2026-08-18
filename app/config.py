@@ -188,6 +188,7 @@ class Settings(BaseSettings):
         if self.ocr_tier == "none":
             self.ocr_enabled = False
 
+        self.query_stream_timeout_s = max(1, self.query_stream_timeout_s)
         self.ocr_garbage_ratio = _clamp(self.ocr_garbage_ratio, 0.0, 1.0)
         self.ocr_conf_floor = _clamp(self.ocr_conf_floor, 0.0, 1.0)
         self.ocr_dpi = int(_clamp(self.ocr_dpi, 72, 600))
@@ -271,6 +272,13 @@ class Settings(BaseSettings):
     rrf_score_scale: int = 1000
     retrieval_top_k: int = 15
     context_max_tokens: int = 8000  # Balanced for reliability and depth
+    # Hard ceiling on one /api/query/stream response. The keepalive frame proves
+    # the connection is alive, not that the model is making progress, and
+    # Request.is_disconnected() only resolves when the ASGI server delivers the
+    # disconnect - behind a buffering proxy that can lag for minutes while a
+    # stuck provider keeps burning tokens. Generous: a local 3 tok/s model on a
+    # long answer is legitimately slow.
+    query_stream_timeout_s: int = 180
 
     # ── Source-balanced fusion ───────────────────────────────────────────────
     # Allocate the result window across folder_tag domains rather than taking a

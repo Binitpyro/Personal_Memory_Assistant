@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import time
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -9,6 +10,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from app.api.deps import ensure_rag, get_db, get_emb, get_lancedb, get_llm, get_planner
 from app.api.limiter import limiter
+from app.config import settings
 from app.storage.db import DatabaseManager
 
 logger = logging.getLogger(__name__)
@@ -123,15 +125,26 @@ async def query(
                 history=history,
             )
 
-        async def _bg_save_query():
+        # The history row is user-visible at GET /api/query/history, so it is
+        # written before the response returns: a BackgroundTask scheduled after
+        # the send can be lost to a shutdown between the two. Its failure must
+        # not cost the caller an answer it already has, hence the guard.
+        query_id = None
+        try:
             query_id = await db.save_query(
                 q,
                 res.get("answer", ""),
                 int(res.get("retrieved_count", 0)),
                 float(res.get("latency_ms", 0.0)),
             )
+        except Exception:
+            logger.exception("Failed to persist query history")
+
+        # Telemetry stays in the background - losing a row costs nothing a user
+        # can see.
+        async def _bg_save_telemetry():
             telemetry = res.get("_telemetry")
-            if telemetry:
+            if query_id is not None and telemetry:
                 await db.save_telemetry(
                     query_id=query_id,
                     time_to_first_token_ms=0.0,
@@ -143,7 +156,7 @@ async def query(
                     chunks_dropped=telemetry.get("chunks_dropped"),
                 )
 
-        background_tasks.add_task(_bg_save_query)
+        background_tasks.add_task(_bg_save_telemetry)
 
         return res
     except Exception as e:
@@ -172,6 +185,7 @@ async def query_stream(
     async def stream_results():
         agen = None
         pending = None
+        deadline = time.monotonic() + settings.query_stream_timeout_s
         try:
             async with query_semaphore:
                 agen = stream_rag(
@@ -191,6 +205,18 @@ async def query_stream(
                 )
 
                 while True:
+                    # Nothing else bounds this loop: the keepalive only proves
+                    # the socket is open, and a provider that stops producing
+                    # without erroring would stream pings forever.
+                    if time.monotonic() >= deadline:
+                        logger.warning(
+                            "Stream exceeded query_stream_timeout_s=%ss; aborting.",
+                            settings.query_stream_timeout_s,
+                        )
+                        timeout_msg = {"type": "error", "text": "Generation timed out."}
+                        yield json.dumps(timeout_msg) + "\n"
+                        return
+
                     if pending is None:
                         pending = asyncio.ensure_future(_next_chunk_or_end(agen))
 

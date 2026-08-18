@@ -37,6 +37,7 @@ from app.ocr import protocol as proto
 from app.ocr import queue as ocr_queue
 from app.ocr import registry
 from app.ocr.settings import (
+    GPU_TIER,
     VLM_TIER,
     ensure_dirs,
     is_tier_installed,
@@ -107,6 +108,9 @@ class OcrManager:
         # behind the first - the pool has exactly one thread.
         self._pending_read: Any = None
         self._stderr_tail: deque[str] = deque(maxlen=200)
+        #: When the queue last drained with a worker still up, for the
+        #: ocr_worker_idle_timeout_s linger. None when not idling.
+        self._idle_since: float | None = None
         # Three distinct lifetimes, previously collapsed into two counters that
         # reset on unrelated schedules - which silently disabled recycling.
         #   _docs_done         : this queue pass, for _finalize_indexes + status
@@ -308,11 +312,12 @@ class OcrManager:
                     stale_after_s=self._stale_claim_seconds(),
                 )
                 if row is None:
-                    await self._retire_worker("idle")
+                    idle_wait = await self._retire_if_idle_long_enough()
                     await self._finalize_indexes()
-                    await self._sleep_or_kick(_IDLE_POLL_S)
+                    await self._sleep_or_kick(idle_wait)
                     continue
 
+                self._idle_since = None
                 await self._process_doc(row)
 
             except asyncio.CancelledError:
@@ -362,6 +367,7 @@ class OcrManager:
         has been transcribed is worth indexing even if the document as a whole
         ran out of budget.
         """
+        from app.ocr.raster_png import RasterError, open_pdf
         from app.ocr.vlm_engine import VlmNotConfiguredError, recognize_page
 
         capped = pages[: settings.ocr_vlm_max_pages_per_doc]
@@ -377,25 +383,77 @@ class OcrManager:
         done: list[OcrPage] = []
         deadline = time.monotonic() + settings.ocr_vlm_doc_timeout_s
 
-        for page_num in capped:
-            if self._stopping:
-                break
-            if time.monotonic() >= deadline:
-                logger.warning(
-                    "OCR (VLM): %s hit the document budget after %d page(s).",
-                    path.name,
-                    len(done),
-                )
-                return done, proto.E_OCR_DOC_TIMEOUT
-            try:
-                done.append(await recognize_page(path, page_num))
-            except VlmNotConfiguredError as exc:
-                # Fatal for the tier, not for this document: nothing will
-                # succeed until the user picks a model again.
-                logger.error("OCR (VLM) is not configured: %s", exc)
-                return done, proto.E_TIER_NOT_INSTALLED
+        # Opened once for the whole document. render_page_png opens, renders and
+        # closes per call, so this loop used to re-parse the entire PDF for
+        # every page - 50 full parses for a 50-page document.
+        try:
+            doc_ctx = open_pdf(path)
+            handle = doc_ctx.__enter__()
+        except RasterError as exc:
+            # Cannot open at all: every requested page fails the same way it
+            # would have individually, so the shape the indexer sees is
+            # unchanged.
+            logger.warning("OCR (VLM): cannot open %s: %s", path.name, exc)
+            return [OcrPage(page_num=p, error="RASTER_FAILED") for p in capped], ""
+
+        try:
+            for page_num in capped:
+                if self._stopping:
+                    break
+                if time.monotonic() >= deadline:
+                    logger.warning(
+                        "OCR (VLM): %s hit the document budget after %d page(s).",
+                        path.name,
+                        len(done),
+                    )
+                    return done, proto.E_OCR_DOC_TIMEOUT
+                try:
+                    done.append(await recognize_page(path, page_num, doc=handle))
+                except VlmNotConfiguredError as exc:
+                    # Fatal for the tier, not for this document: nothing will
+                    # succeed until the user picks a model again.
+                    logger.error("OCR (VLM) is not configured: %s", exc)
+                    return done, proto.E_TIER_NOT_INSTALLED
+        finally:
+            with contextlib.suppress(Exception):
+                doc_ctx.__exit__(None, None, None)
 
         return done, ""
+
+    async def _retire_if_idle_long_enough(self) -> float:
+        """Keep a drained worker alive briefly. Returns how long to sleep.
+
+        The worker was killed the instant claim_next returned nothing, so under
+        the normal one-file-at-a-time watcher pattern every document paid a
+        fresh venv start plus an ONNX model load. `ocr_worker_idle_timeout_s`
+        has been in config since the tier work and was read nowhere.
+
+        Not applied on the GPU tier: a resident DirectML session holds VRAM and
+        Tier 2 already measures ~5.2 GB against a 4 GB target, so lingering
+        there trades a cold start for pressure on the budget that actually
+        binds.
+        """
+        if self._proc is None or self._proc.poll() is not None:
+            self._idle_since = None
+            return _IDLE_POLL_S
+
+        if settings.ocr_tier == GPU_TIER:
+            await self._retire_worker("idle")
+            self._idle_since = None
+            return _IDLE_POLL_S
+
+        now = time.monotonic()
+        if self._idle_since is None:
+            self._idle_since = now
+
+        remaining = max(1, int(settings.ocr_worker_idle_timeout_s)) - (now - self._idle_since)
+        if remaining <= 0:
+            await self._retire_worker("idle")
+            self._idle_since = None
+            return _IDLE_POLL_S
+        # Wake when the linger expires rather than a poll later, so the timeout
+        # means what it says instead of rounding up to _IDLE_POLL_S.
+        return min(_IDLE_POLL_S, remaining)
 
     def _stale_claim_seconds(self) -> int:
         """How long a `running` row may sit before another pass may reclaim it.

@@ -178,6 +178,11 @@ def is_tier_installed(tier: str | None = None) -> bool:
 #: mean "a venv exists"; it means a provider and model have been chosen.
 VLM_TIER = "vlm"
 
+#: DirectML tier. Named here because callers need to special-case it on
+#: memory grounds: a resident session holds VRAM, and Tier 2 measures
+#: ~5.2 GB against a 4 GB target.
+GPU_TIER = "gpu"
+
 
 def vlm_selection() -> dict[str, str]:
     """The user's chosen Tier 3 provider and model, or empty when unset."""

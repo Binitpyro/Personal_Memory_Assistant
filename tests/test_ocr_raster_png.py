@@ -70,3 +70,35 @@ def test_the_render_is_legible(one_page_pdf):
     text = " ".join(row[1] for row in (result or []))
 
     assert SMOKE_TEST_PHRASE.split()[0] in text.upper()
+
+
+def test_open_pdf_renders_many_pages_from_one_handle(one_page_pdf):
+    """render_page_png opens and closes per call; open_pdf is the multi-page path."""
+    from app.ocr.raster_png import open_pdf, render_page_from
+
+    with open_pdf(one_page_pdf) as doc:
+        first = render_page_from(doc, 0, dpi=150)
+        second = render_page_from(doc, 0, dpi=150)
+
+    assert first.startswith(PNG_MAGIC)
+    assert first == second, "the handle must stay usable across renders"
+
+
+def test_render_page_from_leaves_the_document_open(one_page_pdf):
+    """It must close only the page and bitmap it allocated."""
+    from app.ocr.raster_png import open_pdf, render_page_from
+
+    with open_pdf(one_page_pdf) as doc:
+        render_page_from(doc, 0, dpi=72)
+        # Still usable: a closed document raises here instead.
+        assert len(doc) >= 1
+        render_page_from(doc, 0, dpi=72)
+
+
+def test_open_pdf_rejects_a_non_pdf(tmp_path):
+    from app.ocr.raster_png import open_pdf
+
+    junk = tmp_path / "notes.txt"
+    junk.write_text("not a pdf", encoding="utf-8")
+    with pytest.raises(RasterError, match="cannot open PDF"), open_pdf(junk):
+        pass

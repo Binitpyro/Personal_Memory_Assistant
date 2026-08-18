@@ -34,28 +34,45 @@ class RasterError(Exception):
     """Page could not be rendered. The caller skips it and continues."""
 
 
-def render_page_png(path: str | Path, page_num: int, dpi: int) -> bytes:
-    """Render one page of `path` to PNG bytes.
+@contextlib.contextmanager
+def open_pdf(path: str | Path):
+    """Open a document once for a multi-page render pass.
 
-    Rendered in colour, unlike the OCR path's grayscale: a vision model is
-    reading a picture rather than feeding a binarizer, and colour carries
-    information (highlighting, coloured stamps, ink vs preprint) that grayscale
-    throws away.
+    `render_page_png` opens, renders and closes on every call, which is right
+    for a one-off but meant a 50-page Tier 3 document paid 50 full PDF parses -
+    the VLM loop called it once per page. Callers rendering several pages of
+    the same file should hold this open and use `render_page_from`.
+
+    Not safe for *concurrent* use: pdfium handles tolerate being touched from
+    different threads but not at the same time. The VLM loop awaits each page
+    before starting the next, so it never overlaps.
     """
     try:
         import pypdfium2 as pdfium
     except ImportError as exc:  # pragma: no cover - dependency is declared
         raise RasterError(f"pypdfium2 is not available: {exc}") from exc
 
-    doc = None
+    try:
+        doc = pdfium.PdfDocument(str(path))
+    except Exception as exc:
+        raise RasterError(f"cannot open PDF: {exc}") from exc
+
+    try:
+        yield doc
+    finally:
+        with contextlib.suppress(Exception):
+            doc.close()
+
+
+def render_page_from(doc, page_num: int, dpi: int) -> bytes:
+    """Render one page of an already-open document to PNG bytes.
+
+    Closes the page and bitmap it allocates, never the document - that belongs
+    to `open_pdf`.
+    """
     page = None
     bitmap = None
     try:
-        try:
-            doc = pdfium.PdfDocument(str(path))
-        except Exception as exc:
-            raise RasterError(f"cannot open PDF: {exc}") from exc
-
         try:
             page = doc[page_num]
         except Exception as exc:
@@ -83,7 +100,19 @@ def render_page_png(path: str | Path, page_num: int, dpi: int) -> bytes:
     finally:
         # PDFium allocations are native and the GC will not reclaim them
         # promptly; a long document would otherwise accumulate them.
-        for handle in (bitmap, page, doc):
+        for handle in (bitmap, page):
             if handle is not None:
                 with contextlib.suppress(Exception):
                     handle.close()
+
+
+def render_page_png(path: str | Path, page_num: int, dpi: int) -> bytes:
+    """Render one page of `path` to PNG bytes, opening and closing the document.
+
+    Rendered in colour, unlike the OCR path's grayscale: a vision model is
+    reading a picture rather than feeding a binarizer, and colour carries
+    information (highlighting, coloured stamps, ink vs preprint) that grayscale
+    throws away.
+    """
+    with open_pdf(path) as doc:
+        return render_page_from(doc, page_num, dpi)

@@ -2,6 +2,7 @@
 
 import pytest
 
+from app.ocr.types import OcrLine, OcrPage
 from app.ocr.vlm_engine import VLM_CONFIDENCE, looks_like_commentary, to_page
 
 
@@ -104,3 +105,59 @@ def test_the_vlm_cache_identity_names_the_model(monkeypatch):
 
     assert first == "vlm:ollama:glm-ocr"
     assert first != second
+
+
+async def test_vlm_document_opens_the_pdf_once(monkeypatch, tmp_path):
+    """The loop called render_page_png per page, which is a full parse each time.
+
+    A 50-page document therefore paid 50 PDF opens. This asserts the count
+    directly rather than the timing, so it cannot pass by being fast.
+    """
+    from app.ocr import manager as manager_mod
+    from app.ocr import raster_png
+    from app.ocr.registry import _smoke_test_pdf
+
+    pdf = _smoke_test_pdf(tmp_path / "multi.pdf")
+    opens = {"n": 0}
+
+    # manager imports open_pdf inside the function, so the name resolves from
+    # raster_png at call time - that is what has to be patched.
+    real_open = raster_png.open_pdf
+
+    def counting_open(path):
+        opens["n"] += 1
+        return real_open(path)
+
+    monkeypatch.setattr(raster_png, "open_pdf", counting_open)
+
+    async def fake_recognize(path, page_num, *, doc=None):
+        assert doc is not None, "the loop must pass its open handle down"
+        return OcrPage(page_num=page_num, lines=(OcrLine(f"page {page_num}", 0.9, False),))
+
+    monkeypatch.setattr("app.ocr.vlm_engine.recognize_page", fake_recognize, raising=True)
+
+    mgr = manager_mod.OcrManager.__new__(manager_mod.OcrManager)
+    mgr._stopping = False
+
+    pages, err = await mgr._run_document_vlm(pdf, [0, 0, 0, 0, 0])
+
+    assert err == ""
+    assert len(pages) == 5
+    assert opens["n"] == 1, f"expected one open for the document, got {opens['n']}"
+
+
+async def test_vlm_unopenable_pdf_still_reports_per_page(monkeypatch, tmp_path):
+    """Opening once must not turn a bad file into a silent whole-document loss."""
+    from app.ocr import manager as manager_mod
+
+    junk = tmp_path / "broken.pdf"
+    junk.write_bytes(b"not a pdf at all")
+
+    mgr = manager_mod.OcrManager.__new__(manager_mod.OcrManager)
+    mgr._stopping = False
+
+    pages, err = await mgr._run_document_vlm(junk, [0, 1, 2])
+
+    assert err == ""
+    assert [p.page_num for p in pages] == [0, 1, 2]
+    assert all(p.error == "RASTER_FAILED" for p in pages)

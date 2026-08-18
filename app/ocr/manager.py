@@ -574,30 +574,23 @@ class OcrManager:
                     f", error {error_code}" if error_code else "",
                 )
             except Exception as exc:
-                from app.indexing.service import progress
-
-                # There is no such raise, and there never was: the comment here
-                # used to cite "service.py:1012" for an index_ocr_pages that
-                # raises when an index run is active, and no such line exists.
-                # index_ocr_pages now writes inside a SAVEPOINT, so a concurrent
-                # index run is genuinely safe rather than merely believed to be.
+                # No special case for "an index run is active" any more.
                 #
-                # The branch stays as a defensive deferral for a transient
-                # RuntimeError raised while an index run happens to be up.
+                # The branch that used to live here deferred a RuntimeError
+                # raised while progress.status != "idle", on the stated grounds
+                # that index_ocr_pages "raises outright" in that situation. It
+                # never did - the comment cited a service.py line that does not
+                # exist. And since 2d3f684 the write happens inside a SAVEPOINT,
+                # so a concurrent index run is genuinely safe rather than merely
+                # believed to be: the hazard the deferral guarded against is
+                # gone.
                 #
-                # Known, deliberately NOT changed here: release_claim() refunds
-                # the attempt, so a *persistent* RuntimeError during a long
-                # index run retries the same document indefinitely with no
-                # budget to exhaust. Making the deferral cost an attempt would
-                # bound it, but that inverts
-                # test_indexer_going_busy_mid_write_refunds_the_claim, whose
-                # rationale is that losing the idle race is someone else's
-                # timing rather than a bad document. That is a separate call
-                # from this transaction fix and does not belong in it.
-                if isinstance(exc, RuntimeError) and progress.status != "idle":
-                    logger.info("OCR: deferring %s, indexing active mid-write.", path.name)
-                    await ocr_queue.release_claim(self.db, row.file_path)
-                    return
+                # Deleting it also removes the livelock it carried:
+                # release_claim() *refunds* the attempt, so a persistent
+                # RuntimeError during a long index run retried the same document
+                # forever with no budget to exhaust. Bounding that would have
+                # inverted a test whose rationale was the now-false premise;
+                # removing the branch retires the test honestly instead.
                 logger.error("Failed to index OCR results for %s: %s", path.name, exc)
                 await ocr_queue.mark_failed(
                     self.db, row.file_path, f"indexing failed: {exc}", terminal=True

@@ -509,9 +509,14 @@ async def security_and_telemetry_middleware(request: Request, call_next):
             "/api/index/progress-stream",
             "/api/auth/google/callback",
         ):
+            # Header only. A ?token= fallback used to be accepted here, but a
+            # query string reaches uvicorn's access log, browser history and
+            # Referer - the same leak already removed from the SSE call (see
+            # frontend/src/api.ts). Nothing ever produced one: api.ts sends the
+            # header on every request, /api/index/progress-stream is exempt
+            # above, and /api/modules/ws reads its own Query param on a path
+            # that never traverses this middleware.
             provided_token = request.headers.get("X-Local-Access-Token")
-            if not provided_token:
-                provided_token = request.query_params.get("token")
 
             if not provided_token or not secrets.compare_digest(provided_token, expected_token):
                 return JSONResponse(
@@ -522,6 +527,11 @@ async def security_and_telemetry_middleware(request: Request, call_next):
     request_id = str(uuid.uuid4())[:8]
     request.state.request_id = request_id
 
+    # Minted before call_next because _serve_index stamps it onto the one inline
+    # script we emit, and the header below has to carry the same value.
+    csp_nonce = secrets.token_urlsafe(16)
+    request.state.csp_nonce = csp_nonce
+
     t0 = time.perf_counter()
     response = await call_next(request)
     elapsed_ms = (time.perf_counter() - t0) * 1000
@@ -531,6 +541,26 @@ async def security_and_telemetry_middleware(request: Request, call_next):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+
+    # HTML only: a CSP is inert on JSON and on the NDJSON/SSE streams. Mirrors
+    # the policy Tauri already ships (frontend/src-tauri/tauri.conf.json) with
+    # script-src tightened from 'unsafe-inline' to a nonce - the built SPA has
+    # no inline script, so the only one is _serve_index's token injection.
+    # style-src keeps 'unsafe-inline' to match Tauri; Vite/React depend on it.
+    # This governs the browser path only. Tauri loads the SPA from its own
+    # bundle at tauri://localhost and stays governed by tauri.conf.json.
+    if response.headers.get("content-type", "").startswith("text/html"):
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            f"script-src 'self' 'nonce-{csp_nonce}'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "connect-src 'self' http://localhost:* http://127.0.0.1:* ws://localhost:*; "
+            "img-src 'self' data: blob:; "
+            "font-src 'self' data:; "
+            "object-src 'none'; "
+            "base-uri 'self'; "
+            "frame-ancestors 'none'"
+        )
 
     if request.url.path not in ("/api/health", "/api/index/progress-stream"):
         logger.info(
@@ -614,7 +644,12 @@ def _serve_index(request: Request):
         return FileResponse(_REACT_INDEX)
 
     html = _REACT_INDEX.read_text(encoding="utf-8")
-    injected = f"<script>window.__PMA_TOKEN__={json.dumps(token)};</script>"
+    # json.dumps does not escape "</script>", which would close the tag early.
+    # The token is token_urlsafe or a keyring value, so this is hygiene rather
+    # than a reachable path - but it costs two replaces.
+    token_js = json.dumps(token).replace("<", "\\u003c").replace(">", "\\u003e")
+    nonce = getattr(request.state, "csp_nonce", "")
+    injected = f'<script nonce="{nonce}">window.__PMA_TOKEN__={token_js};</script>'
     marker = "<head>"
     html = html.replace(marker, marker + injected, 1) if marker in html else injected + html
     # no-store: the token is in the body, so it must not be written to the

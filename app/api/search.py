@@ -47,8 +47,12 @@ class QueryRequest(BaseModel):
     forced_chunk_ids: list[int] | None = Field(None, max_length=500)
     override_provider: str | None = Field(None, max_length=50)
     override_model: str | None = Field(None, max_length=150)
+    # max_length is a context-budget guard, not a DoS fix: the request body is
+    # fully parsed into memory before any validator runs. 50 items at the
+    # 10,000-char ceiling below is already more history than a local model's
+    # window can absorb.
     history: list[dict[str, str]] | None = Field(
-        None
+        None, max_length=50
     )  # List of {"role": "user/assistant", "content": "..."}
 
     @field_validator("history")

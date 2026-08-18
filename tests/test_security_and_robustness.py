@@ -36,11 +36,21 @@ async def test_api_token_enforcement(mock_db, mock_emb, mock_lancedb, mock_llm):
         response = await ac.post("/api/query", json={"question": "test"})
         assert response.status_code == 401
 
-    # C. Request with valid token in query param -> passes auth check (might be 200 or 422/other depending on route details, but NOT 401)
+    # C. Valid token in a query param -> 401. The fallback was removed: a query
+    # string reaches uvicorn's access log, browser history and Referer. The
+    # header is the only accepted carrier.
     token = os.environ.get("X_LOCAL_ACCESS_TOKEN", "test-token")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
-        # Requesting search status check endpoint with token
         response = await ac.get(f"/api/query/history?token={token}")
+        assert response.status_code == 401
+
+    # C2. The same route with the token in the header -> passes auth.
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers={"X-Local-Access-Token": token},
+    ) as ac:
+        response = await ac.get("/api/query/history")
         assert response.status_code != 401
 
     # D. Health check endpoints are exempt -> 200 without token

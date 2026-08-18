@@ -486,6 +486,11 @@ class OcrManager:
                 )
                 return
 
+        # A page carrying an error is not content, however successful the
+        # document-level run looked.
+        failed_pages = [p for p in all_pages if p.error]
+        ok_pages = [p for p in all_pages if not p.error]
+
         # The pages actually queued for OCR, NOT the document's page count.
         # row.page_count is the whole PDF (service.py passes meta.page_count
         # alongside meta.ocr_pages), so for a mixed native/scanned document
@@ -528,8 +533,32 @@ class OcrManager:
             terminal = row.attempts >= settings.ocr_max_attempts
             self._last_error = f"{path.name}: {reason}"
             await ocr_queue.mark_failed(self.db, row.file_path, reason, terminal=terminal)
+        elif all_pages and not ok_pages:
+            # Every page came back carrying an error, and nothing above caught
+            # it. _read_ndjson keeps error records (it filters only
+            # page_num >= 0) and _run_document returns "" for any doc_done, so
+            # error_code is empty and len(all_pages) matches what was asked for
+            # - the document read as a clean success and was marked done with
+            # its last_error wiped. The existing regression test covers only the
+            # zero-page branch above, where all_pages is empty.
+            reason = f"all {len(all_pages)} page(s) failed"
+            terminal = row.attempts >= settings.ocr_max_attempts
+            self._last_error = f"{path.name}: {reason}"
+            await ocr_queue.mark_failed(self.db, row.file_path, reason, terminal=terminal)
         else:
-            await ocr_queue.mark_done(self.db, row.file_path, pages_done=len(all_pages))
+            # Genuine success, possibly partial. Record why when it produced
+            # less than it looks like it did, so "done" is not the only signal
+            # the user gets for a scan that yielded nothing readable.
+            detail = ""
+            if failed_pages:
+                detail = f"{len(failed_pages)} of {len(all_pages)} page(s) failed"
+            elif not any(p.indexable_text for p in ok_pages):
+                detail = f"no readable text in {len(ok_pages)} page(s)"
+            if detail:
+                self._last_error = f"{path.name}: {detail}"
+            await ocr_queue.mark_done(
+                self.db, row.file_path, pages_done=len(all_pages), last_error=detail
+            )
             self._docs_done += 1
             self._docs_since_spawn += 1
 

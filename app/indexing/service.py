@@ -1283,9 +1283,10 @@ class IndexingService:
         `chunks`, that exclusion propagates to search for free while the full
         text stays in `ocr_cache`.
 
-        Safe to run concurrently with an index run: DatabaseManager handles
-        transaction isolation and write serialization, ensuring OCR chunk
-        inserts and LanceDB updates do not corrupt in-flight indexing batches.
+        Runs concurrently with an index run by writing inside a SAVEPOINT, so
+        it can neither commit nor roll back a transaction the indexer holds
+        open on the same connection. See the savepoint comment below for what
+        that does and does not guarantee.
 
         Returns the number of chunks written.
         """
@@ -1352,19 +1353,42 @@ class IndexingService:
         for i in range(0, len(items), step):
             await self._process_embed_stream_batch(items[i : i + step], update_progress=False)
 
-        # _flush_pending_chunks_sqlite always defers its commit to the caller.
-        # The delete joins that transaction (auto_commit=False) so the rollback
-        # below genuinely restores the previous OCR text rather than leaving the
-        # file with nothing.
-        await self.db.begin_transaction()
+        # A SAVEPOINT, not begin_transaction()/commit().
+        #
+        # OCR results arrive long after the run that queued them, so this can
+        # execute while an index run holds a transaction open on the same write
+        # connection. begin_transaction() no-ops when _in_external_transaction
+        # is already set, and the commit() that used to follow then committed
+        # *the indexer's* transaction and cleared the flag - or, on the failure
+        # path, rollback_transaction() discarded the indexer's uncommitted
+        # chunks. Both are cross-writer corruption, and the docstring's claim
+        # that this is "safe to run concurrently" rested on a guard that did not
+        # exist.
+        #
+        # A savepoint nests: RELEASE and ROLLBACK TO leave any enclosing
+        # transaction exactly as they found it, and behave like COMMIT/ROLLBACK
+        # when there is none.
+        #
+        # Residual, deliberately not solved here: the write lock is released
+        # between the statements below, so an interleaved indexer commit can
+        # still make this savepoint's partial work durable. That is a property
+        # of sharing one write connection, not of the savepoint - but it is a
+        # far narrower failure than committing or discarding another writer's
+        # transaction outright.
+        #
+        # _flush_pending_chunks_sqlite always defers its commit to the caller,
+        # and the delete joins the same scope (auto_commit=False), so the
+        # rollback restores the previous OCR text rather than leaving the file
+        # with nothing.
+        savepoint = await self.db.begin_savepoint()
         try:
             if replace_existing_ocr:
                 await self.db.delete_ocr_chunks(file_id, auto_commit=False)
             result = await self._flush_pending_chunks_sqlite(items, active_files)
-            await self.db.commit()
+            await self.db.release_savepoint(savepoint)
         except Exception:
             try:
-                await self.db.rollback_transaction()
+                await self.db.rollback_savepoint(savepoint)
             except Exception as rollback_err:
                 logger.error("OCR chunk rollback failed for %s: %s", path.name, rollback_err)
             raise

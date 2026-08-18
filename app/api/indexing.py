@@ -201,7 +201,8 @@ async def progress_stream(db: DatabaseManager = Depends(get_db)):
 
 
 @router.post("/cleanup")
-async def cleanup_stale(db: DatabaseManager = Depends(get_db)):
+@limiter.limit("3/minute")
+async def cleanup_stale(request: Request, db: DatabaseManager = Depends(get_db)):
     try:
         from app.state import file_tree_cache as _file_tree_cache
         from app.state import insights_cache as _insights_cache
@@ -215,7 +216,12 @@ async def cleanup_stale(db: DatabaseManager = Depends(get_db)):
 
 
 @router.post("/clear")
-async def clear_index(db: DatabaseManager = Depends(get_db), lancedb_client=Depends(get_lancedb)):
+@limiter.limit("3/minute")
+async def clear_index(
+    request: Request,
+    db: DatabaseManager = Depends(get_db),
+    lancedb_client=Depends(get_lancedb),
+):
     from app.state import file_tree_cache as _file_tree_cache
     from app.state import insights_cache as _insights_cache
 
@@ -226,7 +232,8 @@ async def clear_index(db: DatabaseManager = Depends(get_db), lancedb_client=Depe
 
 
 @router.get("/export")
-async def export_index(db: DatabaseManager = Depends(get_db)):
+@limiter.limit("10/minute")
+async def export_index(request: Request, db: DatabaseManager = Depends(get_db)):
     try:
         file_count, chunk_count = await db.get_counts()
         files = await db.get_all_files()
@@ -241,8 +248,10 @@ async def export_index(db: DatabaseManager = Depends(get_db)):
 
 
 @router.post("/folder/remove")
+@limiter.limit("3/minute")
 async def remove_folder_index(
-    request: IndexRequest,
+    request: Request,
+    payload: IndexRequest,
     db: DatabaseManager = Depends(get_db),
     lancedb_client=Depends(get_lancedb),
 ):
@@ -252,7 +261,7 @@ async def remove_folder_index(
     from app.state import insights_cache as _insights_cache
 
     folders = []
-    for f in request.folders:
+    for f in payload.folders:
         p = f.strip().strip('"').strip("'")
         if p and ".." not in p.replace("\\", "/").split("/"):
             # C-02: Don't check isdir, just normalize so we can remove deleted folders

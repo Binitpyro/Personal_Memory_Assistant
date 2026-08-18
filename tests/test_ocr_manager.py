@@ -335,20 +335,24 @@ async def test_sentinel_hash_skips_the_document(mgr, mock_db, pdf_path, sentinel
     mgr._indexing.index_ocr_pages.assert_not_awaited()
 
 
-async def test_indexer_going_busy_mid_write_refunds_the_claim(mgr, mock_db, stub_env, pdf_path):
-    """Losing the idle race is someone else's timing, not a bad document.
+async def test_indexing_failure_is_terminal_not_deferred(mgr, mock_db, stub_env, pdf_path):
+    """Replaces test_indexer_going_busy_mid_write_refunds_the_claim.
 
-    index_ocr_pages raises if an index run starts after the drain loop's idle
-    check. Treating that as a terminal indexing failure burned the document for
-    good; it must go back to pending with its attempt refunded.
+    That test asserted a RuntimeError raised while an index run is active must
+    refund the claim, on the premise that index_ocr_pages "raises outright" in
+    that situation. It never did - the comment cited a service.py line that does
+    not exist - and since 2d3f684 the write happens inside a SAVEPOINT, so a
+    concurrent index run is safe. The deferral guarded a hazard that is gone,
+    and its release_claim() refund meant a persistent RuntimeError retried
+    forever with no budget.
+
+    An indexing failure is now just a failure, whatever the indexer is doing.
     """
     from app.indexing.service import progress
 
     stub_env(GOOD_STUB)
     row = await seed(mock_db, pdf_path)
-    mgr._indexing.index_ocr_pages = AsyncMock(
-        side_effect=RuntimeError("index_ocr_pages() called while indexing is active")
-    )
+    mgr._indexing.index_ocr_pages = AsyncMock(side_effect=RuntimeError("insert blew up"))
 
     original = progress.status
     progress.status = "running"
@@ -358,8 +362,9 @@ async def test_indexer_going_busy_mid_write_refunds_the_claim(mgr, mock_db, stub
         progress.status = original
 
     stored = await ocr_queue.get_row(mock_db, row.file_path)
-    assert stored.status.value == "pending"
-    assert stored.attempts == 0
+    assert stored.status.value == "failed", "must not be parked back on pending"
+    assert "insert blew up" in stored.last_error
+    assert stored.attempts == 1, "the attempt is spent, not refunded"
     await mgr.stop()
 
 

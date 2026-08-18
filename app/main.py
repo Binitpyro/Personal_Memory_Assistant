@@ -325,6 +325,11 @@ async def lifespan(fastapi_app: FastAPI):
     logger.info("Shutdown complete.")
 
 
+# Module-level so a test can shrink it; the loop below has to page more than
+# once for its termination condition to mean anything.
+_BACKFILL_BATCH = 5000
+
+
 async def _split_brain_sync(db_manager, lancedb_client, emb_svc):
     if settings.lancedb_mode != "split_brain":
         return
@@ -348,30 +353,43 @@ async def _split_brain_sync(db_manager, lancedb_client, emb_svc):
 
         if emb_count == 0 and chunk_count > 0:
             logger.warning("Split-brain: Running one-time back-fill migration…")
-            if emb_svc.model is None:
-                for _ in range(60):
-                    await asyncio.sleep(0.5)
-                    if emb_svc.model is not None:
-                        break
-                if emb_svc.model is None:
-                    raise RuntimeError("Embedding model not ready for back-fill.")
+            # EmbeddingService exposes wait_until_ready()/is_ready and has no
+            # `.model` attribute - reading one raised AttributeError before the
+            # loop ever ran, and the handler below logged it as a generic sync
+            # failure. Same pattern as _check_model_signature_task above.
+            ready = await loop.run_in_executor(None, emb_svc.wait_until_ready, 30.0)
+            if not ready or not emb_svc.is_ready:
+                raise RuntimeError("Embedding model not ready for back-fill.")
 
-            backfill_batch = 5000
-            bf_offset = 0
             bf_total = 0
+            last_ids: list[int] | None = None
+            # No OFFSET. The predicate is self-consuming - every row embedded
+            # here leaves the result set - so advancing an offset as well
+            # stepped over an equal number of never-embedded chunks on each
+            # pass, losing about half the corpus while reporting success.
             while True:
                 async with conn.execute(
                     "SELECT c.id, zlib_decompress(c.text_preview) "
                     "FROM chunks c "
                     "LEFT JOIN chunk_embeddings ce ON ce.chunk_id = c.id "
                     "WHERE ce.chunk_id IS NULL "
-                    "LIMIT ? OFFSET ?",
-                    (backfill_batch, bf_offset),
+                    "LIMIT ?",
+                    (_BACKFILL_BATCH,),
                 ) as cur:
                     rows = await cur.fetchall()
                 if not rows:
                     break
                 ids_batch = [r[0] for r in rows]
+                # Termination now depends on the insert shrinking the result
+                # set. If a page ever repeats, stop rather than spin the boot
+                # path forever.
+                if ids_batch == last_ids:
+                    logger.error(
+                        "Split-brain back-fill made no progress on %d chunk(s); stopping.",
+                        len(ids_batch),
+                    )
+                    break
+                last_ids = ids_batch
                 texts_batch = [r[1] or "" for r in rows]
 
                 def _embed_task(t=texts_batch):
@@ -384,10 +402,9 @@ async def _split_brain_sync(db_manager, lancedb_client, emb_svc):
                 ]
                 await db_manager.insert_chunk_embeddings_bulk(blob_data)
                 bf_total += len(blob_data)
-                bf_offset += backfill_batch
-                if len(rows) < backfill_batch:
+                if len(rows) < _BACKFILL_BATCH:
                     break
-            logger.info("Split-brain back-fill complete.")
+            logger.info("Split-brain back-fill complete: %d chunk(s) embedded.", bf_total)
 
         # Phase B: Batch-aware Differential Sync
         max_ldb_id = await loop.run_in_executor(None, lancedb_client.get_max_id, "pma_chunks")

@@ -3,10 +3,42 @@ import { Bot, User, Sparkles, FileText, ChevronDown, ChevronRight, Clock, Plus, 
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
+import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import { type Message } from '../../hooks/useChatStream';
 import { type QuerySource, type TraceEvent } from '../../api';
 import { CrystalGraphTrace } from '../CrystalGraphTrace';
 import { isTauri, openFile } from '../../utils/tauriShell';
+
+/**
+ * Sanitisation schema for model output.
+ *
+ * `rehypeRaw` is load-bearing, not decorative: llm_client.py instructs the model
+ * to wrap grounded assertions in `<claim sources="[n]">`, capability_detector.py
+ * probes whether it can, and the `components` map below turns those tags into
+ * the citation UI. Dropping raw HTML would render them as literal text.
+ *
+ * But the model's answer is derived from documents the user did not write, so it
+ * is untrusted input: a poisoned chunk can steer the model into emitting
+ * `<img src=x onerror=...>`, and `window.__PMA_TOKEN__` sits in the same page
+ * authorising every /api/ route. The CSP blocks the exfiltration channels in the
+ * browser, but Tauri ships `script-src 'self' 'unsafe-inline'`
+ * (tauri.conf.json), where an inline handler *would* run. This closes it at the
+ * source instead.
+ *
+ * Extends the GitHub default rather than replacing it, so everything remark-gfm
+ * legitimately emits - tables, code, lists, links - keeps rendering. Only the
+ * two custom tags and their one attribute are added. `on*` handlers are not in
+ * the default allowlist and are therefore dropped.
+ */
+const claimSchema = {
+  ...defaultSchema,
+  tagNames: [...(defaultSchema.tagNames ?? []), 'claim', 'inference'],
+  attributes: {
+    ...defaultSchema.attributes,
+    claim: ['sources'],
+    inference: ['sources'],
+  },
+};
 
 /**
  * Renders the bounded retrieval loop's trace.
@@ -207,7 +239,10 @@ export function MessageBubble({ message: msg, onNearMissClick }: Readonly<Messag
             <div className="prose prose-invert prose-sm max-w-none">
               <ReactMarkdown 
                 remarkPlugins={[remarkGfm]}
-                rehypePlugins={[rehypeRaw]}
+                // Order is load-bearing: rehypeRaw parses the raw HTML into the
+                // tree, rehypeSanitize then strips what is not allowlisted.
+                // Reversed, sanitisation runs before the dangerous nodes exist.
+                rehypePlugins={[rehypeRaw, [rehypeSanitize, claimSchema]]}
                 components={{
                   claim: ({ ...props }: Readonly<Record<string, any>>) => {
                     const sourcesStr = String(props.sources || "");

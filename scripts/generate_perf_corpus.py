@@ -3,6 +3,8 @@ from pathlib import Path
 
 import docx
 
+from scripts.make_scanned_pdf import write_scanned_pdf
+
 # Technical phrases/paragraphs to build natural-looking corpus
 TOPICS = [
     "The Personal Memory Assistant uses a hybrid RAG architecture to retrieve local files.",
@@ -257,6 +259,23 @@ def main():
         text = generate_text_content(num_paragraphs=2)
         create_docx(corpus_dir / f"spec_{i}.docx", text)
     print("Generated 500 DOCX files.")
+
+    # 6. 50 image-only PDFs. Everything above this point has a text layer, so
+    #    every page classified NATIVE at the detection gate and the OCR path was
+    #    never exercised by the corpus at all. These carry no text operators, so
+    #    they are the only entries that reach the OCR queue. Kept to 50 because
+    #    each is a full-page raster (~10-40 KB) and OCR is orders of magnitude
+    #    slower per page than extraction - enough to exercise the path without
+    #    dominating a benchmark run.
+    #
+    #    The text is written into the filename-matched content so a run can be
+    #    scored: whatever OCR returns for scan_N should contain its phrase.
+    for i in range(1, 51):
+        write_scanned_pdf(
+            corpus_dir / f"scan_{i}.pdf",
+            chr(10).join([f"SCAN {i} INVOICE", generate_sentence(), "Total due 4471"]),
+        )
+    print("Generated 50 scanned (image-only) PDF files.")
 
     total_files = len(list(corpus_dir.glob("*")))
     print(f"Corpus generation complete. Generated {total_files} files in total.")

@@ -661,9 +661,13 @@ def _serve_index(request: Request):
     shell worked, via initTauriConnection(). Everything else got a working page
     whose every /api/ call returned 401, with no way for the user to tell why.
 
-    Injected for loopback clients only. The server can be bound to 0.0.0.0
-    (see __main__.py --host), and the token must never be handed to the
-    network. A remote client still has to supply it explicitly.
+    Injected for loopback clients only. The server can be bound beyond
+    loopback - `PMA_HOST` overrides settings.host (env_prefix "PMA_", verified),
+    and `uvicorn --host` bypasses settings entirely - and the token must never
+    be handed to the network. A remote client still has to supply it explicitly.
+
+    The previous note here cited "__main__.py --host". That file does not
+    exist; the reasoning was right and only the reference was wrong.
     """
     if not _REACT_INDEX.exists():
         return _missing_frontend_response()

@@ -431,3 +431,99 @@ async def test_conf_floor_is_reapplied_when_reading_worker_output(mgr, tmp_path,
 
     assert pages[0].lines[0].low is True
     assert pages[0].indexable_text == ""
+
+
+ALL_PAGES_FAILED_STUB = """
+for line in sys.stdin:
+    try:
+        msg = protocol.decode(line)
+    except protocol.ProtocolError:
+        continue
+    if msg["t"] == protocol.REQ_HELLO:
+        emit(protocol.make_ready(model_version="stub", ep="CPUExecutionProvider"))
+    elif msg["t"] == protocol.REQ_DOC:
+        with open(msg["ndjson"], "a", encoding="utf-8") as f:
+            for p in msg["pages"]:
+                f.write(json.dumps({
+                    "page": p, "lines": [], "mean_conf": 0.0, "ms": 3,
+                    "error": "E_RASTER_FAILED",
+                }) + "\\n")
+                f.flush()
+                emit(protocol.make_page(doc_id=msg["doc_id"], page=p, ok=False, ms=3))
+        emit(protocol.make_doc_done(
+            doc_id=msg["doc_id"], pages_ok=0, pages_failed=len(msg["pages"]), mean_conf=0.0))
+    elif msg["t"] == protocol.REQ_SHUTDOWN:
+        break
+"""
+
+
+async def test_document_whose_every_page_failed_is_not_marked_done(
+    mgr, mock_db, stub_env, pdf_path
+):
+    """Per-page errors with a clean doc_done must not read as success.
+
+    Distinct from test_document_that_produced_nothing_is_not_marked_done, which
+    covers the *zero-page* branch. Here the worker writes a record per page,
+    each carrying an error and no lines, then reports doc_done normally.
+    _read_ndjson keeps those records (it filters only page_num >= 0) and
+    _run_document returns "" for any doc_done, so error_code was empty and
+    len(all_pages) matched the request: the document fell through to mark_done,
+    which also wiped last_error.
+    """
+    stub_env(ALL_PAGES_FAILED_STUB)
+    row = await seed(mock_db, pdf_path)
+
+    await mgr._process_doc(row)
+
+    # Proves we are in the new branch and not the older zero-page one: the
+    # stub really did write a record per page, so all_pages is non-empty and
+    # index_ocr_pages was reached.
+    mgr._indexing.index_ocr_pages.assert_awaited_once()
+    _p, pages = mgr._indexing.index_ocr_pages.await_args.args
+    assert len(pages) == 3
+    assert all(pg.error for pg in pages)
+
+    stored = await ocr_queue.get_row(mock_db, row.file_path)
+    assert stored.status.value != "done"
+    assert "page(s) failed" in stored.last_error
+    await mgr.stop()
+
+
+async def test_blank_but_successful_scan_records_why(mgr, mock_db, stub_env, pdf_path):
+    """A scan that ran cleanly and found nothing is done, but says so.
+
+    Without this the queue shows an ordinary success and the user has no way to
+    tell an empty scan from an indexed one.
+    """
+    stub_env(BLANK_OK_STUB)
+    row = await seed(mock_db, pdf_path)
+
+    await mgr._process_doc(row)
+
+    stored = await ocr_queue.get_row(mock_db, row.file_path)
+    assert stored.status.value == "done"
+    assert "no readable text" in stored.last_error
+    await mgr.stop()
+
+
+BLANK_OK_STUB = """
+for line in sys.stdin:
+    try:
+        msg = protocol.decode(line)
+    except protocol.ProtocolError:
+        continue
+    if msg["t"] == protocol.REQ_HELLO:
+        emit(protocol.make_ready(model_version="stub", ep="CPUExecutionProvider"))
+    elif msg["t"] == protocol.REQ_DOC:
+        with open(msg["ndjson"], "a", encoding="utf-8") as f:
+            for p in msg["pages"]:
+                f.write(json.dumps({
+                    "page": p, "lines": [], "mean_conf": 0.0, "ms": 3,
+                }) + "\\n")
+                f.flush()
+                emit(protocol.make_page(doc_id=msg["doc_id"], page=p, ok=True, ms=3))
+        emit(protocol.make_doc_done(
+            doc_id=msg["doc_id"], pages_ok=len(msg["pages"]), pages_failed=0, mean_conf=0.0))
+    elif msg["t"] == protocol.REQ_SHUTDOWN:
+        break
+"""

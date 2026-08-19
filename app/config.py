@@ -278,7 +278,37 @@ class Settings(BaseSettings):
     # feeds their chunks into RRF as a third ranked list. Weighted below the two
     # chunk-level signals: it decides which documents are worth spending chunk
     # budget on, it does not by itself decide which chunk answers the question.
-    rrf_summary_weight: float = 0.3
+    #
+    # Swept, 4 builds each, on tests/eval. `->` is against the leg switched off
+    # (recall 0.979, nDCG 0.985):
+    #
+    #   w=0.3  (shipped)  recall 0.868  nDCG 0.873   both far worse than off
+    #   w=0.1             recall 0.993  nDCG 0.944   recall up, ranking wrecked
+    #   w=0.05            recall 0.993  nDCG 0.995   both up
+    #   w=0.02            recall 0.993  nDCG 0.995   same
+    #
+    # The shipped 0.3 was ~6x too high and cost 0.111 recall against not using
+    # the leg at all. The signal was never the problem - the summary index
+    # ranks the right document first for a single-file query - the scale was.
+    # A top-ranked file contributed 0.3/(rrf_k + 1) = 0.004918 to each of its
+    # chunks while a semantic hit at rank r contributes 0.6/(60 + r + 1), so the
+    # boost outweighed ~61 ranks of chunk evidence, more than a small corpus
+    # contains. The leg stopped breaking ties and became a near-binary "is this
+    # file in the top 5 summaries" flag, made worse because rrf_k = 60 barely
+    # differentiates a *5*-element list (rank 0 -> 0.004918, rank 4 -> 0.004615).
+    #
+    # 0.1 is a trap worth naming: recall looks great and nDCG collapses, because
+    # promoting a file's chunks as a block reorders them against each other.
+    # Sweep both metrics, never recall alone.
+    #
+    # summary_expand_chunks_per_file makes no measurable difference once the
+    # weight is right (0.02 at per_file 1 and 5 are identical), so it is left
+    # alone.
+    #
+    # Caveat: 12 queries over 24 documents. That is enough to show 0.3 reliably
+    # hurts - the ranges do not overlap - and not enough to characterise the leg
+    # on a corpus where document routing actually earns its keep.
+    rrf_summary_weight: float = 0.05
     # Chunks pulled per summary-ranked file. Caps how far one long document can
     # push into the fused candidate list.
     summary_expand_chunks_per_file: int = 5

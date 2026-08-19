@@ -256,6 +256,16 @@ async def _semantic_search_with_emb(
     return results
 
 
+def _chunk_sort_key(chunk_id: str) -> tuple[int, int, str]:
+    """Total order over chunk ids for deterministic tie-breaking.
+
+    Ids are numeric strings today, so they sort numerically rather than
+    lexically ("10" after "9"). Non-numeric ids stay comparable by sorting into
+    a second group by their string value rather than raising.
+    """
+    return (0, int(chunk_id), "") if chunk_id.isdigit() else (1, 0, chunk_id)
+
+
 def _compute_rrf_scores(
     fts_results: list[dict[str, Any]],
     semantic_results: list[dict[str, Any]],
@@ -288,7 +298,20 @@ def _compute_rrf_scores(
             # document is promoted or demoted as a unit.
             rank = res.get("rank", 0)
             scores[chunk_id] = scores.get(chunk_id, 0.0) + sum_w * (1.0 / (k_rrf + rank + 1))
-    return sorted(scores.items(), key=lambda x: x[1], reverse=True)[:k]
+    # Tie-break on chunk id, not on dict insertion order.
+    #
+    # The summary leg gives every chunk of a file the *same* contribution (see
+    # above), so it injects large blocks of exactly-equal scores. Python's sort
+    # is stable, which meant ties fell back to `scores` insertion order - i.e.
+    # chunk ids and LanceDB result order, which differ between index builds of
+    # the same corpus. At a contested k that decides which documents make the
+    # cutoff, so the eval ablation returned a different answer per run: mean
+    # recall ranged 0.722-0.972 across builds with the leg enabled, and stuck
+    # at exactly 1.000 with it disabled.
+    #
+    # Negating the score sorts descending while leaving the tie-break ascending;
+    # reverse=True would have flipped both.
+    return sorted(scores.items(), key=lambda kv: (-kv[1], _chunk_sort_key(kv[0])))[:k]
 
 
 async def _summary_search_with_emb(

@@ -337,6 +337,17 @@ async def lifespan(fastapi_app: FastAPI):
         await asyncio.gather(*state.bg_tasks, return_exceptions=True)
 
     await db_manager.close()
+
+    # Last, and after the background tasks are cancelled: the indexing pipeline
+    # hands work to two module-level thread pools, and concurrent.futures joins
+    # their threads at interpreter exit with no timeout. Retiring them here
+    # keeps idle workers from delaying shutdown. It does not rescue a worker
+    # already parked in a blocking call - that is handled at the call sites, in
+    # app/indexing/service.py.
+    from app.indexing.service import shutdown_executors
+
+    shutdown_executors()
+
     logger.info("Shutdown complete.")
 
 

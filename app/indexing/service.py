@@ -316,6 +316,36 @@ _DISK_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="pma-disk"
 _EXTRACT_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pma-extract")
 
 
+def shutdown_executors() -> None:
+    """Retire the module-level pools.
+
+    **This is not what fixes the teardown hang.** `shutdown()` cannot retire a
+    worker already parked inside an untimed blocking call, and
+    `concurrent.futures.thread`'s atexit hook joins every pool's threads with no
+    timeout, so one such worker hangs interpreter exit forever at zero CPU. What
+    prevents that is bounding the calls themselves - see `_offer` and
+    `_bridge_get` in `_stream_extract_and_prepare`.
+
+    This exists so a clean shutdown does not sit waiting on idle workers, and so
+    the pools do not outlive the process that owns them.
+
+    The retired pools are *replaced*, not just closed. The FastAPI lifespan,
+    `EvalIndex.close()` and a test session may all call this, and leaving the
+    module globals pointing at shut-down executors would make every later
+    indexing run in the same process die on "cannot schedule new futures after
+    shutdown". ThreadPoolExecutor spawns its threads lazily, so the replacements
+    cost nothing until something submits work.
+    """
+    global _DISK_EXECUTOR, _EXTRACT_EXECUTOR
+
+    for pool in (_DISK_EXECUTOR, _EXTRACT_EXECUTOR):
+        with contextlib.suppress(Exception):
+            pool.shutdown(wait=False, cancel_futures=True)
+
+    _DISK_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="pma-disk")
+    _EXTRACT_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pma-extract")
+
+
 class StreamChunker:
     """Helper to process a stream of text fragments into properly sized chunks."""
 
@@ -445,6 +475,14 @@ class IndexingService:
         # accumulate. It is O(changed files) resident for the length of a run.
         self._known_hashes: dict[str, str] = {}
 
+    async def shutdown(self) -> None:
+        """Release the thread pools this service's pipeline uses.
+
+        Awaitable so the FastAPI lifespan can call it alongside the other
+        shutdown steps; the work itself is non-blocking.
+        """
+        shutdown_executors()
+
     def cancel_indexing(self):
         with progress._lock:
             progress.is_cancelled = True
@@ -558,11 +596,21 @@ class IndexingService:
                 except Exception as e:
                     logger.error("Failed to create HNSW index for %s: %s", _table, e)
 
-            task = asyncio.create_task(self.db.wal_checkpoint())
-            from app import state
-
-            state.bg_tasks.add(task)
-            task.add_done_callback(state.bg_tasks.discard)
+            # Awaited, not backgrounded. `state.bg_tasks` is drained only by the
+            # FastAPI lifespan, and it *cancels* rather than awaits - so the
+            # checkpoint this run exists to perform was either cancelled at
+            # shutdown or raced `DatabaseManager.close()`, logging "WAL
+            # checkpoint failed: Cannot operate on a closed database" and
+            # leaving the WAL un-truncated. Reclaiming that space is the whole
+            # point of the call, and no non-FastAPI entry point drains the set
+            # at all.
+            #
+            # Awaiting matches the rest of the post-run maintenance: fts_optimize
+            # in api/indexing.py's _index_then_compact, and both of them in
+            # ocr/manager.py's drain. TRUNCATE does wait on readers, but is
+            # bounded by PRAGMA busy_timeout (5s, _configure_conn).
+            progress.set_current_file("Checkpointing the write-ahead log…")
+            await self.db.wal_checkpoint()
 
             # Removed post-index incremental vacuum to avoid database locks (H-15)
 
@@ -717,6 +765,30 @@ class IndexingService:
 
             bridge: stdlib_queue.Queue[Any] = stdlib_queue.Queue(maxsize=64)
             sentinel = object()
+            # Cleared once _pump stops consuming. Without it, the puts below
+            # block forever on a full bridge whenever the pump goes away, and a
+            # thread already inside an untimed blocking call cannot be
+            # cancelled - it parks at zero CPU and concurrent.futures' atexit
+            # hook then joins it forever, hanging interpreter exit after all the
+            # real work has been committed. progress.is_cancelled does not cover
+            # this: the *task* can be cancelled (TaskGroup teardown, shutdown)
+            # while the run itself is not.
+            pump_alive = threading.Event()
+            pump_alive.set()
+
+            def _offer(item: Any) -> bool:
+                """Hand one item to the pump.
+
+                False means stop producing: either the run was cancelled, or the
+                pump is gone and nothing will ever drain the bridge again.
+                """
+                while True:
+                    try:
+                        bridge.put(item, timeout=1.0)
+                        return True
+                    except stdlib_queue.Full:
+                        if progress.is_cancelled or not pump_alive.is_set():
+                            return False
 
             def _extract_and_chunk():
                 chunker = StreamChunker(self.chunk_size, self.chunk_overlap, prefix)
@@ -772,13 +844,8 @@ class IndexingService:
                             if progress.is_cancelled:
                                 return "CANCELLED", "", None
                             chunks_emitted += 1
-                            while True:
-                                try:
-                                    bridge.put(c, timeout=1.0)
-                                    break
-                                except stdlib_queue.Full:
-                                    if progress.is_cancelled:
-                                        return "CANCELLED", "", None
+                            if not _offer(c):
+                                return "CANCELLED", "", None
                         if len(ft_summary) < 2000:
                             ft_summary += (
                                 fragment
@@ -790,13 +857,8 @@ class IndexingService:
                         if progress.is_cancelled:
                             return "CANCELLED", "", None
                         chunks_emitted += 1
-                        while True:
-                            try:
-                                bridge.put(c, timeout=1.0)
-                                break
-                            except stdlib_queue.Full:
-                                if progress.is_cancelled:
-                                    return "CANCELLED", "", None
+                        if not _offer(c):
+                            return "CANCELLED", "", None
 
                     # A scanned document legitimately yields no *native* text:
                     # that is the OCR case, not a failure. It must keep its real
@@ -831,14 +893,33 @@ class IndexingService:
                         sha256_result = digest
                     return sha256_result, ft_summary, meta
                 finally:
-                    bridge.put(sentinel)
+                    _offer(sentinel)
+
+            def _bridge_get():
+                # Bounded: an untimed get() strands this worker thread the
+                # moment _pump is cancelled mid-await, because cancelling the
+                # asyncio future does nothing to a thread already inside the
+                # call. See the pump_alive comment above.
+                return bridge.get(timeout=1.0)
 
             async def _pump():
-                while True:
-                    item = await loop.run_in_executor(_DISK_EXECUTOR, bridge.get)
-                    if item is sentinel:
-                        break
-                    await queue.put({"type": "chunk", "path": path, "chunk": item})
+                try:
+                    while True:
+                        try:
+                            item = await loop.run_in_executor(_DISK_EXECUTOR, _bridge_get)
+                        except stdlib_queue.Empty:
+                            # The sentinel is published from a finally, so it
+                            # only goes missing if the extract worker died or
+                            # its bounded put gave up. Exiting on the future
+                            # instead means the pump no longer depends on it.
+                            if extract_future.done() and bridge.empty():
+                                break
+                            continue
+                        if item is sentinel:
+                            break
+                        await queue.put({"type": "chunk", "path": path, "chunk": item})
+                finally:
+                    pump_alive.clear()
 
             extract_future = loop.run_in_executor(_EXTRACT_EXECUTOR, _extract_and_chunk)
             await _pump()
@@ -1158,9 +1239,18 @@ class IndexingService:
                 tier=settings.ocr_tier,
             )
             with contextlib.suppress(Exception):
-                from app.api.deps import get_ocr
+                # get_ocr_if_ready, never get_ocr: constructing the manager
+                # here would build the API layer's module-global
+                # DatabaseManager - a second one on this same file - which no
+                # non-FastAPI entry point closes. aiosqlite's worker threads
+                # are not daemons, so that leak hung the process at
+                # threading._shutdown after a full, committed indexing run.
+                # The app builds the manager during lifespan startup, so it is
+                # present there; elsewhere there is no worker to kick and the
+                # durable ocr_queue row is already written.
+                from app.api.deps import get_ocr_if_ready
 
-                ocr = await get_ocr()
+                ocr = get_ocr_if_ready()
                 if ocr:
                     await ocr.kick()
         except Exception as exc:

@@ -643,7 +643,40 @@ class TestXlsxExtractor:
         assert result == ""
 
 
-# ── PPTX (mocked python-pptx) ────────────────────────────────────────────────
+# -- PPTX (real decks; the extractor reads OOXML directly) ---------------------
+#
+# These were mocked against python-pptx, which the extractor no longer uses at
+# all - it reads the zip's XML parts so peak memory is bounded by one slide
+# rather than by an lxml tree for the whole package. Mocks could not have caught
+# a regression in that rewrite, so every case below builds a real .pptx.
+# Equivalence with the old python-pptx output is asserted separately, in
+# tests/test_pptx_extractor_stream.py.
+
+
+def _deck(path, *, title=None, body=None, table=None, notes=None):
+    """Build a real single-slide .pptx and return its path."""
+    from pptx import Presentation
+    from pptx.util import Inches
+
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[5])
+    if title is not None:
+        slide.shapes.title.text = title
+    if body is not None:
+        box = slide.shapes.add_textbox(Inches(1), Inches(2), Inches(4), Inches(1))
+        box.text_frame.text = body
+    if table is not None:
+        rows, cols = len(table), len(table[0])
+        shape = slide.shapes.add_table(
+            rows, cols, Inches(1), Inches(3), Inches(6), Inches(0.8 * rows)
+        )
+        for r, row in enumerate(table):
+            for c, val in enumerate(row):
+                shape.table.cell(r, c).text = val
+    if notes is not None:
+        slide.notes_slide.notes_text_frame.text = notes
+    prs.save(str(path))
+    return path
 
 
 class TestPptxExtractor:
@@ -655,193 +688,87 @@ class TestPptxExtractor:
         assert not self.ext.can_handle(tmp_path / "slides.xlsx")
 
     def test_extract_success(self, tmp_path):
-        fake_path = tmp_path / "test.pptx"
-        fake_path.touch()
-        mock_pptx = MagicMock()
-        mock_shape = MagicMock()
-        mock_shape.has_text_frame = False  # use .text attribute path
-        mock_shape.text = "Slide text content"
-        mock_shape.has_table = False
-        mock_slide = MagicMock()
-        mock_slide.shapes = [mock_shape]
-        mock_slide.has_notes_slide = False
-        mock_prs = MagicMock()
-        mock_prs.slides = [mock_slide]
-        mock_pptx.Presentation.return_value = mock_prs
-        with patch.dict("sys.modules", {"pptx": mock_pptx}):
-            result = self.ext.extract(fake_path, MAX_SIZE)
-        assert isinstance(result, str)
+        path = _deck(tmp_path / "ok.pptx", title="Hello", body="Slide text content")
+        result = self.ext.extract(path, MAX_SIZE)
+        assert "Hello" in result
+        assert "Slide text content" in result
+        assert "--- Slide 1 ---" in result
 
     def test_missing_file_returns_empty(self, tmp_path):
-        result = self.ext.extract(tmp_path / "missing.pptx", MAX_SIZE)
-        assert result == ""
+        assert self.ext.extract(tmp_path / "missing.pptx", MAX_SIZE) == ""
 
     def test_pptx_zip_bomb_prevention(self, tmp_path):
+        """The guard reads the central directory and must refuse before any
+        part is decompressed."""
         fake_pptx = tmp_path / "zip_bomb.pptx"
         fake_pptx.touch()
 
         mock_info = MagicMock()
         mock_info.file_size = 101 * 1024 * 1024
         mock_info.compress_size = 1024
-
         mock_zf = MagicMock()
         mock_zf.__enter__.return_value = mock_zf
         mock_zf.infolist.return_value = [mock_info]
 
-        mock_pptx = MagicMock()
-
-        with (
-            patch("zipfile.ZipFile", return_value=mock_zf),
-            patch.dict("sys.modules", {"pptx": mock_pptx}),
-        ):
+        with patch("zipfile.ZipFile", return_value=mock_zf):
             result = self.ext.extract(fake_pptx, MAX_SIZE)
 
         assert result == ""
-        mock_pptx.Presentation.assert_not_called()
-
-    def _make_mock_prs(self, mock_pptx, slide):
-        mock_prs = MagicMock()
-        mock_prs.slides = [slide]
-        mock_pptx.Presentation.return_value = mock_prs
-        return mock_prs
+        mock_zf.open.assert_not_called()
 
     def test_extract_includes_table_cells_after_title(self, tmp_path):
         """P0-3: GraphicFrame tables were silently dropped. Cell text must
         appear, and must come AFTER the regular shape text - the summarizer
         takes the first line after each slide marker as that slide's title,
         so table content can't displace it."""
-        fake_path = tmp_path / "table.pptx"
-        fake_path.touch()
-        mock_pptx = MagicMock()
+        path = _deck(
+            tmp_path / "table.pptx",
+            title="Q4 Overview",
+            table=[["Region", "Revenue"], ["EMEA", "12"]],
+        )
+        out = list(self.ext.extract_stream(path, MAX_SIZE))
 
-        title_shape = MagicMock()
-        title_shape.has_text_frame = True
-        title_shape.text = "Slide Title"
-        title_shape.has_table = False
-
-        cell_a = MagicMock()
-        cell_a.text = "Revenue"
-        cell_b = MagicMock()
-        cell_b.text = "1000"
-        mock_row = MagicMock()
-        mock_row.cells = [cell_a, cell_b]
-        mock_table = MagicMock()
-        mock_table.rows = [mock_row]
-
-        table_shape = MagicMock()
-        table_shape.has_text_frame = False
-        table_shape.text = ""
-        table_shape.has_table = True
-        table_shape.table = mock_table
-
-        mock_slide = MagicMock()
-        mock_slide.shapes = [title_shape, table_shape]
-        mock_slide.has_notes_slide = False
-        self._make_mock_prs(mock_pptx, mock_slide)
-
-        with patch.dict("sys.modules", {"pptx": mock_pptx}):
-            result = self.ext.extract(fake_path, MAX_SIZE)
-
-        assert "Slide Title" in result
-        assert "Revenue | 1000" in result
-        assert result.index("Slide Title") < result.index("Revenue | 1000")
+        assert out[0] == "--- Slide 1 ---"
+        assert out[1] == "Q4 Overview", "table text displaced the slide title"
+        joined = "\n".join(out)
+        assert "Region | Revenue" in joined
+        assert "EMEA | 12" in joined
 
     def test_extract_includes_speaker_notes(self, tmp_path):
-        """P0-3: speaker notes were silently dropped - often the densest
-        content on a slide."""
-        fake_path = tmp_path / "notes.pptx"
-        fake_path.touch()
-        mock_pptx = MagicMock()
+        path = _deck(tmp_path / "notes.pptx", title="Deck", notes="Remember the caveat")
+        joined = "\n".join(self.ext.extract_stream(path, MAX_SIZE))
+        assert "[Notes] Remember the caveat" in joined
 
-        title_shape = MagicMock()
-        title_shape.has_text_frame = True
-        title_shape.text = "Slide Title"
-        title_shape.has_table = False
+    def test_notes_exclude_the_slide_number_placeholder(self, tmp_path):
+        """A notes slide also carries a slide-number placeholder and a
+        thumbnail of the slide. Taking every text frame on the part appended a
+        stray page number to every note - caught by the differential test
+        against real decks, not by review."""
+        path = _deck(tmp_path / "notesonly.pptx", title="Deck", notes="Just this")
+        notes = [ln for ln in self.ext.extract_stream(path, MAX_SIZE) if ln.startswith("[Notes]")]
+        assert notes == ["[Notes] Just this"]
 
-        mock_slide = MagicMock()
-        mock_slide.shapes = [title_shape]
-        mock_slide.has_notes_slide = True
-        mock_slide.notes_slide.notes_text_frame.text = "Remember to mention Q4 growth."
-        self._make_mock_prs(mock_pptx, mock_slide)
+    def test_slide_without_notes_emits_none(self, tmp_path):
+        path = _deck(tmp_path / "plain.pptx", title="Deck", body="text")
+        assert not [
+            ln for ln in self.ext.extract_stream(path, MAX_SIZE) if ln.startswith("[Notes]")
+        ]
 
-        with patch.dict("sys.modules", {"pptx": mock_pptx}):
-            result = self.ext.extract(fake_path, MAX_SIZE)
-
-        assert "Remember to mention Q4 growth." in result
-        assert "[Notes]" in result
-        assert result.index("Slide Title") < result.index("Remember to mention Q4 growth.")
-
-    def test_unreadable_table_does_not_abort_slide(self, tmp_path):
-        """A shape that claims has_table=True but whose .table access blows
-        up must be skipped, not crash the whole extraction. Uses a plain
-        class rather than a MagicMock, because setting a property on
-        type(some_mock) would mutate the shared MagicMock class itself and
-        leak into unrelated tests."""
-        fake_path = tmp_path / "broken_table.pptx"
-        fake_path.touch()
-        mock_pptx = MagicMock()
-
-        title_shape = MagicMock()
-        title_shape.has_text_frame = True
-        title_shape.text = "Slide Title"
-        title_shape.has_table = False
-
-        class _BrokenTableShape:
-            has_text_frame = False
-            text = ""
-            has_table = True
-
-            @property
-            def table(self):
-                raise RuntimeError("corrupt table part")
-
-        broken_table_shape = _BrokenTableShape()
-
-        mock_slide = MagicMock()
-        mock_slide.shapes = [title_shape, broken_table_shape]
-        mock_slide.has_notes_slide = False
-        self._make_mock_prs(mock_pptx, mock_slide)
-
-        with patch.dict("sys.modules", {"pptx": mock_pptx}):
-            result = self.ext.extract(fake_path, MAX_SIZE)
-
-        assert "Slide Title" in result
+    def test_corrupt_file_does_not_raise(self, tmp_path):
+        bad = tmp_path / "corrupt.pptx"
+        bad.write_bytes(b"not a zip at all")
+        assert self.ext.extract(bad, MAX_SIZE) == ""
 
     def test_slide_title_survives_as_first_line_for_summarizer(self, tmp_path):
-        """Integration check against the real summarizer contract
-        (app/indexing/summarizer.py _summarize_doc_text): it takes the first
-        line after each '--- Slide N ---' marker as that slide's title."""
-        fake_path = tmp_path / "summary_check.pptx"
-        fake_path.touch()
-        mock_pptx = MagicMock()
-
-        title_shape = MagicMock()
-        title_shape.has_text_frame = True
-        title_shape.text = "Q4 Overview"
-        title_shape.has_table = False
-
-        cell = MagicMock()
-        cell.text = "Some table cell"
-        mock_row = MagicMock()
-        mock_row.cells = [cell]
-        mock_table = MagicMock()
-        mock_table.rows = [mock_row]
-        table_shape = MagicMock()
-        table_shape.has_text_frame = False
-        table_shape.text = ""
-        table_shape.has_table = True
-        table_shape.table = mock_table
-
-        mock_slide = MagicMock()
-        mock_slide.shapes = [title_shape, table_shape]
-        mock_slide.has_notes_slide = False
-        self._make_mock_prs(mock_pptx, mock_slide)
-
-        with patch.dict("sys.modules", {"pptx": mock_pptx}):
-            result = self.ext.extract(fake_path, MAX_SIZE)
-
         from app.indexing.summarizer import _summarize_doc_text
 
+        path = _deck(
+            tmp_path / "sum.pptx",
+            title="Q4 Overview",
+            table=[["Region", "Revenue"]],
+            notes="internal only",
+        )
+        result = self.ext.extract(path, MAX_SIZE)
         summary = _summarize_doc_text(result, 300)
         assert "Q4 Overview" in summary
 

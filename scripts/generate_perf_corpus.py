@@ -208,6 +208,41 @@ def create_docx(filename, text):
     doc.save(filename)
 
 
+def create_pptx(filename, text, slides=12):
+    """A slide deck with title, body, table and speaker notes on every slide.
+
+    The corpus carried no .pptx at all, and that blind spot cost real time: the
+    ingestion memory ceiling was measured entirely on this fixture and looked
+    healthy, while a real PPTX-heavy corpus ran 114 MB higher in the extract
+    path. PPTX is also the most structurally expensive OOXML format here - each
+    slide is its own package part, with separate notes parts and rels - so a
+    corpus without it does not exercise the extractor that costs the most.
+    See CLAUDE.md section 6.
+    """
+    from pptx import Presentation
+    from pptx.util import Inches
+
+    paragraphs = [p for p in text.split(chr(10) * 2) if p.strip()] or [text]
+    prs = Presentation()
+    title_only = prs.slide_layouts[5]
+    for n in range(slides):
+        slide = prs.slides.add_slide(title_only)
+        slide.shapes.title.text = f"Section {n + 1}"
+        box = slide.shapes.add_textbox(Inches(0.6), Inches(1.6), Inches(8.5), Inches(3.5))
+        box.text_frame.text = paragraphs[n % len(paragraphs)]
+        if n % 3 == 0:
+            table = slide.shapes.add_table(
+                3, 2, Inches(0.6), Inches(5.2), Inches(8.5), Inches(1.4)
+            ).table
+            for r, row in enumerate((("Metric", "Value"), ("Latency", "42"), ("Recall", "0.81"))):
+                for c, val in enumerate(row):
+                    table.cell(r, c).text = val
+        slide.notes_slide.notes_text_frame.text = (
+            f"Notes for section {n + 1}: {generate_sentence()}"
+        )
+    prs.save(filename)
+
+
 def main():
     corpus_dir = Path("tests/fixtures/perf_corpus")
     corpus_dir.mkdir(parents=True, exist_ok=True)
@@ -276,6 +311,13 @@ def main():
             chr(10).join([f"SCAN {i} INVOICE", generate_sentence(), "Total due 4471"]),
         )
     print("Generated 50 scanned (image-only) PDF files.")
+
+    # 7. 150 PPTX decks. See create_pptx: the corpus had no slides at all, so
+    #    the extractor with the highest per-file cost was invisible to every
+    #    memory and throughput number taken on this fixture.
+    for i in range(1, 151):
+        create_pptx(corpus_dir / f"deck_{i}.pptx", generate_text_content(num_paragraphs=4))
+    print("Generated 150 PPTX files.")
 
     total_files = len(list(corpus_dir.glob("*")))
     print(f"Corpus generation complete. Generated {total_files} files in total.")

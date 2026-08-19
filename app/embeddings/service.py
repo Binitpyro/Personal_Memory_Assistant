@@ -26,7 +26,9 @@ def _get_models_lock_data() -> dict[str, Any]:
     return load_models_lock()
 
 
-def _length_sorted_batches(texts: list[str], batch_size: int) -> list[list[int]]:
+def _length_sorted_batches(
+    texts: list[str], batch_size: int, char_budget: int = 0
+) -> list[list[int]]:
     """Group text *positions* into batches of similar length, shortest first.
 
     The tokenizer pads every batch to its longest member, so a batch holding one
@@ -52,11 +54,49 @@ def _length_sorted_batches(texts: list[str], batch_size: int) -> list[list[int]]
     which batch it lands in. That sensitivity is pre-existing, not introduced
     here: measured deviation from padding-free embedding is identical before
     and after this change.
+
+    `char_budget` caps `rows * width_of_widest_row` instead of capping rows
+    alone, which is the difference between bounded and unbounded peak memory.
+    The tokenizer pads to the batch's longest member, so a batch costs
+    proportional to that product - measured at **0.140 MB per (row x token)** on
+    bge-small: 64 rows x 110 tokens predicted 986 MB against 988.5 MB observed,
+    and 16 x 110 predicted 247 MB against 252.5 MB. A fixed row count therefore
+    lets a corpus of long chunks set peak memory, which is exactly how a real
+    403 MB PDF corpus reached 1307 MB above idle while a 1.3 GB fixture of small
+    files stayed at 426 MB (CLAUDE.md section 6).
+
+    Budgeted in characters, not tokens, for the same reason lengths are: it
+    reuses the sort key and avoids tokenizing twice. ~5.09 chars/token measured
+    on real chunk text, so the default 10240 is ~2000 token-slots.
+
+    `batch_size` still applies as an upper bound, so short texts batch exactly as
+    before and only wide batches are narrowed. `char_budget <= 0` restores the
+    original fixed-size behaviour.
+
+    Every position appears in exactly one batch under both modes - callers
+    scatter results back by position, so a dropped or duplicated index is a
+    silent wrong-embedding bug, not a performance regression.
     """
     if batch_size < 1:
         batch_size = 1
     order = sorted(range(len(texts)), key=lambda i: len(texts[i]))
-    return [order[i : i + batch_size] for i in range(0, len(order), batch_size)]
+    if char_budget <= 0:
+        return [order[i : i + batch_size] for i in range(0, len(order), batch_size)]
+
+    batches: list[list[int]] = []
+    current: list[int] = []
+    for i in order:
+        # `order` is ascending by length, so this row is the widest in `current`
+        # once appended, and its width is what the whole batch pads to.
+        width = len(texts[i])
+        over_budget = current and (len(current) + 1) * width > char_budget
+        if current and (over_budget or len(current) >= batch_size):
+            batches.append(current)
+            current = []
+        current.append(i)
+    if current:
+        batches.append(current)
+    return batches
 
 
 class EmbeddingService:
@@ -415,15 +455,20 @@ class EmbeddingService:
         loop = asyncio.get_running_loop()
 
         def _run_inference():
-            num_batches = (len(unique_texts) + effective_batch_size - 1) // effective_batch_size
             if not unique_texts:
                 return np.zeros((0, self._embedding_dim), dtype=np.float32)
 
+            # Batched first, then counted: with a char budget the batch count is
+            # not len/batch_size, and reporting the arithmetic figure would make
+            # the progress bar overrun on a corpus of wide chunks.
+            planned = _length_sorted_batches(
+                unique_texts, effective_batch_size, settings.embedding_batch_char_budget
+            )
+            num_batches = len(planned)
+
             out_array = np.zeros((len(unique_texts), self._embedding_dim), dtype=np.float32)
 
-            for batch_no, positions in enumerate(
-                _length_sorted_batches(unique_texts, effective_batch_size), start=1
-            ):
+            for batch_no, positions in enumerate(planned, start=1):
                 if progress_callback:
                     progress_callback(batch_no, num_batches)
 
@@ -472,7 +517,9 @@ class EmbeddingService:
         effective_batch_size = batch_size or self.optimal_batch_size
 
         out_array = np.zeros((len(unique_texts), self._embedding_dim), dtype=np.float32)
-        for positions in _length_sorted_batches(unique_texts, effective_batch_size):
+        for positions in _length_sorted_batches(
+            unique_texts, effective_batch_size, settings.embedding_batch_char_budget
+        ):
             batch = [unique_texts[j] for j in positions]
             encoded = self._tokenizer.encode_batch(batch)
             input_ids = np.array([e.ids for e in encoded], dtype=np.int64)

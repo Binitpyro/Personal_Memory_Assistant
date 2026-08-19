@@ -470,3 +470,88 @@ class TestLengthSortedBatching:
 
         similarity = batched @ singles.T
         assert list(np.argmax(similarity, axis=1)) == list(range(len(texts)))
+
+
+class TestBatchCharBudget:
+    """`char_budget` caps rows x width-of-widest-row, not rows alone.
+
+    A row cap does not bound peak embedding memory: the tokenizer pads each
+    batch to its longest member, so cost tracks `rows * width` - measured at
+    0.140 MB per (row x token) on bge-small. That is how a 403 MB PDF corpus of
+    full-width chunks reached 1307 MB above idle while a 1.3 GB fixture of small
+    files stayed at 426 MB. See CLAUDE.md section 6.
+
+    The partitioning property is the one that must not break: callers scatter
+    results back by position, so a dropped or duplicated index silently pairs a
+    chunk with the wrong vector.
+    """
+
+    def test_wide_texts_are_narrowed_to_respect_the_budget(self):
+        from app.embeddings.service import _length_sorted_batches
+
+        texts = ["x" * 500] * 64
+        batches = _length_sorted_batches(texts, 64, char_budget=2000)
+
+        assert all(len(g) * 500 <= 2000 for g in batches), "a batch exceeded the budget"
+        assert max(len(g) for g in batches) == 4
+        flat = [i for g in batches for i in g]
+        assert sorted(flat) == list(range(64))
+
+    def test_texts_well_under_the_budget_batch_exactly_as_before(self):
+        """Only asserts the far end of the range, and deliberately so.
+
+        An earlier version of this test used 10-char texts and was read as
+        "short corpora are unaffected". That is false at realistic widths: a
+        full chunk is ~560 chars including the context prefix, so the default
+        10240 budget caps *every* corpus at ~18 rows, not just PDF-heavy ones.
+        Measured consequence is a memory drop on both corpora and a ~16%
+        throughput *gain* (171.3 vs 148.1 texts/s), so the narrowing is wanted -
+        but do not read this test as evidence that nothing changes.
+        """
+        from app.embeddings.service import _length_sorted_batches
+
+        texts = ["x" * 10] * 64
+        with_budget = _length_sorted_batches(texts, 64, char_budget=10240)
+        without = _length_sorted_batches(texts, 64, char_budget=0)
+
+        assert with_budget == without
+        assert len(with_budget) == 1
+
+    def test_realistic_chunk_width_is_narrowed(self):
+        """The case that actually occurs: a full chunk plus its context prefix."""
+        from app.embeddings.service import _length_sorted_batches
+
+        texts = ["[PDF: lecture.pdf] " + "w" * 512] * 64
+        batches = _length_sorted_batches(texts, 64, char_budget=10240)
+
+        widest = max(len(g) for g in batches)
+        assert widest == 19, f"expected ~19 rows at 531 chars, got {widest}"
+        assert all(len(g) * 531 <= 10240 for g in batches)
+
+    def test_budget_partitions_every_index_exactly_once(self):
+        from app.embeddings.service import _length_sorted_batches
+
+        texts = [("z" * (i * 7 + 1)) for i in range(50)]
+        batches = _length_sorted_batches(texts, 8, char_budget=64)
+
+        flat = [i for g in batches for i in g]
+        assert sorted(flat) == list(range(50))
+        assert len(flat) == len(set(flat))
+        assert all(g for g in batches), "emitted an empty batch"
+
+    def test_single_text_wider_than_the_budget_still_ships(self):
+        """A chunk larger than the whole budget must not produce an empty batch
+        or an infinite loop - it goes alone and costs what it costs."""
+        from app.embeddings.service import _length_sorted_batches
+
+        texts = ["x" * 5000, "y" * 3]
+        batches = _length_sorted_batches(texts, 64, char_budget=100)
+
+        assert sorted(i for g in batches for i in g) == [0, 1]
+        assert all(len(g) >= 1 for g in batches)
+
+    def test_zero_budget_restores_fixed_size_batching(self):
+        from app.embeddings.service import _length_sorted_batches
+
+        texts = [("q" * (i + 1)) for i in range(20)]
+        assert _length_sorted_batches(texts, 6, char_budget=0) == _length_sorted_batches(texts, 6)

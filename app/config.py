@@ -83,11 +83,25 @@ class Settings(BaseSettings):
     # P0-4: the tokenizer pads each batch to its own longest sequence
     # (enable_padding has no length=), so peak memory scales with
     # batch_size * longest_seq_in_batch, not item count. At 512 that's a
-    # ~262k-token worst case on a product targeting 4 GB VRAM / 60 MB RAM.
+    # ~262k-token worst case on a product sized for an 8 GB laptop (the
+    # "60 MB RAM" this comment used to cite is retracted - see CLAUDE.md
+    # section 6, which now states a steady-state ceiling plus a boundedness
+    # invariant that this padding strategy currently violates).
     # 64 is still generous - sentence-transformers defaults to 32. The real
-    # fix is token-budget batching (post-deadline); this just bounds the
-    # blast radius until then.
+    # fix is token-budget batching; it was deferred as "post-deadline" and
+    # that deferral has expired with the XPRIZE withdrawal. This just bounds
+    # the blast radius until then.
     embedding_batch_size: int = 64
+    # Caps rows x width-of-widest-row per batch, which is what actually bounds
+    # peak embedding memory - measured 0.140 MB per (row x token) on bge-small.
+    # A row count alone does not bound it: at 64 rows the College corpus (full
+    # ~560-char chunks) reached 988 MB in the embed stage, while a fixture of
+    # small files stayed low purely because its chunks were short. ~5.09
+    # chars/token on real chunk text, so 10240 is ~2000 token-slots ~= 285 MB.
+    # Short texts are unaffected - embedding_batch_size is still the row cap, so
+    # this only narrows batches that would otherwise be wide. 0 disables it and
+    # restores fixed-size batching. See CLAUDE.md section 6.
+    embedding_batch_char_budget: int = 10240
     embedding_allow_download: bool = True
     embedding_allow_unpinned: bool = False
 

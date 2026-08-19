@@ -314,6 +314,14 @@ class DatabaseManager:
 
         migrations = [
             ("summary", "ALTER TABLE files ADD COLUMN summary TEXT DEFAULT ''"),
+            # Why a file produced no chunks. `sha256` was carrying this as well
+            # as the digest and could not carry all of it: a deliberately
+            # skipped binary and a page deferred to OCR both keep their real
+            # digest with zero chunks, so nothing recorded which had happened.
+            (
+                "files_extract_status",
+                "ALTER TABLE files ADD COLUMN extract_status TEXT DEFAULT ''",
+            ),
             ("sha256", "ALTER TABLE files ADD COLUMN sha256 TEXT DEFAULT ''"),
             (
                 "files_created_at",

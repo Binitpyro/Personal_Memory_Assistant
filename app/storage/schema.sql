@@ -9,7 +9,8 @@ CREATE TABLE IF NOT EXISTS files (
     folder_tag TEXT,
     usage_count INTEGER DEFAULT 0,
     summary TEXT DEFAULT '',
-    sha256 TEXT DEFAULT ''
+    sha256 TEXT DEFAULT '',
+    extract_status TEXT DEFAULT ''
 );
 
 -- Performance indexes

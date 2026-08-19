@@ -103,7 +103,7 @@ async def test_pump_exits_when_the_extractor_finishes_without_a_sentinel(tmp_pat
     class _NeverRunsExecutor:
         def submit(self, fn, *args, **kwargs):
             fut: concurrent.futures.Future = concurrent.futures.Future()
-            fut.set_result(("NOCONTENT", "", None))
+            fut.set_result(("NOCONTENT", "", None, "nocontent"))
             return fut
 
     monkeypatch.setattr(idx, "_EXTRACT_EXECUTOR", _NeverRunsExecutor())
@@ -257,3 +257,90 @@ async def test_wal_checkpoint_on_a_closed_manager_logs_instead_of_raising(tmp_pa
         await mgr.wal_checkpoint()
 
     assert any("WAL checkpoint failed" in r.message for r in caplog.records)
+
+
+class TestExtractStatus:
+    """`files.extract_status` records *why* a file produced no chunks.
+
+    `files.sha256` was carrying this alongside the digest and could not carry
+    all of it. A deliberately-skipped binary and a scanned page deferred to OCR
+    both keep their **real** digest with zero chunks - the OCR cache keys on
+    that digest, so a sentinel there would collide across every scanned document
+    - which left the two indistinguishable in the database, with nothing saying
+    which had happened. That is CLAUDE.md 8.1 defect 7.
+    """
+
+    @pytest.mark.asyncio
+    async def test_binary_skip_and_real_content_are_distinguishable(self, tmp_path):
+        from app.storage.db import DatabaseManager
+
+        mgr = DatabaseManager(str(tmp_path / "status.db"))
+        await mgr.init_db(schema_path="app/storage/schema.sql")
+        service = idx.IndexingService(mgr, FakeEmb(), FakeLanceDB())
+
+        corpus = tmp_path / "docs"
+        corpus.mkdir()
+        (corpus / "real.md").write_text("# Real\n\n" + ("prose " * 200), encoding="utf-8")
+        # A *supported* extension holding binary content. ".bin" is not in
+        # settings.extensions_set, so a file named that way is never scanned and
+        # the assertion below would silently never run - the first version of this
+        # test was vacuous for exactly that reason. ".txt" is scanned, and both
+        # rust_core and _extract_plain_text_stream sniff the content and emit the
+        # "[BINARY:" stub rather than indexing replacement-character noise.
+        (corpus / "image.txt").write_bytes(b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 8)
+
+        idx.progress.status = "idle"
+        try:
+            await service.index_folders([str(corpus)])
+            rows = await mgr.execute_query(
+                "SELECT path, sha256, extract_status, "
+                "(SELECT COUNT(*) FROM chunks WHERE file_id = files.id) FROM files"
+            )
+        finally:
+            await mgr.close()
+
+        by_name = {Path(r[0]).name: r for r in rows}
+        assert "real.md" in by_name, f"indexed nothing: {rows}"
+        assert by_name["real.md"][2] == "", "a file with content must carry no skip reason"
+        assert by_name["real.md"][3] > 0
+
+        assert "image.txt" in by_name, f"the binary file was never scanned: {rows}"
+        _path, sha, status, chunks = by_name["image.txt"]
+        assert chunks == 0
+        assert status == "binary", f"binary skip recorded as {status!r}"
+        # The digest stays real - it is the OCR cache's content key, so a
+        # sentinel there would collide across every scanned document - which is
+        # precisely why sha256 alone cannot express the reason.
+        assert sha not in ("", "ERROR", "NOCONTENT", "CANCELLED")
+
+    @pytest.mark.asyncio
+    async def test_migration_is_idempotent_and_adds_the_column(self, tmp_path):
+        """init_db twice must not error, and must leave the column present.
+
+        Deliberately *not* a hand-rolled "legacy" table: schema.sql creates
+        idx_files_change_detection on files(path, modified_at, sha256), so
+        executescript fails outright against a files table predating those
+        columns. That is a real limitation of init_db, but asserting the
+        opposite would encode a path the code does not support.
+
+        Everything is inside the try. An earlier version of this test put
+        init_db outside it, and when init_db raised, close() never ran - the
+        leaked non-daemon aiosqlite threads then stopped pytest itself from
+        exiting, which is exactly the defect this file exists to prevent.
+        """
+        from app.storage.db import DatabaseManager
+
+        mgr = DatabaseManager(str(tmp_path / "twice.db"))
+        try:
+            await mgr.init_db(schema_path="app/storage/schema.sql")
+            await mgr.init_db(schema_path="app/storage/schema.sql")
+            cols = {r[1] for r in await mgr.execute_query("PRAGMA table_info(files)")}
+            applied = {
+                r[0]
+                for r in await mgr.execute_query("SELECT migration_name FROM schema_migrations")
+            }
+        finally:
+            await mgr.close()
+
+        assert "extract_status" in cols
+        assert "files_extract_status" in applied, "the migration was not recorded"

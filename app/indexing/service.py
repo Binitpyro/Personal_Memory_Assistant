@@ -241,6 +241,19 @@ _STUB_PREFIXES = ("[BINARY:", "[UNREADABLE:", "[ENCRYPTED")
 # as complete would retire it on an antivirus lock.
 _TRANSIENT_STUB_PREFIXES = ("[UNREADABLE:",)
 
+# Why a file produced no chunks, recorded on `files.extract_status`.
+#
+# `files.sha256` was carrying this as well as the digest, via the sentinels
+# below, and it could not carry all of it: a deliberately-skipped binary and a
+# scanned page awaiting OCR both keep their *real* digest with zero chunks, so
+# they were indistinguishable in the database and nothing said which had
+# happened. "" means the file produced content normally.
+_STUB_STATUS = {
+    "[BINARY:": "binary",
+    "[UNREADABLE:": "unreadable",
+    "[ENCRYPTED": "encrypted",
+}
+
 # sha256 values that mean "this file is not successfully indexed", so
 # _detect_changes must re-attempt it rather than treating it as up to date.
 #   ""          - the header's placeholder (service.py:534). The storer's commit
@@ -797,6 +810,7 @@ class IndexingService:
 
                 chunks_emitted = 0
                 stub_skipped = False
+                stub_kind = ""
                 transient_stub = False
                 source_size = stat.st_size
 
@@ -813,7 +827,7 @@ class IndexingService:
                 try:
                     for fragment in _get_stream():
                         if progress.is_cancelled:
-                            return "CANCELLED", "", None
+                            return "CANCELLED", "", None, "cancelled"
 
                         # Out-of-band extractor signal (which pages need OCR).
                         # Checked before the stub test because ExtractMeta
@@ -832,6 +846,10 @@ class IndexingService:
                             logger.debug("Skipping stub for %s — no indexable text.", path)
                             ft_summary = ""
                             stub_skipped = True
+                            stub_kind = next(
+                                (v for k, v in _STUB_STATUS.items() if fragment.startswith(k)),
+                                "skipped",
+                            )
                             # "[UNREADABLE:" is rust_core's *transient* I/O
                             # failure stub - an AV lock, a network share blip, a
                             # file held open elsewhere. Treating it as a
@@ -842,10 +860,10 @@ class IndexingService:
 
                         for c in chunker.process(fragment):
                             if progress.is_cancelled:
-                                return "CANCELLED", "", None
+                                return "CANCELLED", "", None, "cancelled"
                             chunks_emitted += 1
                             if not _offer(c):
-                                return "CANCELLED", "", None
+                                return "CANCELLED", "", None, "cancelled"
                         if len(ft_summary) < 2000:
                             ft_summary += (
                                 fragment
@@ -855,10 +873,10 @@ class IndexingService:
 
                     for c in chunker.finalize():
                         if progress.is_cancelled:
-                            return "CANCELLED", "", None
+                            return "CANCELLED", "", None, "cancelled"
                         chunks_emitted += 1
                         if not _offer(c):
-                            return "CANCELLED", "", None
+                            return "CANCELLED", "", None, "cancelled"
 
                     # A scanned document legitimately yields no *native* text:
                     # that is the OCR case, not a failure. It must keep its real
@@ -891,7 +909,20 @@ class IndexingService:
                         sha256_result = "NOCONTENT"
                     else:
                         sha256_result = digest
-                    return sha256_result, ft_summary, meta
+
+                    if hash_failed or transient_stub:
+                        status = "unreadable" if transient_stub else "error"
+                    elif stub_skipped:
+                        status = stub_kind
+                    elif ocr_pending and chunks_emitted == 0:
+                        status = "ocr_pending"
+                    elif sha256_result == "NOCONTENT":
+                        status = "nocontent"
+                    elif chunks_emitted == 0 and source_size == 0:
+                        status = "empty"
+                    else:
+                        status = ""
+                    return sha256_result, ft_summary, meta, status
                 finally:
                     _offer(sentinel)
 
@@ -923,7 +954,7 @@ class IndexingService:
 
             extract_future = loop.run_in_executor(_EXTRACT_EXECUTOR, _extract_and_chunk)
             await _pump()
-            sha256, full_text_for_summary, extract_meta = await extract_future
+            sha256, full_text_for_summary, extract_meta, extract_status = await extract_future
             if sha256 in ("ERROR", "NOCONTENT"):
                 progress.record_failure(f"{path.name}: {sha256}")
 
@@ -939,6 +970,7 @@ class IndexingService:
                     "path": path,
                     "summary": summary,
                     "sha256": sha256,
+                    "extract_status": "cancelled" if sha256 == "CANCELLED" else extract_status,
                     "extract_meta": extract_meta,
                 }
             )
@@ -971,6 +1003,7 @@ class IndexingService:
                         "path": path,
                         "summary": f"[ERROR: {e!s}]",
                         "sha256": "ERROR",
+                        "extract_status": "error",
                         "extract_meta": None,
                     }
                 )
@@ -1171,8 +1204,14 @@ class IndexingService:
                     file_info = active_files.pop(path_str, None)
                     if file_info:
                         await self.db.execute_write(
-                            "UPDATE files SET summary = ?, sha256 = ? WHERE id = ?",
-                            (item["summary"], item.get("sha256", ""), file_info["id"]),
+                            "UPDATE files SET summary = ?, sha256 = ?, extract_status = ? "
+                            "WHERE id = ?",
+                            (
+                                item["summary"],
+                                item.get("sha256", ""),
+                                item.get("extract_status", ""),
+                                file_info["id"],
+                            ),
                         )
                         # The summary is the document-level retrieval signal; it
                         # has to reach the vector index, not just SQLite.

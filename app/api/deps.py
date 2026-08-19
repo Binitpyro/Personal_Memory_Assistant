@@ -80,6 +80,43 @@ async def get_ocr():
     return _ocr_manager
 
 
+def get_ocr_if_ready():
+    """Return the OCR manager only if something already built it. Never builds one.
+
+    `get_ocr()` constructs on demand, and constructing pulls in `get_db()` -
+    the module-global `DatabaseManager`. Calling that from inside the indexing
+    pipeline is wrong twice over: it is a service reaching forward into the API
+    layer, and in any non-FastAPI entry point (the eval harness, `scripts/`)
+    it opens a **second** DatabaseManager on the same file that nobody closes.
+    aiosqlite's `Connection` worker threads are not daemons, so one unclosed
+    connection blocks `threading._shutdown` forever - the process finishes all
+    its work, commits, and then sits at zero CPU until it is killed.
+
+    The app builds this during lifespan startup (`app/main.py`), so the in-app
+    path is unchanged. Everywhere else there is no OCR worker to kick anyway,
+    and the durable `ocr_queue` row has already been written by the caller.
+    """
+    return _ocr_manager
+
+
+async def close_all() -> None:
+    """Release the module-global DatabaseManager. Idempotent.
+
+    For entry points that are not the FastAPI app: the lifespan closes this
+    object itself (`app/main.py`), but a script or the eval harness builds its
+    own manager and would otherwise leave this one open. Deliberately does not
+    touch `_ocr_manager` - stopping it means shutting a worker subprocess down,
+    which is the lifespan's job, not a teardown helper's.
+    """
+    global _db_manager
+
+    if _db_manager is not None:
+        try:
+            await _db_manager.close()
+        finally:
+            _db_manager = None
+
+
 def ensure_indexing() -> tuple[Any, Any]:
     from app import state
 

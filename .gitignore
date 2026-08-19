@@ -224,6 +224,11 @@ app/vector_store/lancedb_data/
 
 # local/private files
 PMA Obsidian/files/
+# Real-corpus eval slice: survey output, ground truth, and any persistent index
+# built over a personal corpus. The corpus itself lives outside the repo and is
+# never copied in - it is personal coursework containing third-party lecture
+# material, and this repo is public MIT.
+/eval-local/
 # scripts/      <-- Tracked
 GEMINI.md
 scripts/Sonar-Scan.bat

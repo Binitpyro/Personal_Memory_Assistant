@@ -12,13 +12,23 @@ takes tens of seconds. Callers gate it behind the `eval` pytest marker.
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from tests.eval import metrics
+
+if TYPE_CHECKING:
+    # Type-only. The runtime imports stay inside build() so that importing this
+    # module does not drag in ONNX and LanceDB at collection time.
+    from app.embeddings.service import EmbeddingService
+    from app.storage.db import DatabaseManager
+    from app.vector_store.lancedb_client import LanceDBClient
+
+logger = logging.getLogger(__name__)
 
 CORPUS_DIR = Path(__file__).parent / "corpus"
 QUERIES_FILE = Path(__file__).parent / "queries.json"
@@ -83,9 +93,12 @@ class EvalIndex:
         # same reason. Do not "simplify" this back to a tmp_path fixture.
         self.workdir = workdir or Path(tempfile.mkdtemp(prefix="pma_eval_"))
         self.corpus_dir = corpus_dir
-        self.db = None
-        self.lancedb = None
-        self.embeddings = None
+        # Annotated because scripts/survey_corpus.py imports this module, and an
+        # import from outside tests/ drags it past mypy's `^tests/` exclude.
+        # Without these, mypy infers the attributes as literally None.
+        self.db: DatabaseManager | None = None
+        self.lancedb: LanceDBClient | None = None
+        self.embeddings: EmbeddingService | None = None
         self._path_prefix = ""
 
     async def build(self) -> EvalIndex:
@@ -124,9 +137,39 @@ class EvalIndex:
         return self
 
     async def close(self) -> None:
+        from app.api.deps import close_all
+        from app.indexing.service import shutdown_executors
+
         if self.db is not None:
             await self.db.close()
-        shutil.rmtree(self.workdir, ignore_errors=True)
+
+        # This harness builds its own DatabaseManager, but any code path that
+        # touches app.api.deps builds the module-global one too. Leaving it
+        # open leaves a non-daemon aiosqlite thread behind, which blocks
+        # interpreter exit forever.
+        await close_all()
+
+        # The pipeline's thread pools are module-level and outlive this object.
+        # concurrent.futures joins their workers at interpreter exit with no
+        # timeout, so a caller that only closed the database would still hang.
+        shutdown_executors()
+
+        # Deliberately NOT ignore_errors=True. That swallowed precisely the
+        # evidence that mattered: a hung survey run left behind an eval.db
+        # Windows refused to delete - a read connection was still open - while
+        # rmtree removed the lancedb/ directory next to it and reported nothing.
+        # The result looked like a clean teardown for an entire investigation.
+        leftovers: list[str] = []
+        shutil.rmtree(
+            self.workdir, onexc=lambda _fn, path, exc: leftovers.append(f"{path}: {exc!r}")
+        )
+        if leftovers:
+            logger.warning(
+                "EvalIndex.close() could not remove %d path(s) under %s - something still holds a handle: %s",
+                len(leftovers),
+                self.workdir,
+                "; ".join(leftovers),
+            )
 
     def relativize(self, absolute_path: str) -> str:
         """Corpus-relative path, so ground truth stays machine-independent."""
@@ -138,6 +181,9 @@ class EvalIndex:
 
     async def retrieve(self, query: str, k: int) -> list[dict[str, Any]]:
         from app.search import retrieval
+
+        if self.db is None or self.embeddings is None or self.lancedb is None:
+            raise RuntimeError("EvalIndex.build() must run before retrieve()")
 
         # Ablations change fusion behaviour without changing the index, so the
         # retrieval cache would serve results from the previous configuration.

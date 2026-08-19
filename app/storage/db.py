@@ -93,6 +93,21 @@ def serialize_write(func):
     return wrapper
 
 
+# Module-level so a test can shrink it. Generous rather than tight: legitimate
+# contention on a pool_size=4 pool during a bulk ingest is normal, and this is
+# meant to catch a leak, not to police slow queries.
+_READ_ACQUIRE_TIMEOUT_S = 30.0
+
+
+class ReadPoolExhaustedError(RuntimeError):
+    """No read connection became available within `_READ_ACQUIRE_TIMEOUT_S`.
+
+    Almost always a leaked borrow rather than real contention: the pool is
+    returned to in a `finally`, so a missing connection means some path exited
+    without running it.
+    """
+
+
 class DatabaseManager:
     """Manages the SQLite database connection and operations with a read-connection pool."""
 
@@ -102,6 +117,11 @@ class DatabaseManager:
         self.pool_size = pool_size
         self._write_conn: aiosqlite.Connection | None = None
         self._read_pool: asyncio.Queue[aiosqlite.Connection] | None = None
+        # Every read connection ever opened, queued or borrowed. close() walked
+        # the queue alone, so a leaked borrow kept its SQLite handle open past
+        # shutdown and left the database file locked - which is how a survey run
+        # left behind an eval.db that shutil.rmtree could not remove.
+        self._read_conns: list[aiosqlite.Connection] = []
         self.conn_factory: Callable[[], aiosqlite.Connection] | None = None
         self._in_ingest_mode = False
         self._pool_initialized = False
@@ -129,9 +149,11 @@ class DatabaseManager:
             await self._configure_conn(self._write_conn, is_write_conn=True)
 
             # 2. Read connection pool
+            self._read_conns = []
             for _ in range(self.pool_size):
                 conn = await aiosqlite.connect(self.db_path, isolation_level=None)
                 await self._configure_conn(conn, is_write_conn=False)
+                self._read_conns.append(conn)
                 await self._read_pool.put(conn)
 
             self._pool_initialized = True
@@ -181,14 +203,35 @@ class DatabaseManager:
 
         if self._read_pool is None:
             raise RuntimeError("Database read pool is not initialized")
-        conn = await self._read_pool.get()
+
+        # Bounded on purpose. `await queue.get()` on an empty pool parks at zero
+        # CPU with no timeout, so a leaked borrow turns every later reader into
+        # a silent, permanent hang. Raising instead makes starvation diagnosable
+        # the first time it happens rather than after a 61-minute stall.
+        try:
+            conn = await asyncio.wait_for(self._read_pool.get(), timeout=_READ_ACQUIRE_TIMEOUT_S)
+        except TimeoutError as exc:
+            raise ReadPoolExhaustedError(
+                f"No read connection available after {_READ_ACQUIRE_TIMEOUT_S}s "
+                f"(pool_size={self.pool_size}). A borrow was most likely leaked."
+            ) from exc
+
         try:
             yield conn
         finally:
-            # Defensive reset: ensure no open transaction lingers on pooled read connection
-            with contextlib.suppress(Exception):
-                await conn.rollback()
-            await self._read_pool.put(conn)
+            # The return is unconditional and awaits nothing. `rollback()` used
+            # to sit directly in this `finally` under
+            # `contextlib.suppress(Exception)`; CancelledError is a
+            # BaseException, so a cancellation delivered during the rollback
+            # escaped the suppression, skipped the put, and lost the connection
+            # for the life of the process. put_nowait cannot raise here either -
+            # the queue is unbounded - so there is no await left on this path
+            # for a cancellation to land on.
+            try:
+                with contextlib.suppress(Exception):
+                    await conn.rollback()
+            finally:
+                self._read_pool.put_nowait(conn)
 
     def _get_conn(self) -> aiosqlite.Connection:
         """Return the active write connection, raising if not connected."""
@@ -208,8 +251,14 @@ class DatabaseManager:
 
             if self._read_pool:
                 while not self._read_pool.empty():
-                    conn = self._read_pool.get_nowait()
+                    self._read_pool.get_nowait()
+
+            # Close by ledger, not by queue: a connection borrowed and never
+            # returned is absent from the queue but still holds a file handle.
+            for conn in self._read_conns:
+                with contextlib.suppress(Exception):
                     await conn.close()
+            self._read_conns = []
 
             self._pool_initialized = False
 
@@ -676,8 +725,11 @@ class DatabaseManager:
         Call this after a large indexing run to reclaim disk space.
         Uses TRUNCATE mode which is safe and doesn't block readers.
         """
-        conn = self._get_conn()
+        # _get_conn() belongs inside the try: it raises when the manager is
+        # closed, and sitting outside it that RuntimeError escaped a function
+        # whose every other failure mode is logged and swallowed.
         try:
+            conn = self._get_conn()
             await conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             await conn.commit()
             logger.info("WAL checkpoint completed - WAL file truncated.")

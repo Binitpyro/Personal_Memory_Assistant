@@ -73,13 +73,53 @@ def _provenance(k: int, use_reranker: bool) -> dict:
     lock_digest = hashlib.sha256(lock.read_bytes()).hexdigest()[:16] if lock.exists() else ""
 
     status = reranker.reranker_status()
+
+    # Which model produced these numbers. models_lock_sha256 pins the *file*,
+    # which does not move if settings.embedding_model is pointed elsewhere - so
+    # the live signature (repo_id@revision:file) is recorded too. It is None
+    # until the service loads, which is fine: a run that retrieved anything has
+    # loaded it.
+    emb_service = _clients.get("emb")
+    emb_signature = getattr(emb_service, "model_signature", None) if emb_service else None
+
+    # No LLM participates in a retrieval run - _retrieve calls hybrid_retrieve
+    # directly, never full_rag. The configured provider is recorded anyway so a
+    # baseline taken during answer-generation work is not mistaken for one taken
+    # here, and llm_used says which it was. "auto" is a preference, not a
+    # resolution: the real provider is chosen per call from the fallback chain
+    # and generate_answer currently discards it.
+    llm_provider = ""
+    llm_model = ""
+    try:
+        from app.settings_store import SettingsStore
+
+        # Same reader llm_client.py:232 uses, so the recorded values are the
+        # ones the client would act on.
+        llm_prefs = (SettingsStore.read() or {}).get("llm", {})
+        llm_provider = llm_prefs.get("provider", "") or ""
+        llm_model = llm_prefs.get("gemini_model", "") or ""
+    except Exception:
+        pass
+
     return {
         "commit": commit,
         "models_lock_sha256": lock_digest,
+        "embedding_model": settings.embedding_model,
+        "embedding_model_signature": emb_signature,
         "reranker_requested": use_reranker,
         "reranker_available": status["available"],
         "reranker_reason": status["reason"],
+        "llm_used": False,
+        "llm_provider_configured": llm_provider,
+        "llm_model_configured": llm_model,
         "k": k,
+        # The fusion constants. rrf_k is the one Paper 1 argues is wrong for
+        # personal corpora, so a baseline that does not state it cannot be
+        # compared against a later adaptive-k run.
+        "rrf_k": settings.rrf_k,
+        "rrf_fts_weight": settings.rrf_fts_weight,
+        "rrf_semantic_weight": settings.rrf_semantic_weight,
+        "rrf_summary_weight": settings.rrf_summary_weight,
         "chunk_size": settings.chunk_size,
         "chunk_overlap": settings.chunk_overlap,
         "embedding_batch_size": settings.embedding_batch_size,

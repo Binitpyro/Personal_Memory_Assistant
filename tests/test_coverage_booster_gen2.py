@@ -88,9 +88,13 @@ async def test_debug_query_plan_dev_mode(client):
 @pytest.mark.asyncio
 async def test_websocket_missing_token_on_server(monkeypatch):
     websocket = AsyncMock()
+    # The client does present a credential - in the header, since the ?token=
+    # fallback is gone. The refusal has to come from the server having no
+    # expected token configured, not from the client having sent nothing.
+    websocket.headers = {"x-local-access-token": "some-token"}
     # Mock X_LOCAL_ACCESS_TOKEN env var missing
     monkeypatch.delenv("X_LOCAL_ACCESS_TOKEN", raising=False)
-    await websocket_endpoint(websocket, token="some-token")
+    await websocket_endpoint(websocket)
     websocket.close.assert_called_once_with(code=1008)
 
 

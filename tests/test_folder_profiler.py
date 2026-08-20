@@ -196,7 +196,7 @@ async def test_generate_folder_profiles_async(tmp_path):
     folder = tmp_path / "proj"
     folder.mkdir()
     (folder / "main.py").write_text("x = 1")
-    files = [(folder / "main.py", ".py")]
+    files = [(folder / "main.py", ".py", str(folder))]
     profiles = await generate_folder_profiles_async(files, [folder])
     assert len(profiles) == 1
     assert profiles[0]["folder_path"] == str(folder)
@@ -207,6 +207,6 @@ async def test_generate_folder_profiles_async_handles_error(tmp_path):
     folder = tmp_path / "broken"
     folder.mkdir()
     # Pass a non-existent file - profile should still be produced or skipped gracefully
-    files = [(folder / "ghost.py", ".py")]
+    files = [(folder / "ghost.py", ".py", str(folder))]
     profiles = await generate_folder_profiles_async(files, [folder])
     assert isinstance(profiles, list)

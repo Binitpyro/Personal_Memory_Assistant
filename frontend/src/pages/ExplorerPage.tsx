@@ -60,7 +60,7 @@ function FolderNode({ node, depth, onSelect, selectedPath, onDeleteFolder }: Fol
           )}
         </div>
         <Folder className="w-4 h-4 text-primary shrink-0" />
-        <span className="text-sm font-medium truncate flex-1">{node.name}</span>
+        <span className="text-sm font-medium truncate flex-1" title={node.fullPath}>{node.name}</span>
 
         <button
           onClick={handleDelete}
@@ -192,12 +192,11 @@ export function ExplorerPage() {
 
     const rootNodes: TreeNode[] = []
 
-    Object.entries(tree.folders).forEach(([tag, files]) => {
-      // Step 1: Normalize root tag
-      let normTag = tag.replaceAll('\\', '/').toLowerCase();
-      while (normTag.endsWith('/')) { normTag = normTag.slice(0, -1); }
-      const partsTag = tag.split(/[\\/]/).filter(Boolean);
-      const tagName = partsTag.at(-1) || tag;
+    Object.entries(tree.folders).forEach(([root, files]) => {
+      // `root` is the indexed folder's full path (see GET /api/files/tree).
+      // Everything below hangs off stripping it from each file path.
+      let normRoot = root.replaceAll('\\', '/').toLowerCase();
+      while (normRoot.endsWith('/')) { normRoot = normRoot.slice(0, -1); }
 
       const filteredFiles = files.filter(f => {
         const extMatch = activeExtension ? ('.' + f.path.split('.').pop()?.toLowerCase()) === activeExtension.toLowerCase() : true;
@@ -207,29 +206,29 @@ export function ExplorerPage() {
 
       if (filteredFiles.length === 0 && activeExtension) return;
 
-      const root: TreeNode = { name: tagName, fullPath: tag, children: new Map(), files: [] }
+      const rootNode: TreeNode = { name: root, fullPath: root, children: new Map(), files: [] }
+      // Build child paths with the separator the root actually uses. The
+      // removal endpoint matches `files.path` with a LIKE prefix, and that
+      // column carries the host separator.
+      const sep = root.includes('\\') ? '\\' : '/'
 
       filteredFiles.forEach(f => {
         const normPath = f.path.replaceAll('\\', '/')
         const normPathLower = normPath.toLowerCase()
 
         let relative = normPath
-        if (normPathLower.startsWith(normTag)) {
-          // Robustly remove the tag prefix
-          relative = normPath.slice(normTag.length);
+        if (normPathLower.startsWith(normRoot)) {
+          relative = normPath.slice(normRoot.length);
           while (relative.startsWith('/')) { relative = relative.slice(1); }
         }
 
         const parts = relative.split('/').filter(Boolean)
-        let current = root
+        let current = rootNode
 
-        // Skip parts that match root name to avoid "Root > Root > Sub" nesting
-        let startIdx = 0;
-        while (startIdx < parts.length && parts[startIdx].toLowerCase() === tagName.toLowerCase()) {
-          startIdx++;
-        }
-
-        for (let i = startIdx; i < parts.length; i++) {
+        // No root-name skipping here. A subfolder is allowed to share the
+        // root's name (D:\College\College), and with the prefix stripped
+        // correctly there is nothing left to deduplicate.
+        for (let i = 0; i < parts.length; i++) {
           const part = parts[i]
           if (i === parts.length - 1) {
             current.files.push(f)
@@ -237,7 +236,7 @@ export function ExplorerPage() {
             if (!current.children.has(part)) {
               current.children.set(part, {
                 name: part,
-                fullPath: current.fullPath + '/' + part,
+                fullPath: current.fullPath + sep + part,
                 children: new Map(),
                 files: []
               })
@@ -246,7 +245,7 @@ export function ExplorerPage() {
           }
         }
       })
-      rootNodes.push(root)
+      rootNodes.push(rootNode)
     })
 
     return rootNodes.sort((a, b) => a.name.localeCompare(b.name))

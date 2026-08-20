@@ -10,7 +10,8 @@ CREATE TABLE IF NOT EXISTS files (
     usage_count INTEGER DEFAULT 0,
     summary TEXT DEFAULT '',
     sha256 TEXT DEFAULT '',
-    extract_status TEXT DEFAULT ''
+    extract_status TEXT DEFAULT '',
+    root_path TEXT DEFAULT ''
 );
 
 -- Performance indexes

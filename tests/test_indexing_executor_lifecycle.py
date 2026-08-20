@@ -69,7 +69,7 @@ async def test_cancelling_extraction_leaves_the_extract_pool_usable(tmp_path, mo
     tasks = [
         asyncio.create_task(
             service._stream_extract_and_prepare(
-                _corpus_file(tmp_path, f"doc{i}.txt", service), "tag", None, q
+                _corpus_file(tmp_path, f"doc{i}.txt", service), "tag", "", None, q
             )
         )
         for i, q in enumerate(queues)
@@ -112,7 +112,7 @@ async def test_pump_exits_when_the_extractor_finishes_without_a_sentinel(tmp_pat
     queue: asyncio.Queue = asyncio.Queue()
 
     await asyncio.wait_for(
-        service._stream_extract_and_prepare(path, "tag", None, queue), timeout=20.0
+        service._stream_extract_and_prepare(path, "tag", "", None, queue), timeout=20.0
     )
 
     kinds = [queue.get_nowait()["type"] for _ in range(queue.qsize())]
@@ -344,3 +344,53 @@ class TestExtractStatus:
 
         assert "extract_status" in cols
         assert "files_extract_status" in applied, "the migration was not recorded"
+        assert "root_path" in cols
+        assert "files_root_path" in applied, "the migration was not recorded"
+
+    @pytest.mark.asyncio
+    async def test_root_path_is_added_to_an_existing_index(self, tmp_path):
+        """An index built before files_root_path must gain the column in place.
+
+        This is the whole point of the additive migration: the Explorer groups
+        by root_path, and a user with an existing index should not have to
+        rebuild to get a correct tree. The starting table carries sha256 -- see
+        the note above on why a genuinely ancient table cannot be simulated --
+        but no root_path.
+        """
+        import aiosqlite
+
+        from app.storage.db import DatabaseManager
+
+        db_file = tmp_path / "legacy.db"
+        async with aiosqlite.connect(str(db_file)) as conn:
+            await conn.execute(
+                "CREATE TABLE files (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " path TEXT UNIQUE NOT NULL, size INTEGER NOT NULL,"
+                " modified_at TEXT NOT NULL, type TEXT NOT NULL, folder_tag TEXT,"
+                " usage_count INTEGER DEFAULT 0, sha256 TEXT DEFAULT '')"
+            )
+            await conn.execute(
+                "INSERT INTO files (path, size, modified_at, type, folder_tag)"
+                " VALUES ('/srv/proj/a.py', 1, 'now', '.py', 'proj')"
+            )
+            await conn.commit()
+
+        mgr = DatabaseManager(str(db_file))
+        try:
+            await mgr.init_db(schema_path="app/storage/schema.sql")
+            cols = {r[1] for r in await mgr.execute_query("PRAGMA table_info(files)")}
+            rows = await mgr.execute_query("SELECT path, root_path FROM files")
+            idx = {
+                r[0]
+                for r in await mgr.execute_query(
+                    "SELECT name FROM sqlite_master WHERE type='index'"
+                )
+            }
+        finally:
+            await mgr.close()
+
+        assert "root_path" in cols, "the pre-existing index never gained the column"
+        # The default is empty, not NULL: /api/files/tree keys off truthiness and
+        # derives a fallback root for exactly these rows.
+        assert [tuple(r) for r in rows] == [("/srv/proj/a.py", "")]
+        assert "idx_files_root_path" in idx

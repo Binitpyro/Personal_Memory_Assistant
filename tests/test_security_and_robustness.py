@@ -153,7 +153,7 @@ async def test_rag_pipeline_edge_cases(tmp_path, mock_db, mock_emb, mock_lancedb
     indexer._extract_plain_text_stream = mock_extract
 
     # Run streaming extraction
-    await indexer._stream_extract_and_prepare(error_file, "test_tag", None, queue)
+    await indexer._stream_extract_and_prepare(error_file, "test_tag", "", None, queue)
 
     # Collect items from queue
     items = []
@@ -303,7 +303,7 @@ async def test_rag_pipeline_extremely_large_input(tmp_path, mock_db, mock_emb, m
 
     indexer = IndexingService(mock_db, mock_emb, mock_lancedb)
     queue = asyncio.Queue()
-    await indexer._stream_extract_and_prepare(large_file, "test_tag", None, queue)
+    await indexer._stream_extract_and_prepare(large_file, "test_tag", "", None, queue)
 
     items = []
     while not queue.empty():
@@ -327,7 +327,7 @@ async def test_malformed_structured_files(tmp_path, mock_db, mock_emb, mock_lanc
 
     # Process fake PDF
     queue_pdf = asyncio.Queue()
-    await indexer._stream_extract_and_prepare(fake_pdf, "pdf_tag", None, queue_pdf)
+    await indexer._stream_extract_and_prepare(fake_pdf, "pdf_tag", "", None, queue_pdf)
 
     pdf_items = []
     while not queue_pdf.empty():
@@ -339,7 +339,7 @@ async def test_malformed_structured_files(tmp_path, mock_db, mock_emb, mock_lanc
 
     # Process fake docx
     queue_docx = asyncio.Queue()
-    await indexer._stream_extract_and_prepare(fake_docx, "docx_tag", None, queue_docx)
+    await indexer._stream_extract_and_prepare(fake_docx, "docx_tag", "", None, queue_docx)
 
     docx_items = []
     while not queue_docx.empty():

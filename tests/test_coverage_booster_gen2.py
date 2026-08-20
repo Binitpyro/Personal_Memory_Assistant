@@ -639,6 +639,6 @@ async def test_indexing_pipeline_taskgroup_exception():
 
     with pytest.raises(BaseExceptionGroup) as excinfo:
         await service._batch_index_pipeline(
-            files_to_index=[(Path("C:/a.py"), "A")], offset=0, total_to_index=1
+            files_to_index=[(Path("C:/a.py"), "A", "C:/")], offset=0, total_to_index=1
         )
     assert any("simulated pipeline error" in str(e) for e in excinfo.value.exceptions)

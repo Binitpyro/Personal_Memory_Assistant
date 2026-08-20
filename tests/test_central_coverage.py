@@ -115,7 +115,7 @@ async def test_indexing_pipeline_deep(real_db, tmp_path):
     test_file.write_text("Hello world content.")
     try:
         q = asyncio.Queue()
-        await svc._stream_extract_and_prepare(test_file, "tag", None, q)
+        await svc._stream_extract_and_prepare(test_file, "tag", "", None, q)
 
         header = await q.get()
         assert header["type"] == "header"
@@ -128,7 +128,7 @@ async def test_indexing_pipeline_deep(real_db, tmp_path):
         assert footer["type"] == "footer"
 
         # Verification of DB record creation
-        await svc._batch_index_pipeline([(test_file, "tag")])
+        await svc._batch_index_pipeline([(test_file, "tag", "")])
         change_map = await real_db.get_files_change_map([str(test_file.absolute())])
         assert str(test_file.absolute()) in change_map
     finally:

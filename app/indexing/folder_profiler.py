@@ -163,7 +163,7 @@ def build_folder_profile(
 
 
 async def generate_folder_profiles_async(
-    all_files: list[tuple[Path, str]],
+    all_files: list[tuple[Path, str, str]],
     folders: list[Path],
 ) -> list[dict[str, Any]]:
     """Run build_folder_profile concurrently for all folders."""
@@ -171,16 +171,20 @@ async def generate_folder_profiles_async(
     max_workers = min(len(folders), (os.cpu_count() or 4) + 2)
     profiles: list[dict[str, Any]] = []
 
-    # Pre-group files by their folder_tag to avoid O(N * M) string matching
-    grouped_files: dict[str, list[Any]] = {f.name: [] for f in folders}
-    for fp, tag in all_files:
-        if tag in grouped_files:
-            grouped_files[tag].append((fp, tag))
+    # Pre-group by the scanned root path, not by `f.name`, to avoid O(N * M)
+    # string matching. The basename is not a unique key: two indexed folders can
+    # share one, and then both get handed the merged list. `build_folder_profile`
+    # re-filters with `is_relative_to`, so that produced extra work rather than a
+    # wrong profile, but the root is the key that actually identifies a folder.
+    grouped_files: dict[str, list[Any]] = {str(f): [] for f in folders}
+    for fp, tag, root in all_files:
+        if root in grouped_files:
+            grouped_files[root].append((fp, tag))
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
         futs = [
             loop.run_in_executor(
-                pool, build_folder_profile, f, f.name, grouped_files.get(f.name, [])
+                pool, build_folder_profile, f, f.name, grouped_files.get(str(f), [])
             )
             for f in folders
         ]

@@ -198,7 +198,7 @@ async def test_stream_extract_and_prepare(tmp_path: Path):
     file_ok = tmp_path / "ok.txt"
     file_ok.write_text("Hello world. " * 30, encoding="utf-8")
     q = asyncio.Queue()
-    await svc._stream_extract_and_prepare(file_ok, "tmp", None, q)
+    await svc._stream_extract_and_prepare(file_ok, "tmp", "", None, q)
 
     header = await q.get()
     assert header["type"] == "header"
@@ -230,7 +230,9 @@ async def test_stream_pump_unblocks_on_cancellation(monkeypatch, tmp_path: Path)
     monkeypatch.setattr(svc, "_generate_summary", lambda _text, _path: "")
     idx.progress.reset(0)
     queue = asyncio.Queue()
-    task = asyncio.create_task(svc._stream_extract_and_prepare(waiting_file, "tmp", None, queue))
+    task = asyncio.create_task(
+        svc._stream_extract_and_prepare(waiting_file, "tmp", "", None, queue)
+    )
 
     try:
         assert await asyncio.wait_for(asyncio.to_thread(started.wait), timeout=1)
@@ -316,7 +318,7 @@ async def test_scan_index_file_and_profiles(monkeypatch, tmp_path: Path):
 
     all_files, _method, _duration = svc._scan_all_folders([folder])
     assert len(all_files) == 1
-    await svc._batch_index_pipeline([(file1, "proj")])
+    await svc._batch_index_pipeline([(file1, "proj", "")])
     assert svc.lancedb_client.docs_batches
 
 
@@ -347,7 +349,7 @@ async def test_cancellation_awareness(tmp_path: Path):
     # A large file so extraction takes time
     f.write_text("Hello world. " * 100000, encoding="utf-8")
 
-    task = asyncio.create_task(svc._batch_index_pipeline([(f, "cancel_test")]))
+    task = asyncio.create_task(svc._batch_index_pipeline([(f, "cancel_test", "")]))
 
     # Wait until it enters ingest mode
     await asyncio.sleep(0.05)
@@ -439,7 +441,7 @@ async def test_file_that_extracts_to_nothing_is_not_marked_complete(tmp_path: Pa
     svc._extract_plain_text_stream = lambda _p: iter(())
 
     q: asyncio.Queue = asyncio.Queue()
-    await svc._stream_extract_and_prepare(f, "tag", None, q)
+    await svc._stream_extract_and_prepare(f, "tag", "", None, q)
 
     items = []
     while not q.empty():
@@ -460,7 +462,7 @@ async def test_empty_file_is_still_marked_complete(tmp_path: Path):
     f.write_text("", encoding="utf-8")
 
     q: asyncio.Queue = asyncio.Queue()
-    await svc._stream_extract_and_prepare(f, "tag", None, q)
+    await svc._stream_extract_and_prepare(f, "tag", "", None, q)
 
     footers = []
     while not q.empty():
@@ -489,7 +491,7 @@ async def test_extractor_stubs_are_never_indexed_as_content(tmp_path: Path, stub
     f.write_text("placeholder", encoding="utf-8")
 
     q: asyncio.Queue = asyncio.Queue()
-    await svc._stream_extract_and_prepare(f, "tag", stub, q)
+    await svc._stream_extract_and_prepare(f, "tag", "", stub, q)
 
     items = []
     while not q.empty():
@@ -512,7 +514,7 @@ async def test_unchanged_content_skips_reindex(tmp_path: Path):
     svc._known_hashes = {str(f.absolute()): digest}
 
     q: asyncio.Queue = asyncio.Queue()
-    await svc._stream_extract_and_prepare(f, "tag", None, q)
+    await svc._stream_extract_and_prepare(f, "tag", "", None, q)
 
     items = []
     while not q.empty():
@@ -532,7 +534,7 @@ async def test_changed_content_still_reindexes(tmp_path: Path):
     svc._known_hashes = {str(f.absolute()): "0" * 64}
 
     q: asyncio.Queue = asyncio.Queue()
-    await svc._stream_extract_and_prepare(f, "tag", None, q)
+    await svc._stream_extract_and_prepare(f, "tag", "", None, q)
 
     types = []
     while not q.empty():
@@ -570,7 +572,7 @@ async def test_pipeline_propagates_stage_failure(tmp_path: Path):
     svc._storer_worker = boom
 
     with pytest.raises(BaseExceptionGroup) as excinfo:
-        await svc._batch_index_pipeline([(f, "tag")])
+        await svc._batch_index_pipeline([(f, "tag", "")])
     assert any("storer exploded" in str(e) for e in excinfo.value.exceptions)
 
 
@@ -602,7 +604,7 @@ async def test_scanned_document_keeps_its_real_hash(tmp_path: Path):
     svc._extract_plain_text_stream = lambda _p: iter((meta,))
 
     q: asyncio.Queue = asyncio.Queue()
-    await svc._stream_extract_and_prepare(f, "tag", None, q)
+    await svc._stream_extract_and_prepare(f, "tag", "", None, q)
 
     footers = []
     while not q.empty():
@@ -627,7 +629,7 @@ async def test_unreadable_stub_retries_rather_than_retiring_the_file(tmp_path: P
     f.write_text("real content", encoding="utf-8")
 
     q: asyncio.Queue = asyncio.Queue()
-    await svc._stream_extract_and_prepare(f, "tag", f"[UNREADABLE: {f}]", q)
+    await svc._stream_extract_and_prepare(f, "tag", "", f"[UNREADABLE: {f}]", q)
 
     footers = [
         i
@@ -670,7 +672,7 @@ async def test_utf16_file_is_indexed_as_real_text(tmp_path: Path):
     f.write_bytes(("SELECT unique_marker FROM t;\n" * 40).encode("utf-16"))
 
     q: asyncio.Queue = asyncio.Queue()
-    await svc._stream_extract_and_prepare(f, "tag", None, q)
+    await svc._stream_extract_and_prepare(f, "tag", "", None, q)
 
     chunks = []
     while not q.empty():

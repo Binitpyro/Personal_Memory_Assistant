@@ -556,9 +556,10 @@ async def security_and_telemetry_middleware(request: Request, call_next):
             # query string reaches uvicorn's access log, browser history and
             # Referer - the same leak already removed from the SSE call (see
             # frontend/src/api.ts). Nothing ever produced one: api.ts sends the
-            # header on every request, /api/index/progress-stream is exempt
-            # above, and /api/modules/ws reads its own Query param on a path
-            # that never traverses this middleware.
+            # header on every request, and /api/index/progress-stream is exempt
+            # above. /api/modules/ws does not traverse this middleware and so
+            # kept its own Query fallback for a while after this one went; it
+            # is header-only too now, so the policy holds everywhere.
             provided_token = request.headers.get("X-Local-Access-Token")
 
             if not provided_token or not secrets.compare_digest(provided_token, expected_token):

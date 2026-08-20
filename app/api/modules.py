@@ -12,7 +12,7 @@ import secrets
 import time
 from collections import deque
 
-from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.api.deps import get_db, get_emb, get_lancedb, get_planner
 from app.search.retrieval import retrieve_only
@@ -27,11 +27,21 @@ RATE_LIMIT_WINDOW = 60.0
 
 
 @router.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(None)):
+async def websocket_endpoint(websocket: WebSocket):
     """
     Secure WebSocket endpoint for module health and handshake messaging.
-    Requires a valid X_LOCAL_ACCESS_TOKEN passed either in the header
-    'X-Local-Access-Token' or as a query parameter 'token'.
+    Requires a valid X_LOCAL_ACCESS_TOKEN in the 'X-Local-Access-Token' header.
+
+    Header only. A ?token= fallback used to be accepted here, and it outlived
+    the same fallback being removed from every /api/ HTTP route because this
+    path does not traverse that middleware. Query strings reach uvicorn's
+    access log, browser history and Referer, which is no less true of a socket
+    handshake than of a GET.
+
+    The usual reason to keep it - browsers cannot set headers on a WebSocket
+    handshake - does not apply: nothing in frontend/src constructs a WebSocket
+    at all. This is Core's module extension point, and the module processes
+    that use it are ordinary HTTP clients that can set a header.
     """
     expected_token = os.environ.get("X_LOCAL_ACCESS_TOKEN")
     if not expected_token:
@@ -40,8 +50,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(Non
         return
 
     provided_token = websocket.headers.get("x-local-access-token")
-    if not provided_token:
-        provided_token = token
 
     if not provided_token or not secrets.compare_digest(provided_token, expected_token):
         logger.warning("Unauthorized WebSocket connection attempt refused.")

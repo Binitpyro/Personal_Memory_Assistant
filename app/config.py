@@ -152,7 +152,7 @@ class Settings(BaseSettings):
     # state, `ocr_enabled` the user switch - normalize_ocr keeps them coherent
     # so callers only ever need to read one of them.
     ocr_enabled: bool = False
-    ocr_tier: str = "none"  # "none" | "cpu" | "gpu"
+    ocr_tier: str = "none"  # "none" | "cpu" | "gpu" | "vlm" (app/ocr/settings.py)
     ocr_dpi: int = 150
     ocr_min_chars_per_page: int = 100
     ocr_garbage_ratio: float = 0.30

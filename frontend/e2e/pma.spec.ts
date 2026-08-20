@@ -72,7 +72,7 @@ test.beforeEach(async ({ page }) => {
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({
-        version: '0.0.71',
+        version: '0.0.72',
         status: 'ok',
         db: 'connected',
         model_ready: true,

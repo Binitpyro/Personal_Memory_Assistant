@@ -27,7 +27,7 @@ vi.mock('../../api', () => ({
   getHealth: vi.fn(),
 }));
 
-const base = { version: '0.0.71', status: 'ok', db: 'connected', split_brain_sync_status: 'idle' };
+const base = { version: '0.0.72', status: 'ok', db: 'connected', split_brain_sync_status: 'idle' };
 
 describe('AppShell subsystem health', () => {
   beforeEach(() => {

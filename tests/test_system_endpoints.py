@@ -289,6 +289,54 @@ async def test_pick_folder_mocked(client):
     assert "error" not in data
 
 
+def _fake_tkinter(askdirectory_result=None, askdirectory_error=None):
+    """Stand-in for tkinter, returning the mock root so a test can assert on it.
+
+    _dialog imports tkinter inside the function body, so sys.modules is the
+    only place to intercept it. The other pick_folder tests mock
+    run_in_executor, which means _dialog never runs at all and neither of them
+    could have observed what it does with the root.
+    """
+    fake_root = MagicMock()
+    fake_tk = MagicMock()
+    fake_tk.Tk.return_value = fake_root
+    fake_filedialog = MagicMock()
+    if askdirectory_error is not None:
+        fake_filedialog.askdirectory.side_effect = askdirectory_error
+    else:
+        fake_filedialog.askdirectory.return_value = askdirectory_result
+    fake_tk.filedialog = fake_filedialog
+    modules = {"tkinter": fake_tk, "tkinter.filedialog": fake_filedialog}
+    return fake_root, modules
+
+
+@pytest.mark.asyncio
+async def test_pick_folder_destroys_the_tk_root(client):
+    # withdraw() only hides the window - the interpreter, its event loop and its
+    # window-system resources live on until destroy(). This endpoint can be
+    # called repeatedly, so a leak per call accumulates for the life of the
+    # process.
+    fake_root, modules = _fake_tkinter(askdirectory_result="C:/picked")
+    with patch.dict("sys.modules", modules):
+        response = await client.get("/api/pick/folder")
+    assert response.status_code == 200
+    assert response.json()["path"] == "C:/picked"
+    fake_root.destroy.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_pick_folder_destroys_the_tk_root_when_the_dialog_raises(client):
+    # The reason it is a finally and not a trailing call. A raising dialog is
+    # the case where leaking matters most, and it is the one a happy-path test
+    # cannot reach.
+    fake_root, modules = _fake_tkinter(askdirectory_error=RuntimeError("no display"))
+    with patch.dict("sys.modules", modules):
+        response = await client.get("/api/pick/folder")
+    assert response.status_code == 200
+    assert response.json()["path"] == ""
+    fake_root.destroy.assert_called_once()
+
+
 @pytest.mark.asyncio
 async def test_pick_folder_dialog_failure(client):
     # No display / tkinter unavailable: fails closed with the same error

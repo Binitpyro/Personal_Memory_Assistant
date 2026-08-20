@@ -369,10 +369,18 @@ async def pick_folder():
         import tkinter as tk
         from tkinter import filedialog
 
+        # destroy() in a finally, not just withdraw(). Withdrawing hides the
+        # window; the interpreter, its event loop and its X/Win32 resources stay
+        # alive for the life of the process, and this endpoint can be called
+        # repeatedly. Cancelling the dialog returns "" rather than raising, so
+        # without the finally the leak is silent on the common path.
         root = tk.Tk()
-        root.withdraw()
-        root.wm_attributes("-topmost", 1)
-        return filedialog.askdirectory(parent=root, title="Select Folder") or ""
+        try:
+            root.withdraw()
+            root.wm_attributes("-topmost", 1)
+            return filedialog.askdirectory(parent=root, title="Select Folder") or ""
+        finally:
+            root.destroy()
 
     try:
         path = await asyncio.get_running_loop().run_in_executor(None, _dialog)

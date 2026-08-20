@@ -43,7 +43,16 @@ def _peak_working_set_mb() -> float:
     GetProcessMemoryInfo, not tracemalloc: the ONNX arena and numpy buffers are
     invisible to tracemalloc, which is most of the cost during indexing (see the
     RAM budget note in CLAUDE.md section 6).
+
+    The platform check is what makes the "off Windows" half of that promise hold
+    for mypy as well as at runtime: typeshed gates ctypes.WinDLL behind
+    sys.platform, so checking this file for Linux fails on it without the guard.
+    The `except` below would swallow it anyway, which is exactly why it went
+    unnoticed on a Windows-only dev box - same guard as
+    scripts/profile_ingest_memory.py.
     """
+    if sys.platform != "win32":
+        return 0.0
     try:
         import ctypes
         from ctypes import wintypes

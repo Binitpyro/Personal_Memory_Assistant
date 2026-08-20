@@ -322,6 +322,15 @@ class DatabaseManager:
                 "files_extract_status",
                 "ALTER TABLE files ADD COLUMN extract_status TEXT DEFAULT ''",
             ),
+            # The indexed folder root this file was found under. `folder_tag`
+            # holds only the root's basename, so two folders that share a name
+            # collide in it and it cannot be turned back into a path. The
+            # Explorer needs the real root to strip it off a file path and to
+            # target a folder removal.
+            (
+                "files_root_path",
+                "ALTER TABLE files ADD COLUMN root_path TEXT DEFAULT ''",
+            ),
             ("sha256", "ALTER TABLE files ADD COLUMN sha256 TEXT DEFAULT ''"),
             (
                 "files_created_at",
@@ -411,6 +420,7 @@ class DatabaseManager:
                 "ON files(path, modified_at, sha256)"
             )
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_files_size ON files(size)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_files_root_path ON files(root_path)")
             await conn.commit()
         except Exception:
             logger.debug("Failed to create covering index.", exc_info=True)
@@ -758,18 +768,20 @@ class DatabaseManager:
         conn = self._get_conn()
         file_data.setdefault("summary", "")
         file_data.setdefault("sha256", "")
+        file_data.setdefault("root_path", "")
         if "type" in file_data:
             file_data["type"] = file_data["type"].lower()
         query = """
-        INSERT INTO files (path, size, modified_at, type, folder_tag, summary, sha256)
-        VALUES (:path, :size, :modified_at, :type, :folder_tag, :summary, :sha256)
+        INSERT INTO files (path, size, modified_at, type, folder_tag, summary, sha256, root_path)
+        VALUES (:path, :size, :modified_at, :type, :folder_tag, :summary, :sha256, :root_path)
         ON CONFLICT(path) DO UPDATE SET
             size=excluded.size,
             modified_at=excluded.modified_at,
             type=excluded.type,
             folder_tag=excluded.folder_tag,
             summary=excluded.summary,
-            sha256=excluded.sha256
+            sha256=excluded.sha256,
+            root_path=excluded.root_path
         RETURNING id;
         """
         async with conn.execute(query, file_data) as cursor:
@@ -791,15 +803,16 @@ class DatabaseManager:
 
         conn = self._get_conn()
         query = """
-        INSERT INTO files (path, size, modified_at, type, folder_tag, summary, sha256)
-        VALUES (:path, :size, :modified_at, :type, :folder_tag, :summary, :sha256)
+        INSERT INTO files (path, size, modified_at, type, folder_tag, summary, sha256, root_path)
+        VALUES (:path, :size, :modified_at, :type, :folder_tag, :summary, :sha256, :root_path)
         ON CONFLICT(path) DO UPDATE SET
             size=excluded.size,
             modified_at=excluded.modified_at,
             type=excluded.type,
             folder_tag=excluded.folder_tag,
             summary=excluded.summary,
-            sha256=excluded.sha256
+            sha256=excluded.sha256,
+            root_path=excluded.root_path
         RETURNING id;
         """
         file_ids = []
@@ -807,6 +820,7 @@ class DatabaseManager:
         for fd in files_data:
             fd.setdefault("summary", "")
             fd.setdefault("sha256", "")
+            fd.setdefault("root_path", "")
             if "type" in fd:
                 fd["type"] = fd["type"].lower()
 
@@ -1563,7 +1577,8 @@ class DatabaseManager:
         async with (
             self._get_read_conn() as conn,
             conn.execute(
-                "SELECT id, path, size, type, folder_tag, usage_count FROM files ORDER BY folder_tag, path"
+                "SELECT id, path, size, type, folder_tag, root_path, usage_count "
+                "FROM files ORDER BY root_path, folder_tag, path"
             ) as cursor,
         ):
             return list(await cursor.fetchall())

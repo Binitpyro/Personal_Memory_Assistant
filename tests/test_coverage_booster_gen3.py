@@ -172,7 +172,9 @@ async def test_scan_all_folders_rust_mocked(monkeypatch):
     # Test scan success path
     files, method, _dur = service._scan_all_folders([Path("C:/FolderA")])
     assert len(files) == 1
-    assert files[0] == (Path("C:/FolderA/file.py"), "FolderA")
+    # The third element is the indexed root the file was attributed to; it is
+    # what /api/files/tree groups by and what the Explorer strips off.
+    assert files[0] == (Path("C:/FolderA/file.py"), "FolderA", str(Path("C:/FolderA").resolve()))
     assert method == "rust_jwalk"
 
     # Test exception fallback path

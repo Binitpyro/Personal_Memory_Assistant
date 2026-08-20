@@ -264,6 +264,14 @@ _STUB_STATUS = {
 _INCOMPLETE_SHA_STATES = ("", "ERROR", "CANCELLED", "NOCONTENT")
 
 
+#: One scanned file: its path, the basename of the indexed folder it came from,
+#: and that folder's full path. The root is carried separately because
+#: `folder_tag` is only the basename and so cannot be turned back into a path,
+#: nor tell two like-named folders apart. Empty root means the scanner could not
+#: attribute the file to any requested root.
+ScannedFile = tuple[Path, str, str]
+
+
 #: UTF-16/32 byte-order marks. Text in these encodings is full of NUL bytes, so
 #: a plain NUL test calls it binary. On Windows that is not an edge case:
 #: PowerShell's `>`, `Out-File` and `Export-Csv` wrote UTF-16LE by default
@@ -630,7 +638,7 @@ class IndexingService:
             progress.complete()
 
     async def _batch_index_pipeline(
-        self, files_to_index: list[tuple[Path, str]], offset: int = 0, total_to_index: int = 0
+        self, files_to_index: list[ScannedFile], offset: int = 0, total_to_index: int = 0
     ) -> None:
         batch_total = len(files_to_index)
         total_so_far = offset
@@ -668,13 +676,13 @@ class IndexingService:
             logger.error("Pipeline stage failed or cancelled:", exc_info=e)
             raise
 
-    async def _rust_pre_extract(self, files_to_index: list[tuple[Path, str]]) -> dict[str, str]:
+    async def _rust_pre_extract(self, files_to_index: list[ScannedFile]) -> dict[str, str]:
         pre_extracted: dict[str, str] = {}
         if not RUST_CORE_AVAILABLE:
             return pre_extracted
 
         rust_paths = []
-        for fp, _ in files_to_index:
+        for fp, _, _ in files_to_index:
             ext = fp.suffix.lower()
             if ext in TEXT_EXTENSIONS and ext not in [".json", ".csv"]:
                 rust_paths.append(str(fp.absolute()))
@@ -696,7 +704,7 @@ class IndexingService:
         extracted_lock = asyncio.Lock()
         semaphore = asyncio.Semaphore(self._concurrency * 2)
 
-        async def _safe_stream_extract(path: Path, tag: str, cached_text: str | None):
+        async def _safe_stream_extract(path: Path, tag: str, root: str, cached_text: str | None):
             if progress.is_cancelled:
                 return
             nonlocal extracted_count
@@ -706,7 +714,7 @@ class IndexingService:
                     overall = total_so_far + extracted_count
                 progress.set_current_file(f"Extracting: {path.name} ({overall}/{grand_total})")
 
-                await self._stream_extract_and_prepare(path, tag, cached_text, embed_queue)
+                await self._stream_extract_and_prepare(path, tag, root, cached_text, embed_queue)
 
         # Process files_to_index in small chunks of 16 to enforce O(1) memory boundary
         chunk_size = 16
@@ -717,9 +725,9 @@ class IndexingService:
             chunk_pre_extracted = await self._rust_pre_extract(chunk)
 
             tasks = []
-            for fp, ft in chunk:
+            for fp, ft, fr in chunk:
                 cached_text = chunk_pre_extracted.pop(str(fp.absolute()), None)
-                tasks.append(_safe_stream_extract(fp, ft, cached_text))
+                tasks.append(_safe_stream_extract(fp, ft, fr, cached_text))
 
             results = await asyncio.gather(*tasks, return_exceptions=True)
             for res in results:
@@ -732,7 +740,12 @@ class IndexingService:
         await embed_queue.put(None)
 
     async def _stream_extract_and_prepare(
-        self, path: Path, folder_tag: str, pre_text: str | None, queue: asyncio.Queue
+        self,
+        path: Path,
+        folder_tag: str,
+        root_path: str,
+        pre_text: str | None,
+        queue: asyncio.Queue,
     ) -> None:
         import queue as stdlib_queue
 
@@ -767,6 +780,7 @@ class IndexingService:
                     "modified_at": mtime_iso,
                     "type": path.suffix.lower(),
                     "folder_tag": folder_tag,
+                    "root_path": root_path,
                     "sha256": "",  # placeholder, updated in footer
                 },
             }
@@ -989,6 +1003,7 @@ class IndexingService:
                             "modified_at": datetime.now().isoformat(),
                             "type": path.suffix.lower(),
                             "folder_tag": folder_tag,
+                            "root_path": root_path,
                             "sha256": "ERROR",
                         },
                     }
@@ -1656,16 +1671,14 @@ class IndexingService:
         except Exception:
             return ""
 
-    def _scan_all_folders(
-        self, unique_folders: list[Path]
-    ) -> tuple[list[tuple[Path, str]], str, float]:
+    def _scan_all_folders(self, unique_folders: list[Path]) -> tuple[list[ScannedFile], str, float]:
         if RUST_CORE_AVAILABLE:
             return self._scan_all_folders_rust(unique_folders)
         return self._scan_all_folders_python(unique_folders)
 
     def _scan_all_folders_rust(
         self, unique_folders: list[Path]
-    ) -> tuple[list[tuple[Path, str]], str, float]:
+    ) -> tuple[list[ScannedFile], str, float]:
         import time
 
         t0 = time.perf_counter()
@@ -1677,21 +1690,26 @@ class IndexingService:
             for path_str in rust_paths:
                 p_obj = Path(path_str)
                 tag = "Unknown"
+                root = ""
                 for f_res, f_name in resolved_folders:
                     try:
                         p_obj.resolve().relative_to(f_res)
                         tag = f_name
+                        # `relative_to` succeeded, so this is a genuine string
+                        # prefix of the path we are about to store. That is what
+                        # `delete_files_by_folder_prefix` matches on.
+                        root = str(f_res)
                         break
                     except ValueError:
                         pass
-                all_files.append((p_obj, tag))
+                all_files.append((p_obj, tag, root))
             return all_files, "rust_jwalk", (time.perf_counter() - t0) * 1000
         except Exception:
             return self._scan_all_folders_python(unique_folders)
 
     def _scan_all_folders_python(
         self, unique_folders: list[Path]
-    ) -> tuple[list[tuple[Path, str]], str, float]:
+    ) -> tuple[list[ScannedFile], str, float]:
         all_files, seen_paths = [], set()
         scan_dur = 0.0
         for f in unique_folders:
@@ -1701,13 +1719,13 @@ class IndexingService:
                 abs_p = str(fp.resolve())
                 if abs_p not in seen_paths:
                     seen_paths.add(abs_p)
-                    all_files.append((fp, f.name))
+                    all_files.append((fp, f.name, str(f)))
         return all_files, "scandir", scan_dur
 
     async def _detect_changes(
-        self, all_files: list[tuple[Path, str]], reader_conn: aiosqlite.Connection
-    ) -> tuple[list[tuple[Path, str]], int, int, int]:
-        file_paths = [str(fp.absolute()) for fp, _ in all_files]
+        self, all_files: list[ScannedFile], reader_conn: aiosqlite.Connection
+    ) -> tuple[list[ScannedFile], int, int, int]:
+        file_paths = [str(fp.absolute()) for fp, _, _ in all_files]
         change_map = await self.db.get_files_change_map(file_paths, conn=reader_conn)
         to_index, skipped, new_c, changed_c = [], 0, 0, 0
 
@@ -1727,7 +1745,7 @@ class IndexingService:
         batch_size = 1000
         for i in range(0, len(all_files), batch_size):
             batch = all_files[i : i + batch_size]
-            stat_tasks = [_stat_file(fp) for fp, _ in batch]
+            stat_tasks = [_stat_file(fp) for fp, _, _ in batch]
             res = await asyncio.gather(*stat_tasks, return_exceptions=False)
             stat_results.extend(res)
 
@@ -1741,7 +1759,7 @@ class IndexingService:
                 failed_paths.add(key)
 
         self._known_hashes = {}
-        for fp, tag in all_files:
+        for fp, tag, root in all_files:
             key = str(fp.absolute())
             if key in failed_paths:
                 skipped += 1
@@ -1752,13 +1770,13 @@ class IndexingService:
                 skipped += 1
             elif stored:
                 changed_c += 1
-                to_index.append((fp, tag))
+                to_index.append((fp, tag, root))
                 # Only a complete prior hash can authorise the early-out.
                 if stored[1] not in _INCOMPLETE_SHA_STATES:
                     self._known_hashes[key] = stored[1]
             else:
                 new_c += 1
-                to_index.append((fp, tag))
+                to_index.append((fp, tag, root))
         return to_index, skipped, new_c, changed_c
 
     def _is_binary(self, path: Path) -> bool:

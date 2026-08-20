@@ -55,12 +55,16 @@ async def test_files_tree_endpoint(client, mock_db):
 
     file_tree_cache["data"] = None
 
-    # Populate mock_db
+    # Populate mock_db. The group key is root_path -- the indexed folder's full
+    # path -- not folder_tag, which holds only the basename and so cannot be
+    # stripped off a file path nor passed to the folder-removal endpoint.
     await mock_db.execute_write(
-        "INSERT INTO files (id, path, type, size, folder_tag, usage_count, modified_at) VALUES (1, 'dir/a.py', '.py', 100, 'folder_a', 2, 'now')"
+        "INSERT INTO files (id, path, type, size, folder_tag, root_path, usage_count, modified_at)"
+        " VALUES (1, '/srv/dir/a.py', '.py', 100, 'dir', '/srv/dir', 2, 'now')"
     )
     await mock_db.execute_write(
-        "INSERT INTO files (id, path, type, size, folder_tag, usage_count, modified_at) VALUES (2, 'dir/b.txt', '.txt', 200, NULL, NULL, 'now')"
+        "INSERT INTO files (id, path, type, size, folder_tag, root_path, usage_count, modified_at)"
+        " VALUES (2, '/srv/dir/sub/b.txt', '.txt', 200, 'dir', '/srv/dir', NULL, 'now')"
     )
 
     # 1. Non-cached fetch
@@ -69,8 +73,11 @@ async def test_files_tree_endpoint(client, mock_db):
     data = response.json()
     assert data["total_files"] == 2
     assert data["total_size"] == 300
-    assert "folder_a" in data["folders"]
-    assert "Unknown" in data["folders"]  # None tag maps to Unknown
+    assert list(data["folders"]) == ["/srv/dir"]
+    assert len(data["folders"]["/srv/dir"]) == 2
+    # Every path in a group must sit under the key, or the Explorer cannot strip
+    # it and falls back to rendering the whole absolute path as a node chain.
+    assert all(e["path"].startswith("/srv/dir") for e in data["folders"]["/srv/dir"])
 
     # 2. Cached fetch
     response_cached = await client.get("/api/files/tree")
@@ -83,6 +90,103 @@ async def test_files_tree_endpoint(client, mock_db):
         response_err = await client.get("/api/files/tree")
         assert response_err.status_code == 500
         assert "DB broke" in response_err.json()["error"]
+
+
+@pytest.mark.asyncio
+async def test_files_tree_separates_folders_sharing_a_basename(client, mock_db):
+    """Two folders named College on different drives must stay separate roots.
+
+    They share a `folder_tag` -- the basename is all it holds -- so grouping by
+    it merged two unrelated corpora under one Explorer node and made the
+    delete button ambiguous. root_path is what tells them apart.
+    """
+    from app.state import file_tree_cache
+
+    file_tree_cache["data"] = None
+
+    await mock_db.execute_write(
+        "INSERT INTO files (id, path, type, size, folder_tag, root_path, usage_count, modified_at)"
+        " VALUES (1, '/a/College/x.py', '.py', 10, 'College', '/a/College', 0, 'now')"
+    )
+    await mock_db.execute_write(
+        "INSERT INTO files (id, path, type, size, folder_tag, root_path, usage_count, modified_at)"
+        " VALUES (2, '/b/College/y.py', '.py', 20, 'College', '/b/College', 0, 'now')"
+    )
+
+    data = (await client.get("/api/files/tree")).json()
+    assert sorted(data["folders"]) == ["/a/College", "/b/College"]
+    assert [e["path"] for e in data["folders"]["/a/College"]] == ["/a/College/x.py"]
+    assert [e["path"] for e in data["folders"]["/b/College"]] == ["/b/College/y.py"]
+
+
+@pytest.mark.asyncio
+async def test_files_tree_derives_a_root_for_pre_migration_rows(client, mock_db):
+    """Rows written before files_root_path still get a usable root.
+
+    Their root_path is '', so the tree falls back to the longest directory
+    prefix shared by the group. Without it an existing index would keep
+    rendering the whole absolute path as a chain of nodes until re-indexed.
+    """
+    from app.state import file_tree_cache
+
+    file_tree_cache["data"] = None
+
+    for i, path in enumerate(("/srv/proj/a.py", "/srv/proj/sub/b.py"), start=1):
+        await mock_db.execute_write(
+            "INSERT INTO files (id, path, type, size, folder_tag, root_path, usage_count,"
+            " modified_at) VALUES (?, ?, '.py', 10, 'proj', '', 0, 'now')",
+            (i, path),
+        )
+
+    data = (await client.get("/api/files/tree")).json()
+    assert list(data["folders"]) == ["/srv/proj"]
+    assert len(data["folders"]["/srv/proj"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_files_tree_fallback_root_never_swallows_a_file_name(client, mock_db):
+    """A single-file group must yield its directory, not the file itself.
+
+    Taking the common prefix over whole paths would return '/srv/proj/only.py',
+    and the Explorer would then strip a file name off as though it were a
+    folder, leaving the file with no name segment at all.
+    """
+    from app.state import file_tree_cache
+
+    file_tree_cache["data"] = None
+
+    await mock_db.execute_write(
+        "INSERT INTO files (id, path, type, size, folder_tag, root_path, usage_count, modified_at)"
+        " VALUES (1, '/srv/proj/only.py', '.py', 10, 'proj', '', 0, 'now')"
+    )
+
+    data = (await client.get("/api/files/tree")).json()
+    assert list(data["folders"]) == ["/srv/proj"]
+
+
+def test_common_parent_prefix_preserves_the_host_separator():
+    """The result has to stay a literal prefix of `files.path`.
+
+    `delete_files_by_folder_prefix` matches with LIKE, so a prefix respelt with
+    the wrong separator matches nothing and the removal silently no-ops.
+    """
+    from app.api.insights import _common_parent_prefix
+
+    sep = chr(92)
+    win = [
+        sep.join(("D:", "projects", "pma", "a.py")),
+        sep.join(("D:", "projects", "pma", "sub", "b.py")),
+    ]
+    expected = sep.join(("D:", "projects", "pma"))
+    assert _common_parent_prefix(win) == expected
+    assert all(p.startswith(_common_parent_prefix(win)) for p in win)
+
+    posix = ["/srv/pma/a.py", "/srv/pma/sub/b.py"]
+    assert _common_parent_prefix(posix) == "/srv/pma"
+
+    assert _common_parent_prefix([]) == ""
+    # Nothing in common -> no root can be claimed.
+    assert _common_parent_prefix(["/a/x.py", "/b/y.py"]) == ""
 
 
 @pytest.mark.asyncio

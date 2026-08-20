@@ -43,14 +43,17 @@ class FakeDB:
             {
                 "id": 1,
                 "folder_tag": "ProjectA",
+                "root_path": "C:/proj",
                 "path": "C:/proj/a.py",
                 "size": 100,
                 "type": ".py",
                 "usage_count": 2,
             },
+            # No root_path: a row written before the files_root_path migration.
             {
                 "id": 2,
                 "folder_tag": "",
+                "root_path": "",
                 "path": "C:/proj/readme.md",
                 "size": 50,
                 "type": ".md",
@@ -81,8 +84,11 @@ async def test_get_files_tree_groups_and_totals():
     # result is a dict when successful
     assert result["total_files"] == 2
     assert result["total_size"] == 150
-    assert "ProjectA" in result["folders"]
-    assert "Unknown" in result["folders"]
+    # Grouped by the indexed folder's full path, not by folder_tag. The
+    # migrated row supplies its root directly; the pre-migration one has its
+    # root derived by common prefix, and both land in the same group.
+    assert list(result["folders"]) == ["C:/proj"]
+    assert len(result["folders"]["C:/proj"]) == 2
 
 
 @pytest.mark.asyncio

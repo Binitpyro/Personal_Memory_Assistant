@@ -221,6 +221,26 @@ fn find_sentence_boundary(text: &str, char_pos: usize, char_window: usize) -> us
     text[..final_byte_idx].chars().count()
 }
 
+/// Strip Windows' extended-length prefix, keeping the path absolute.
+///
+/// `std::fs::canonicalize` returns extended-length paths: `D:\a\b.txt` comes
+/// back as `\\?\D:\a\b.txt`, which most consumers choke on. Removing the `\\?\`
+/// is right for a drive path and **wrong for a UNC path**: Windows canonicalizes
+/// `\\server\share\x` to `\\?\UNC\server\share\x`, so a plain 4-character strip
+/// yields `UNC\server\share\x` - a *relative* path. Python then joins that onto
+/// the process working directory, `stat()` fails, and `_detect_changes` counts
+/// every file on a network share as skipped without saying why.
+///
+/// `strip_prefix`, not `trim_start_matches`: the latter removes *repeated*
+/// leading occurrences, which is never what is wanted here.
+fn strip_extended_length_prefix(path: &str) -> String {
+    match path.strip_prefix(r"\\?\UNC\") {
+        // `\\?\UNC\server\share` -> `\\server\share`
+        Some(rest) => format!(r"\\{}", rest),
+        None => path.strip_prefix(r"\\?\").unwrap_or(path).to_string(),
+    }
+}
+
 /// Fast parallel directory scanner returning a list of valid file paths.
 #[pyfunction]
 fn scan_folders(folders: Vec<String>, extensions: Vec<String>) -> PyResult<Vec<String>> {
@@ -252,7 +272,7 @@ fn scan_folders(folders: Vec<String>, extensions: Vec<String>) -> PyResult<Vec<S
                 if ext_set.is_empty() || ext_set.contains(&ext_str) {
                     if let Ok(abs_path) = std::fs::canonicalize(&path) {
                         let path_str = abs_path.to_string_lossy();
-                        Some(path_str.trim_start_matches(r"\\?\").to_string())
+                        Some(strip_extended_length_prefix(&path_str))
                     } else {
                         path.to_str().map(|s| s.to_string())
                     }
@@ -582,6 +602,50 @@ fn rust_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── strip_extended_length_prefix ──────────────────────────────────────
+
+    #[test]
+    fn test_strip_prefix_drive_path() {
+        assert_eq!(
+            strip_extended_length_prefix(r"\\?\D:\projects\a.txt"),
+            r"D:\projects\a.txt"
+        );
+    }
+
+    #[test]
+    fn test_strip_prefix_unc_path_stays_absolute() {
+        // The regression: a 4-char strip left `UNC\server\share\a.txt`, which is
+        // relative, so every file on a network share was silently skipped.
+        assert_eq!(
+            strip_extended_length_prefix(r"\\?\UNC\server\share\a.txt"),
+            r"\\server\share\a.txt"
+        );
+    }
+
+    #[test]
+    fn test_strip_prefix_unc_result_is_recognisably_absolute() {
+        let out = strip_extended_length_prefix(r"\\?\UNC\localhost\C$\Users\x\a.txt");
+        assert!(out.starts_with(r"\\"), "UNC path lost its root: {}", out);
+        assert!(!out.starts_with("UNC"), "UNC path left relative: {}", out);
+    }
+
+    #[test]
+    fn test_strip_prefix_leaves_ordinary_paths_alone() {
+        assert_eq!(strip_extended_length_prefix(r"D:\a\b.txt"), r"D:\a\b.txt");
+        assert_eq!(strip_extended_length_prefix("/srv/a/b.txt"), "/srv/a/b.txt");
+        assert_eq!(strip_extended_length_prefix(""), "");
+    }
+
+    #[test]
+    fn test_strip_prefix_removes_only_one_occurrence() {
+        // trim_start_matches would eat both and mangle the path; strip_prefix
+        // takes exactly one.
+        assert_eq!(
+            strip_extended_length_prefix(r"\\?\\\?\D:\a.txt"),
+            r"\\?\D:\a.txt"
+        );
+    }
 
     // ── get_sentence_boundary ─────────────────────────────────────────────
 

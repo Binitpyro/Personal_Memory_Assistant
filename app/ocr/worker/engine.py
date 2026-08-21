@@ -51,7 +51,7 @@ class Engine:
                 # whenever the weights do.
                 self.model_version = f"custom-{self._override_digest(overrides)}"
                 return
-            except Exception:
+            except Exception:  # nosec B110
                 # A bad override must not take the engine down - the bundled
                 # models are always present and always work. The fallback is not
                 # silent: model_version stays at the bundled value, which the

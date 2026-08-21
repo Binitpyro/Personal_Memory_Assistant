@@ -108,7 +108,7 @@ def _count_image_xobjects(page: Any) -> int:
                     entry = entry.get_object()
                 if entry.get("/Subtype") == "/Image":
                     count += 1
-            except Exception:
+            except Exception:  # nosec B112
                 continue
         return count
     except Exception:
@@ -138,7 +138,7 @@ def _content_stream_bytes(page: Any) -> int:
                 if hasattr(length, "get_object"):
                     length = length.get_object()
                 total += int(length or 0)
-            except Exception:
+            except Exception:  # nosec B112
                 continue
         return total
     except Exception:

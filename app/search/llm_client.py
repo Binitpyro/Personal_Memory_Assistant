@@ -364,7 +364,7 @@ Answer:
         try:
             data = SettingsStore.read()
             per_provider = data.get("llm", {}).get("per_provider", {})
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
         provider_settings = per_provider.get(pid, {})

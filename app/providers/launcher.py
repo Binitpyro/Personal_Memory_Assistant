@@ -30,7 +30,7 @@ import asyncio
 import logging
 import os
 import shutil
-import subprocess
+import subprocess  # nosec B404
 import sys
 import time
 from dataclasses import dataclass
@@ -228,7 +228,7 @@ def get_launch_status(provider_id: str, base_url: str) -> dict:
 
 
 def _popen(argv: list[str], creationflags: int = 0, new_session: bool = False) -> None:
-    subprocess.Popen(  # fixed argv from LAUNCHERS, shell=False
+    subprocess.Popen(  # fixed argv from LAUNCHERS, shell=False  # nosec B603
         argv,
         creationflags=creationflags,
         start_new_session=new_session,

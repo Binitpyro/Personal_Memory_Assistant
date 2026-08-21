@@ -15,6 +15,27 @@ export async function initTauriConnection(setEndpoint: (e: string) => void, setT
   }
 }
 
+/**
+ * Open an indexed file in the OS default application.
+ *
+ * Returns false when there is nothing to open or we are not running under the
+ * desktop shell — a browser tab cannot reach the user's filesystem, and callers
+ * use that to hide the affordance rather than offer a button that does nothing.
+ *
+ * `shell:allow-open` is already granted in src-tauri/capabilities.
+ */
+export async function openFile(path: string): Promise<boolean> {
+  if (!isTauri || !path) return false;
+  try {
+    const { open } = await import('@tauri-apps/plugin-shell');
+    await open(path);
+    return true;
+  } catch (e) {
+    console.error('[Tauri] Failed to open file:', path, e);
+    return false;
+  }
+}
+
 export async function pickFolder(fallbackFetch: () => Promise<{ path: string }>): Promise<{ path: string }> {
   if (isTauri) {
     const { open } = await import('@tauri-apps/plugin-dialog');

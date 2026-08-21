@@ -72,7 +72,7 @@ test.beforeEach(async ({ page }) => {
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({
-        version: '0.0.71',
+        version: '0.0.72',
         status: 'ok',
         db: 'connected',
         model_ready: true,
@@ -335,7 +335,8 @@ test('Explorer Scenario - Tree visualization rendering by mocking files-tree, ve
 
   await page.goto('/explorer');
 
-  // Verify root folder node is displayed (its name tagName is 'pma_test')
+  // The root node is labelled with the folder's full path; getByText is a
+  // substring match, so 'pma_test' still locates it.
   const rootNode = page.locator('.select-none').getByText('pma_test');
   await expect(rootNode).toBeVisible();
 

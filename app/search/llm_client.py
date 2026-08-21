@@ -1,48 +1,114 @@
 import json
 import logging
+import re
 from collections.abc import AsyncGenerator
 from pathlib import Path
+from typing import Any
 
 import httpx
 import keyring
 
 from app.config import settings
-from app.providers import BaseProvider, create_provider, get_configured_provider_ids
+from app.providers import (
+    PROVIDER_REGISTRY,
+    BaseProvider,
+    create_provider,
+    env_base_url,
+    get_configured_provider_ids,
+    get_default_chain,
+    is_loopback_url,
+)
 from app.search.capability_detector import capability_detector
+from app.settings_store import CURRENT_SCHEMA_VERSION, SettingsStore
 
 logger = logging.getLogger(__name__)
 
 
 def _get_effective_fallback_chain() -> list[str]:
-    configured_ids = get_configured_provider_ids()
-    pref_path = Path("data/settings.json")
-    saved_chain: list[str] = []
-    if pref_path.exists():
-        try:
-            with open(pref_path, encoding="utf-8") as f:
-                data = json.load(f)
-            saved_chain = data.get("llm", {}).get("fallback_chain") or []
-        except Exception:  # nosec B110
-            pass
+    configured = set(get_configured_provider_ids())
+    try:
+        data = SettingsStore.read()
+    except Exception as e:
+        logger.warning("Failed to read settings in fallback chain lookup: %s", e)
+        return get_default_chain()
 
-    if not saved_chain or set(saved_chain) <= {"gemini", "openai", "ollama"}:
-        return configured_ids
+    if data.get("schema_version") != CURRENT_SCHEMA_VERSION:
+        return get_default_chain()
 
-    chain = []
-    for pid in saved_chain:
-        if pid in configured_ids and pid not in chain:
-            chain.append(pid)
-    for pid in configured_ids:
-        if pid not in chain:
-            chain.append(pid)
+    saved = data.get("llm", {}).get("fallback_chain") or []
+    if not saved:
+        return get_default_chain()
 
-    return chain if chain else configured_ids
+    chain = [p for p in saved if p in configured]
+    if not chain:
+        logger.warning(
+            "Saved fallback_chain %s has no configured providers; falling back to default order.",
+            saved,
+        )
+        return get_default_chain()
+
+    return chain
+
+
+async def _get_effective_fallback_chain_async() -> list[str]:
+    import asyncio
+
+    return await asyncio.to_thread(_get_effective_fallback_chain)
 
 
 class ProviderNotConfiguredError(Exception):
     """Raised when no active LLM provider can be resolved."""
 
     pass
+
+
+# "llama3.2:1b" -> 1, "qwen2.5:14b" -> 14, "qwen2.5:0.5b" -> 0.5. The version
+# number is skipped because it is not followed by a bare "b".
+_PARAM_SIZE_RE = re.compile(r"(?<![\d.])(\d+(?:\.\d+)?)\s*b(?![a-z0-9])")
+
+# Below this many billion parameters a model cannot use a large context, so it
+# gets the tighter budget and the reduced chunk allowance in build_context.
+_SMALL_MODEL_BILLIONS = 4.0
+
+
+def _parse_param_billions(model: str | None) -> float | None:
+    matches = _PARAM_SIZE_RE.findall((model or "").lower())
+    if not matches:
+        return None
+    return min(float(m) for m in matches)
+
+
+def _classify_local_model(model: str | None) -> str:
+    """Map a local model name onto a context-budget class.
+
+    This class is the only input to ``compute_context_budget``, so it decides
+    the constraint the whole system is designed around. It used to be substring
+    matching - ``"3b" in name`` - under which ``llama3.2:1b`` and
+    ``qwen2.5:0.5b`` both fell through to ``7b_local`` and were handed a 10,000
+    token budget they cannot use, which is the exact failure mode the project's
+    design constraints reject.
+
+    Parameter count is parsed numerically instead. It is still a proxy for
+    context length - ``llama3.1:8b`` really has a 128k window - so the map is
+    user-overridable via ``settings.model_class_overrides``, and the heuristic
+    is the last resort rather than the only answer.
+    """
+    name = (model or "").strip().lower()
+    if not name:
+        return "7b_local"
+
+    overrides = settings.model_class_overrides or {}
+    for key, cls in overrides.items():
+        if key.lower() == name:
+            return cls
+
+    billions = _parse_param_billions(name)
+    if billions is None:
+        # "mini"/"small" are the only naming conventions worth trusting blind.
+        if "mini" in name or "small" in name:
+            return "3b_local"
+        return "7b_local"
+    return "3b_local" if billions < _SMALL_MODEL_BILLIONS else "7b_local"
 
 
 class LLMClient:
@@ -110,6 +176,11 @@ class LLMClient:
             logger.warning("Failed to load OAuth token: %s", e)
         return None
 
+    @staticmethod
+    def parse_param_billions(model: str | None) -> float | None:
+        """Parameter count in billions parsed from a model name, or None."""
+        return _parse_param_billions(model)
+
     def get_model_class(
         self, override_provider: str | None = None, override_model: str | None = None
     ) -> str:
@@ -118,21 +189,9 @@ class LLMClient:
         if provider == "gemini":
             return "cloud"
         if provider == "ollama":
-            model = override_model or self.ollama_model
-            model_lower = model.lower() if model else ""
-            if "3b" in model_lower or "2b" in model_lower or "mini" in model_lower:
-                return "3b_local"
-            if "7b" in model_lower or "8b" in model_lower:
-                return "7b_local"
-            return "7b_local"
+            return _classify_local_model(override_model or self.ollama_model)
         if provider == "lm_studio":
-            model = override_model or self.lm_studio_model
-            model_lower = model.lower() if model else ""
-            if "3b" in model_lower or "2b" in model_lower or "mini" in model_lower:
-                return "3b_local"
-            if "7b" in model_lower or "8b" in model_lower:
-                return "7b_local"
-            return "7b_local"
+            return _classify_local_model(override_model or self.lm_studio_model)
 
         if provider in (
             "openai",
@@ -145,36 +204,36 @@ class LLMClient:
             return "cloud"
 
         if provider == "auto":
+            if self.ollama_model or self.lm_studio_model:
+                return _classify_local_model(
+                    override_model or self.ollama_model or self.lm_studio_model
+                )
             if self.api_key or self._oauth_token:
                 return "cloud"
-            model = override_model or self.ollama_model
-            model_lower = model.lower() if model else ""
-            if "3b" in model_lower or "2b" in model_lower or "mini" in model_lower:
-                return "3b_local"
             return "7b_local"
 
         if self.api_key or self._oauth_token:
             return "cloud"
-        model = override_model or self.ollama_model
-        model_lower = model.lower() if model else ""
-        if "3b" in model_lower or "2b" in model_lower or "mini" in model_lower:
-            return "3b_local"
-        return "7b_local"
+        return _classify_local_model(override_model or self.ollama_model)
 
     def _load_runtime_preferences(self) -> None:
-        pref_path = Path("data/settings.json")
-        if not pref_path.exists():
-            return
+        # P1-1: was a direct open()/json.load() bypassing SettingsStore, so
+        # it saw torn writes and ignored schema_version. SettingsStore.read()
+        # already returns {} for a missing file; it raises on corrupt JSON
+        # where this method previously degraded silently, so that behavior
+        # is preserved here rather than let a corrupt file start raising
+        # out of _ensure_token_loaded.
         try:
-            with open(pref_path, encoding="utf-8") as f:
-                data = json.load(f)
-            llm_prefs = data.get("llm", {})
-            self.provider_preference = llm_prefs.get("provider", "auto")
-            self.model = llm_prefs.get("gemini_model", self.model)
-            self.ollama_model = llm_prefs.get("ollama_model", self.ollama_model)
-            self.lm_studio_model = llm_prefs.get("lm_studio_model", self.lm_studio_model)
+            data = SettingsStore.read()
         except Exception as e:
             logger.debug("Unable to load runtime LLM preferences: %s", e)
+            return
+
+        llm_prefs = data.get("llm", {})
+        self.provider_preference = llm_prefs.get("provider", "auto")
+        self.model = llm_prefs.get("gemini_model", self.model)
+        self.ollama_model = llm_prefs.get("ollama_model", self.ollama_model)
+        self.lm_studio_model = llm_prefs.get("lm_studio_model", self.lm_studio_model)
 
     def apply_preferences(
         self,
@@ -300,18 +359,44 @@ Answer:
                 pass
 
         # Load settings for base_url/model
-        pref_path = Path("data/settings.json")
+        data: dict = {}
         per_provider = {}
-        if pref_path.exists():
-            try:
-                with open(pref_path, encoding="utf-8") as f:
-                    data = json.load(f)
-                per_provider = data.get("llm", {}).get("per_provider", {})
-            except Exception:  # nosec B110
-                pass
+        try:
+            data = SettingsStore.read()
+            per_provider = data.get("llm", {}).get("per_provider", {})
+        except Exception:  # nosec B110
+            pass
 
         provider_settings = per_provider.get(pid, {})
-        base_url = provider_settings.get("base_url")
+        base_url = provider_settings.get("base_url") or env_base_url(pid)
+
+        # Anything that leaves this machine needs explicit, region-independent
+        # opt-in (llm.cloud_privacy_consent).
+        #
+        # Gated on the resolved *destination*, not the provider's kind. Kind
+        # describes what a provider usually is; base_url is a free-text setting,
+        # so a provider registered as kind="local" - ollama, lm_studio - can be
+        # aimed at another host and used to be exempt forever. That made the
+        # gate a label check rather than a data-egress check. openai_compatible
+        # is still exempt when it points at this machine, which is the
+        # self-hosted case the exemption was written for.
+        spec = PROVIDER_REGISTRY.get(pid)
+        leaves_device = spec is not None and spec.kind in ("cloud", "aggregator")
+        if not leaves_device and spec is not None and spec.kind == "local":
+            leaves_device = not is_loopback_url(base_url or spec.default_base_url)
+        if leaves_device and not data.get("llm", {}).get("cloud_privacy_consent", False):
+            raise ProviderNotConfiguredError(
+                f"Cloud privacy consent required before using provider {pid}. "
+                "Free-tier cloud dispatches may use inputs for model training."
+            )
+
+        # Normalize legacy Anthropic base_url if pointing to spec default with appended /v1
+        if (
+            pid == "anthropic"
+            and base_url
+            and base_url.rstrip("/") == "https://api.anthropic.com/v1"
+        ):
+            base_url = "https://api.anthropic.com"
 
         default_model = model_override or provider_settings.get("default_model")
         if not default_model:
@@ -367,7 +452,7 @@ Answer:
             )
 
         provider_preference = self.provider_preference or "auto"
-        fallback_chain = _get_effective_fallback_chain()
+        fallback_chain = await _get_effective_fallback_chain_async()
 
         resolved_id = None
         if provider_preference != "auto":
@@ -406,7 +491,7 @@ Answer:
             supports_claims = await capability_detector.detect_capabilities(self)
         prompt = self._build_prompt(query, context, mode, supports_claims=supports_claims)
 
-        fallback_chain = _get_effective_fallback_chain()
+        fallback_chain = await _get_effective_fallback_chain_async()
 
         # Build list of providers to try
         providers_to_try = []
@@ -451,6 +536,56 @@ Answer:
             return f"LLM unavailable: All providers in fallback chain failed. Last error: {last_error!s}"
         return "LLM unavailable: No providers configured."
 
+    async def generate_raw(
+        self,
+        messages: list[dict[str, Any]],
+        override_provider: str | None = None,
+        override_model: str | None = None,
+    ) -> str:
+        """Raw LLM generation for external sidecars without RAG prompt wrapping."""
+        await self._ensure_token_loaded()
+        fallback_chain = await _get_effective_fallback_chain_async()
+
+        providers_to_try = []
+        if override_provider:
+            providers_to_try.append((override_provider, override_model, 30.0))
+        else:
+            primary_id = None
+            try:
+                temp_prov = await self._resolve()
+                primary_id = temp_prov.spec.id
+                await temp_prov.close()
+            except Exception:  # nosec B110
+                pass
+
+            if primary_id:
+                providers_to_try.append((primary_id, override_model, 30.0))
+
+            for pid in fallback_chain:
+                if pid != primary_id:
+                    providers_to_try.append((pid, None, 10.0))
+
+        max_attempts = len(providers_to_try)
+        attempt = 0
+        last_error = None
+
+        while attempt < max_attempts:
+            pid, model, to_val = providers_to_try[attempt]
+            try:
+                provider = await self._resolve_provider_by_id(pid, model, timeout=to_val)
+                try:
+                    return await provider.chat(messages)
+                finally:
+                    await provider.close()
+            except Exception as e:
+                logger.warning(f"Fallback attempt {attempt} for {pid} failed: {e}")
+                last_error = e
+                attempt += 1
+
+        if last_error:
+            return f"LLM unavailable: All providers in fallback chain failed. Last error: {last_error!s}"
+        return "LLM unavailable: No providers configured."
+
     async def stream_answer(
         self,
         query: str,
@@ -464,7 +599,7 @@ Answer:
         supports_claims = await capability_detector.detect_capabilities(self)
         prompt = self._build_prompt(query, context, mode, supports_claims=supports_claims)
 
-        fallback_chain = _get_effective_fallback_chain()
+        fallback_chain = await _get_effective_fallback_chain_async()
 
         # Build list of providers to try
         providers_to_try = []
@@ -497,11 +632,11 @@ Answer:
 
         # Calculate prompt tokens locally
         try:
-            from app.search.context_builder import _get_tokens
+            from app.search.context_builder import count_tokens_uncached
 
             # Include messages in prompt count
             full_prompt_text = prompt + "\n" + json.dumps(history or [])
-            prompt_tokens = len(_get_tokens(full_prompt_text))
+            prompt_tokens = count_tokens_uncached(full_prompt_text)
         except Exception:
             prompt_tokens = max(len(prompt) // 4, len(prompt.split()) * 4 // 3)
 
@@ -566,9 +701,9 @@ Answer:
 
         # Calculate completion tokens and yield final control usage packet
         try:
-            from app.search.context_builder import _get_tokens
+            from app.search.context_builder import count_tokens_uncached
 
-            completion_tokens = len(_get_tokens(full_answer))
+            completion_tokens = count_tokens_uncached(full_answer)
         except Exception:
             completion_tokens = max(len(full_answer) // 4, len(full_answer.split()) * 4 // 3)
 

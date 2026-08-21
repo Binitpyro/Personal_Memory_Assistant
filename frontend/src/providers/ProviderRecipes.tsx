@@ -21,7 +21,7 @@ export function ProviderRecipes({
     setApplyError(null);
     try {
       // 1. Update routing fallback chain
-      await setProviderSettings({ provider: 'gemini', fallback_chain: fallback }); 
+      await setProviderSettings({ provider: defaultModel.provider, fallback_chain: fallback });
       
       // Fetch latest prefs
       const currentPrefs = await getLLMPreferences();

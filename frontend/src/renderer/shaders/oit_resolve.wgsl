@@ -1,44 +1,40 @@
-// frontend/src/renderer/shaders/oit_resolve.wgsl
-// Weighted Blended Order-Independent Transparency (WBOIT) resolve pass.
-// Reference: McGuire & Bavoil 2013 — "Weighted Blended OIT"
-// Algorithm: visibility = 1 - exp(-totalAlpha), avgColor = accum.rgb / accum.a
-// NOTE: This is NOT Moment-Based OIT (MBOIT). MBOIT requires moment reconstruction
-// from b0-b3 tensors. The momentTexture binding here is used only as an alpha
-// accumulator (moments.x = totalAlpha). The variable name is preserved for
-// compatibility with the existing GPU bind group layout.
+// oit_resolve.wgsl — Resolve Weighted-Blended OIT into SceneColor.
+//
+// Runs as a fullscreen triangle. Blend state on the pipeline is:
+//   src * (1 - dstA) + dst * dstA           (i.e., "over" op with revealage)
+//
+// This is the McGuire/Bavoil compositing step:
+//   final = accum.rgb / max(accum.a, ε)     ← average color, weighted
+//   src   = final,  srcA = 1 - reveal
+// then blended over SceneColor.
 
-struct FullscreenVertexOutput {
-    @builtin(position) position: vec4<f32>,
+@group(0) @binding(0) var t_accum:  texture_2d<f32>;
+@group(0) @binding(1) var t_reveal: texture_2d<f32>;
+@group(0) @binding(2) var s_point:  sampler;
+
+struct VOut {
+    @builtin(position) clip_pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
 };
 
 @vertex
-fn vs_main(@builtin(vertex_index) vertex_index: u32) -> FullscreenVertexOutput {
-    var out: FullscreenVertexOutput;
-    // Giant Triangle math: creates a triangle that covers the whole screen
-    let x = -1.0 + f32((vertex_index & 1u) << 2u);
-    let y = -1.0 + f32((vertex_index & 2u) << 1u);
-    out.position = vec4<f32>(x, y, 0.0, 1.0);
-    return out;
+fn vs_main(@builtin(vertex_index) vi: u32) -> VOut {
+    var o: VOut;
+    o.clip_pos = fullscreen_tri(vi);
+    o.uv = fullscreen_uv(vi);
+    return o;
 }
 
-@group(0) @binding(0) var momentTexture: texture_2d<f32>;
-@group(0) @binding(1) var colorTexture: texture_2d<f32>;
-
 @fragment
-fn fs_main(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
-    let coords = vec2<i32>(in.position.xy);
-    let moments = textureLoad(momentTexture, coords, 0);
-    let accum = textureLoad(colorTexture, coords, 0);
+fn fs_main(in: VOut) -> @location(0) vec4<f32> {
+    let accum = textureSampleLevel(t_accum,  s_point, in.uv, 0.0);
+    let reveal = textureSampleLevel(t_reveal, s_point, in.uv, 0.0).r;
 
-    if moments.x <= 0.0001 {
-        return vec4<f32>(0.945, 0.96, 0.878, 1.0);
+    // If nothing was drawn to this pixel, punch through with alpha=0.
+    let alpha = 1.0 - reveal;
+    if (alpha < 1e-4) {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
     }
-
-    let totalAlpha = moments.x;
-    let visibility = 1.0 - exp(-totalAlpha); 
-    
-    let avgColor = accum.rgb / max(accum.a, 0.0001);
-    let backgroundColor = vec3<f32>(0.945, 0.96, 0.878);
-
-    return vec4<f32>(avgColor * visibility + backgroundColor * (1.0 - visibility), 1.0);
+    let avg_color = accum.rgb / max(accum.a, 1e-4);
+    return vec4<f32>(avg_color, alpha);
 }

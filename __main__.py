@@ -98,9 +98,19 @@ def run_server(args: argparse.Namespace) -> None:
         Timer(2.0, lambda: webbrowser.open(f"http://{host}:{port}")).start()
 
     if reload:
-        # Dev mode: single process with hot-reload
+        # Dev mode: single process with hot-reload restricted to app code
+        app_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app")
         uvicorn_kwargs["reload"] = True
-        uvicorn_kwargs["reload_dirs"] = [os.path.dirname(os.path.abspath(__file__))]
+        uvicorn_kwargs["reload_dirs"] = [app_dir]
+        uvicorn_kwargs["reload_excludes"] = [
+            "tests/*",
+            "frontend/*",
+            "data/*",
+            ".pytest_cache/*",
+            "*.db*",
+            "*.db-wal",
+            "*.db-shm",
+        ]
     elif args.workers > 1:
         # Production multi-worker (no reload)
         uvicorn_kwargs["workers"] = args.workers

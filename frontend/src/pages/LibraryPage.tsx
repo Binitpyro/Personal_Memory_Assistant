@@ -1,11 +1,12 @@
 import { useState, useCallback, useEffect } from 'react'
-import { BookOpen, HardDrive, FolderPlus, RefreshCw, Loader2, CheckCircle2, AlertCircle, Play, Trash2 } from 'lucide-react'
+import { BookOpen, HardDrive, FolderPlus, RefreshCw, Loader2, CheckCircle2, AlertCircle, Play, Trash2, ScanText } from 'lucide-react'
 import { useApi, invalidateCache } from '../useApi'
 import {
   getHealth,
   getIndexStatus,
   getSystemInfo,
   getAppConfig,
+  getOcrStatus,
   pickFolder,
   startIndexing,
   clearIndex,
@@ -30,6 +31,13 @@ export function LibraryPage() {
   })
   const { data: sysInfo } = useApi(getSystemInfo, { cacheKey: 'system-info' })
   const { data: config } = useApi(getAppConfig, { cacheKey: 'app-config' })
+
+  // OCR runs after the index run finishes, so this keeps polling regardless of
+  // indexing state. Without it "indexing complete" is a lie for scanned PDFs.
+  const { data: ocr } = useApi(getOcrStatus, {
+    cacheKey: 'ocr-status',
+    refetchInterval: 10_000,
+  })
 
   // Derive running state from BOTH local flag and polled backend status
   const isRunning = indexing || status?.status === 'running'
@@ -66,8 +74,9 @@ export function LibraryPage() {
 
   const handleBrowse = useCallback(async () => {
     try {
-      const { path } = await pickFolder()
+      const { path, error } = await pickFolder()
       if (path) setFolderPath(path)
+      else if (error) setMessage({ type: 'err', text: error })
     } catch {
       setMessage({ type: 'err', text: 'Could not open folder picker' })
     }
@@ -202,6 +211,30 @@ export function LibraryPage() {
               className="bg-primary h-2.5 rounded-full transition-all duration-300"
               style={{ width: `${progressPct}%` }}
             />
+          </div>
+        </div>
+      )}
+
+      {/* OCR backlog. Deliberately outside the isRunning guard: OCR is drained
+          after the index run ends, so this has to survive run completion. */}
+      {!!ocr?.pages_pending && (
+        <div className="glass-card">
+          <div className="flex items-center gap-3">
+            {ocr.worker_running
+              ? <Loader2 className="w-5 h-5 text-primary animate-spin shrink-0" />
+              : <ScanText className="w-5 h-5 text-primary shrink-0" />}
+            <div className="min-w-0">
+              <div className="text-sm font-semibold text-text-primary">
+                {ocr.pages_pending.toLocaleString()} page{ocr.pages_pending === 1 ? '' : 's'} pending OCR
+              </div>
+              <div className="text-xs text-text-secondary truncate">
+                {ocr.unhealthy
+                  ? `OCR stopped: ${ocr.fatal}`
+                  : ocr.worker_running
+                    ? `Reading ${ocr.current_file || 'scanned pages'}…`
+                    : 'Scanned pages are queued and will be read in the background.'}
+              </div>
+            </div>
           </div>
         </div>
       )}

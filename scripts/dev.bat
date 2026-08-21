@@ -24,7 +24,7 @@ if not exist "frontend\node_modules" (
 )
 
 echo [INFO] Starting backend on http://127.0.0.1:8000
-start "PMA Backend" cmd /k "cd /d %PROJECT_DIR% && call .venv\Scripts\activate.bat && python -m uvicorn app.main:app --reload --port 8000"
+start "PMA Backend" cmd /k "cd /d %PROJECT_DIR% && call .venv\Scripts\activate.bat && python -m uvicorn app.main:app --reload --reload-dir app --reload-exclude tests --reload-exclude data --reload-exclude frontend --reload-exclude .pytest_cache --port 8000"
 
 echo [INFO] Starting Vite frontend on http://127.0.0.1:5173
 start "PMA Frontend" cmd /k "cd /d %PROJECT_DIR%\frontend && npm run dev"

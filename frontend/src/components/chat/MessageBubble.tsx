@@ -1,11 +1,115 @@
 import { useState } from 'react';
-import { Bot, User, Sparkles, RotateCcw, FileText, ChevronDown, ChevronRight, Clock, Plus, Network } from 'lucide-react';
+import { Bot, User, Sparkles, FileText, ChevronDown, ChevronRight, Clock, Plus, Network, SearchX, Split, ExternalLink } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
+import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import { type Message } from '../../hooks/useChatStream';
-import { type QuerySource } from '../../api';
+import { type QuerySource, type TraceEvent } from '../../api';
 import { CrystalGraphTrace } from '../CrystalGraphTrace';
+import { isTauri, openFile } from '../../utils/tauriShell';
+
+/**
+ * Sanitisation schema for model output.
+ *
+ * `rehypeRaw` is load-bearing, not decorative: llm_client.py instructs the model
+ * to wrap grounded assertions in `<claim sources="[n]">`, capability_detector.py
+ * probes whether it can, and the `components` map below turns those tags into
+ * the citation UI. Dropping raw HTML would render them as literal text.
+ *
+ * But the model's answer is derived from documents the user did not write, so it
+ * is untrusted input: a poisoned chunk can steer the model into emitting
+ * `<img src=x onerror=...>`, and `window.__PMA_TOKEN__` sits in the same page
+ * authorising every /api/ route. The CSP blocks the exfiltration channels in the
+ * browser, but Tauri ships `script-src 'self' 'unsafe-inline'`
+ * (tauri.conf.json), where an inline handler *would* run. This closes it at the
+ * source instead.
+ *
+ * Extends the GitHub default rather than replacing it, so everything remark-gfm
+ * legitimately emits - tables, code, lists, links - keeps rendering. Only the
+ * two custom tags and their one attribute are added. `on*` handlers are not in
+ * the default allowlist and are therefore dropped.
+ */
+const claimSchema = {
+  ...defaultSchema,
+  tagNames: [...(defaultSchema.tagNames ?? []), 'claim', 'inference'],
+  attributes: {
+    ...defaultSchema.attributes,
+    claim: ['sources'],
+    inference: ['sources'],
+  },
+};
+
+/**
+ * Renders the bounded retrieval loop's trace.
+ *
+ * The not-found list leads and is always visible: reporting "nothing in your
+ * research notes on this" is the thing a chatbot with search cannot do, and it
+ * is worthless buried inside a collapsed panel. The step-by-step breakdown is
+ * supporting detail and stays folded away.
+ */
+const ReasoningTrace = ({ trace }: Readonly<{ trace: TraceEvent[] }>) => {
+  const [isOpen, setIsOpen] = useState(false);
+
+  const notFound = trace.find((e) => e.kind === 'not_found');
+  const missing = notFound?.subqueries ?? [];
+  const steps = trace.filter((e) => e.kind === 'decompose' || e.kind === 'retrieve');
+  const summary = trace.find((e) => e.kind === 'done');
+
+  if (steps.length === 0 && missing.length === 0) return null;
+
+  return (
+    <div className="mt-2 flex flex-col gap-2">
+      {missing.length > 0 && (
+        <div className="bg-slate-500/10 border border-slate-400/20 rounded-lg overflow-hidden">
+          <div className="px-3 py-2 flex items-center gap-2 text-slate-200/90 text-xs font-bold border-b border-slate-400/10">
+            <SearchX className="w-4 h-4" />
+            Searched for, but not found in your files
+          </div>
+          <div className="p-3 text-xs text-slate-200/70 flex flex-col gap-1.5">
+            {missing.map((q) => (
+              <span key={q} className="flex items-start gap-2">
+                <span className="text-slate-400 mt-px">–</span>
+                <span>{q}</span>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {steps.length > 0 && (
+        <div className="border border-primary/20 rounded-xl overflow-hidden bg-surface-dark/30">
+          <button
+            onClick={() => setIsOpen(!isOpen)}
+            className="w-full flex items-center justify-between px-3 py-2 text-xs font-bold text-primary-light hover:bg-primary/5 transition-colors"
+          >
+            <span className="flex items-center gap-1.5">
+              <Split className="w-3.5 h-3.5" /> How this answer was assembled
+            </span>
+            {isOpen ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+          </button>
+          {isOpen && (
+            <div className="p-3 border-t border-primary/10 flex flex-col gap-2 text-xs text-text-secondary">
+              {steps.map((e, i) => (
+                <div key={`${e.kind}-${i}`} className="flex items-start gap-2">
+                  <span className="text-primary-light/60 font-mono text-[10px] mt-0.5 shrink-0">
+                    {e.kind}
+                  </span>
+                  <span>{e.detail}</span>
+                </div>
+              ))}
+              {summary && (
+                <div className="mt-1 pt-2 border-t border-white/5 text-[10px] text-text-secondary/70">
+                  {summary.detail}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
 
 const GraphTraceViewer = ({ traceData }: Readonly<{ traceData: string }>) => {
   const [isOpen, setIsOpen] = useState(false);
@@ -81,8 +185,24 @@ const SourceViewer = ({ src, onForceInclude }: Readonly<{ src: QuerySource, onFo
         )}
       </div>
       {isOpen && src.text && (
-        <div className="p-2 text-xs text-text-secondary bg-black/20 border border-white/5 rounded-lg max-h-48 overflow-y-auto whitespace-pre-wrap leading-relaxed">
-          {content}
+        <div className="flex flex-col gap-1">
+          <div className="p-2 text-xs text-text-secondary bg-black/20 border border-white/5 rounded-lg max-h-48 overflow-y-auto whitespace-pre-wrap leading-relaxed">
+            {content}
+          </div>
+          {/* Until now the expanded panel was a dead end: you could read the
+              matched passage but had no way to reach the document it came
+              from. Hidden outside the desktop shell, where a browser tab
+              cannot open a local file. */}
+          {isTauri && (
+            <button
+              onClick={() => { void openFile(src.file_path); }}
+              className="flex items-center gap-1.5 px-2 py-1 self-start bg-white/5 hover:bg-white/10 transition-colors rounded-lg text-[10px] text-text-secondary border border-white/5"
+              title={`Open ${src.file_path}`}
+            >
+              <ExternalLink className="w-3 h-3 text-primary-light" />
+              <span>Open file</span>
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -119,7 +239,10 @@ export function MessageBubble({ message: msg, onNearMissClick }: Readonly<Messag
             <div className="prose prose-invert prose-sm max-w-none">
               <ReactMarkdown 
                 remarkPlugins={[remarkGfm]}
-                rehypePlugins={[rehypeRaw]}
+                // Order is load-bearing: rehypeRaw parses the raw HTML into the
+                // tree, rehypeSanitize then strips what is not allowlisted.
+                // Reversed, sanitisation runs before the dangerous nodes exist.
+                rehypePlugins={[rehypeRaw, [rehypeSanitize, claimSchema]]}
                 components={{
                   claim: ({ ...props }: Readonly<Record<string, any>>) => {
                     const sourcesStr = String(props.sources || "");
@@ -145,17 +268,42 @@ export function MessageBubble({ message: msg, onNearMissClick }: Readonly<Messag
           )}
         </div>
 
+        {/* Stopped by the user. Rendered separately from the mode badge below,
+            which only appears once sources arrive - a stream stopped before
+            that point has no mode and would otherwise be indistinguishable
+            from an answer that simply ended. */}
+        {msg.role === 'assistant' && msg.stopped && (
+          <div className="flex items-center gap-2 mt-1">
+            <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full border bg-white/5 text-text-secondary border-white/10">
+              Stopped · partial answer
+            </span>
+          </div>
+        )}
+
         {/* Mode Badge */}
         {msg.role === 'assistant' && !msg.isStreaming && msg.mode && (
           <div className="flex flex-wrap items-center gap-2 mt-1">
+            {/* "cached" is provenance, not a warning: it states what happened
+                rather than that something went wrong, so it reads at the same
+                weight as the rest of the metadata row. Before this, a cached
+                answer arrived with no sources and defaulted to "full_rag" -
+                presented as fresh. */}
             <span className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full border ${
               msg.mode === 'fast_path'
                 ? 'bg-amber-500/10 text-amber-400 border-amber-500/20'
                 : msg.mode === 'degraded_rag'
                   ? 'bg-orange-500/10 text-orange-400 border-orange-500/20'
-                  : 'bg-primary/10 text-primary-light border-primary/20'
+                  : msg.mode === 'cached'
+                    ? 'bg-white/5 text-text-secondary border-white/10'
+                    : 'bg-primary/10 text-primary-light border-primary/20'
               }`}>
-              {msg.mode === 'fast_path' ? '⚡ Fast Answer' : msg.mode === 'degraded_rag' ? '⚠️ Degraded RAG' : '🔍 RAG Answer'}
+              {msg.mode === 'fast_path'
+                ? '⚡ Fast Answer'
+                : msg.mode === 'degraded_rag'
+                  ? '⚠️ Degraded RAG'
+                  : msg.mode === 'cached'
+                    ? '⟳ Saved answer'
+                    : '🔍 RAG Answer'}
             </span>
             {msg.fallbackTo && (
               <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full border bg-red-500/10 text-red-400 border-red-500/20">
@@ -188,6 +336,11 @@ export function MessageBubble({ message: msg, onNearMissClick }: Readonly<Messag
               <span>The system identified information in your files that might be conflicting.</span>
             </div>
           </div>
+        )}
+
+        {/* Bounded retrieval loop trace (agentic mode only) */}
+        {msg.role === 'assistant' && msg.trace && msg.trace.length > 0 && (
+          <ReasoningTrace trace={msg.trace} />
         )}
 
         {/* Knowledge Gaps Panel */}
@@ -230,19 +383,6 @@ export function MessageBubble({ message: msg, onNearMissClick }: Readonly<Messag
                 ))}
               </div>
             )}
-          </div>
-        )}
-
-        {/* Answer Evolution Panel */}
-        {msg.role === 'assistant' && msg.answer_evolution_diff && (
-          <div className="mt-2 bg-emerald-500/10 border border-emerald-500/20 rounded-lg overflow-hidden">
-            <div className="px-3 py-2 flex items-center gap-2 text-emerald-200/90 text-xs font-bold border-b border-emerald-500/10">
-              <RotateCcw className="w-4 h-4" />
-              Answer Evolution
-            </div>
-            <div className="p-3 text-xs text-emerald-200/70">
-              {msg.answer_evolution_diff}
-            </div>
           </div>
         )}
 

@@ -33,7 +33,17 @@ import { FileTypeTreemap } from './FileTypeTreemap';
 import { WebGPURenderer } from '../renderer/WebGPURenderer';
 import { WebGL2Renderer } from '../renderer/WebGL2Renderer';
 import { getVisualizerStream, getVisualizerMeta, type FileEntry, type VisualizerNodeMeta } from '../api';
+import { FLAG_FOLDER } from '../interaction/NavigationController';
 import type { NavigationController } from '../interaction/NavigationController';
+import { useDreamscapeStore } from '../store/dreamscapeStore';
+
+interface CachedStream {
+    buffer: ArrayBuffer;
+    meta: Record<string, VisualizerNodeMeta>;
+}
+
+const streamCache = new Map<string, CachedStream>();
+
 
 /** Both renderer classes conform to this shape; the hook is generic over it. */
 interface RendererLike {
@@ -47,6 +57,7 @@ interface RendererLike {
     readonly handleZoom: (delta: number) => void;
     readonly focusOnNode: (sourceIndex: number) => void;
     readonly nav: NavigationController;
+    onDeviceLost?: () => void;
 }
 
 export interface WebGPUFallbackProps {
@@ -54,6 +65,32 @@ export interface WebGPUFallbackProps {
     readonly activeFilter?: string | null;
     readonly onFilterChange?: (ext: string | null) => void;
     readonly initialMode?: 'folder' | 'type';
+    readonly exposure?: number;
+    readonly showOutlines?: boolean;
+}
+
+/**
+ * Which element the ResizeObserver should measure.
+ *
+ * Never the canvas. `renderer.resize()` assigns `canvas.width`/`canvas.height`,
+ * and those attributes ARE the canvas's intrinsic layout size - so observing the
+ * canvas makes the observer react to its own output. Wherever the height chain
+ * above is indefinite, that closes into a feedback loop which multiplies the
+ * canvas by the device pixel ratio on every cycle, and the page grows without
+ * bound. Measuring the wrapper breaks the cycle: its size is decided by layout
+ * alone and nothing ever writes to it.
+ *
+ * Exported so the invariant is directly testable - jsdom has no layout engine,
+ * so the loop itself cannot be reproduced in a unit test.
+ */
+export function resizeTarget(
+    canvas: HTMLCanvasElement,
+    wrapper: HTMLElement | null,
+): HTMLElement | null {
+    const target = wrapper ?? canvas.parentElement;
+    // Defensive: a caller passing the canvas as its own wrapper would re-arm
+    // exactly the bug this function exists to prevent.
+    return target === canvas ? null : target;
 }
 
 /**
@@ -68,10 +105,20 @@ export interface WebGPUFallbackProps {
  */
 function useDreamscapeCanvas<R extends RendererLike>(
     canvasRef: React.RefObject<HTMLCanvasElement | null>,
+    // Measured instead of the canvas. `renderer.resize` writes canvas.width/height,
+    // which ARE the canvas's intrinsic layout size - so observing the canvas means
+    // the observer reacts to its own output. With any indefinite height in the
+    // chain above, that closes into a feedback loop that multiplies by DPR every
+    // cycle. The wrapper's size is decided by layout alone and is never written to.
+    wrapperRef: React.RefObject<HTMLElement | null>,
     factory: (canvas: HTMLCanvasElement) => R,
     activeFilter: string | null | undefined,
     onError: (msg: string) => void,
     onNodeSelected?: (sourceIndex: number, name: string) => void,
+    rendererOptions?: {
+        exposure?: number;
+        showOutlines?: boolean;
+    },
 ) {
     const rendererRef = useRef<R | null>(null);
     const rafRef = useRef<number>(0);
@@ -97,22 +144,58 @@ function useDreamscapeCanvas<R extends RendererLike>(
         (async () => {
             try {
                 await renderer.init();
-                const [buffer, meta] = await Promise.all([
-                    getVisualizerStream(activeFilter),
-                    getVisualizerMeta(activeFilter).catch(() => ({})),
-                ]);
+
+                // Wired up the moment there is a device to lose — before the
+                // stream fetch, not after. A hang during the first frames used
+                // to land on an unset handler, so the tier never degraded and
+                // the RAF loop kept submitting to a dead device.
+                renderer.onDeviceLost = () => {
+                    cancelled = true;
+                    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+                    onError('GPU device lost. Please refresh the page to restore 3D view.');
+                };
+
+                const tuned = renderer as R & {
+                    exposure?: number;
+                    enableOutline?: boolean;
+                };
+
+                if (rendererOptions?.exposure !== undefined) {
+                    tuned.exposure = rendererOptions.exposure;
+                }
+
+                if (rendererOptions?.showOutlines !== undefined) {
+                    tuned.enableOutline = rendererOptions.showOutlines;
+                }
+
+                let buffer: ArrayBuffer;
+                let meta: any;
+                const cacheKey = activeFilter || 'default';
+
+                if (streamCache.has(cacheKey)) {
+                    const cached = streamCache.get(cacheKey)!;
+                    buffer = cached.buffer;
+                    meta = cached.meta;
+                } else {
+                    [buffer, meta] = await Promise.all([
+                        getVisualizerStream(activeFilter),
+                        getVisualizerMeta(activeFilter).catch(() => ({})),
+                    ]);
+                    if (buffer.byteLength <= 4) {
+                        throw new Error('No 3D data available or filter returned 0 results.');
+                    }
+                    // Vite dev trap: if the backend is misconfigured we might get an
+                    // HTML page instead of binary. First two bytes of '<!doctype' are
+                    // 0x3C 0x21 in ASCII. Fail loud and early rather than reading
+                    // garbage as f32s.
+                    const head = new Uint8Array(buffer, 0, 2);
+                    if (head[0] === 0x3C && head[1] === 0x21) {
+                        throw new Error('Backend returned HTML instead of binary. Check the /api/visualizer/stream route.');
+                    }
+                    streamCache.set(cacheKey, { buffer, meta });
+                }
+
                 metaRef.current = meta;
-                if (buffer.byteLength <= 4) {
-                    throw new Error('No 3D data available or filter returned 0 results.');
-                }
-                // Vite dev trap: if the backend is misconfigured we might get an
-                // HTML page instead of binary. First two bytes of '<!doctype' are
-                // 0x3C 0x21 in ASCII. Fail loud and early rather than reading
-                // garbage as f32s.
-                const head = new Uint8Array(buffer, 0, 2);
-                if (head[0] === 0x3C && head[1] === 0x21) {
-                    throw new Error('Backend returned HTML instead of binary. Check the /api/visualizer/stream route.');
-                }
                 if (cancelled) return;
 
                 await renderer.loadData(buffer);
@@ -128,11 +211,21 @@ function useDreamscapeCanvas<R extends RendererLike>(
 
                 resizeObserver = new ResizeObserver(entries => {
                     for (const e of entries) {
-                        const { width, height } = e.contentRect;
-                        if (width > 0 && height > 0) renderer.resize(width, height);
+                        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+                        const dpBox = (e as any).devicePixelContentBoxSize?.[0];
+                        let w: number, h: number;
+                        if (dpBox) {
+                            w = dpBox.inlineSize;
+                            h = dpBox.blockSize;
+                        } else {
+                            w = Math.round(e.contentRect.width * dpr);
+                            h = Math.round(e.contentRect.height * dpr);
+                        }
+                        if (w > 0 && h > 0) renderer.resize(w, h);
                     }
                 });
-                resizeObserver.observe(canvas);
+                const measured = resizeTarget(canvas, wrapperRef.current);
+                if (measured) resizeObserver.observe(measured);
 
                 const loop = () => {
                     if (cancelled) return;
@@ -156,7 +249,7 @@ function useDreamscapeCanvas<R extends RendererLike>(
     // different buffer). We do NOT want re-init on every allFiles reference
     // change (that fires whenever InsightsPage re-renders). Include only the
     // stable dependencies.
-    }, [activeFilter, factory, onError]);
+    }, [activeFilter, factory, onError, rendererOptions?.exposure, rendererOptions?.showOutlines]);
 
     const onMouseDown = (e: React.MouseEvent) => {
         setDragging(true);
@@ -222,6 +315,25 @@ function useDreamscapeCanvas<R extends RendererLike>(
         const bc = renderer.nav.breadcrumbs;
         const name = bc[bc.length - 1]?.name ?? `#${sourceIndex}`;
         onNodeSelected?.(sourceIndex, name);
+
+        // If it's a file, add it to the dreamscape store for chat context.
+        // NavigationController has no metadata side-channel; the node's own
+        // flags are the authoritative folder/file bit (FLAG_FOLDER).
+        const node = renderer.nav.getGraphNode(sourceIndex);
+        const isFolder = ((node?.flags ?? 0) & FLAG_FOLDER) === FLAG_FOLDER;
+        
+        if (!isFolder && e.shiftKey) { // Optional: require shift-click to select? Or just any click on a file? Let's just add any clicked file.
+           // Actually, let's just add it anytime they click a file.
+           useDreamscapeStore.getState().addChunk({
+               id: sourceIndex,
+               filename: name,
+           });
+        } else if (!isFolder) {
+           useDreamscapeStore.getState().addChunk({
+               id: sourceIndex,
+               filename: name,
+           });
+        }
     };
 
     // Wheel handling has to be a native listener so we can passive:false and
@@ -247,8 +359,9 @@ interface CanvasInnerProps extends WebGPUFallbackProps {
     readonly onError: (msg: string) => void;
 }
 
-const DreamscapeCanvas: React.FC<CanvasInnerProps> = ({ activeFilter, tier, onError }) => {
+const DreamscapeCanvas: React.FC<CanvasInnerProps> = ({ activeFilter, tier, onError, exposure, showOutlines }) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
+    const wrapperRef = useRef<HTMLDivElement>(null);
     const [selection, setSelection] = useState<{ index: number, name: string } | null>(null);
 
     // Renderer factory is stable per-tier — this is important so useEffect
@@ -262,8 +375,9 @@ const DreamscapeCanvas: React.FC<CanvasInnerProps> = ({ activeFilter, tier, onEr
     );
 
     const { rendererRef, onMouseDown, onMouseMove, onMouseUp, hover, setHover } =
-        useDreamscapeCanvas(canvasRef, factory, activeFilter, onError,
-            (idx, name) => setSelection({ index: idx, name }));
+        useDreamscapeCanvas(canvasRef, wrapperRef, factory, activeFilter, onError,
+            (idx, name) => setSelection({ index: idx, name }),
+            { exposure, showOutlines });
 
     const breadcrumbs = rendererRef.current?.nav.breadcrumbs ?? [];
 
@@ -292,7 +406,7 @@ const DreamscapeCanvas: React.FC<CanvasInnerProps> = ({ activeFilter, tier, onEr
     }
 
     return (
-        <div className="w-full h-full min-h-[400px] relative bg-[#02030a] rounded-3xl overflow-hidden border border-white/10 shadow-inner">
+        <div ref={wrapperRef} className="w-full h-full min-h-[400px] relative bg-[#02030a] rounded-3xl overflow-hidden border border-white/10 shadow-inner">
             {/* Title */}
             <div className="absolute top-6 left-8 z-10 pointer-events-none">
                 <h2 className="text-2xl font-bold text-white flex items-center gap-3">
@@ -346,10 +460,14 @@ const DreamscapeCanvas: React.FC<CanvasInnerProps> = ({ activeFilter, tier, onEr
                 </div>
             )}
 
+            {/* No minHeight on the canvas on purpose. A floor here re-introduces an
+                intrinsic size that can exceed the wrapper, which desyncs the render
+                viewport (sized from the wrapper) from the hit-test box (read off the
+                canvas in onMouseMove). The floor belongs on the wrapper alone. */}
             <canvas
                 ref={canvasRef}
                 className="w-full h-full cursor-grab active:cursor-grabbing block touch-none"
-                style={{ minHeight: '400px', height: '100%', width: '100%', touchAction: 'none' }}
+                style={{ height: '100%', width: '100%', touchAction: 'none' }}
                 onMouseDown={onMouseDown}
                 onMouseMove={onMouseMove}
                 onMouseUp={onMouseUp}
@@ -363,9 +481,19 @@ const DreamscapeCanvas: React.FC<CanvasInnerProps> = ({ activeFilter, tier, onEr
  * Top-level tier-picker component. Probes WebGPU, then WebGL2, then falls
  * back to the 2D treemap.
  */
-export const WebGPUFallback: React.FC<WebGPUFallbackProps> = ({ allFiles, activeFilter, onFilterChange, initialMode }) => {
+export const WebGPUFallback: React.FC<WebGPUFallbackProps> = ({ allFiles, activeFilter, onFilterChange, initialMode, exposure = 1.15, showOutlines = false }) => {
     const [status, setStatus] = useState<'checking' | 'webgpu' | 'webgl2' | 'unsupported'>('checking');
     const [reason, setReason] = useState<string | null>(null);
+
+    // Must be stable: this lands in useDreamscapeCanvas's effect dependency
+    // array. As an inline arrow it changed identity on every parent render, so
+    // an unrelated InsightsPage re-render tore down the renderer and built a
+    // fresh GPUDevice — which is why a single fault used to log twice.
+    const handleError = useCallback((msg: string) => {
+        setReason(msg);
+        // If the chosen tier errors out at load-time, degrade one step.
+        setStatus(prev => (prev === 'webgpu' ? 'webgl2' : 'unsupported'));
+    }, []);
 
     useEffect(() => {
         let cancelled = false;
@@ -408,8 +536,10 @@ export const WebGPUFallback: React.FC<WebGPUFallbackProps> = ({ allFiles, active
     }, []);
 
     if (status === 'checking') {
+        // h-full, not a fixed height: a hardcoded 600px disagreed with the
+        // steady-state panel and made it jump the moment the tier resolved.
         return (
-            <div className="w-full h-[600px] bg-slate-900 flex items-center justify-center rounded-lg border border-slate-800">
+            <div className="w-full h-full min-h-[400px] bg-slate-900 flex items-center justify-center rounded-lg border border-slate-800">
                 <div className="flex flex-col items-center">
                     <div className="w-12 h-12 border-4 border-blue-500/30 border-t-blue-500 rounded-full animate-spin" />
                     <p className="mt-4 text-slate-400 font-mono text-sm">Initializing GPU Infrastructure…</p>
@@ -440,16 +570,19 @@ export const WebGPUFallback: React.FC<WebGPUFallbackProps> = ({ allFiles, active
 
     return (
         <DreamscapeCanvas
+            // Keying on tier forces a BRAND NEW <canvas> when we degrade. A
+            // canvas keeps its context type for life, so reusing the same
+            // element after WebGPU claimed it makes getContext('webgl2')
+            // return null forever ("existing context of a different type").
+            key={status}
             tier={status}
             allFiles={allFiles}
             activeFilter={activeFilter}
             onFilterChange={onFilterChange}
             initialMode={initialMode}
-            // If the chosen tier errors out at load-time, degrade one step.
-            onError={(msg) => {
-                setReason(msg);
-                setStatus(status === 'webgpu' ? 'webgl2' : 'unsupported');
-            }}
+            exposure={exposure}
+            showOutlines={showOutlines}
+            onError={handleError}
         />
     );
 };

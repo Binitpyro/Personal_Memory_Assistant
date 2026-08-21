@@ -43,17 +43,28 @@ ignore = [
     "RUSTSEC-2024-0419",
     "RUSTSEC-2024-0420",
     # Other unmaintained crates tied to current dependencies
-    "RUSTSEC-2025-0057", # fxhash
     "RUSTSEC-2024-0370", # proc-macro-error
     "RUSTSEC-2025-0075", # unic-char-range
     "RUSTSEC-2025-0080", # unic-common
     "RUSTSEC-2025-0081", # unic-char-property
     "RUSTSEC-2025-0098", # unic-ucd-version
     "RUSTSEC-2025-0100", # unic-ucd-ident
-    # Blocked updates
-    "RUSTSEC-2026-0194", # quick-xml (requires >=0.41.0, stuck on 0.39.4)
-    "RUSTSEC-2026-0195", # quick-xml (requires >=0.41.0, stuck on 0.39.4)
-    "RUSTSEC-2026-0190", # anyhow
-    "RUSTSEC-2024-0429", # glib
-    "RUSTSEC-2026-0097", # rand
+
+    # Every id above is one cargo-deny actually matches. Dropped because it
+    # reported "no crate matched advisory criteria" for each, which is a warning
+    # on every run:
+    #   RUSTSEC-2026-0194/0195 quick-xml - needed >=0.41.0, lockfile is on 0.41.0
+    #   RUSTSEC-2025-0057      fxhash    - gone; `cargo tree -i fxhash` finds no package
+    #   RUSTSEC-2024-0429      glib      - crate present, but cargo-deny does not
+    #   RUSTSEC-2026-0190      anyhow      act on these advisories' kind, so the
+    #   RUSTSEC-2026-0097      rand        entries could never fire here
+    # glib is still ignored in .cargo/audit.toml, where cargo-audit does report
+    # it (unsound). fxhash, anyhow and rand are in neither file - cargo-audit
+    # does not report them either.
+    # No rkyv entry (RUSTSEC-2026-0235) on purpose. cargo-deny resolves the
+    # feature graph and correctly finds no rkyv in it - the crate is an unenabled
+    # optional dependency of rust_decimal, present in Cargo.lock but never
+    # compiled. Only .cargo/audit.toml ignores it, because cargo-audit scans the
+    # lockfile and false-positives. Adding it here would just produce a
+    # permanent "no crate matched advisory criteria" warning.
 ]

@@ -24,11 +24,28 @@ def _zlib_decompress_fn(blob: Any) -> str:
     if not blob:
         return ""
     if isinstance(blob, str):
+        # TODO(post-P0-2): app/api/modules.py was the only production writer
+        # of uncompressed str into text_preview, and it's gone (see the
+        # license-boundary strip). This passthrough exists for rows already
+        # written before that fix, plus test fixtures. Confirm no legacy
+        # rows remain before removing it - until then it's load-bearing,
+        # not dead code.
         return blob
     try:
         return zlib.decompress(blob).decode("utf-8")
-    except Exception:
-        return str(blob)
+    except Exception as e:
+        # P1-2: this used to `return str(blob)` - the Python repr of the raw
+        # bytes (e.g. "b'x\\x9c...'") - which then got indexed into FTS as
+        # if it were real text, indistinguishable from genuine content.
+        # A blob that fails to decompress is corrupt; surface that instead
+        # of silently fabricating searchable garbage from it.
+        logger.error(
+            "zlib_decompress failed on a %d-byte blob (SQLite scalar function receives "
+            "no chunk id): %s",
+            len(blob) if hasattr(blob, "__len__") else -1,
+            e,
+        )
+        return ""
 
 
 FTS_TABLE_DDL = """
@@ -76,6 +93,21 @@ def serialize_write(func):
     return wrapper
 
 
+# Module-level so a test can shrink it. Generous rather than tight: legitimate
+# contention on a pool_size=4 pool during a bulk ingest is normal, and this is
+# meant to catch a leak, not to police slow queries.
+_READ_ACQUIRE_TIMEOUT_S = 30.0
+
+
+class ReadPoolExhaustedError(RuntimeError):
+    """No read connection became available within `_READ_ACQUIRE_TIMEOUT_S`.
+
+    Almost always a leaked borrow rather than real contention: the pool is
+    returned to in a `finally`, so a missing connection means some path exited
+    without running it.
+    """
+
+
 class DatabaseManager:
     """Manages the SQLite database connection and operations with a read-connection pool."""
 
@@ -85,6 +117,11 @@ class DatabaseManager:
         self.pool_size = pool_size
         self._write_conn: aiosqlite.Connection | None = None
         self._read_pool: asyncio.Queue[aiosqlite.Connection] | None = None
+        # Every read connection ever opened, queued or borrowed. close() walked
+        # the queue alone, so a leaked borrow kept its SQLite handle open past
+        # shutdown and left the database file locked - which is how a survey run
+        # left behind an eval.db that shutil.rmtree could not remove.
+        self._read_conns: list[aiosqlite.Connection] = []
         self.conn_factory: Callable[[], aiosqlite.Connection] | None = None
         self._in_ingest_mode = False
         self._pool_initialized = False
@@ -112,9 +149,11 @@ class DatabaseManager:
             await self._configure_conn(self._write_conn, is_write_conn=True)
 
             # 2. Read connection pool
+            self._read_conns = []
             for _ in range(self.pool_size):
-                conn = await aiosqlite.connect(self.db_path)
+                conn = await aiosqlite.connect(self.db_path, isolation_level=None)
                 await self._configure_conn(conn, is_write_conn=False)
+                self._read_conns.append(conn)
                 await self._read_pool.put(conn)
 
             self._pool_initialized = True
@@ -164,11 +203,35 @@ class DatabaseManager:
 
         if self._read_pool is None:
             raise RuntimeError("Database read pool is not initialized")
-        conn = await self._read_pool.get()
+
+        # Bounded on purpose. `await queue.get()` on an empty pool parks at zero
+        # CPU with no timeout, so a leaked borrow turns every later reader into
+        # a silent, permanent hang. Raising instead makes starvation diagnosable
+        # the first time it happens rather than after a 61-minute stall.
+        try:
+            conn = await asyncio.wait_for(self._read_pool.get(), timeout=_READ_ACQUIRE_TIMEOUT_S)
+        except TimeoutError as exc:
+            raise ReadPoolExhaustedError(
+                f"No read connection available after {_READ_ACQUIRE_TIMEOUT_S}s "
+                f"(pool_size={self.pool_size}). A borrow was most likely leaked."
+            ) from exc
+
         try:
             yield conn
         finally:
-            await self._read_pool.put(conn)
+            # The return is unconditional and awaits nothing. `rollback()` used
+            # to sit directly in this `finally` under
+            # `contextlib.suppress(Exception)`; CancelledError is a
+            # BaseException, so a cancellation delivered during the rollback
+            # escaped the suppression, skipped the put, and lost the connection
+            # for the life of the process. put_nowait cannot raise here either -
+            # the queue is unbounded - so there is no await left on this path
+            # for a cancellation to land on.
+            try:
+                with contextlib.suppress(Exception):
+                    await conn.rollback()
+            finally:
+                self._read_pool.put_nowait(conn)
 
     def _get_conn(self) -> aiosqlite.Connection:
         """Return the active write connection, raising if not connected."""
@@ -188,8 +251,14 @@ class DatabaseManager:
 
             if self._read_pool:
                 while not self._read_pool.empty():
-                    conn = self._read_pool.get_nowait()
+                    self._read_pool.get_nowait()
+
+            # Close by ledger, not by queue: a connection borrowed and never
+            # returned is absent from the queue but still holds a file handle.
+            for conn in self._read_conns:
+                with contextlib.suppress(Exception):
                     await conn.close()
+            self._read_conns = []
 
             self._pool_initialized = False
 
@@ -245,6 +314,23 @@ class DatabaseManager:
 
         migrations = [
             ("summary", "ALTER TABLE files ADD COLUMN summary TEXT DEFAULT ''"),
+            # Why a file produced no chunks. `sha256` was carrying this as well
+            # as the digest and could not carry all of it: a deliberately
+            # skipped binary and a page deferred to OCR both keep their real
+            # digest with zero chunks, so nothing recorded which had happened.
+            (
+                "files_extract_status",
+                "ALTER TABLE files ADD COLUMN extract_status TEXT DEFAULT ''",
+            ),
+            # The indexed folder root this file was found under. `folder_tag`
+            # holds only the root's basename, so two folders that share a name
+            # collide in it and it cannot be turned back into a path. The
+            # Explorer needs the real root to strip it off a file path and to
+            # target a folder removal.
+            (
+                "files_root_path",
+                "ALTER TABLE files ADD COLUMN root_path TEXT DEFAULT ''",
+            ),
             ("sha256", "ALTER TABLE files ADD COLUMN sha256 TEXT DEFAULT ''"),
             (
                 "files_created_at",
@@ -262,6 +348,9 @@ class DatabaseManager:
                 "chunks_segmenter_version",
                 "ALTER TABLE chunks ADD COLUMN segmenter_version TEXT",
             ),
+            # Provenance for OCR: lets a re-OCR replace only the chunks the OCR
+            # worker produced, leaving native text in a mixed PDF intact.
+            ("chunks_source", "ALTER TABLE chunks ADD COLUMN source TEXT"),
         ]
         for col_name, ddl in migrations:
             if await _already_applied(col_name):
@@ -331,6 +420,7 @@ class DatabaseManager:
                 "ON files(path, modified_at, sha256)"
             )
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_files_size ON files(size)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_files_root_path ON files(root_path)")
             await conn.commit()
         except Exception:
             logger.debug("Failed to create covering index.", exc_info=True)
@@ -454,6 +544,58 @@ class DatabaseManager:
         except Exception as exc:
             logger.debug("kg_edges migration note: %s", exc)
 
+        # OCR work queue (deferred: scanned pages are enqueued during indexing
+        # and drained afterwards, so a slow engine never stalls extraction).
+        try:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS ocr_queue (
+                    file_path   TEXT PRIMARY KEY,
+                    pages_json  TEXT NOT NULL DEFAULT '[]',
+                    page_count  INTEGER NOT NULL DEFAULT 0,
+                    pages_done  INTEGER NOT NULL DEFAULT 0,
+                    tier        TEXT NOT NULL DEFAULT 'cpu',
+                    status      TEXT NOT NULL DEFAULT 'pending',
+                    force_ocr   INTEGER NOT NULL DEFAULT 0,
+                    attempts    INTEGER NOT NULL DEFAULT 0,
+                    last_error  TEXT NOT NULL DEFAULT '',
+                    enqueued_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+            """)
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ocr_queue_status ON ocr_queue(status, enqueued_at)"
+            )
+            await conn.commit()
+            logger.debug("ocr_queue table ensured.")
+        except Exception as exc:
+            logger.debug("ocr_queue migration note: %s", exc)
+
+        # OCR page cache, keyed on content hash so it outlives both the file
+        # row and a full index reset. See clear_all() for why it is excluded
+        # from the broad wipe.
+        try:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS ocr_cache (
+                    content_key   TEXT NOT NULL,
+                    page_num      INTEGER NOT NULL,
+                    model_version TEXT NOT NULL,
+                    preproc_hash  TEXT NOT NULL,
+                    text          TEXT NOT NULL DEFAULT '',
+                    mean_conf     REAL NOT NULL DEFAULT 0.0,
+                    bytes         INTEGER NOT NULL DEFAULT 0,
+                    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+                    last_used_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                    PRIMARY KEY (content_key, page_num, model_version, preproc_hash)
+                )
+            """)
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ocr_cache_lru ON ocr_cache(last_used_at)"
+            )
+            await conn.commit()
+            logger.debug("ocr_cache table ensured.")
+        except Exception as exc:
+            logger.debug("ocr_cache migration note: %s", exc)
+
         # Phase 9.1: Drop the heavy covering index that duplicates chunk text
         try:
             await conn.execute("DROP INDEX IF EXISTS idx_chunks_covering")
@@ -535,6 +677,23 @@ class DatabaseManager:
         self._in_ingest_mode = False
         logger.info("Exited ingest mode (FTS delta applied, triggers restored).")
 
+    async def get_system_state(self, key: str) -> str | None:
+        """Retrieves a string value from the system_state table."""
+        conn = self._get_conn()
+        async with conn.execute("SELECT value FROM system_state WHERE key = ?", (key,)) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else None
+
+    @serialize_write
+    async def set_system_state(self, key: str, value: str) -> None:
+        """Sets a string value in the system_state table."""
+        conn = self._get_conn()
+        await conn.execute(
+            "INSERT OR REPLACE INTO system_state (key, value) VALUES (?, ?)",
+            (key, value),
+        )
+        await conn.commit()
+
     @serialize_write
     async def fts_optimize(self) -> None:
         """Optimizes the FTS5 index to reduce fragmentation and improve search speed."""
@@ -584,8 +743,11 @@ class DatabaseManager:
         Call this after a large indexing run to reclaim disk space.
         Uses TRUNCATE mode which is safe and doesn't block readers.
         """
-        conn = self._get_conn()
+        # _get_conn() belongs inside the try: it raises when the manager is
+        # closed, and sitting outside it that RuntimeError escaped a function
+        # whose every other failure mode is logged and swallowed.
         try:
+            conn = self._get_conn()
             await conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             await conn.commit()
             logger.info("WAL checkpoint completed - WAL file truncated.")
@@ -606,18 +768,20 @@ class DatabaseManager:
         conn = self._get_conn()
         file_data.setdefault("summary", "")
         file_data.setdefault("sha256", "")
+        file_data.setdefault("root_path", "")
         if "type" in file_data:
             file_data["type"] = file_data["type"].lower()
         query = """
-        INSERT INTO files (path, size, modified_at, type, folder_tag, summary, sha256)
-        VALUES (:path, :size, :modified_at, :type, :folder_tag, :summary, :sha256)
+        INSERT INTO files (path, size, modified_at, type, folder_tag, summary, sha256, root_path)
+        VALUES (:path, :size, :modified_at, :type, :folder_tag, :summary, :sha256, :root_path)
         ON CONFLICT(path) DO UPDATE SET
             size=excluded.size,
             modified_at=excluded.modified_at,
             type=excluded.type,
             folder_tag=excluded.folder_tag,
             summary=excluded.summary,
-            sha256=excluded.sha256
+            sha256=excluded.sha256,
+            root_path=excluded.root_path
         RETURNING id;
         """
         async with conn.execute(query, file_data) as cursor:
@@ -639,15 +803,16 @@ class DatabaseManager:
 
         conn = self._get_conn()
         query = """
-        INSERT INTO files (path, size, modified_at, type, folder_tag, summary, sha256)
-        VALUES (:path, :size, :modified_at, :type, :folder_tag, :summary, :sha256)
+        INSERT INTO files (path, size, modified_at, type, folder_tag, summary, sha256, root_path)
+        VALUES (:path, :size, :modified_at, :type, :folder_tag, :summary, :sha256, :root_path)
         ON CONFLICT(path) DO UPDATE SET
             size=excluded.size,
             modified_at=excluded.modified_at,
             type=excluded.type,
             folder_tag=excluded.folder_tag,
             summary=excluded.summary,
-            sha256=excluded.sha256
+            sha256=excluded.sha256,
+            root_path=excluded.root_path
         RETURNING id;
         """
         file_ids = []
@@ -655,6 +820,7 @@ class DatabaseManager:
         for fd in files_data:
             fd.setdefault("summary", "")
             fd.setdefault("sha256", "")
+            fd.setdefault("root_path", "")
             if "type" in fd:
                 fd["type"] = fd["type"].lower()
 
@@ -720,6 +886,8 @@ class DatabaseManager:
                 else c["text_preview"],
                 "sentence_offsets": c.get("sentence_offsets"),
                 "segmenter_version": c.get("segmenter_version"),
+                # NULL for natively-extracted text; 'ocr' for worker output.
+                "source": c.get("source"),
             }
             for c in chunks
         ]
@@ -729,8 +897,8 @@ class DatabaseManager:
             ids: list[int] = []
             for chunk in insert_data:
                 async with conn.execute(
-                    "INSERT INTO chunks (file_id, start_offset, end_offset, text_preview, sentence_offsets, segmenter_version) "
-                    "VALUES (:file_id, :start_offset, :end_offset, :text_preview, :sentence_offsets, :segmenter_version) RETURNING id;",
+                    "INSERT INTO chunks (file_id, start_offset, end_offset, text_preview, sentence_offsets, segmenter_version, source) "
+                    "VALUES (:file_id, :start_offset, :end_offset, :text_preview, :sentence_offsets, :segmenter_version, :source) RETURNING id;",
                     chunk,
                 ) as cursor:
                     row = await cursor.fetchone()
@@ -773,8 +941,8 @@ class DatabaseManager:
             for i in range(0, len(insert_data), max_rows_per_query):
                 batch = insert_data[i : i + max_rows_per_query]
                 await conn.executemany(
-                    "INSERT INTO chunks (file_id, start_offset, end_offset, text_preview, sentence_offsets, segmenter_version) "
-                    "VALUES (:file_id, :start_offset, :end_offset, :text_preview, :sentence_offsets, :segmenter_version);",
+                    "INSERT INTO chunks (file_id, start_offset, end_offset, text_preview, sentence_offsets, segmenter_version, source) "
+                    "VALUES (:file_id, :start_offset, :end_offset, :text_preview, :sentence_offsets, :segmenter_version, :source);",
                     batch,
                 )
 
@@ -937,6 +1105,74 @@ class DatabaseManager:
                     for r in rows
                 ]
 
+    async def get_chunk_ids_for_paths(
+        self, paths: list[str], per_file_limit: int = 5
+    ) -> dict[str, list[int]]:
+        """Map file paths to their first ``per_file_limit`` chunk ids, in document order.
+
+        Used by retrieval to turn a ranked list of *documents* (from the summary
+        index) into chunk-id candidates that can participate in RRF. Bounded per
+        file so a single long document cannot dominate the fused list.
+        """
+        if not paths or per_file_limit <= 0:
+            return {}
+
+        placeholders = ",".join("?" for _ in paths)
+        query = f"""
+            SELECT f.path, c.id
+            FROM chunks c
+            JOIN files f ON c.file_id = f.id
+            WHERE f.path IN ({placeholders})
+            ORDER BY f.path, c.id
+        """  # nosec B608 # noqa: S608
+
+        by_path: dict[str, list[int]] = {}
+        async with self._get_read_conn() as conn, conn.execute(query, tuple(paths)) as cursor:
+            rows = await cursor.fetchall()
+        for path, chunk_id in rows:
+            bucket = by_path.setdefault(path, [])
+            if len(bucket) < per_file_limit:
+                bucket.append(chunk_id)
+        return by_path
+
+    @staticmethod
+    def _bfs_cte(placeholders: str) -> str:
+        """The recursive traversal CTE, without a projection.
+
+        Split out from `bfs_from_chunks` so the traversal itself is observable:
+        the outer query's `SELECT DISTINCT ... LIMIT` collapses the result set,
+        which means a correct traversal and a re-expanding one return identical
+        rows. The difference is entirely in how large the working table gets on
+        the way there, and that is only measurable against this fragment.
+
+        UNION (not UNION ALL) gives SQLite's working-table dedup, which is the
+        visited set this bidirectional traversal needs. With UNION ALL every
+        edge ping-pongs A->B->A->B to max_depth. SQLite requires all compound
+        operators in one recursive CTE to match, so both terms use UNION.
+        """
+        return f"""
+        WITH RECURSIVE
+        bfs_nodes(id, depth) AS (
+            SELECT id, 0
+            FROM kg_nodes
+            WHERE json_extract(properties, '$.chunk_id') IN ({placeholders})
+
+            UNION
+
+            SELECT e.target, b.depth + 1
+            FROM kg_edges e
+            JOIN bfs_nodes b ON e.source = b.id
+            WHERE b.depth < ?
+
+            UNION
+
+            SELECT e.source, b.depth + 1
+            FROM kg_edges e
+            JOIN bfs_nodes b ON e.target = b.id
+            WHERE b.depth < ?
+        )
+        """  # nosec B608 # noqa: S608
+
     async def bfs_from_chunks(
         self, chunk_ids: list[int], max_depth: int = 3, limit: int = 5
     ) -> list[int]:
@@ -945,34 +1181,15 @@ class DatabaseManager:
             return []
 
         placeholders = ",".join("?" for _ in chunk_ids)
-        # We query for edges traversed from the starting nodes
-        query = f"""
-        WITH RECURSIVE
-        bfs_nodes(id, depth) AS (
-            SELECT id, 0
-            FROM kg_nodes
-            WHERE json_extract(properties, '$.chunk_id') IN ({placeholders})
-
-            UNION ALL
-
-            SELECT e.target, b.depth + 1
-            FROM kg_edges e
-            JOIN bfs_nodes b ON e.source = b.id
-            WHERE b.depth < ?
-
-            UNION ALL
-
-            SELECT e.source, b.depth + 1
-            FROM kg_edges e
-            JOIN bfs_nodes b ON e.target = b.id
-            WHERE b.depth < ?
-        )
+        # Only bound placeholders are interpolated; every value is parameterized.
+        projection = """
         SELECT DISTINCT CAST(json_extract(n.properties, '$.chunk_id') AS INTEGER) as chunk_id
         FROM bfs_nodes b
         JOIN kg_nodes n ON b.id = n.id
         WHERE json_extract(n.properties, '$.chunk_id') IS NOT NULL
         LIMIT ?
-        """  # nosec B608 # noqa: S608
+        """
+        query = self._bfs_cte(placeholders) + projection  # nosec B608
         params = [*chunk_ids, max_depth, max_depth, limit]
 
         async with self._get_read_conn() as conn, conn.execute(query, params) as cursor:
@@ -987,19 +1204,32 @@ class DatabaseManager:
             return []
 
         placeholders = ",".join("?" for _ in src_chunk_ids)
+        # H-4: UNION ALL is correct here - unlike bfs_from_chunks this enumerates
+        # distinct *paths*, not a visited set, so SQLite's working-table dedup
+        # would collapse two genuinely different routes to the same node. That
+        # leaves cycles unguarded though: with A->B->A the only brake was
+        # p.depth < max_depth, so a 2-cycle emitted "A -> B -> A -> B" as a
+        # relational fact. The visited list carries the ids already on this path
+        # and excludes an edge that would revisit one. Direction is preserved
+        # deliberately: the rendered string asserts "source -[rel]-> target", so
+        # traversing an edge backwards would state the relation in reverse.
         query = f"""
         WITH RECURSIVE
-        paths(id, path_str, depth) AS (
-            SELECT id, label || ' ' || id, 0
+        paths(id, path_str, depth, visited) AS (
+            SELECT id, label || ' ' || id, 0, ',' || id || ','
             FROM kg_nodes
             WHERE json_extract(properties, '$.chunk_id') IN ({placeholders})
 
             UNION ALL
 
-            SELECT e.target, p.path_str || ' -[' || e.relation || ']-> ' || (SELECT label || ' ' || id FROM kg_nodes WHERE id = e.target), p.depth + 1
+            SELECT e.target,
+                   p.path_str || ' -[' || e.relation || ']-> ' || (SELECT label || ' ' || id FROM kg_nodes WHERE id = e.target),
+                   p.depth + 1,
+                   p.visited || e.target || ','
             FROM kg_edges e
             JOIN paths p ON e.source = p.id
             WHERE p.depth < ?
+              AND instr(p.visited, ',' || e.target || ',') = 0
         )
         SELECT path_str FROM paths
         WHERE depth > 0
@@ -1012,32 +1242,134 @@ class DatabaseManager:
             return [r[0] for r in rows]
 
     async def _maybe_commit(self, conn: aiosqlite.Connection) -> None:
-        """Commit the connection."""
-        await conn.commit()
+        """Commit the connection only if not within an external transaction."""
+        if not self._in_external_transaction:
+            await conn.commit()
 
     @serialize_write
     async def commit(self) -> None:
         """Explicitly commits the current transaction."""
-        if self.conn:
-            await self.conn.commit()
+        if self._write_conn:
+            try:
+                await self._write_conn.commit()
+            finally:
+                self._in_external_transaction = False
 
     @serialize_write
     async def begin_transaction(self) -> None:
         """Begin an external write transaction."""
         conn = self._get_conn()
-        await conn.execute("BEGIN IMMEDIATE")
+        if not self._in_external_transaction:
+            try:
+                await conn.execute("BEGIN IMMEDIATE")
+                self._in_external_transaction = True
+            except Exception as e:
+                if "cannot start a transaction within a transaction" in str(e):
+                    self._in_external_transaction = True
+                else:
+                    raise
 
     @serialize_write
     async def commit_transaction(self) -> None:
         """Commit the external write transaction."""
         conn = self._get_conn()
-        await conn.commit()
+        try:
+            await conn.commit()
+        finally:
+            self._in_external_transaction = False
 
     @serialize_write
     async def rollback_transaction(self) -> None:
         """Rollback the external write transaction."""
         conn = self._get_conn()
-        await conn.rollback()
+        try:
+            await conn.rollback()
+        finally:
+            self._in_external_transaction = False
+
+    @serialize_write
+    async def begin_savepoint(self) -> str:
+        """Open a nested savepoint and return its name.
+
+        The isolation primitive for a writer that may run while another holds
+        an external transaction open on the same connection.
+        begin_transaction()/commit() cannot do this: begin_transaction() no-ops
+        when `_in_external_transaction` is already set, and the matching
+        commit() then commits *the other writer's* transaction and clears the
+        flag - while rollback_transaction() discards its uncommitted work.
+
+        SAVEPOINT nests instead. Outside a transaction it behaves like
+        BEGIN/COMMIT; inside one it is a marker, so RELEASE and ROLLBACK TO
+        leave the enclosing transaction exactly as they found it.
+
+        Unlike write_transaction(), this does not hold `_write_lock` across the
+        caller's work - it could not, since every write it would make is
+        @serialize_write and asyncio.Lock is not reentrant. The tradeoff is in
+        the docstring of the caller.
+        """
+        conn = self._get_conn()
+        name = f"sp_{uuid.uuid4().hex}"
+        await conn.execute(f"SAVEPOINT {name}")  # nosec B608 - name is a local uuid
+        return name
+
+    @serialize_write
+    async def release_savepoint(self, name: str) -> None:
+        """Keep the savepoint's work. Commits only if we opened the transaction."""
+        conn = self._get_conn()
+        await conn.execute(f"RELEASE {name}")  # nosec B608 - name from begin_savepoint
+        if not self._in_external_transaction:
+            await conn.commit()
+
+    @serialize_write
+    async def rollback_savepoint(self, name: str) -> None:
+        """Undo back to the savepoint, leaving any enclosing transaction intact."""
+        conn = self._get_conn()
+        with contextlib.suppress(Exception):
+            await conn.execute(f"ROLLBACK TO {name}")  # nosec B608 - internal name
+            await conn.execute(f"RELEASE {name}")  # nosec B608 - internal name
+        if not self._in_external_transaction:
+            with contextlib.suppress(Exception):
+                await conn.rollback()
+
+    @contextlib.asynccontextmanager
+    async def write_transaction(self):
+        """Context manager that acquires the write lock and manages an isolated transaction/savepoint."""
+        async with self._write_lock:
+            conn = self._get_conn()
+            savepoint_name = None
+            in_tx = self._in_external_transaction
+            if not in_tx:
+                self._in_external_transaction = True
+                try:
+                    await conn.execute("BEGIN IMMEDIATE")
+                except Exception as e:
+                    if "cannot start a transaction within a transaction" in str(e):
+                        savepoint_name = f"sp_{uuid.uuid4().hex}"
+                        await conn.execute(f"SAVEPOINT {savepoint_name}")
+                    else:
+                        self._in_external_transaction = False
+                        raise
+            else:
+                savepoint_name = f"sp_{uuid.uuid4().hex}"
+                await conn.execute(f"SAVEPOINT {savepoint_name}")
+
+            try:
+                yield conn
+                if savepoint_name:
+                    await conn.execute(f"RELEASE {savepoint_name}")
+                elif not in_tx:
+                    await conn.commit()
+            except Exception:
+                if savepoint_name:
+                    with contextlib.suppress(Exception):
+                        await conn.execute(f"ROLLBACK TO {savepoint_name}")
+                elif not in_tx:
+                    with contextlib.suppress(Exception):
+                        await conn.rollback()
+                raise
+            finally:
+                if not in_tx:
+                    self._in_external_transaction = False
 
     @serialize_write
     async def delete_file_chunks(self, file_id: int, *, auto_commit: bool = True) -> None:
@@ -1053,6 +1385,50 @@ class DatabaseManager:
                 (file_id,),
             )
         await conn.execute("DELETE FROM chunks WHERE file_id = ?", (file_id,))
+        if auto_commit:
+            await self._maybe_commit(conn)
+
+    async def get_file_chunk_ids(self, file_id: int) -> list[int]:
+        """Ids of every chunk for a file, without decompressing any of them.
+
+        `get_file_chunks` projects `zlib_decompress(text_preview)`, and
+        zlib_decompress is a per-connection Python callback - so using it just to
+        collect ids dragged every chunk of every re-indexed file across the
+        C-to-Python boundary and threw the text away.
+        """
+        async with (
+            self._get_read_conn() as conn,
+            conn.execute("SELECT id FROM chunks WHERE file_id = ?", (file_id,)) as cursor,
+        ):
+            return [r[0] for r in await cursor.fetchall()]
+
+    async def get_ocr_chunk_ids(self, file_id: int) -> list[int]:
+        """Ids of chunks this file got from OCR, so they can be replaced alone."""
+        async with (
+            self._get_read_conn() as conn,
+            conn.execute(
+                "SELECT id FROM chunks WHERE file_id = ? AND source = 'ocr'",
+                (file_id,),
+            ) as cursor,
+        ):
+            return [r[0] for r in await cursor.fetchall()]
+
+    @serialize_write
+    async def delete_ocr_chunks(self, file_id: int, *, auto_commit: bool = True) -> None:
+        """Delete only the OCR-sourced chunks of a file.
+
+        The narrow counterpart to :meth:`delete_file_chunks`. Re-running OCR on
+        a mixed PDF (native body, scanned appendix) must not take the natively
+        extracted text with it.
+        """
+        conn = self._get_conn()
+        if self._in_ingest_mode:
+            await conn.execute(
+                "INSERT OR IGNORE INTO temp_ingest_chunk_deletes(id, text_preview) "
+                "SELECT id, text_preview FROM chunks WHERE file_id = ? AND source = 'ocr'",
+                (file_id,),
+            )
+        await conn.execute("DELETE FROM chunks WHERE file_id = ? AND source = 'ocr'", (file_id,))
         if auto_commit:
             await self._maybe_commit(conn)
 
@@ -1201,7 +1577,8 @@ class DatabaseManager:
         async with (
             self._get_read_conn() as conn,
             conn.execute(
-                "SELECT id, path, size, type, folder_tag, usage_count FROM files ORDER BY folder_tag, path"
+                "SELECT id, path, size, type, folder_tag, root_path, usage_count "
+                "FROM files ORDER BY root_path, folder_tag, path"
             ) as cursor,
         ):
             return list(await cursor.fetchall())
@@ -1292,6 +1669,38 @@ class DatabaseManager:
                 return 0, 0
             return row[0], row[1]
 
+    async def get_chunks_by_ids(self, chunk_ids: list[int]) -> list[dict[str, Any]]:
+        """Fetch full chunk details for a given list of chunk IDs."""
+        if not chunk_ids:
+            return []
+
+        placeholders = ",".join("?" for _ in chunk_ids)
+        query_sql = (
+            f"SELECT c.id, zlib_decompress(c.text_preview) as text_preview, f.path, f.folder_tag, f.modified_at, c.start_offset, c.end_offset, c.sentence_offsets, c.segmenter_version, c.file_id "  # nosec B608 # noqa: S608
+            f"FROM chunks c JOIN files f ON c.file_id = f.id "
+            f"WHERE c.id IN ({placeholders})"
+        )
+        rows = await self.execute_query(query_sql, tuple(chunk_ids))
+
+        results = []
+        for row in rows:
+            results.append(
+                {
+                    "chunk_id": row[0],
+                    "text": row[1],
+                    "file_path": row[2],
+                    "folder_tag": row[3],
+                    "modified_at": row[4],
+                    "start_offset": row[5],
+                    "end_offset": row[6],
+                    "sentence_offsets": row[7],
+                    "segmenter_version": row[8],
+                    "file_id": row[9],
+                    "score": 1.0,
+                }
+            )
+        return results
+
     async def execute_query(self, sql: str, params: tuple = ()) -> list[Any]:
         """Execute a read-only SQL query via the read-pool and return all rows."""
         async with self._get_read_conn() as conn, conn.execute(sql, params) as cursor:
@@ -1303,6 +1712,21 @@ class DatabaseManager:
         conn = self._get_conn()
         await conn.execute(sql, params)
         await self._maybe_commit(conn)
+
+    @serialize_write
+    async def execute_write_returning(self, sql: str, params: tuple = ()) -> list[Any]:
+        """Write and read back rows in one lock-held step.
+
+        The write lock is released between separate calls, so a SELECT-then-
+        UPDATE claim written as two statements could hand the same row to two
+        callers. Doing it as one `UPDATE ... RETURNING` under the lock closes
+        that window.
+        """
+        conn = self._get_conn()
+        async with conn.execute(sql, params) as cursor:
+            rows = list(await cursor.fetchall())
+        await self._maybe_commit(conn)
+        return rows
 
     @serialize_write
     async def save_query(
@@ -1454,18 +1878,17 @@ class DatabaseManager:
 
         Returns counts of removed files and chunks.
         """
-        async with self._get_read_conn() as read_pool_conn:
-            cur = await read_pool_conn.execute("SELECT COUNT(*) FROM files")
-            row = await cur.fetchone()
-            files_count = row[0] if row else 0
-            await cur.close()
-
-            cur = await read_pool_conn.execute("SELECT COUNT(*) FROM chunks")
-            row = await cur.fetchone()
-            chunks_count = row[0] if row else 0
-            await cur.close()
-
         conn = self._get_conn()
+        cur = await conn.execute("SELECT COUNT(*) FROM files")
+        row = await cur.fetchone()
+        files_count = row[0] if row else 0
+        await cur.close()
+
+        cur = await conn.execute("SELECT COUNT(*) FROM chunks")
+        row = await cur.fetchone()
+        chunks_count = row[0] if row else 0
+        await cur.close()
+
         query = f"""
             -- Remove triggers so chunk deletes don't touch FTS
             {FTS_DROP_TRIGGERS_DDL}
@@ -1478,7 +1901,14 @@ class DatabaseManager:
             DELETE FROM files;
             DELETE FROM query_history;
             DELETE FROM folder_profiles;
-            DROP TABLE IF EXISTS unreal_project_facts;
+
+            -- Pending OCR work refers to files that no longer exist.
+            DELETE FROM ocr_queue;
+
+            -- ocr_cache is deliberately NOT cleared. It is keyed on content
+            -- hash, not on file id, so it stays valid across a wipe and makes
+            -- re-indexing the same documents free instead of re-running OCR.
+            -- Use DELETE /api/ocr/cache to clear it explicitly.
 
             -- Recreate FTS table with optimized schema and contentless mode.
             -- text_preview is stored zlib-compressed so triggers decompress on the fly.
@@ -1489,6 +1919,30 @@ class DatabaseManager:
 
         logger.info("Cleared all data: %d files, %d chunks", files_count, chunks_count)
         return {"files_removed": files_count, "chunks_removed": chunks_count}
+
+    @serialize_write
+    async def clear_vectors_only(self) -> dict[str, int]:
+        """Delete embeddings only, leaving files/chunks/FTS/history intact.
+
+        The model-change-safe counterpart to clear_all(). Must not touch
+        `chunks` - the ON DELETE CASCADE would take chunk_embeddings with it
+        and fire the FTS delete triggers, silently degrading into a full wipe.
+
+        Scope note: this clears the SQLite `chunk_embeddings` table **only**.
+        LanceDB (`pma_chunks`, `pma_summaries`, `query_cache`) is untouched -
+        callers that need both must also call `LanceDBClient.clear_all()`.
+        """
+        conn = self._get_conn()
+        cur = await conn.execute("SELECT COUNT(*) FROM chunk_embeddings")
+        row = await cur.fetchone()
+        embeddings_count = row[0] if row else 0
+        await cur.close()
+
+        await conn.execute("DELETE FROM chunk_embeddings")
+        await conn.commit()
+
+        logger.info("Cleared vectors only: %d embeddings removed", embeddings_count)
+        return {"embeddings_removed": embeddings_count}
 
     async def get_files_by_filter(
         self,

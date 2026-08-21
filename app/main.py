@@ -5,6 +5,7 @@ Handles API routing, dependency injection, and lifespan events.
 
 import asyncio
 import ctypes
+import json
 import logging
 import os
 import platform as plat
@@ -37,6 +38,7 @@ from app.api.search import router as search_router
 from app.api.system import router as system_router
 from app.api.telemetry import router as telemetry_router
 from app.config import settings
+from app.ocr.api import router as ocr_router
 from app.project_constants import APP_VERSION
 from app.storage.db import DatabaseManager
 
@@ -120,6 +122,11 @@ def health(db: DatabaseManager):
         "model_ready": model_ready,
         "indexing": "idle",
         "split_brain_sync_status": state.split_brain_sync_status,
+        # Copied, not aliased: the payload must not hand a caller a live handle
+        # on process state. `status` deliberately ignores these — OCR being off
+        # does not degrade search, and ocr_enabled defaults to False, so folding
+        # it in would report a healthy default install as degraded.
+        "subsystems": {k: dict(v) for k, v in state.subsystems.items()},
     }
 
 
@@ -157,6 +164,10 @@ def _log_startup_info():
 
 @asynccontextmanager
 async def lifespan(fastapi_app: FastAPI):
+    from app.ocr.settings import load_persisted_state
+
+    load_persisted_state()
+
     _log_startup_info()
     loop = asyncio.get_running_loop()
 
@@ -191,13 +202,26 @@ async def lifespan(fastapi_app: FastAPI):
     await loop.run_in_executor(None, lancedb_client.connect)
 
     async def _bg_preload_reranker_task():
+        # preload_reranker() swallows its own failure, so this except never fired
+        # and "loaded successfully" printed unconditionally - directly under the
+        # line saying the model was not found. Report the actual state instead.
         try:
-            from app.search.reranker import preload_reranker
+            from app.search.reranker import preload_reranker, reranker_status
 
             await loop.run_in_executor(None, preload_reranker)
-            logger.info("Reranker model loaded successfully.")
+            status = reranker_status()
+            if status["available"]:
+                logger.info("Reranker model loaded successfully.")
+                state.set_subsystem("reranker", "up")
+            else:
+                logger.warning(
+                    "Reranking is OFF - results will be returned in fusion order. %s",
+                    status["reason"],
+                )
+                state.set_subsystem("reranker", "down", str(status["reason"]))
         except Exception as e:
-            logger.debug("Reranker preload skipped or failed: %s", e)
+            logger.warning("Reranker preload failed: %s", e)
+            state.set_subsystem("reranker", "down", str(e))
 
     rerank_task = asyncio.create_task(_bg_preload_reranker_task())
     state.bg_tasks.add(rerank_task)
@@ -208,14 +232,103 @@ async def lifespan(fastapi_app: FastAPI):
     state.bg_tasks.add(sync_task)
     sync_task.add_done_callback(state.bg_tasks.discard)
 
+    async def _check_model_signature_task():
+        try:
+            is_ready = await loop.run_in_executor(None, emb.wait_until_ready, 60.0)
+            if not is_ready or not emb.is_ready or emb.has_failed:
+                logger.warning(
+                    "Embedding service not ready or failed to load. Skipping model signature check."
+                )
+                return
+
+            current_sig = emb.model_signature
+            if not current_sig:
+                return
+
+            stored_sig = await db_manager.get_system_state("embedding_model_signature")
+            if stored_sig is None:
+                await db_manager.set_system_state("embedding_model_signature", current_sig)
+                logger.info("Recorded initial embedding model signature: %s", current_sig)
+            elif stored_sig != current_sig:
+                logger.warning(
+                    "╔══════════════════════════════════════════════════════════════════════════╗\n"
+                    "║ WARNING: EMBEDDING MODEL SIGNATURE MISMATCH DETECTED                    ║\n"
+                    "║ Stored:  %-63s ║\n"
+                    "║ Current: %-63s ║\n"
+                    "║ The vector space has changed. Existing vectors in LanceDB are STALE.    ║\n"
+                    "║ Please manually clear and re-ingest your indexed folders.              ║\n"
+                    "╚══════════════════════════════════════════════════════════════════════════╝",
+                    stored_sig[:63],
+                    current_sig[:63],
+                )
+                await db_manager.set_system_state("embedding_model_signature", current_sig)
+                # TODO: Auto-trigger a vector-only re-embed here using
+                # db_manager.clear_vectors_only() + LanceDBClient.clear_all()
+                # (see scripts/reindex_embeddings.py for the full rebuild flow).
+                # Not wired in automatically: this warn-only path would become
+                # an unprompted destructive wipe on every boot after a config
+                # change. Left as a manual step for now.
+        except Exception as err:
+            logger.warning("Failed during model signature check: %s", err)
+
+    sig_task = asyncio.create_task(_check_model_signature_task())
+    state.bg_tasks.add(sig_task)
+    sig_task.add_done_callback(state.bg_tasks.discard)
+
     vac_task = asyncio.create_task(_bg_auto_vacuum(db_manager))
     state.bg_tasks.add(vac_task)
     vac_task.add_done_callback(state.bg_tasks.discard)
 
+    # OCR drain loop. start() swallows its own errors: a broken OCR install
+    # must never stop the server from coming up.
+    ocr_manager = None
+    try:
+        from app.api.deps import get_ocr
+
+        ocr_manager = await get_ocr()
+        await ocr_manager.start()
+        # "disabled" rather than "up" when the feature is off: ocr_enabled
+        # defaults to False, and a red pip on a default install is a bug report
+        # waiting to happen.
+        state.set_subsystem("ocr", "up" if settings.ocr_enabled else "disabled")
+    except Exception as err:
+        logger.warning("OCR manager unavailable: %s", err)
+        state.set_subsystem("ocr", "down", str(err))
+
+    # Folder watcher. Like OCR above, a failure here must never stop the server
+    # coming up - it is a convenience, not a dependency of serving queries.
+    watcher = None
+    try:
+        from app.indexing.watcher import FolderWatcher
+
+        watcher = FolderWatcher(
+            db_manager,
+            lambda: IndexingService(db_manager, get_emb(), get_lancedb()),
+        )
+        watcher.start()
+        state.set_subsystem("watcher", "up")
+    except Exception as err:
+        logger.warning("Folder watcher unavailable: %s", err)
+        state.set_subsystem("watcher", "down", str(err))
+
     logger.info("Server ready (v%s)", APP_VERSION)
     yield
 
+    if watcher is not None:
+        try:
+            await watcher.stop()
+        except Exception as err:
+            logger.warning("Folder watcher shutdown failed: %s", err)
+
     # 5. Graceful Shutdown
+    # OCR first: the worker subprocess needs an explicit shutdown message and a
+    # wait(), which cancelling its task would not deliver.
+    if ocr_manager is not None:
+        try:
+            await ocr_manager.stop()
+        except Exception as err:
+            logger.warning("OCR manager shutdown failed: %s", err)
+
     logger.info("Shutting down: cleaning up %d background tasks...", len(state.bg_tasks))
     for t in list(state.bg_tasks):
         t.cancel()
@@ -224,7 +337,23 @@ async def lifespan(fastapi_app: FastAPI):
         await asyncio.gather(*state.bg_tasks, return_exceptions=True)
 
     await db_manager.close()
+
+    # Last, and after the background tasks are cancelled: the indexing pipeline
+    # hands work to two module-level thread pools, and concurrent.futures joins
+    # their threads at interpreter exit with no timeout. Retiring them here
+    # keeps idle workers from delaying shutdown. It does not rescue a worker
+    # already parked in a blocking call - that is handled at the call sites, in
+    # app/indexing/service.py.
+    from app.indexing.service import shutdown_executors
+
+    shutdown_executors()
+
     logger.info("Shutdown complete.")
+
+
+# Module-level so a test can shrink it; the loop below has to page more than
+# once for its termination condition to mean anything.
+_BACKFILL_BATCH = 5000
 
 
 async def _split_brain_sync(db_manager, lancedb_client, emb_svc):
@@ -250,30 +379,43 @@ async def _split_brain_sync(db_manager, lancedb_client, emb_svc):
 
         if emb_count == 0 and chunk_count > 0:
             logger.warning("Split-brain: Running one-time back-fill migration…")
-            if emb_svc.model is None:
-                for _ in range(60):
-                    await asyncio.sleep(0.5)
-                    if emb_svc.model is not None:
-                        break
-                if emb_svc.model is None:
-                    raise RuntimeError("Embedding model not ready for back-fill.")
+            # EmbeddingService exposes wait_until_ready()/is_ready and has no
+            # `.model` attribute - reading one raised AttributeError before the
+            # loop ever ran, and the handler below logged it as a generic sync
+            # failure. Same pattern as _check_model_signature_task above.
+            ready = await loop.run_in_executor(None, emb_svc.wait_until_ready, 30.0)
+            if not ready or not emb_svc.is_ready:
+                raise RuntimeError("Embedding model not ready for back-fill.")
 
-            backfill_batch = 5000
-            bf_offset = 0
             bf_total = 0
+            last_ids: list[int] | None = None
+            # No OFFSET. The predicate is self-consuming - every row embedded
+            # here leaves the result set - so advancing an offset as well
+            # stepped over an equal number of never-embedded chunks on each
+            # pass, losing about half the corpus while reporting success.
             while True:
                 async with conn.execute(
                     "SELECT c.id, zlib_decompress(c.text_preview) "
                     "FROM chunks c "
                     "LEFT JOIN chunk_embeddings ce ON ce.chunk_id = c.id "
                     "WHERE ce.chunk_id IS NULL "
-                    "LIMIT ? OFFSET ?",
-                    (backfill_batch, bf_offset),
+                    "LIMIT ?",
+                    (_BACKFILL_BATCH,),
                 ) as cur:
                     rows = await cur.fetchall()
                 if not rows:
                     break
                 ids_batch = [r[0] for r in rows]
+                # Termination now depends on the insert shrinking the result
+                # set. If a page ever repeats, stop rather than spin the boot
+                # path forever.
+                if ids_batch == last_ids:
+                    logger.error(
+                        "Split-brain back-fill made no progress on %d chunk(s); stopping.",
+                        len(ids_batch),
+                    )
+                    break
+                last_ids = ids_batch
                 texts_batch = [r[1] or "" for r in rows]
 
                 def _embed_task(t=texts_batch):
@@ -286,10 +428,9 @@ async def _split_brain_sync(db_manager, lancedb_client, emb_svc):
                 ]
                 await db_manager.insert_chunk_embeddings_bulk(blob_data)
                 bf_total += len(blob_data)
-                bf_offset += backfill_batch
-                if len(rows) < backfill_batch:
+                if len(rows) < _BACKFILL_BATCH:
                     break
-            logger.info("Split-brain back-fill complete.")
+            logger.info("Split-brain back-fill complete: %d chunk(s) embedded.", bf_total)
 
         # Phase B: Batch-aware Differential Sync
         max_ldb_id = await loop.run_in_executor(None, lancedb_client.get_max_id, "pma_chunks")
@@ -411,9 +552,15 @@ async def security_and_telemetry_middleware(request: Request, call_next):
             "/api/index/progress-stream",
             "/api/auth/google/callback",
         ):
+            # Header only. A ?token= fallback used to be accepted here, but a
+            # query string reaches uvicorn's access log, browser history and
+            # Referer - the same leak already removed from the SSE call (see
+            # frontend/src/api.ts). Nothing ever produced one: api.ts sends the
+            # header on every request, and /api/index/progress-stream is exempt
+            # above. /api/modules/ws does not traverse this middleware and so
+            # kept its own Query fallback for a while after this one went; it
+            # is header-only too now, so the policy holds everywhere.
             provided_token = request.headers.get("X-Local-Access-Token")
-            if not provided_token:
-                provided_token = request.query_params.get("token")
 
             if not provided_token or not secrets.compare_digest(provided_token, expected_token):
                 return JSONResponse(
@@ -424,6 +571,11 @@ async def security_and_telemetry_middleware(request: Request, call_next):
     request_id = str(uuid.uuid4())[:8]
     request.state.request_id = request_id
 
+    # Minted before call_next because _serve_index stamps it onto the one inline
+    # script we emit, and the header below has to carry the same value.
+    csp_nonce = secrets.token_urlsafe(16)
+    request.state.csp_nonce = csp_nonce
+
     t0 = time.perf_counter()
     response = await call_next(request)
     elapsed_ms = (time.perf_counter() - t0) * 1000
@@ -433,6 +585,26 @@ async def security_and_telemetry_middleware(request: Request, call_next):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+
+    # HTML only: a CSP is inert on JSON and on the NDJSON/SSE streams. Mirrors
+    # the policy Tauri already ships (frontend/src-tauri/tauri.conf.json) with
+    # script-src tightened from 'unsafe-inline' to a nonce - the built SPA has
+    # no inline script, so the only one is _serve_index's token injection.
+    # style-src keeps 'unsafe-inline' to match Tauri; Vite/React depend on it.
+    # This governs the browser path only. Tauri loads the SPA from its own
+    # bundle at tauri://localhost and stays governed by tauri.conf.json.
+    if response.headers.get("content-type", "").startswith("text/html"):
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            f"script-src 'self' 'nonce-{csp_nonce}'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "connect-src 'self' http://localhost:* http://127.0.0.1:* ws://localhost:*; "
+            "img-src 'self' data: blob:; "
+            "font-src 'self' data:; "
+            "object-src 'none'; "
+            "base-uri 'self'; "
+            "frame-ancestors 'none'"
+        )
 
     if request.url.path not in ("/api/health", "/api/index/progress-stream"):
         logger.info(
@@ -467,6 +639,7 @@ api_router.include_router(insights_router, tags=["insights"])
 api_router.include_router(system_router, tags=["system"])
 api_router.include_router(telemetry_router)
 api_router.include_router(debug_router)
+api_router.include_router(ocr_router)
 
 
 @api_router.get("/health")
@@ -482,11 +655,59 @@ def health_root(db: DatabaseManager = Depends(get_db)):
     return health(db)
 
 
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+def _is_loopback(request: Request) -> bool:
+    client = request.client
+    return client is not None and client.host in _LOOPBACK_HOSTS
+
+
+def _serve_index(request: Request):
+    """Serve the SPA, handing the access token to same-machine clients.
+
+    index.html is a static build artifact, so a browser opening
+    http://127.0.0.1:8000 had no way to obtain the token at all: api.ts looks
+    for ?token= (absent), VITE_DEV_TOKEN (baked in at build time, unset in a
+    release build) and sessionStorage (empty on a first visit). Only the Tauri
+    shell worked, via initTauriConnection(). Everything else got a working page
+    whose every /api/ call returned 401, with no way for the user to tell why.
+
+    Injected for loopback clients only. The server can be bound beyond
+    loopback - `PMA_HOST` overrides settings.host (env_prefix "PMA_", verified),
+    and `uvicorn --host` bypasses settings entirely - and the token must never
+    be handed to the network. A remote client still has to supply it explicitly.
+
+    The previous note here cited "__main__.py --host". That file does not
+    exist; the reasoning was right and only the reference was wrong.
+    """
+    if not _REACT_INDEX.exists():
+        return _missing_frontend_response()
+
+    if not _is_loopback(request):
+        return FileResponse(_REACT_INDEX)
+
+    token = os.environ.get("X_LOCAL_ACCESS_TOKEN", "")
+    if not token:
+        return FileResponse(_REACT_INDEX)
+
+    html = _REACT_INDEX.read_text(encoding="utf-8")
+    # json.dumps does not escape "</script>", which would close the tag early.
+    # The token is token_urlsafe or a keyring value, so this is hygiene rather
+    # than a reachable path - but it costs two replaces.
+    token_js = json.dumps(token).replace("<", "\\u003c").replace(">", "\\u003e")
+    nonce = getattr(request.state, "csp_nonce", "")
+    injected = f'<script nonce="{nonce}">window.__PMA_TOKEN__={token_js};</script>'
+    marker = "<head>"
+    html = html.replace(marker, marker + injected, 1) if marker in html else injected + html
+    # no-store: the token is in the body, so it must not be written to the
+    # browser's on-disk HTTP cache.
+    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
+
+
 @app.get("/")
 async def root(request: Request):
-    if _REACT_INDEX.exists():
-        return FileResponse(_REACT_INDEX)
-    return _missing_frontend_response()
+    return _serve_index(request)
 
 
 @app.get("/{full_path:path}")
@@ -501,10 +722,9 @@ async def spa_catch_all(request: Request, full_path: str):
     if candidate.exists() and candidate.is_file():
         return FileResponse(candidate)
 
+    # Deep links (/search, /settings, ...) land here and must get the token too.
     if "text/html" in request.headers.get("accept", ""):
-        if _REACT_INDEX.exists():
-            return FileResponse(_REACT_INDEX)
-        return _missing_frontend_response()
+        return _serve_index(request)
     return JSONResponse(status_code=404, content={"error": "Not found"})
 
 

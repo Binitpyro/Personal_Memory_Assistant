@@ -1,47 +1,43 @@
 import asyncio
-import json
 import logging
 import time
-from pathlib import Path
 from typing import Any
 
 import keyring
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Extra
 
+from app.api.models import PRIVACY_NOTICE
 from app.config import settings
 from app.providers import (
     PROVIDER_IDS,
     PROVIDER_REGISTRY,
     create_provider,
-    get_configured_provider_ids,
+    env_base_url,
+    get_default_chain_async,
 )
 from app.providers.base import ValidationResult
 from app.providers.cache import validation_cache
+from app.providers.launcher import get_launch_status
+from app.providers.launcher import launch as launch_local_provider
+from app.settings_store import CURRENT_SCHEMA_VERSION, SettingsStore
 
 logger = logging.getLogger(__name__)
 _background_tasks: set[asyncio.Task[Any]] = set()
 
 providers_router = APIRouter(prefix="/providers", tags=["providers"])
 
-SETTINGS_PATH = Path("data/settings.json")
-
 
 def read_settings() -> dict:
-    if not SETTINGS_PATH.exists():
-        return {}
     try:
-        with open(SETTINGS_PATH, encoding="utf-8") as f:
-            data = json.load(f)
-            return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
+        return SettingsStore.read()
+    except Exception as e:
+        logger.error("Failed to read settings in providers API: %s", e)
+        raise HTTPException(status_code=500, detail=f"Settings file unreadable: {e}") from e
 
 
 def write_settings(data: dict) -> None:
-    SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+    SettingsStore.save(data)
 
 
 def migrate_settings_if_needed(data: dict) -> dict:
@@ -69,9 +65,6 @@ def migrate_settings_if_needed(data: dict) -> dict:
     if "provider" not in llm:
         llm["provider"] = "auto"
 
-    if "fallback_chain" not in llm:
-        llm["fallback_chain"] = get_configured_provider_ids()
-
     return data
 
 
@@ -98,9 +91,13 @@ class SetDefaultModelPayload(BaseModel):
 class LLMGeneralSettingsPayload(BaseModel):
     provider: str | None = None
     fallback_chain: list[str] | None = None
+    cloud_privacy_consent: bool | None = None
 
     class Config:
         extra = Extra.ignore
+
+
+_GATED_PROVIDER_KINDS = ("cloud", "aggregator")
 
 
 @providers_router.get("/settings")
@@ -108,9 +105,14 @@ async def get_llm_settings():
     data = await asyncio.to_thread(read_settings)
     data = migrate_settings_if_needed(data)
     llm = data.get("llm", {})
+    saved_chain = llm.get("fallback_chain")
+    if data.get("schema_version") != CURRENT_SCHEMA_VERSION:
+        saved_chain = None
     return {
         "provider": llm.get("provider", "auto"),
-        "fallback_chain": llm.get("fallback_chain") or get_configured_provider_ids(),
+        "fallback_chain": saved_chain or await get_default_chain_async(),
+        "cloud_privacy_consent": llm.get("cloud_privacy_consent", False),
+        "cloud_privacy_notice": PRIVACY_NOTICE,
     }
 
 
@@ -118,8 +120,26 @@ async def get_llm_settings():
 async def update_llm_settings(payload: LLMGeneralSettingsPayload):
     data = await asyncio.to_thread(read_settings)
     data = migrate_settings_if_needed(data)
+
+    consent = data["llm"].get("cloud_privacy_consent", False)
+    if payload.cloud_privacy_consent is not None:
+        consent = payload.cloud_privacy_consent
+
     if payload.provider is not None:
+        gated_selection = (
+            payload.provider in PROVIDER_REGISTRY
+            and PROVIDER_REGISTRY[payload.provider].kind in _GATED_PROVIDER_KINDS
+        )
+        if gated_selection and not consent:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Explicit consent (cloud_privacy_consent=true) is required to select cloud "
+                    "providers. Free-tier cloud dispatches may use inputs for model training."
+                ),
+            )
         data["llm"]["provider"] = payload.provider
+
     if payload.fallback_chain is not None:
         for pid in payload.fallback_chain:
             if pid not in PROVIDER_IDS:
@@ -127,6 +147,10 @@ async def update_llm_settings(payload: LLMGeneralSettingsPayload):
                     status_code=400, detail=f"Invalid provider ID in fallback chain: {pid}"
                 )
         data["llm"]["fallback_chain"] = payload.fallback_chain
+
+    if payload.cloud_privacy_consent is not None:
+        data["llm"]["cloud_privacy_consent"] = payload.cloud_privacy_consent
+
     await asyncio.to_thread(write_settings, data)
     return {"status": "success"}
 
@@ -137,6 +161,7 @@ async def list_providers():
     data = migrate_settings_if_needed(data)
     llm = data.get("llm", {})
     per_provider = llm.get("per_provider", {})
+    cloud_consent = bool(llm.get("cloud_privacy_consent", False))
 
     results = []
     for pid in PROVIDER_IDS:
@@ -163,7 +188,7 @@ async def list_providers():
                 pass
 
         provider_settings = per_provider.get(pid, {})
-        base_url = provider_settings.get("base_url") or spec.default_base_url
+        base_url = provider_settings.get("base_url") or env_base_url(pid) or spec.default_base_url
         default_model = provider_settings.get("default_model")
 
         api_key = env_key
@@ -175,8 +200,13 @@ async def list_providers():
 
         last_validation = validation_cache.get(pid, base_url, api_key)
 
-        # Trigger background validation if no validation result is cached yet for active providers
-        if last_validation is None and (is_set or pid in ("ollama", "lm_studio")):
+        # Trigger background validation if no validation result is cached yet for
+        # active providers. Cloud/aggregator kinds stay behind the same consent
+        # gate as dispatch: validate() is only a keyed ping, but it fires on
+        # every Settings page load and would reach an off-device endpoint the
+        # user has not opted into.
+        consent_ok = spec.kind not in _GATED_PROVIDER_KINDS or cloud_consent
+        if last_validation is None and consent_ok and (is_set or pid in ("ollama", "lm_studio")):
             try:
                 p_obj = create_provider(
                     pid, api_key=api_key, base_url=base_url, default_model=default_model
@@ -216,7 +246,7 @@ async def validate_provider(provider_id: str, payload: ValidatePayload) -> Valid
     provider_settings = per_provider.get(provider_id, {})
 
     if base_url is None:
-        base_url = provider_settings.get("base_url")
+        base_url = provider_settings.get("base_url") or env_base_url(provider_id)
 
     if api_key is None:
         env_key_name = f"{provider_id}_api_key"
@@ -249,7 +279,7 @@ async def self_test_provider(provider_id: str):
     data = migrate_settings_if_needed(data)
     per_provider = data.get("llm", {}).get("per_provider", {})
     provider_settings = per_provider.get(provider_id, {})
-    base_url = provider_settings.get("base_url")
+    base_url = provider_settings.get("base_url") or env_base_url(provider_id)
     default_model = provider_settings.get("default_model")
 
     env_key_name = f"{provider_id}_api_key"
@@ -285,6 +315,53 @@ async def self_test_provider(provider_id: str):
         return {"ok": False, "error": str(e)}
     finally:
         await provider.close()
+
+
+def _resolve_base_url(provider_id: str, data: dict) -> str:
+    """Saved override -> environment (.env) -> registry default."""
+    per_provider = data.get("llm", {}).get("per_provider", {})
+    saved = (per_provider.get(provider_id) or {}).get("base_url")
+    if saved:
+        return str(saved)
+
+    env_url = env_base_url(provider_id)
+    if env_url:
+        return env_url
+
+    return PROVIDER_REGISTRY[provider_id].default_base_url or ""
+
+
+async def _base_url_for(provider_id: str) -> str:
+    data = await asyncio.to_thread(read_settings)
+    data = migrate_settings_if_needed(data)
+    return _resolve_base_url(provider_id, data)
+
+
+@providers_router.get("/{provider_id}/launch_status")
+async def provider_launch_status(provider_id: str) -> dict:
+    """Can PMA start this provider, and is it already up?"""
+    if provider_id not in PROVIDER_IDS:
+        raise HTTPException(status_code=400, detail=f"Unknown provider: {provider_id}")
+
+    base_url = await _base_url_for(provider_id)
+    return await asyncio.to_thread(get_launch_status, provider_id, base_url)
+
+
+@providers_router.post("/{provider_id}/launch")
+async def launch_provider(provider_id: str) -> dict:
+    """Start a local provider and wait until it answers.
+
+    Takes no request body on purpose: the executable is chosen entirely from a fixed
+    table in app/providers/launcher.py, never from caller input.
+
+    Like /validate, expected failures come back as HTTP 200 with ok=false and an
+    error_code so the UI can render them without treating them as exceptions.
+    """
+    if provider_id not in PROVIDER_IDS:
+        raise HTTPException(status_code=400, detail=f"Unknown provider: {provider_id}")
+
+    base_url = await _base_url_for(provider_id)
+    return await launch_local_provider(provider_id, base_url)
 
 
 @providers_router.put("/{provider_id}/key")
@@ -366,7 +443,10 @@ async def get_current_provider():
     llm = data.get("llm", {})
     provider_preference = llm.get("provider", "auto")
 
-    fallback_chain = llm.get("fallback_chain") or get_configured_provider_ids()
+    saved_chain = llm.get("fallback_chain")
+    if data.get("schema_version") != CURRENT_SCHEMA_VERSION:
+        saved_chain = None
+    fallback_chain = saved_chain or await get_default_chain_async()
 
     resolved_id = None
     source = "unset"

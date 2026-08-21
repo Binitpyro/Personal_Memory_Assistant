@@ -52,6 +52,48 @@ async def get_insights_by_type(extension: str = Query(...), db: DatabaseManager 
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+@router.get("/insights/portrait")
+async def get_insights_portrait():
+    from app.insights.portrait import generate_portrait
+
+    try:
+        data = await generate_portrait()
+        return data
+    except Exception as e:
+        logger.error(f"Error generating portrait: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+def _common_parent_prefix(paths: list[str]) -> str:
+    """Longest directory prefix shared by every path in *paths*.
+
+    Compared over the *parent* of each path, never the path itself: with a
+    single file the whole-path prefix would swallow the filename and the caller
+    would strip a file name off as though it were a folder.
+
+    Separator-preserving. `files.path` is written as `str(Path.absolute())`, so
+    it carries the host separator, and the result has to stay a literal prefix
+    of it for `delete_files_by_folder_prefix` to match.
+    """
+    if not paths:
+        return ""
+    split: list[list[str]] = []
+    for p in paths:
+        norm = p.replace("\\", "/")
+        parts = norm.split("/")[:-1]  # drop the file name
+        split.append(parts)
+    first, shortest = split[0], min(len(x) for x in split)
+    depth = 0
+    while depth < shortest and all(x[depth] == first[depth] for x in split):
+        depth += 1
+    if depth == 0:
+        return ""
+    prefix = "/".join(first[:depth])
+    # Re-spell using the separator the original paths actually used.
+    sep = "\\" if "\\" in paths[0] else "/"
+    return prefix.replace("/", sep)
+
+
 @router.get("/files/tree")
 async def get_files_tree(db: DatabaseManager = Depends(get_db)):
     from app.state import CACHE_TTL as _CACHE_TTL
@@ -62,23 +104,37 @@ async def get_files_tree(db: DatabaseManager = Depends(get_db)):
         return _file_tree_cache["data"]
     try:
         files = await db.get_all_files()
+        # Keyed by the indexed folder's full path. The Explorer strips this key
+        # off each file path to build its tree and passes it to the folder
+        # removal endpoint, so a basename will not do.
         folders: dict[str, list[dict[str, Any]]] = {}
+        # Rows written before the files_root_path migration carry an empty
+        # root_path. Park them under their folder_tag, then derive a root by
+        # common prefix once the group is complete, so an existing index gets the
+        # corrected tree without a re-index. That fallback cannot separate two
+        # folders sharing a basename -- only a re-index can.
+        legacy: dict[str, list[dict[str, Any]]] = {}
         total_size = 0
         for f in files:
             # Row object does not have .get()
-            tag = f["folder_tag"] if f["folder_tag"] else "Unknown"
-            if tag not in folders:
-                folders[tag] = []
-            folders[tag].append(
-                {
-                    "id": f["id"],
-                    "path": f["path"],
-                    "size": f["size"] or 0,
-                    "type": f["type"],
-                    "usage_count": f["usage_count"] or 0,
-                }
-            )
+            entry = {
+                "id": f["id"],
+                "path": f["path"],
+                "size": f["size"] or 0,
+                "type": f["type"],
+                "usage_count": f["usage_count"] or 0,
+            }
+            root = f["root_path"] or ""
+            if root:
+                folders.setdefault(root, []).append(entry)
+            else:
+                tag = f["folder_tag"] or "Unknown"
+                legacy.setdefault(tag, []).append(entry)
             total_size += f["size"] or 0
+
+        for tag, entries in legacy.items():
+            root = _common_parent_prefix([e["path"] for e in entries]) or tag
+            folders.setdefault(root, []).extend(entries)
 
         data = {"folders": folders, "total_files": len(files), "total_size": total_size}
         _file_tree_cache["data"] = data

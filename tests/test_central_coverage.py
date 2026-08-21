@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import os
+import zlib
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -114,7 +115,7 @@ async def test_indexing_pipeline_deep(real_db, tmp_path):
     test_file.write_text("Hello world content.")
     try:
         q = asyncio.Queue()
-        await svc._stream_extract_and_prepare(test_file, "tag", None, q)
+        await svc._stream_extract_and_prepare(test_file, "tag", "", None, q)
 
         header = await q.get()
         assert header["type"] == "header"
@@ -127,7 +128,7 @@ async def test_indexing_pipeline_deep(real_db, tmp_path):
         assert footer["type"] == "footer"
 
         # Verification of DB record creation
-        await svc._batch_index_pipeline([(test_file, "tag")])
+        await svc._batch_index_pipeline([(test_file, "tag", "")])
         change_map = await real_db.get_files_change_map([str(test_file.absolute())])
         assert str(test_file.absolute()) in change_map
     finally:
@@ -212,12 +213,16 @@ async def test_full_rag_logic(tmp_path):
         ("a.py", ".py", 100, "now"),
     )
     long_text = (
-        b"This is a reasonably long chunk of text that exceeds the fifty character "
-        b"minimum requirement for the hybrid retriever to consider it valid."
+        "This is a reasonably long chunk of text that exceeds the fifty character "
+        "minimum requirement for the hybrid retriever to consider it valid."
     )
+    # Production writes zlib-compressed bytes (see db.py's chunk insert);
+    # inserting the raw string previously "worked" only because
+    # zlib_decompress's corrupt-data fallback returned str(blob) - a bug
+    # fixed in P1-2. Compress here to match the real write path.
     await db.execute_write(
         "INSERT INTO chunks (file_id, text_preview, start_offset, end_offset) VALUES (?,?,?,?)",
-        (1, long_text, 0, 100),
+        (1, zlib.compress(long_text.encode("utf-8")), 0, 100),
     )
     llm = MagicMock()
     llm.generate_answer = AsyncMock(return_value="Ans")

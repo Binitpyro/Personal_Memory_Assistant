@@ -1,14 +1,19 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { Search, Send, Loader2, Sparkles, Clock, Trash2, RotateCcw } from 'lucide-react';
+import { Search, Send, Square, Sparkles, Clock, Trash2, RotateCcw } from 'lucide-react';
+import { toast } from 'sonner';
 import { useApi, invalidateCache } from '../useApi';
-import { getQueryHistory, clearQueryHistory, getFileTree, type HistoryItem } from '../api';
+import { getQueryHistory, clearQueryHistory, getFileTree, subscribeProgress, type HistoryItem } from '../api';
 
 import { useChatStream } from '../hooks/useChatStream';
 import { MessageBubble } from '../components/chat/MessageBubble';
 import { FilterBar } from '../components/chat/FilterBar';
 import { ModelPicker } from '../components/providers/ModelPicker';
+import { useDreamscapeStore } from '../store/dreamscapeStore';
 
 export function SearchPage() {
+  const selectedChunks = useDreamscapeStore(state => state.selectedChunks);
+  const removeChunk = useDreamscapeStore(state => state.removeChunk);
+  const clearChunks = useDreamscapeStore(state => state.clearChunks);
 
   const [question, setQuestion] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -19,14 +24,34 @@ export function SearchPage() {
 
   const { data: historyData, refetch: refetchHistory } = useApi(getQueryHistory, { cacheKey: 'query-history' });
   
-  const { messages, executeSearch, resetChat: resetChatStream } = useChatStream(() => {
+  const { messages, executeSearch, resetChat: resetChatStream, stopStream } = useChatStream(() => {
     invalidateCache('query-history');
     refetchHistory();
   });
 
   const isSearching = messages.at(-1)?.isStreaming ?? false;
 
-  const { data: fileTree } = useApi(getFileTree, { cacheKey: 'files-tree', refetchInterval: isSearching ? 0 : 15_000 });
+  // U-5: the file tree changes only when indexing does, and subscribeProgress
+  // already pushes those events. A fixed 15s poll re-fetched the whole tree
+  // forever on a corpus that had not moved.
+  const { data: fileTree, refetch: refetchFileTree } = useApi(getFileTree, {
+    cacheKey: 'files-tree',
+  });
+
+  useEffect(() => {
+    let last = '';
+    const unsubscribe = subscribeProgress((evt) => {
+      // Refresh on the transition into a settled state, not on every progress
+      // frame - those arrive continuously during a scan.
+      const status = evt?.status ?? '';
+      if (status !== last && (status === 'completed' || status === 'idle')) {
+        invalidateCache('files-tree');
+        refetchFileTree();
+      }
+      last = status;
+    });
+    return unsubscribe;
+  }, [refetchFileTree]);
 
 
   const inputRef = useRef<HTMLInputElement>(null);
@@ -62,12 +87,13 @@ export function SearchPage() {
         folder_tag: selectedFolderTag || undefined,
         mode: selectedMode || undefined,
         forced_chunk_id: forcedChunkId,
+        selected_chunk_ids: selectedChunks.map(c => c.id),
         isRetry: !!overrideQuestion || !!forcedChunkId
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Search failed');
     }
-  }, [question, isSearching, executeSearch, selectedFileType, selectedFolderTag, selectedMode, messages]);
+  }, [question, isSearching, executeSearch, selectedFileType, selectedFolderTag, selectedMode, messages, selectedChunks]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -76,16 +102,33 @@ export function SearchPage() {
     }
   };
 
-  const handleClearHistory = useCallback(async () => {
-    if (!confirm('Are you sure you want to clear all chat history?')) return;
-    try {
-      await clearQueryHistory();
-      invalidateCache('query-history');
-      refetchHistory();
-      resetChatStream();
-    } catch (e) {
-      alert(`Failed to clear history: ${e instanceof Error ? e.message : 'Unknown error'}`);
-    }
+  // Native confirm()/alert() rendered as platform dialogs that do not match the
+  // app's visual language, and confirm() blocks the event loop. sonner was
+  // already a declared dependency and imported nowhere.
+  const handleClearHistory = useCallback(() => {
+    const doClear = async () => {
+      try {
+        const res = await clearQueryHistory();
+        invalidateCache('query-history');
+        refetchHistory();
+        resetChatStream();
+        // The backend reports whether the persistent semantic cache went with
+        // it. Saying "cleared" when verbatim questions are still on disk is the
+        // kind of claim this app cannot afford to get wrong.
+        if (res && res.semantic_cache_cleared === false) {
+          toast.warning('History cleared, but the saved-answer cache could not be cleared.');
+        } else {
+          toast.success('Chat history cleared.');
+        }
+      } catch (e) {
+        toast.error(`Failed to clear history: ${e instanceof Error ? e.message : 'Unknown error'}`);
+      }
+    };
+
+    toast('Clear all chat history?', {
+      action: { label: 'Clear', onClick: () => void doClear() },
+      cancel: { label: 'Cancel', onClick: () => {} },
+    });
   }, [refetchHistory, resetChatStream]);
 
   const resetChat = () => {
@@ -183,6 +226,28 @@ export function SearchPage() {
               </div>
             </div>
           )}
+          {selectedChunks.length > 0 && (
+            <div className="flex flex-wrap gap-2 items-center mb-1">
+              <span className="text-[10px] uppercase font-black text-text-secondary tracking-wider ml-1">Context:</span>
+              {selectedChunks.map(chunk => (
+                <div key={chunk.id} className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-primary/10 border border-primary/20 text-xs text-primary-light">
+                  <span className="truncate max-w-[150px]">{chunk.filename}</span>
+                  <button 
+                    onClick={() => removeChunk(chunk.id)}
+                    className="hover:text-error transition-colors"
+                  >
+                    &times;
+                  </button>
+                </div>
+              ))}
+              <button 
+                onClick={() => clearChunks()}
+                className="text-[10px] uppercase font-bold text-text-secondary hover:text-error transition-colors ml-1"
+              >
+                Clear
+              </button>
+            </div>
+          )}
           <div className="relative group">
             <div className="absolute -inset-0.5 bg-gradient-to-r from-primary to-accent rounded-2xl blur opacity-20 group-focus-within:opacity-40 transition duration-1000"></div>
             <div className="relative flex items-center glass rounded-2xl overflow-hidden shadow-2xl">
@@ -197,13 +262,25 @@ export function SearchPage() {
                 disabled={isSearching}
                 aria-expanded={showHistory}
               />
-              <button
-                onClick={() => handleSearch()}
-                disabled={!question.trim() || isSearching}
-                className="p-3 mr-2 bg-primary hover:bg-primary-dark disabled:bg-white/5 text-white rounded-xl transition-all shadow-lg"
-              >
-                {isSearching ? <Loader2 className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
-              </button>
+              {isSearching ? (
+                <button
+                  onClick={stopStream}
+                  aria-label="Stop generating"
+                  title="Stop generating"
+                  className="p-3 mr-2 bg-white/10 hover:bg-white/20 text-white rounded-xl transition-all shadow-lg"
+                >
+                  <Square className="w-5 h-5 fill-current" />
+                </button>
+              ) : (
+                <button
+                  onClick={() => handleSearch()}
+                  disabled={!question.trim()}
+                  aria-label="Send question"
+                  className="p-3 mr-2 bg-primary hover:bg-primary-dark disabled:bg-white/5 text-white rounded-xl transition-all shadow-lg"
+                >
+                  <Send className="w-5 h-5" />
+                </button>
+              )}
             </div>
           </div>
           

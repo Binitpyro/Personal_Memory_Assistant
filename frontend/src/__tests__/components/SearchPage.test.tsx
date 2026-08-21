@@ -29,6 +29,9 @@ vi.mock('../../api', () => {
     getFileTree: vi.fn(),
     getAppConfig: vi.fn(),
     getProviders: vi.fn(),
+    // The file tree refreshes off index-progress events now instead of a 15s
+    // poll. Returns the unsubscribe the component calls on unmount.
+    subscribeProgress: vi.fn(() => vi.fn()),
   };
 });
 

@@ -77,6 +77,9 @@ pyinstaller ^
     --hidden-import=tokenizers ^
     --add-data "app;app" ^
     --add-data "static;static" ^
+    --add-data "app/ocr/worker;app/ocr/worker" ^
+    --add-data "app/ocr/protocol.py;app/ocr" ^
+    --add-data "models.lock.json;." ^
     --add-binary "app/scanner/rust_core/target/release/rust_core.dll;app/scanner/rust_core/target/release" ^
     __main__.py
 

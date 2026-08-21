@@ -9,7 +9,7 @@ vi.mock('../../useApi', () => ({
     if (opts?.cacheKey === 'health') {
       return {
         data: {
-          version: '0.0.71',
+          version: '0.0.72',
           status: 'ok',
           db: 'connected',
           split_brain_sync_status: 'idle',
@@ -76,6 +76,18 @@ vi.mock('../../api', () => {
     getIndexStatus: vi.fn(),
     getSystemInfo: vi.fn(),
     getAppConfig: vi.fn(),
+    getOcrStatus: vi.fn().mockResolvedValue({
+      tier: 'none',
+      enabled: false,
+      installed: false,
+      uv_available: false,
+      queue: { pending: 0, running: 0, done: 0, failed: 0, skipped: 0, pages_pending: 0 },
+      pages_pending: 0,
+      worker_running: false,
+      current_file: '',
+      unhealthy: false,
+      fatal: '',
+    }),
     pickFolder: vi.fn(),
     startIndexing: vi.fn(),
     clearIndex: vi.fn(),

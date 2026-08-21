@@ -1,3 +1,5 @@
+import re
+
 import pytest
 from httpx import AsyncClient
 
@@ -83,3 +85,45 @@ async def test_files_tree_endpoint(client: AsyncClient):
     response = await client.get("/api/files/tree")
     assert response.status_code == 200
     assert "folders" in response.json()
+
+
+@pytest.mark.asyncio
+async def test_csp_nonce_matches_the_injected_script(client: AsyncClient):
+    """The header nonce and the inline script nonce must be the same value."""
+    response = await client.get("/")
+    assert response.status_code == 200
+
+    csp = response.headers["content-security-policy"]
+    assert "default-src 'self'" in csp
+    assert "style-src 'self' 'unsafe-inline'" in csp
+
+    match = re.search(r"script-src 'self' 'nonce-([A-Za-z0-9_-]+)'", csp)
+    assert match is not None, csp
+    assert f'<script nonce="{match.group(1)}">' in response.text
+
+
+@pytest.mark.asyncio
+async def test_csp_nonce_is_minted_per_request(client: AsyncClient):
+    """A reused nonce is no better than 'unsafe-inline'."""
+    first = (await client.get("/")).headers["content-security-policy"]
+    second = (await client.get("/")).headers["content-security-policy"]
+    assert first != second
+
+
+@pytest.mark.asyncio
+async def test_csp_is_not_set_on_json_responses(client: AsyncClient):
+    response = await client.get("/api/health")
+    assert response.status_code == 200
+    assert "content-security-policy" not in response.headers
+
+
+@pytest.mark.asyncio
+async def test_history_list_is_capped(client: AsyncClient):
+    """Bounds the context budget, not the request body."""
+    item = {"role": "user", "content": "x"}
+
+    at_cap = await client.post("/api/query", json={"question": "q", "history": [item] * 50})
+    assert at_cap.status_code != 422
+
+    over_cap = await client.post("/api/query", json={"question": "q", "history": [item] * 51})
+    assert over_cap.status_code == 422

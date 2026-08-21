@@ -147,6 +147,11 @@ def test_telemetry_endpoint(app_client):
 
 
 class TestReadWriteSettings:
+    """P1-1: models.py's _read_settings/_write_settings now delegate to
+    SettingsStore (app/settings_store.py), so these tests patch
+    app.settings_store.SETTINGS_PATH - the module.SETTINGS_PATH attribute
+    these used to patch directly on app.api.models no longer exists there."""
+
     def test_read_missing_returns_empty(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         from app.api.models import _read_settings
@@ -161,28 +166,35 @@ class TestReadWriteSettings:
 
         from app.api import models as m
 
-        # Patch SETTINGS_PATH to tmp
         settings_path = tmp_path / "data" / "settings.json"
-        monkeypatch.setattr(m, "SETTINGS_PATH", settings_path)
+        monkeypatch.setattr("app.settings_store.SETTINGS_PATH", settings_path)
         m._write_settings({"llm": {"provider": "gemini"}})
         result = m._read_settings()
         assert result["llm"]["provider"] == "gemini"
 
-    def test_read_corrupt_json_returns_empty(self, tmp_path, monkeypatch):
+    def test_read_corrupt_json_raises_http_500(self, tmp_path, monkeypatch):
+        """Behavior change from the old bypass: a corrupt settings file used
+        to be silently treated as "no settings yet", so the next write would
+        overwrite it and lose whatever was recoverable. SettingsStore.read()
+        raises instead, and models.py now surfaces that as a 500 rather than
+        swallowing it - matching app/api/providers.py's read_settings."""
+        from fastapi import HTTPException
+
         from app.api import models as m
 
         bad_file = tmp_path / "settings.json"
         bad_file.write_text("{bad json}", encoding="utf-8")
-        monkeypatch.setattr(m, "SETTINGS_PATH", bad_file)
-        result = m._read_settings()
-        assert result == {}
+        monkeypatch.setattr("app.settings_store.SETTINGS_PATH", bad_file)
+        with pytest.raises(HTTPException) as exc_info:
+            m._read_settings()
+        assert exc_info.value.status_code == 500
 
 
 @pytest.mark.asyncio
 async def test_get_preferences_default(tmp_path, monkeypatch):
     from app.api import models as m
 
-    monkeypatch.setattr(m, "SETTINGS_PATH", tmp_path / "missing.json")
+    monkeypatch.setattr("app.settings_store.SETTINGS_PATH", tmp_path / "missing.json")
     result = await m.get_preferences()
     assert result["provider"] == "auto"
 
@@ -193,7 +205,7 @@ async def test_set_preferences_normalizes_invalid_provider(tmp_path, monkeypatch
 
     settings_file = tmp_path / "data" / "settings.json"
     (tmp_path / "data").mkdir()
-    monkeypatch.setattr(m, "SETTINGS_PATH", settings_file)
+    monkeypatch.setattr("app.settings_store.SETTINGS_PATH", settings_file)
     mock_llm = MagicMock()
     mock_llm.apply_preferences = MagicMock()
     with patch("app.api.models.get_llm", return_value=mock_llm):
@@ -241,3 +253,165 @@ async def test_detect_local_models_ollama_detected():
 
     assert result["ollama"]["detected"] is True
     assert "llama3" in result["ollama"]["models"]
+
+
+@pytest.mark.asyncio
+async def test_llm_chat_passthrough_rejects_auto():
+    from fastapi import HTTPException
+
+    from app.api.models import LLMChatRequest, chat_passthrough
+
+    payload = LLMChatRequest(
+        messages=[{"role": "user", "content": "hi"}],
+        provider="auto",
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        await chat_passthrough(payload)
+    assert exc_info.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_llm_chat_passthrough_success():
+    from app.api.models import LLMChatRequest, chat_passthrough
+
+    mock_provider = AsyncMock()
+    mock_provider.chat = AsyncMock(return_value="Passthrough response")
+    mock_provider.close = AsyncMock()
+
+    mock_llm = MagicMock()
+    mock_llm._resolve_provider_by_id = AsyncMock(return_value=mock_provider)
+
+    payload = LLMChatRequest(
+        messages=[{"role": "user", "content": "hello"}],
+        provider="ollama",
+    )
+    with patch("app.api.models.get_llm", return_value=mock_llm):
+        result = await chat_passthrough(payload)
+
+    assert result["provider"] == "ollama"
+    assert result["content"] == "Passthrough response"
+
+
+@pytest.mark.asyncio
+async def test_llm_chat_passthrough_resolution_failure_does_not_leak_url(caplog):
+    """P1-3: a user-configured openai_compatible base_url with embedded
+    credentials would previously appear verbatim in the 502 response body,
+    since the raw exception string was interpolated straight into `detail`.
+    httpx's ConnectError.__str__ includes the request URL, which is exactly
+    the shape of exception _resolve_provider_by_id can raise."""
+    import httpx
+    from fastapi import HTTPException
+
+    from app.api.models import LLMChatRequest, chat_passthrough
+
+    leaky_url = "https://user:supersecret@evil-or-not.example/v1/chat"
+    mock_llm = MagicMock()
+    mock_llm._resolve_provider_by_id = AsyncMock(
+        side_effect=httpx.ConnectError(f"Connection refused: {leaky_url}")
+    )
+
+    payload = LLMChatRequest(
+        messages=[{"role": "user", "content": "hi"}],
+        provider="openai_compatible",
+    )
+    with (
+        patch("app.api.models.get_llm", return_value=mock_llm),
+        pytest.raises(HTTPException) as exc_info,
+    ):
+        await chat_passthrough(payload)
+
+    assert exc_info.value.status_code == 502
+    assert "supersecret" not in exc_info.value.detail
+    assert leaky_url not in exc_info.value.detail
+    # Full detail must still reach the server log for debugging.
+    assert any(leaky_url in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_llm_chat_passthrough_chat_failure_does_not_leak_url(caplog):
+    """Same leak vector, but from the provider.chat() call itself rather
+    than provider resolution."""
+    import httpx
+    from fastapi import HTTPException
+
+    from app.api.models import LLMChatRequest, chat_passthrough
+
+    leaky_url = "https://user:supersecret@evil-or-not.example/v1/chat"
+    mock_provider = AsyncMock()
+    mock_provider.chat = AsyncMock(
+        side_effect=httpx.ConnectError(f"Connection refused: {leaky_url}")
+    )
+    mock_provider.close = AsyncMock()
+
+    mock_llm = MagicMock()
+    mock_llm._resolve_provider_by_id = AsyncMock(return_value=mock_provider)
+
+    payload = LLMChatRequest(
+        messages=[{"role": "user", "content": "hi"}],
+        provider="openai_compatible",
+    )
+    with (
+        patch("app.api.models.get_llm", return_value=mock_llm),
+        pytest.raises(HTTPException) as exc_info,
+    ):
+        await chat_passthrough(payload)
+
+    assert exc_info.value.status_code == 502
+    assert "supersecret" not in exc_info.value.detail
+    assert leaky_url not in exc_info.value.detail
+    assert any(leaky_url in r.message for r in caplog.records)
+    mock_provider.close.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_cloud_privacy_consent_required(tmp_path, monkeypatch):
+    from fastapi import HTTPException
+
+    from app.api import models as m
+
+    settings_file = tmp_path / "data" / "settings.json"
+    (tmp_path / "data").mkdir()
+    monkeypatch.setattr("app.settings_store.SETTINGS_PATH", settings_file)
+
+    payload = m.LLMPreferences(provider="gemini", cloud_privacy_consent=False)
+    with pytest.raises(HTTPException) as exc_info:
+        await m.set_preferences(payload)
+    assert exc_info.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_set_preferences_preserves_sibling_llm_keys(tmp_path, monkeypatch):
+    """P1-1: set_preferences used to do `data["llm"] = {...}`, replacing the
+    whole sub-dict and silently destroying fallback_chain/per_provider -
+    written by app/api/providers.py's own preferences endpoints - on every
+    call. It also never stamped schema_version, which made
+    _get_effective_fallback_chain bail to defaults. Both are fixed by
+    routing through SettingsStore.save() with an in-place update."""
+    from app.api import models as m
+    from app.settings_store import CURRENT_SCHEMA_VERSION, SettingsStore
+
+    settings_file = tmp_path / "data" / "settings.json"
+    (tmp_path / "data").mkdir()
+    monkeypatch.setattr("app.settings_store.SETTINGS_PATH", settings_file)
+
+    SettingsStore.save(
+        {
+            "llm": {
+                "provider": "auto",
+                "fallback_chain": ["ollama", "lm_studio"],
+                "per_provider": {"ollama": {"base_url": None, "default_model": "llama3"}},
+            }
+        }
+    )
+
+    mock_llm = MagicMock()
+    mock_llm.apply_preferences = MagicMock()
+    with patch("app.api.models.get_llm", return_value=mock_llm):
+        payload = m.LLMPreferences(provider="ollama", ollama_model="mistral")
+        await m.set_preferences(payload)
+
+    saved = SettingsStore.read()
+    assert saved["llm"]["fallback_chain"] == ["ollama", "lm_studio"]
+    assert saved["llm"]["per_provider"] == {"ollama": {"base_url": None, "default_model": "llama3"}}
+    assert saved["llm"]["ollama_model"] == "mistral"
+    assert saved["schema_version"] == CURRENT_SCHEMA_VERSION

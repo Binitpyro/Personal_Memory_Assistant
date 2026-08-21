@@ -74,11 +74,7 @@ class QueryPlanner:
             "folder size",
             "directory size",
             # descriptive inventory
-            "give me a summary",
-            "show me a summary",
             "index summary",
-            "what folders",
-            "which folders",
             "folder count",
             "what types of files",
             "file types indexed",
@@ -86,8 +82,63 @@ class QueryPlanner:
             "show stats",
             "index stats",
             "storage stats",
-            "my index",
-            "the index",
+            # Removed - these matched as bare substrings and hijacked content
+            # questions into a canned file-count string the user never asked
+            # for, or silently stripped the reranker and the bounded loop:
+            #   "my index" / "the index"  - how a person refers to this tool by
+            #       name, so "what does the index say about turbulence" routed
+            #       to FAST_METADATA.
+            #   "give me a summary" / "show me a summary" - "give me a summary
+            #       of my thesis notes" is a content question.
+            #   "what folders" / "which folders" - "which folders have the most
+            #       physics notes" needs retrieval, not a folder listing.
+            # Inventory intent is now required to look like inventory: see
+            # _has_inventory_intent below.
+        }
+    )
+
+    # An inventory question names a thing being counted *and* asks about its
+    # extent. Requiring both kills the bare-substring hijacks above without
+    # maintaining an ever-growing phrase list.
+    # "space" and "data" are deliberately absent: they are ordinary content
+    # words, and with "how much" they turned "how much space does the renderer
+    # use in the frame budget" into a file count. The literal phrases "how much
+    # space" / "disk space" still live in _INVENTORY_PHRASES.
+    _INVENTORY_NOUNS = frozenset(
+        {
+            "file",
+            "files",
+            "folder",
+            "folders",
+            "index",
+            "storage",
+            "disk",
+            "drive",
+            "document",
+            "documents",
+            "item",
+            "items",
+        }
+    )
+
+    # Negative evidence. An inventory phrase followed by a topic is a content
+    # question about the corpus, not a question about the corpus's size:
+    # "what's in my index about kinetics" is not "what's in my index".
+    _TOPIC_MARKERS = ("about", "regarding", "concerning", "mention", "say about", "related to")
+    _INVENTORY_MEASURES = frozenset(
+        {
+            "how many",
+            "how much",
+            "how large",
+            "how big",
+            "how full",
+            "count",
+            "total",
+            "size",
+            "usage",
+            "stats",
+            "breakdown",
+            "capacity",
         }
     )
 
@@ -136,28 +187,22 @@ class QueryPlanner:
 
         # 1. Exact phrase inventory fast path
         has_inventory_phrase = any(k in query_lower for k in self._INVENTORY_PHRASES)
-        # Composite: "how much/many/large/big" + storage/index/file context
-        has_composite_inventory = any(
-            p in query_lower for p in ("how much", "how many", "how large", "how big")
-        ) and any(
-            t in query_lower
-            for t in (
-                "index",
-                "storage",
-                "file",
-                "space",
-                "memory",
-                "size",
-                "data",
-                "drive",
-                "folder",
-            )
+        # Composite: an extent measure *and* a thing being measured. Both are
+        # required. Either alone matched content questions - "how much space
+        # does the renderer use in the frame budget" answered with a canned
+        # file count, because "how much" and "space" both appeared.
+        words = set(re.findall(r"\w+", query_lower))
+        has_composite_inventory = bool(words & self._INVENTORY_NOUNS) and any(
+            m in query_lower if " " in m else m in words for m in self._INVENTORY_MEASURES
         )
         # Listing intent: "list/show/enumerate" + file/folder/index nouns
         has_listing_intent = any(p in query_lower for p in self._LISTING_PHRASES) and any(
             t in query_lower for t in ("file", "folder", "document", "index", "indexed")
         )
-        if has_inventory_phrase or has_composite_inventory or has_listing_intent:
+        names_a_topic = any(m in query_lower for m in self._TOPIC_MARKERS)
+        if (
+            has_inventory_phrase or has_composite_inventory or has_listing_intent
+        ) and not names_a_topic:
             return QueryPlan(
                 mode=PlanMode.FAST_METADATA,
                 original_query=query,

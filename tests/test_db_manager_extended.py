@@ -1,8 +1,42 @@
+import asyncio
+import contextlib
+import zlib
 from pathlib import Path
 
 import pytest
 
-from app.storage.db import DatabaseManager
+from app.storage import db as dbmod
+from app.storage.db import DatabaseManager, _zlib_decompress_fn
+
+
+class TestZlibDecompressFn:
+    """P1-2: on a decompress failure this used to `return str(blob)` - the
+    Python repr of the raw bytes (e.g. "b'x\\x9c...'") - which then got
+    indexed into FTS as if it were real text, indistinguishable from
+    genuine content via chunk_fts_ai's `zlib_decompress(new.text_preview)`
+    trigger call. It now logs and returns "" instead."""
+
+    def test_valid_compressed_bytes_round_trip(self):
+        original = "hello world, this is chunk text"
+        blob = zlib.compress(original.encode("utf-8"))
+        assert _zlib_decompress_fn(blob) == original
+
+    def test_empty_or_none_returns_empty_string(self):
+        assert _zlib_decompress_fn(None) == ""
+        assert _zlib_decompress_fn(b"") == ""
+
+    def test_string_input_passes_through_unchanged(self):
+        # The isinstance(blob, str) passthrough exists for legacy/test rows
+        # written before compression was added everywhere.
+        assert _zlib_decompress_fn("already text") == "already text"
+
+    def test_corrupt_bytes_returns_empty_and_logs_error(self, caplog):
+        garbage = b"not a valid zlib stream at all"
+        with caplog.at_level("ERROR", logger="app.storage.db"):
+            result = _zlib_decompress_fn(garbage)
+        assert result == ""
+        assert result != str(garbage)  # the old, wrong behavior
+        assert any("zlib_decompress failed" in r.message for r in caplog.records)
 
 
 @pytest.fixture
@@ -12,6 +46,22 @@ async def db(tmp_path: Path):
     await mgr.init_db(schema_path="app/storage/schema.sql")
     yield mgr
     await mgr.close()
+
+
+@pytest.mark.asyncio
+async def test_zlib_decompress_registered_as_sql_function(db: DatabaseManager):
+    """Confirms the Python fix is actually wired into the SQLite connection
+    that production code queries against, not just correct in isolation."""
+    conn = db._get_conn()
+    async with conn.execute(
+        "SELECT zlib_decompress(?)", (zlib.compress(b"round trip via SQL"),)
+    ) as cursor:
+        row = await cursor.fetchone()
+    assert row[0] == "round trip via SQL"
+
+    async with conn.execute("SELECT zlib_decompress(?)", (b"garbage bytes",)) as cursor:
+        row = await cursor.fetchone()
+    assert row[0] == ""
 
 
 def _file_data(path: Path, folder_tag: str = "Test"):
@@ -239,3 +289,103 @@ async def test_cascading_deletes(db: DatabaseManager, tmp_path: Path):
             assert (await cur.fetchone())[0] == 0
         async with conn.execute("SELECT COUNT(*) FROM kg_edges WHERE source = 'node1'") as cur:
             assert (await cur.fetchone())[0] == 0
+
+
+# ── Read-pool borrow accounting ─────────────────────────────────────────────
+#
+# `_get_read_conn` hands out one of `pool_size` connections and returns it in a
+# `finally`. Two ways a connection could be lost for good, both real:
+#
+#   1. The rollback in that `finally` was wrapped in `contextlib.suppress(
+#      Exception)`. `CancelledError` is a `BaseException`, so a cancellation
+#      delivered while the rollback was in flight escaped the suppression and
+#      skipped the `put` entirely.
+#   2. `close()` only closed connections still sitting in the queue, so a
+#      borrowed one kept its SQLite handle open past shutdown. That is why the
+#      403 MB survey run left an `eval.db` Windows refused to delete, which in
+#      turn let `shutil.rmtree(..., ignore_errors=True)` hide the whole thing.
+#
+# Once the pool is empty, `await queue.get()` parks at zero CPU with no timeout,
+# so a leak is silent and permanent. Every test here is bounded so a regression
+# fails fast instead of hanging CI.
+
+
+@pytest.mark.asyncio
+async def test_cancelled_rollback_still_returns_the_connection(db: DatabaseManager):
+    """A `CancelledError` out of the cleanup rollback must not eat a connection.
+
+    Patched rather than raced: the cancellation has to land *inside*
+    `conn.rollback()` to reproduce, and driving that by timing is flaky. The
+    mechanism is what matters, and this states it directly.
+    """
+    assert db._read_pool is not None
+    before = db._read_pool.qsize()
+
+    with pytest.raises(asyncio.CancelledError):
+        async with db._get_read_conn() as conn:
+            conn.rollback = _raise_cancelled  # type: ignore[method-assign]
+
+    assert db._read_pool.qsize() == before
+
+
+async def _raise_cancelled(*args, **kwargs):
+    raise asyncio.CancelledError
+
+
+@pytest.mark.asyncio
+async def test_cancelled_borrow_returns_the_connection(db: DatabaseManager):
+    """Cancelling the task that holds the borrow must not shrink the pool."""
+    assert db._read_pool is not None
+    before = db._read_pool.qsize()
+
+    started = asyncio.Event()
+
+    async def _borrow():
+        async with db._get_read_conn():
+            started.set()
+            await asyncio.sleep(3600)
+
+    task = asyncio.create_task(_borrow())
+    await asyncio.wait_for(started.wait(), timeout=5.0)
+    assert db._read_pool.qsize() == before - 1
+
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    assert db._read_pool.qsize() == before
+
+
+@pytest.mark.asyncio
+async def test_starved_pool_raises_instead_of_hanging(db: DatabaseManager, monkeypatch):
+    """Starvation must surface as an error, not an indefinite park.
+
+    A hang that raises is strictly better than one that does not, even when the
+    leak that caused it has been fixed - this is the guard against the next one.
+    """
+    monkeypatch.setattr(dbmod, "_READ_ACQUIRE_TIMEOUT_S", 0.2)
+    assert db._read_pool is not None
+
+    held = [db._read_pool.get_nowait() for _ in range(db._read_pool.qsize())]
+    try:
+        with pytest.raises(dbmod.ReadPoolExhaustedError):
+            async with db._get_read_conn():
+                pass
+    finally:
+        for conn in held:
+            db._read_pool.put_nowait(conn)
+
+
+@pytest.mark.asyncio
+async def test_close_closes_a_connection_that_was_never_returned(tmp_path: Path):
+    """`close()` must close every read connection it opened, not just the
+    queued ones - a leaked borrow otherwise keeps the database file locked."""
+    mgr = DatabaseManager(str(tmp_path / "leak.db"))
+    await mgr.init_db(schema_path="app/storage/schema.sql")
+    assert mgr._read_pool is not None
+
+    leaked = mgr._read_pool.get_nowait()
+    await mgr.close()
+
+    with pytest.raises(Exception):  # noqa: B017
+        await leaked.execute("SELECT 1")

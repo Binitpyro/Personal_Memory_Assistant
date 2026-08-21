@@ -103,6 +103,7 @@ class LanceDBClient:
         self._table_cache: dict[str, Any] = {}
         self._connect_lock = threading.Lock()
         self._write_lock = threading.Lock()
+        self._cache_writes = 0
 
     def connect(self) -> None:
         if self.db is not None:
@@ -378,6 +379,26 @@ class LanceDBClient:
 
         await loop.run_in_executor(None, _delete)
 
+    async def delete_summaries_by_ids(self, ids: list[str]) -> None:
+        """Delete summary rows by doc_id, so re-indexing replaces rather than duplicates."""
+        self.connect()
+        if not ids:
+            return
+        tbl = self._get_table("pma_summaries")
+        if tbl is None:
+            return
+
+        loop = asyncio.get_running_loop()
+
+        def _delete():
+            with self._write_lock:
+                id_list = ", ".join(
+                    f"'{doc_id.replace(chr(39), chr(39) + chr(39))}'" for doc_id in ids
+                )
+                tbl.delete(f"id IN ({id_list})")
+
+        await loop.run_in_executor(None, _delete)
+
     async def delete_folder(self, folder_tag: str) -> None:
         """Delete all vectors matching a folder tag from both chunks and summaries."""
         self.connect()
@@ -398,12 +419,24 @@ class LanceDBClient:
 
         await loop.run_in_executor(None, _delete_impl)
 
+    @staticmethod
+    def cache_scope(file_type: str | None, folder_tag: str | None) -> str:
+        """Stable key for the retrieval filters an answer was produced under.
+
+        Stored as a column so it can be matched in the search predicate. A
+        post-hoc filter would not work: the search takes the single nearest
+        neighbour, so an out-of-scope best match would return a miss and
+        silently disable the cache instead of scoping it.
+        """
+        return f"{(file_type or '').lower()}|{(folder_tag or '').lower()}"
+
     async def add_query_cache(
         self,
         query_emb: np.ndarray | list[float],
         query_text: str,
         response_text: str,
         timestamp: float,
+        scope: str = "|",
     ) -> None:
         """Add a successful RAG response to the persistent semantic cache."""
         self.connect()
@@ -421,6 +454,7 @@ class LanceDBClient:
             "query_text": pa.array([query_text], type=pa.string()),
             "response_text": pa.array([response_text], type=pa.string()),
             "timestamp": pa.array([timestamp], type=pa.float64()),
+            "scope": pa.array([scope], type=pa.string()),
         }
 
         _num_rows, vector_dim = embeddings_np.shape
@@ -435,8 +469,21 @@ class LanceDBClient:
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, partial(self._create_or_open_table, "query_cache", table))
 
-    async def search_cache(self, query_emb: list[float], threshold: float = 0.95) -> dict | None:
-        """Search the persistent cache for similar past queries."""
+        from app.config import settings
+
+        self._cache_writes += 1
+        if self._cache_writes % max(1, settings.query_cache_prune_interval) == 0:
+            await self.prune_query_cache(settings.query_cache_max_rows)
+
+    async def search_cache(
+        self, query_emb: list[float], threshold: float = 0.95, scope: str = "|"
+    ) -> dict | None:
+        """Search the persistent cache for similar past queries within *scope*.
+
+        Without the scope predicate this returned an answer built under one
+        ``folder_tag`` for the same question asked under another - handing back
+        content the user had explicitly filtered out, before retrieval ever ran.
+        """
         self.connect()
         tbl = self._get_table("query_cache")
         if tbl is None:
@@ -448,12 +495,16 @@ class LanceDBClient:
             try:
                 # H-01: LanceDB's cosine metric returns cosine distance (1 - cosine_similarity).
                 max_distance = 1.0 - threshold
-                res = (
-                    tbl.search(query_emb, vector_column_name="vector")
-                    .metric("cosine")
-                    .limit(1)
-                    .to_arrow()
-                )
+                escaped = scope.replace("'", "''")
+                query = tbl.search(query_emb, vector_column_name="vector").metric("cosine").limit(1)
+                try:
+                    query = query.where(f"scope = '{escaped}'")  # nosec B608
+                except Exception:
+                    # Rows written before the scope column existed. Treat the
+                    # whole table as unscoped and therefore unusable rather than
+                    # serving a cross-scope answer.
+                    return None
+                res = query.to_arrow()
 
                 if isinstance(res, pa.Table) and res.num_rows > 0:
                     rows = res.to_pylist()
@@ -466,6 +517,74 @@ class LanceDBClient:
                 return None
 
         return await loop.run_in_executor(None, _search)
+
+    async def prune_query_cache(self, max_rows: int) -> int:
+        """Bound the semantic cache by row count, oldest first.
+
+        ``add_query_cache`` appended one row per answered query forever, and
+        ``search_cache`` scans the whole ``vector`` column on every query
+        because the table carries no index. At 1,536 bytes per vector a full
+        scan streams the entire 60 MB process budget by ~39,000 rows, and I/O
+        binds well before that - roughly 5,000 rows at 50 ms. So a latency
+        optimisation became a growing linear cost on the critical path, and
+        nothing measured where it turned negative.
+
+        Each ``add`` also writes a one-row Lance fragment, so fragment count -
+        not row count - is what actually degrades the scan. Compaction is the
+        half that matters and there was none anywhere in the tree.
+        """
+        self.connect()
+        tbl = self._get_table("query_cache")
+        if tbl is None:
+            return 0
+
+        def _prune() -> int:
+            try:
+                with self._write_lock:
+                    total = tbl.count_rows()
+                    if total <= max_rows:
+                        return 0
+                    stamps = sorted(
+                        r["timestamp"] for r in tbl.to_arrow().select(["timestamp"]).to_pylist()
+                    )
+                    cutoff = stamps[total - max_rows]
+                    tbl.delete(f"timestamp < {cutoff}")
+                    removed = int(total) - int(tbl.count_rows())
+                    try:
+                        tbl.compact_files()
+                    except Exception as e:  # pragma: no cover - version dependent
+                        logger.debug("query_cache compaction unavailable: %s", e)
+                    return removed
+            except Exception as e:
+                logger.warning("query_cache prune failed: %s", e)
+                return 0
+
+        loop = asyncio.get_running_loop()
+        removed: int = await loop.run_in_executor(None, _prune)
+        return removed
+
+    async def clear_query_cache(self) -> None:
+        """Drop the persistent semantic cache.
+
+        "Clear history" cleared only the SQLite ``query_history`` table while
+        this one kept verbatim question *and* answer text indefinitely, with no
+        TTL and no per-entry delete. On a product sold on local privacy, a user
+        who clears their history reasonably believes the questions are gone.
+        """
+        self.connect()
+
+        db = self.db
+        if db is None:
+            raise RuntimeError("LanceDB connection is not initialized")
+
+        def _drop():
+            with self._write_lock:
+                if "query_cache" in _list_tables(db):
+                    db.drop_table("query_cache")
+                self._table_cache.pop("query_cache", None)
+
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, _drop)
 
     async def create_hnsw_index(self, table_name: str = "pma_chunks") -> None:
         """Create HNSW index on the vector column of the specified table."""

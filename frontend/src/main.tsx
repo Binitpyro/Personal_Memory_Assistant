@@ -6,6 +6,7 @@ import { AppShell } from './components/AppShell'
 import { initTauriConnection } from './api';
 
 import { QueryClientProvider } from '@tanstack/react-query'
+import { Toaster } from 'sonner'
 import { queryClient } from './queryClient'
 import { SessionProvider } from './context/SessionProviderContext'
 
@@ -48,6 +49,7 @@ createRoot(document.getElementById('root')!).render(
             </Routes>
           </Suspense>
         </BrowserRouter>
+        <Toaster theme="dark" position="bottom-right" richColors closeButton />
       </SessionProvider>
     </QueryClientProvider>
   </StrictMode>,

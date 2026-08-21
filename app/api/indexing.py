@@ -98,6 +98,14 @@ async def index_start(
             logger.info("FTS optimization completed after indexing.")
         except Exception as e:
             logger.warning("FTS optimization after indexing failed: %s", e)
+        try:
+            # Wake the OCR drain loop now rather than letting it find the new
+            # work on its next 30s poll.
+            from app.api.deps import get_ocr
+
+            await (await get_ocr()).kick()
+        except Exception as e:
+            logger.debug("Could not notify OCR manager after indexing: %s", e)
 
     background_tasks.add_task(_index_then_compact)
     return {"message": "Indexing started"}
@@ -140,6 +148,9 @@ async def index_status(db: DatabaseManager = Depends(get_db)):
         "scan_method": progress.scan_method,
         "processed_files": progress.processed_files,
         "total_files": progress.total_files,
+        "failed_files": progress.failed_files,
+        "run_failed": progress.run_failed,
+        "last_error": progress.last_error,
     }
 
 
@@ -168,6 +179,14 @@ async def progress_stream(db: DatabaseManager = Depends(get_db)):
                 "skipped_files": progress.skipped_files,
                 "new_files": progress.new_files,
                 "changed_files": progress.changed_files,
+                "failed_files": progress.failed_files,
+                "unchanged_files": progress.unchanged_files,
+                "run_failed": progress.run_failed,
+                # `last_error` is deliberately NOT on this payload. This endpoint
+                # is on the token exemption list (app/main.py:509) and the field
+                # carries exception text, which for OSError/PermissionError
+                # embeds the full filesystem path. It is served on
+                # /api/index/status instead, which is token-gated.
                 "current_file": progress.current_file,
                 "scan_method": progress.scan_method,
                 "scan_duration_ms": progress.scan_duration_ms,
@@ -182,7 +201,8 @@ async def progress_stream(db: DatabaseManager = Depends(get_db)):
 
 
 @router.post("/cleanup")
-async def cleanup_stale(db: DatabaseManager = Depends(get_db)):
+@limiter.limit("3/minute")
+async def cleanup_stale(request: Request, db: DatabaseManager = Depends(get_db)):
     try:
         from app.state import file_tree_cache as _file_tree_cache
         from app.state import insights_cache as _insights_cache
@@ -196,7 +216,12 @@ async def cleanup_stale(db: DatabaseManager = Depends(get_db)):
 
 
 @router.post("/clear")
-async def clear_index(db: DatabaseManager = Depends(get_db), lancedb_client=Depends(get_lancedb)):
+@limiter.limit("3/minute")
+async def clear_index(
+    request: Request,
+    db: DatabaseManager = Depends(get_db),
+    lancedb_client=Depends(get_lancedb),
+):
     from app.state import file_tree_cache as _file_tree_cache
     from app.state import insights_cache as _insights_cache
 
@@ -207,7 +232,8 @@ async def clear_index(db: DatabaseManager = Depends(get_db), lancedb_client=Depe
 
 
 @router.get("/export")
-async def export_index(db: DatabaseManager = Depends(get_db)):
+@limiter.limit("10/minute")
+async def export_index(request: Request, db: DatabaseManager = Depends(get_db)):
     try:
         file_count, chunk_count = await db.get_counts()
         files = await db.get_all_files()
@@ -222,8 +248,10 @@ async def export_index(db: DatabaseManager = Depends(get_db)):
 
 
 @router.post("/folder/remove")
+@limiter.limit("3/minute")
 async def remove_folder_index(
-    request: IndexRequest,
+    request: Request,
+    payload: IndexRequest,
     db: DatabaseManager = Depends(get_db),
     lancedb_client=Depends(get_lancedb),
 ):
@@ -233,7 +261,7 @@ async def remove_folder_index(
     from app.state import insights_cache as _insights_cache
 
     folders = []
-    for f in request.folders:
+    for f in payload.folders:
         p = f.strip().strip('"').strip("'")
         if p and ".." not in p.replace("\\", "/").split("/"):
             # C-02: Don't check isdir, just normalize so we can remove deleted folders

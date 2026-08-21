@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -6,6 +7,23 @@ import pytest
 from httpx import AsyncClient
 
 from app.api.deps import ensure_indexing
+from app.api.limiter import limiter
+
+
+@contextlib.contextmanager
+def _limiter_enabled():
+    """conftest disables slowapi suite-wide; re-enable it for one test only.
+
+    Both the flag and the shared MemoryStorage are restored, otherwise a
+    consumed bucket leaks into whatever test runs next.
+    """
+    limiter.reset()
+    limiter.enabled = True
+    try:
+        yield
+    finally:
+        limiter.enabled = False
+        limiter.reset()
 
 
 @pytest.mark.asyncio
@@ -108,3 +126,27 @@ async def test_indexing_blocked_and_invalid_folders(client: AsyncClient):
     response2 = await client.post("/api/index/start", json={"folders": [non_existent]})
     assert response2.status_code == 400
     assert "No valid folder" in response2.json()["error"]
+
+
+@pytest.mark.asyncio
+async def test_destructive_index_endpoints_are_rate_limited(
+    client: AsyncClient, mock_db, mock_lancedb
+):
+    """/clear wipes the index and used to accept unlimited calls."""
+    # conftest's mock_lancedb only stubs the search/add methods as awaitable.
+    mock_lancedb.clear_all = AsyncMock()
+
+    with _limiter_enabled():
+        codes = [(await client.post("/api/index/clear")).status_code for _ in range(4)]
+
+    assert codes[:3] == [200, 200, 200], codes
+    assert codes[3] == 429, codes
+
+
+@pytest.mark.asyncio
+async def test_index_status_is_not_rate_limited(client: AsyncClient):
+    """LibraryPage polls /status every 10s; a limit here breaks idle browsing."""
+    with _limiter_enabled():
+        codes = [(await client.get("/api/index/status")).status_code for _ in range(12)]
+
+    assert set(codes) == {200}, codes

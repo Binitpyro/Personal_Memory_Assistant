@@ -36,11 +36,21 @@ async def test_api_token_enforcement(mock_db, mock_emb, mock_lancedb, mock_llm):
         response = await ac.post("/api/query", json={"question": "test"})
         assert response.status_code == 401
 
-    # C. Request with valid token in query param -> passes auth check (might be 200 or 422/other depending on route details, but NOT 401)
+    # C. Valid token in a query param -> 401. The fallback was removed: a query
+    # string reaches uvicorn's access log, browser history and Referer. The
+    # header is the only accepted carrier.
     token = os.environ.get("X_LOCAL_ACCESS_TOKEN", "test-token")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
-        # Requesting search status check endpoint with token
         response = await ac.get(f"/api/query/history?token={token}")
+        assert response.status_code == 401
+
+    # C2. The same route with the token in the header -> passes auth.
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers={"X-Local-Access-Token": token},
+    ) as ac:
+        response = await ac.get("/api/query/history")
         assert response.status_code != 401
 
     # D. Health check endpoints are exempt -> 200 without token
@@ -143,7 +153,7 @@ async def test_rag_pipeline_edge_cases(tmp_path, mock_db, mock_emb, mock_lancedb
     indexer._extract_plain_text_stream = mock_extract
 
     # Run streaming extraction
-    await indexer._stream_extract_and_prepare(error_file, "test_tag", None, queue)
+    await indexer._stream_extract_and_prepare(error_file, "test_tag", "", None, queue)
 
     # Collect items from queue
     items = []
@@ -293,7 +303,7 @@ async def test_rag_pipeline_extremely_large_input(tmp_path, mock_db, mock_emb, m
 
     indexer = IndexingService(mock_db, mock_emb, mock_lancedb)
     queue = asyncio.Queue()
-    await indexer._stream_extract_and_prepare(large_file, "test_tag", None, queue)
+    await indexer._stream_extract_and_prepare(large_file, "test_tag", "", None, queue)
 
     items = []
     while not queue.empty():
@@ -317,7 +327,7 @@ async def test_malformed_structured_files(tmp_path, mock_db, mock_emb, mock_lanc
 
     # Process fake PDF
     queue_pdf = asyncio.Queue()
-    await indexer._stream_extract_and_prepare(fake_pdf, "pdf_tag", None, queue_pdf)
+    await indexer._stream_extract_and_prepare(fake_pdf, "pdf_tag", "", None, queue_pdf)
 
     pdf_items = []
     while not queue_pdf.empty():
@@ -329,7 +339,7 @@ async def test_malformed_structured_files(tmp_path, mock_db, mock_emb, mock_lanc
 
     # Process fake docx
     queue_docx = asyncio.Queue()
-    await indexer._stream_extract_and_prepare(fake_docx, "docx_tag", None, queue_docx)
+    await indexer._stream_extract_and_prepare(fake_docx, "docx_tag", "", None, queue_docx)
 
     docx_items = []
     while not queue_docx.empty():

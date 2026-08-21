@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import pytest
+from starlette.requests import Request
 
 from app.api.indexing import IndexRequest, cleanup_stale, export_index
 from app.api.insights import get_files_tree
@@ -9,6 +10,23 @@ from app.api.search import QueryRequest, query_history
 from app.api.system import get_system_info
 from app.insights.service import InsightsService
 from app.search.context_builder import _format_file_stats, build_context
+
+
+def _bare_request() -> Request:
+    """These tests call the handlers directly, bypassing ASGI.
+
+    The handlers take a Starlette Request because slowapi resolves its rate-limit
+    key from it; nothing in the bodies under test reads it.
+    """
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/",
+            "headers": [],
+            "client": ("127.0.0.1", 1),
+        }
+    )
 
 
 class FakeDB:
@@ -25,14 +43,17 @@ class FakeDB:
             {
                 "id": 1,
                 "folder_tag": "ProjectA",
+                "root_path": "C:/proj",
                 "path": "C:/proj/a.py",
                 "size": 100,
                 "type": ".py",
                 "usage_count": 2,
             },
+            # No root_path: a row written before the files_root_path migration.
             {
                 "id": 2,
                 "folder_tag": "",
+                "root_path": "",
                 "path": "C:/proj/readme.md",
                 "size": 50,
                 "type": ".md",
@@ -63,8 +84,11 @@ async def test_get_files_tree_groups_and_totals():
     # result is a dict when successful
     assert result["total_files"] == 2
     assert result["total_size"] == 150
-    assert "ProjectA" in result["folders"]
-    assert "Unknown" in result["folders"]
+    # Grouped by the indexed folder's full path, not by folder_tag. The
+    # migrated row supplies its root directly; the pre-migration one has its
+    # root derived by common prefix, and both land in the same group.
+    assert list(result["folders"]) == ["C:/proj"]
+    assert len(result["folders"]["C:/proj"]) == 2
 
 
 @pytest.mark.asyncio
@@ -97,11 +121,11 @@ async def test_query_history_success_and_error():
 @pytest.mark.asyncio
 async def test_cleanup_stale_success_and_error():
     db = FakeDB()
-    ok = await cleanup_stale(db=db)
+    ok = await cleanup_stale(_bare_request(), db=db)
     assert ok["cleaned_paths"] == ["C:/old/file.txt"]
 
     db.raise_on_cleanup = True
-    err = await cleanup_stale(db=db)
+    err = await cleanup_stale(_bare_request(), db=db)
     assert err.status_code == 500
     payload = json.loads(err.body)
     assert payload["error"] == "Cleanup failed."
@@ -110,13 +134,13 @@ async def test_cleanup_stale_success_and_error():
 @pytest.mark.asyncio
 async def test_export_index_success_and_error():
     db = FakeDB()
-    ok = await export_index(db=db)
+    ok = await export_index(_bare_request(), db=db)
     assert ok["file_count"] == 2
     assert ok["chunk_count"] == 10
     assert len(ok["files"]) == 2
 
     db.raise_on_export = True
-    err = await export_index(db=db)
+    err = await export_index(_bare_request(), db=db)
     assert err.status_code == 500
     payload = json.loads(err.body)
     assert payload["error"] == "Export failed."

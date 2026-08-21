@@ -1,7 +1,7 @@
 # Personal Memory Assistant (PMA)
 ### Local-First Semantic Search & Intelligence Engine
 
-[![Version](https://img.shields.io/badge/Version-0.0.71-blue?style=flat-square)](https://github.com/Binitpyro/Personal_Memory_Assistant)
+[![Version](https://img.shields.io/badge/Version-0.0.72-blue?style=flat-square)](https://github.com/Binitpyro/Personal_Memory_Assistant)
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![Rust](https://img.shields.io/badge/Rust-1.77+-brown?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![React](https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react&logoColor=black)](https://react.dev/)
@@ -14,7 +14,7 @@ Personal Memory Assistant (PMA) is a high-performance, local-first search and re
 ## 1. Project Structure
 
 ```text
-├── app/                # Python Backend (FastAPI, Extraction, RAG)
+├── app/                # Python Backend (FastAPI, Extraction, RAG, OCR)
 ├── frontend/           # React 19 Frontend & Tauri Desktop Shell
 ├── prompts/            # AI System Templates (RAG Logic)
 ├── scripts/            # Automated Development & Build Tooling (Windows)
@@ -32,19 +32,36 @@ Personal Memory Assistant (PMA) is a high-performance, local-first search and re
     - **Vector Store**: LanceDB (High-performance O(1) semantic retrieval; separate tables for chunk embeddings and document-summary embeddings)
 - **Extraction**: Rust-powered parallel file walker & stream extractor
 - **Models**: ONNX Runtime and tokenizers for local embedding generation and cross-encoder reranking
+- **OCR**: optional, off by default. Reads scanned PDFs in an isolated subprocess venv — see [§7](#7-ocr-for-scanned-documents-optional)
 - **AI Providers**: Gemini, OpenAI, Anthropic, Groq, OpenRouter, NVIDIA NIM, Ollama, LM Studio, and generic OpenAI-compatible endpoints
 - **Spatial Engine**: WebGPU-powered GPGPU compute for real-time indexing & Volumetric Visualization
 
 ---
 
-## 3. Getting Started
+## 3. Privacy & Security
 
-### 3.1 Prerequisites
+Local-first is enforced in the code, not just claimed in the pitch.
+
+- **Nothing leaves your machine by default.** No telemetry, no phone-home, no network access required at first run.
+- **Cloud providers are opt-in**, and consent is checked against the *resolved destination* rather than a provider's label — a provider registered as "local" but pointed at a remote host is not exempt. PMA states plainly that free-tier cloud dispatch may use your inputs for model training before it sends anything.
+- **API keys live in the OS keyring.** A key set in `.env` overrides the keyring and is managed outside the UI.
+- **Every `/api/` route requires a local access token**, sent as the `X-Local-Access-Token` header only and compared in constant time. There is no `?token=` query fallback, so tokens never reach access logs, browser history, or `Referer`.
+- **A Content-Security-Policy with a per-request script nonce** is applied to browser-served pages, alongside `X-Content-Type-Options`, `X-Frame-Options` and `Referrer-Policy`.
+- **Model output is sanitised before it renders.** PMA searches documents you did not necessarily write, so a maliciously crafted file must not be able to steer the model into emitting working HTML inside the app.
+- **Destructive and expensive endpoints are rate-limited** — `/index/clear`, `/index/cleanup` and `/index/folder/remove` at 3/minute, `/index/export` at 10/minute. `/index/status` is deliberately left unlimited so the Library page can poll it.
+
+---
+
+## 4. Getting Started
+
+### 4.1 Prerequisites
 - **Python 3.12+** (Managed via `uv` recommended)
 - **Node.js 20+**
 - **Rust Toolchain** (Latest stable)
 
-### 3.2 Quick Start (Windows)
+**Hardware.** PMA targets budget machines on purpose: a ~4 GB VRAM GPU (GTX 1650 / RX 580 class) and an 8 GB RAM laptop. It holds roughly 196 MB resident while serving queries; bulk indexing peaks a few hundred MB above that and returns.
+
+### 4.2 Quick Start (Windows)
 Copy the example configuration, then choose the development workflow you need:
 
 1. **Create local configuration**:
@@ -61,7 +78,7 @@ Copy the example configuration, then choose the development workflow you need:
    npm run tauri dev
    ```
 
-### 3.3 Manual Installation (Cross-Platform)
+### 4.3 Manual Installation (Cross-Platform)
 1. **Initialize Backend**:
    ```bash
    uv sync --all-extras
@@ -72,7 +89,7 @@ Copy the example configuration, then choose the development workflow you need:
    cd frontend && npm install && npm run build
    ```
 
-### 3.4 Credentials
+### 4.4 Credentials
 
 PMA reads configuration from `.env` and checks the operating system keyring for
 provider API keys. Enter API keys during onboarding or in **Settings → Providers**;
@@ -82,7 +99,7 @@ from Settings.
 
 ---
 
-## 4. Development & Automation Scripts
+## 5. Development & Automation Scripts
 
 The `scripts/` directory contains tools to automate the development lifecycle.
 
@@ -102,6 +119,9 @@ The `scripts/` directory contains tools to automate the development lifecycle.
 ./scripts/run_ci_checks.bat   # Lint, type, test, and security checks
 ```
 
+Neither script can run while the development backend is up — the dependency sync cannot
+replace the compiled `rust_core` extension while the server holds it.
+
 To run the frontend test suite directly:
 
 ```powershell
@@ -111,7 +131,7 @@ npm run test
 
 ---
 
-## 5. Configuration
+## 6. Configuration
 
 PMA uses a `.env` file in the root directory for critical configuration. See `.env.example` for details.
 
@@ -129,11 +149,36 @@ PMA_GEMINI_MODEL=gemini-2.5-flash-lite
 # PMA_GEMINI_API_KEY=your_gemini_api_key_here
 ```
 
-See [`.env.example`](.env.example) for all supported provider and indexing settings.
+See [`.env.example`](.env.example) for all supported provider and indexing settings. Values in
+`.env` override the built-in defaults, so anything you leave commented out stays on the tuned
+default rather than falling back to something worse.
 
 ---
 
-## 6. Packaging
+## 7. OCR for Scanned Documents (optional)
+
+A scanned PDF carries no text layer, so ordinary extraction finds nothing in it. OCR fills
+that gap. It is **off by default** and installs into its own isolated virtual environment
+from **Settings → OCR**, so leaving it switched off costs nothing — no extra dependencies
+reach the main application.
+
+| Option | What it does | Download |
+| :--- | :--- | :--- |
+| **Standard** | Runs on the processor. Around one page per second. | ~230 MB |
+| **High accuracy** | Larger, more accurate models on your graphics card. Windows only. | ~430 MB |
+| **Your own AI model** | Sends each page to a vision model you already run in Ollama or LM Studio. | nothing to install |
+
+**High accuracy needs roughly 6 GB of free graphics memory** — measured at 5.2 GB in use — so
+a 4 GB card is not enough and will fall back to the processor, ending up slower than
+Standard. Pick Standard on a 4 GB card.
+
+**Your own AI model** downloads nothing: you pull the vision model yourself. It handles messy
+handwriting and unusual layouts better than the other options, but takes minutes per page
+rather than seconds, so it suits a few important documents rather than a whole library.
+
+---
+
+## 8. Packaging
 
 Tauri is the supported desktop distribution path. Build the Windows MSI installer with:
 
@@ -147,10 +192,10 @@ EXE workflow is temporarily on hold and should not be used as a current release 
 
 ---
 
-## 7. Architecture
+## 9. Architecture
 
-### 7.1 Ingestion Pipeline
-The system reads files in streams to ensure scalability without exceeding memory limits. Each file is chunked for keyword/semantic indexing and independently distilled into a structural summary that gets its own embedding, giving retrieval a document-level signal alongside chunk-level ones.
+### 9.1 Ingestion Pipeline
+The system reads files in streams to ensure scalability without exceeding memory limits. Each file is chunked for keyword/semantic indexing and independently distilled into a structural summary that gets its own embedding, giving retrieval a document-level signal alongside chunk-level ones. Pages with no text layer are deferred to a durable OCR queue and rejoin the pipeline once recognised.
 
 ```mermaid
 graph LR
@@ -163,6 +208,9 @@ graph LR
         C --> D[SQLite Database]
         C --> E[Chunker]
         C --> S[Deep Summarizer]
+        C -->|no text layer| O[OCR Queue]
+        O --> W[OCR Worker]
+        W --> E
     end
 
     subgraph "Indexing"
@@ -173,7 +221,7 @@ graph LR
     end
 ```
 
-### 7.2 Unified Search Flow
+### 9.2 Unified Search Flow
 A query planner first classifies intent into one of four modes: fast metadata/project lookups bypass retrieval entirely, graph-intent queries traverse the knowledge graph, and everything else runs the full RAG pipeline. FULL_RAG fuses three signals — keyword matching (SQLite FTS5), chunk-level semantic search, and document-summary semantic search — via **Reciprocal Rank Fusion (RRF)**, then applies a cross-encoder reranker for maximum precision, automatically bypassed when the top result's confidence decisively clears the runner-up.
 
 ```mermaid
@@ -200,7 +248,7 @@ graph LR
 
 ---
 
-## 8. License
+## 10. License
 Distributed under the **MIT License**.
 
 ---
@@ -209,4 +257,4 @@ Distributed under the **MIT License**.
 
 **Binit Varghese**  
 [GitHub Profile](https://github.com/Binitpyro)         
-Project: [Personal Memory Assistant](https://github.com/Binitpyro/Personal_Memory_Assistant) 
+Project: [Personal Memory Assistant](https://github.com/Binitpyro/Personal_Memory_Assistant)

@@ -65,13 +65,19 @@ def patch_data_paths(tmp_path):
     fake_settings = tmp_path / "settings.json"
     fake_prompt = tmp_path / "rag_system.txt"
 
-    with patch(
-        "app.search.llm_client.Path",
-        lambda *args: {
-            "data/credentials.json": fake_creds,
-            "data/settings.json": fake_settings,
-            "prompts/rag_system.txt": fake_prompt,
-        }.get(os.path.join(*args).replace("\\", "/"), Path(*args)),
+    with (
+        patch(
+            "app.search.llm_client.Path",
+            lambda *args: {
+                "data/credentials.json": fake_creds,
+                "data/settings.json": fake_settings,
+                "prompts/rag_system.txt": fake_prompt,
+            }.get(os.path.join(*args).replace("\\", "/"), Path(*args)),
+        ),
+        # _load_runtime_preferences now goes through SettingsStore.read(),
+        # which resolves data/settings.json via app.settings_store's own
+        # SETTINGS_PATH, not the app.search.llm_client.Path patch above.
+        patch("app.settings_store.SETTINGS_PATH", fake_settings),
     ):
         yield {"credentials": fake_creds, "settings": fake_settings, "prompt": fake_prompt}
 
@@ -197,11 +203,13 @@ def test_get_model_class():
 
     client.provider_preference = "auto"
     client.api_key = "key"
-    assert client.get_model_class() == "cloud"
+    client.ollama_model = "llama-7b"
+    # Auto mode is local-first, so ollama model class is returned
+    assert client.get_model_class() == "7b_local"
 
     client.api_key = None
     client._oauth_token = "token"  # noqa: S105
-    assert client.get_model_class() == "cloud"
+    assert client.get_model_class() == "7b_local"
 
     client._oauth_token = None
     client.ollama_model = "llama-3b"
@@ -316,6 +324,199 @@ async def test_check_lm_studio_health():
 
 
 @pytest.mark.asyncio
+async def test_resolve_provider_by_id_blocks_cloud_without_consent(monkeypatch):
+    from app.search.llm_client import ProviderNotConfiguredError
+
+    client = LLMClient()
+    monkeypatch.setattr(
+        "app.search.llm_client.SettingsStore.read",
+        lambda: {"llm": {"per_provider": {}, "cloud_privacy_consent": False}},
+    )
+    with pytest.raises(ProviderNotConfiguredError):
+        await client._resolve_provider_by_id("gemini")
+
+
+@pytest.mark.asyncio
+async def test_resolve_provider_by_id_allows_cloud_with_consent(monkeypatch):
+    client = LLMClient()
+    monkeypatch.setattr(
+        "app.search.llm_client.SettingsStore.read",
+        lambda: {"llm": {"per_provider": {}, "cloud_privacy_consent": True}},
+    )
+    monkeypatch.setattr("app.config.settings.gemini_api_key", "fake-key")
+    provider = await client._resolve_provider_by_id("gemini")
+    assert provider is not None
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_resolve_provider_by_id_does_not_gate_local_providers(monkeypatch):
+    client = LLMClient()
+    client._check_ollama_health = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "app.search.llm_client.SettingsStore.read",
+        lambda: {"llm": {"per_provider": {}, "cloud_privacy_consent": False}},
+    )
+    provider = await client._resolve_provider_by_id("ollama")
+    assert provider is not None
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_a_local_provider_aimed_off_box_still_needs_consent(monkeypatch):
+    """Consent follows the destination, not the provider's label.
+
+    `ollama` is registered kind="local", but base_url is a free-text setting.
+    Gating on kind meant a user (or a stale .env) could point a "local" provider
+    at another machine and ship the corpus there with no prompt at all.
+    """
+    from app.search.llm_client import ProviderNotConfiguredError
+
+    client = LLMClient()
+    client._check_ollama_health = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "app.search.llm_client.SettingsStore.read",
+        lambda: {
+            "llm": {
+                "per_provider": {"ollama": {"base_url": "http://ollama.corp.example:11434"}},
+                "cloud_privacy_consent": False,
+            }
+        },
+    )
+    with pytest.raises(ProviderNotConfiguredError):
+        await client._resolve_provider_by_id("ollama")
+
+
+@pytest.mark.asyncio
+async def test_a_lan_address_counts_as_off_box(monkeypatch):
+    """Another machine on the LAN is still another machine."""
+    from app.search.llm_client import ProviderNotConfiguredError
+
+    client = LLMClient()
+    client._check_ollama_health = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "app.search.llm_client.SettingsStore.read",
+        lambda: {
+            "llm": {
+                "per_provider": {"ollama": {"base_url": "http://192.168.1.50:11434"}},
+                "cloud_privacy_consent": False,
+            }
+        },
+    )
+    with pytest.raises(ProviderNotConfiguredError):
+        await client._resolve_provider_by_id("ollama")
+
+
+@pytest.mark.asyncio
+async def test_a_local_provider_on_loopback_is_still_ungated(monkeypatch):
+    """The common case must not start demanding consent."""
+    client = LLMClient()
+    client._check_ollama_health = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "app.search.llm_client.SettingsStore.read",
+        lambda: {
+            "llm": {
+                "per_provider": {"ollama": {"base_url": "http://127.0.0.1:11434"}},
+                "cloud_privacy_consent": False,
+            }
+        },
+    )
+    provider = await client._resolve_provider_by_id("ollama")
+    assert provider is not None
+    await provider.close()
+
+
+class TestEffectiveFallbackChain:
+    """`_get_effective_fallback_chain()` decides which providers get tried.
+
+    It reads data/settings.json and filters against the providers that are
+    actually configured - and "configured" includes a liveness probe for local
+    providers. Until the autouse settings isolation in conftest.py, this was
+    only ever exercised by whatever happened to be on the developer's disk and
+    whether Ollama was running, which is what made test_generate_answer below
+    fail on real machines and pass in CI.
+    """
+
+    @staticmethod
+    def _write(path, data):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data), encoding="utf-8")
+
+    def test_no_settings_file_uses_the_default_chain(self):
+        from app.providers import get_default_chain
+        from app.search.llm_client import _get_effective_fallback_chain
+
+        assert _get_effective_fallback_chain() == get_default_chain()
+
+    def test_saved_chain_is_honoured_when_providers_are_configured(self, tmp_path, monkeypatch):
+        from app.search.llm_client import _get_effective_fallback_chain
+        from app.settings_store import CURRENT_SCHEMA_VERSION
+
+        path = tmp_path / "settings.json"
+        self._write(
+            path,
+            {
+                "schema_version": CURRENT_SCHEMA_VERSION,
+                "llm": {"fallback_chain": ["ollama", "gemini"]},
+            },
+        )
+        monkeypatch.setattr("app.settings_store.SETTINGS_PATH", path)
+        monkeypatch.setattr(
+            "app.search.llm_client.get_configured_provider_ids",
+            lambda: ["ollama", "gemini", "lm_studio"],
+        )
+
+        assert _get_effective_fallback_chain() == ["ollama", "gemini"]
+
+    def test_unconfigured_entries_are_filtered_out(self, tmp_path, monkeypatch):
+        from app.search.llm_client import _get_effective_fallback_chain
+        from app.settings_store import CURRENT_SCHEMA_VERSION
+
+        path = tmp_path / "settings.json"
+        self._write(
+            path,
+            {
+                "schema_version": CURRENT_SCHEMA_VERSION,
+                "llm": {"fallback_chain": ["openai", "gemini", "ollama"]},
+            },
+        )
+        monkeypatch.setattr("app.settings_store.SETTINGS_PATH", path)
+        monkeypatch.setattr("app.search.llm_client.get_configured_provider_ids", lambda: ["ollama"])
+
+        assert _get_effective_fallback_chain() == ["ollama"]
+
+    def test_chain_with_nothing_configured_falls_back_to_default(self, tmp_path, monkeypatch):
+        """Otherwise a stale saved chain would leave the user with no provider."""
+        from app.providers import get_default_chain
+        from app.search.llm_client import _get_effective_fallback_chain
+        from app.settings_store import CURRENT_SCHEMA_VERSION
+
+        path = tmp_path / "settings.json"
+        self._write(
+            path,
+            {
+                "schema_version": CURRENT_SCHEMA_VERSION,
+                "llm": {"fallback_chain": ["openai", "anthropic"]},
+            },
+        )
+        monkeypatch.setattr("app.settings_store.SETTINGS_PATH", path)
+        monkeypatch.setattr("app.search.llm_client.get_configured_provider_ids", lambda: [])
+
+        assert _get_effective_fallback_chain() == get_default_chain()
+
+    def test_stale_schema_version_is_ignored(self, tmp_path, monkeypatch):
+        from app.providers import get_default_chain
+        from app.search.llm_client import _get_effective_fallback_chain
+
+        path = tmp_path / "settings.json"
+        self._write(path, {"schema_version": 0, "llm": {"fallback_chain": ["ollama"]}})
+        monkeypatch.setattr("app.settings_store.SETTINGS_PATH", path)
+        monkeypatch.setattr("app.search.llm_client.get_configured_provider_ids", lambda: ["ollama"])
+
+        assert _get_effective_fallback_chain() == get_default_chain()
+
+
+@pytest.mark.asyncio
 async def test_generate_answer():
     client = LLMClient()
     client._ensure_token_loaded = AsyncMock()
@@ -358,32 +559,28 @@ async def test_generate_answer():
     async def mock_resolve_with_fallback(pid, model=None, timeout=30.0):
         from app.search.llm_client import ProviderNotConfiguredError
 
-        if pid == "gemini" or pid == "openai":
-            raise ProviderNotConfiguredError("Not configured")
-        if pid == "lm_studio":
-            return mock_lm_studio
         if pid == "ollama":
             return mock_ollama
-        raise Exception("Unknown provider")
+        if pid == "lm_studio":
+            return mock_lm_studio
+        raise ProviderNotConfiguredError(f"Provider {pid} not configured")
 
     client._resolve_provider_by_id = mock_resolve_with_fallback
 
     ans = await client.generate_answer("q", "c", skip_capability_check=True)
-    assert ans == "lm_studio_ans"
+    assert ans == "ollama_ans"
 
-    # Ollama fallback
-    async def mock_resolve_ollama(pid, model=None, timeout=30.0):
+    # LM studio fallback when ollama is not configured
+    async def mock_resolve_lm_studio(pid, model=None, timeout=30.0):
         from app.search.llm_client import ProviderNotConfiguredError
 
-        if pid in ("gemini", "openai", "lm_studio"):
-            raise ProviderNotConfiguredError("Not configured")
-        if pid == "ollama":
-            return mock_ollama
-        raise Exception("Unknown provider")
+        if pid == "lm_studio":
+            return mock_lm_studio
+        raise ProviderNotConfiguredError(f"Provider {pid} not configured")
 
-    client._resolve_provider_by_id = mock_resolve_ollama
+    client._resolve_provider_by_id = mock_resolve_lm_studio
     ans = await client.generate_answer("q", "c", skip_capability_check=True)
-    assert ans == "ollama_ans"
+    assert ans == "lm_studio_ans"
 
     # None available
     async def mock_resolve_none(pid, model=None, timeout=30.0):

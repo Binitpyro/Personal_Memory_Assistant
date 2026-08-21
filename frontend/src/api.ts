@@ -15,7 +15,14 @@ export let ENDPOINT = metaEnv.VITE_API_URL || "http://127.0.0.1:8000";
 const params = new URLSearchParams(globalThis.location.search);
 const tokenFromUrl = params.get('token');
 const envToken = metaEnv.VITE_DEV_TOKEN || '';
-export let localToken = tokenFromUrl || envToken || sessionStorage.getItem('pma_token') || '';
+// Injected into index.html by the backend for loopback clients. Without this a
+// browser opening http://127.0.0.1:8000 had no token source at all - ?token= is
+// absent, VITE_DEV_TOKEN is baked in at build time and unset in a release
+// build, and sessionStorage is empty on a first visit - so every /api/ call
+// returned 401 against a page that otherwise looked fine.
+const injectedToken = (globalThis as { __PMA_TOKEN__?: string }).__PMA_TOKEN__ || '';
+export let localToken =
+  tokenFromUrl || injectedToken || envToken || sessionStorage.getItem('pma_token') || '';
 
 if (tokenFromUrl) {
   sessionStorage.setItem('pma_token', tokenFromUrl);
@@ -55,6 +62,15 @@ export interface HealthResponse {
   indexing: string;
   /** Boot-time sync status for Split-Brain mode: idle | syncing | done | error */
   split_brain_sync_status?: 'idle' | 'syncing' | 'done' | 'error';
+  /**
+   * Startup outcome of the optional subsystems. Each begins its life inside a
+   * try/except that only logs, so a failure was previously invisible outside
+   * the server console — the user found out when PDFs never got text.
+   *
+   * 'disabled' is a config choice, not a fault: do not render it as one.
+   * 'unknown' means startup has not been attempted, which is not 'down'.
+   */
+  subsystems?: Record<string, { state: 'up' | 'down' | 'disabled' | 'unknown'; detail: string }>;
 }
 
 export const getHealth = () => json<HealthResponse>('/health');
@@ -84,9 +100,168 @@ export interface IndexStatus {
   changed_files: number;
   total_files: number;
   processed_files: number;
+  /** Attempted but produced nothing indexable. Distinct from skipped_files,
+   *  which means "unchanged, nothing to do". */
+  failed_files?: number;
+  /** True when the run itself died rather than finishing. */
+  run_failed?: boolean;
+  /** Only on /index/status, which is token-gated - the SSE stream omits it
+   *  because it is exempt from the token check and this can carry a path. */
+  last_error?: string;
 }
 
 export const getIndexStatus = () => json<IndexStatus>('/index/status');
+
+// ── OCR ──────────────────────────────────────────────────────────────────
+
+export interface OcrQueueCounts {
+  pending: number;
+  running: number;
+  done: number;
+  failed: number;
+  skipped: number;
+  pages_pending: number;
+}
+
+export interface OcrStatus {
+  tier: string;
+  enabled: boolean;
+  installed: boolean;
+  uv_available: boolean;
+  queue: OcrQueueCounts;
+  pages_pending: number;
+  worker_running: boolean;
+  current_file: string;
+  unhealthy: boolean;
+  fatal: string;
+  last_error: string;
+  cache_mb: number;
+  cache_max_mb: number;
+  /** Execution provider recorded in the install stamp, e.g. "CPUExecutionProvider". */
+  ep?: string | null;
+  /** Non-empty when the running engine disagrees with the install stamp. */
+  engine_mismatch?: string;
+}
+
+export interface OcrInstallState {
+  status: 'idle' | 'running' | 'ok' | 'failed' | 'cancelled';
+  step: string;
+  pct: number;
+  message: string;
+  error_code: string;
+  log_tail: string[];
+}
+
+export interface OcrQueueItem {
+  file_path: string;
+  file_name: string;
+  /** Whole document page count. */
+  page_count: number;
+  /** Pages actually queued for OCR - the denominator for pages_done. */
+  pages_queued?: number;
+  pages_done: number;
+  pages_pending: number;
+  status: string;
+  attempts: number;
+  last_error: string;
+  updated_at: string;
+}
+
+export const getOcrStatus = () => json<OcrStatus>('/ocr/status');
+export const getOcrInstallState = () => json<OcrInstallState>('/ocr/install/status');
+
+export interface OcrTierInfo {
+  id: string;
+  /** Non-empty when this tier cannot run on this machine; shown instead of Install. */
+  unavailable_reason: string;
+  installed: boolean;
+  active?: boolean;
+  /** False for the VLM tier: it is chosen, not provisioned, so "Install" is wrong. */
+  needs_install?: boolean;
+}
+
+export const getOcrTiers = () =>
+  json<{ installed: string; tiers: OcrTierInfo[] }>('/ocr/tiers');
+
+export const selectOcrTier = (tier: string) =>
+  json<{ ok: boolean; tier: string; error_code?: string }>('/ocr/select', {
+    method: 'POST',
+    body: JSON.stringify({ tier }),
+  });
+
+export const installOcrTier = (tier = 'cpu') =>
+  json<OcrInstallState>('/ocr/install', {
+    method: 'POST',
+    body: JSON.stringify({ tier }),
+  });
+
+export const cancelOcrInstall = () =>
+  json<{ ok: boolean }>('/ocr/install/cancel', { method: 'POST' });
+
+/** Clear a fatal stop. The only exit when a handshake failure left no failed rows. */
+export const resumeOcr = () =>
+  json<{ ok: boolean }>('/ocr/resume', { method: 'POST' });
+
+export interface VlmModel { id: string; vision: boolean }
+
+export interface VlmProviderInfo {
+  provider: string;
+  display_name: string;
+  base_url: string;
+  /** False when the endpoint is off this machine — page images would leave the device. */
+  is_local: boolean;
+  reachable: boolean;
+  models: VlmModel[];
+  error: string | null;
+}
+
+export const getVlmModels = () =>
+  json<{
+    providers: VlmProviderInfo[];
+    has_vision_model: boolean;
+    suggestions: string[];
+  }>('/ocr/vlm/models');
+
+export const getVlmSelection = () =>
+  json<{ selection: { provider: string; model: string } | null }>('/ocr/vlm/selection');
+
+export const selectVlmModel = (provider: string, model: string) =>
+  json<{ ok: boolean; error_code?: string }>('/ocr/vlm/select', {
+    method: 'POST',
+    body: JSON.stringify({ provider, model }),
+  });
+
+export const uninstallOcrTier = (tier?: string) =>
+  json<{ ok: boolean; removed: string[] }>('/ocr/uninstall', {
+    method: 'POST',
+    body: JSON.stringify({ tier }),
+  });
+
+export const setOcrEnabled = (enabled: boolean) =>
+  json<{ ok: boolean; enabled: boolean; error_code?: string }>('/ocr/enable', {
+    method: 'POST',
+    body: JSON.stringify({ enabled }),
+  });
+
+export const getOcrQueue = (status?: string, limit = 50) =>
+  json<{ items: OcrQueueItem[]; counts: OcrQueueCounts }>(
+    `/ocr/queue?limit=${limit}${status ? `&status=${encodeURIComponent(status)}` : ''}`,
+  );
+
+export const retryOcr = (filePath: string) =>
+  json<{ ok: boolean; error_code?: string }>('/ocr/retry', {
+    method: 'POST',
+    body: JSON.stringify({ file_path: filePath }),
+  });
+
+export const forceOcr = (filePath: string) =>
+  json<{ ok: boolean; pages_queued?: number; error_code?: string }>('/ocr/force', {
+    method: 'POST',
+    body: JSON.stringify({ file_path: filePath }),
+  });
+
+export const clearOcrCache = () =>
+  json<{ removed: number }>('/ocr/cache', { method: 'DELETE' });
 
 export async function* streamGenerator(endpoint: string, payload: any, signal?: AbortSignal) {
   const headers: Record<string, string> = {
@@ -190,7 +365,7 @@ export const purgeHostCache = () =>
 
 // P2-2: Use native Tauri dialog when running inside the desktop shell,
 // fall back to legacy HTTP endpoint for browser-based dev mode.
-export async function pickFolder(): Promise<{ path: string }> {
+export async function pickFolder(): Promise<{ path: string; error?: string }> {
   if (isTauri) {
     const { open } = await import('@tauri-apps/plugin-dialog');
     const selected = await open({ directory: true, multiple: false, title: 'Select a folder to index' });
@@ -199,7 +374,7 @@ export async function pickFolder(): Promise<{ path: string }> {
     return { path: '' };
   }
   // Browser dev mode: use backend tkinter fallback
-  return json<{ path: string }>('/pick/folder');
+  return json<{ path: string; error?: string }>('/pick/folder');
 }
 
 // â”€â”€ Query â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -250,7 +425,10 @@ export const getQueryHistory = (limit = 20) =>
   json<{ history: HistoryItem[] }>(`/query/history?limit=${limit}`);
 
 export const clearQueryHistory = () =>
-  json<{ message: string }>('/query/history/clear', { method: 'POST' });
+  json<{ message: string; semantic_cache_cleared?: boolean; warning?: string }>(
+    '/query/history/clear',
+    { method: 'POST' },
+  );
 
 // â”€â”€ File tree â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -330,6 +508,18 @@ export interface InsightsByTypeResponse {
 export const getInsightsByType = (typeFilter: string) =>
   json<InsightsByTypeResponse>(`/insights/by-type?extension=${encodeURIComponent(typeFilter)}`);
 
+export interface PortraitTheme {
+  name: string;
+  description: string;
+  weight: number;
+}
+
+export interface PortraitResponse {
+  themes: PortraitTheme[];
+}
+
+export const getPortrait = () => json<PortraitResponse>('/insights/portrait');
+
 // â”€â”€ Demo â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export const seedDemo = () =>
@@ -350,8 +540,12 @@ export function subscribeProgress(onData: (data: IndexStatus & { current_file: s
 
   function connect() {
     if (closed) return;
-    const tokenQuery = localToken ? `?token=${encodeURIComponent(localToken)}` : '';
-    es = new EventSource(`${ENDPOINT}${BASE}/index/progress-stream${tokenQuery}`);
+    // No ?token= here. The endpoint is auth-exempt in main.py and progress_stream
+    // takes no token parameter, so the server never read it - but uvicorn's access
+    // log prints the query string, so it leaked the token to the console on every
+    // index run. EventSource cannot set headers; if this stream ever needs auth it
+    // has to be a short-lived ticket or fetch-based SSE, not a bare token in a URL.
+    es = new EventSource(`${ENDPOINT}${BASE}/index/progress-stream`);
     es.onopen = () => {
     };
     es.addEventListener('progress', (e) => {
@@ -380,8 +574,23 @@ export function subscribeProgress(onData: (data: IndexStatus & { current_file: s
 
 // â”€â”€ SSE Query Stream â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+/**
+ * One step of the bounded agentic retrieval loop. `kind` comes from
+ * app/search/agentic.py's TraceEvent; `detail` is already human-readable.
+ * `subqueries` is populated on 'decompose' and 'not_found'.
+ */
+export interface TraceEvent {
+  kind: 'start' | 'decompose' | 'retrieve' | 'not_found' | 'stop' | 'done';
+  detail: string;
+  subqueries?: string[];
+  sources?: string[];
+  count?: number;
+  stop_reason?: string;
+  iterations?: number;
+}
+
 export interface QueryStreamChunk {
-  type: 'content' | 'sources' | 'fast_path' | 'error' | 'cached_full' | 'metadata' | 'done' | 'ping' | 'fallback' | 'usage';
+  type: 'content' | 'sources' | 'fast_path' | 'error' | 'cached_full' | 'metadata' | 'done' | 'ping' | 'fallback' | 'usage' | 'trace';
   mode?: string;
   text?: string;
   answer?: string;
@@ -394,7 +603,7 @@ export interface QueryStreamChunk {
   contradictions_found?: boolean;
   knowledge_gaps?: string[];
   pattern_annotations?: string[];
-  answer_evolution_diff?: string;
+  trace?: TraceEvent[];
   to?: string;
   prompt_tokens?: number;
   completion_tokens?: number;
@@ -564,14 +773,44 @@ export const setProviderDefaultModel = (id: string, model: string) =>
   });
 export const getCurrentProvider = () => json<{ provider: string; model: string }>('/providers/current');
 
+/** Whether PMA can start this provider itself (Ollama / LM Studio only). */
+export interface ProviderLaunchStatus {
+  provider_id: string;
+  supported: boolean;
+  installed: boolean;
+  running: boolean;
+  /** Human label for how it would be started, e.g. "Ollama desktop app". */
+  method: string | null;
+  install_url: string | null;
+}
+
+export interface ProviderLaunchResult {
+  ok: boolean;
+  running: boolean;
+  already_running: boolean;
+  message: string;
+  /** not_supported | unsupported_platform | not_installed | launch_failed | timeout | manual_step_required */
+  error_code: string | null;
+  elapsed_ms: number;
+}
+
+export const getProviderLaunchStatus = (id: string) =>
+  json<ProviderLaunchStatus>(`/providers/${id}/launch_status`);
+
+/** Starts the provider and resolves once its port answers (can take ~30s). */
+export const launchProvider = (id: string) =>
+  json<ProviderLaunchResult>(`/providers/${id}/launch`, { method: 'POST' });
+
 export interface ProviderRoutingSettings {
   provider: string;
   fallback_chain: string[];
+  cloud_privacy_consent?: boolean;
+  cloud_privacy_notice?: string;
 }
 
 export const getProviderSettings = () => json<ProviderRoutingSettings>('/providers/settings');
-export const setProviderSettings = (settings: ProviderRoutingSettings) =>
-  json<ProviderRoutingSettings>('/providers/settings', {
+export const setProviderSettings = (settings: Partial<ProviderRoutingSettings>) =>
+  json<{ status: string }>('/providers/settings', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(settings)

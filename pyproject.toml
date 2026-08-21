@@ -1,6 +1,6 @@
 [project]
 name = "personal-memory-assistant"
-version = "0.0.71"
+version = "0.0.72"
 description = "A local-first Personal Memory Assistant with hybrid RAG search"
 requires-python = ">=3.12"
 license = {text = "MIT"}
@@ -15,6 +15,15 @@ dependencies = [
     "httpx>=0.27.0",
     "onnxruntime>=1.17.0",
     "tokenizers>=0.15.0",
+    # Imported directly by app/embeddings/service.py, app/search/reranker.py and
+    # the OCR model fetch, but only ever arrived transitively via tokenizers. A
+    # tokenizers release that drops it would have broken the embedder, the
+    # reranker and OCR at once, with nothing in this file to explain why.
+    "huggingface-hub>=0.23.0",
+    # Imported under try/except in context_builder.py. Undeclared until now, so
+    # every install silently fell back to counting tokens as len(text)//4 - which
+    # is what "context budget is the binding constraint" was actually enforcing.
+    "tiktoken>=0.7.0",
     "lancedb>=0.10.0",
     "pyarrow>=14.0.0",
     "python-dotenv>=1.0.0",
@@ -22,6 +31,18 @@ dependencies = [
     # pdfplumber removed: pypdf (BSD-3) covers all PDF extraction needs
     "python-docx>=1.1.0",
     "pypdf>=4.0.0",
+    # Page rasterization for the VLM OCR tier, which has no worker venv of its
+    # own to borrow one from. pypdfium2 rather than PyMuPDF: PMA is MIT and
+    # PyMuPDF is AGPL - the same license reasoning that already removed one
+    # dependency here. Pinned to match app/ocr/registry.PINNED_DEPS so the main
+    # process and the OCR venv rasterize identically.
+    "pypdfium2==4.30.0",
+    # raster_png.py calls bitmap.to_pil() on the Tier 3 path, so Pillow is a
+    # direct requirement of the main process - but it only ever arrived
+    # transitively via python-pptx. A python-pptx release that dropped it would
+    # have broken VLM OCR with nothing here to explain why. Same failure mode
+    # the tiktoken comment above records.
+    "pillow>=10.0.0",
     "openpyxl>=3.1.0",
     "nltk>=3.8.1",
     "python-pptx>=0.6.0",
@@ -59,7 +80,14 @@ dev = [
 [tool.ruff]
 target-version = "py312"
 line-length = 100
-extend-exclude = [".pytest_temp"]
+# tests/fixtures is gitignored and generated (scripts/generate_perf_corpus.py
+# emits deliberately sloppy code so the indexer sees realistic input). Linting
+# it produced ~800 findings that drowned out real ones, and "fixing" them would
+# have edited the fixture out from under the benchmarks.
+# tests/eval/corpus is evaluation *content*, not project code - the files exist
+# to be indexed and retrieved, and linting them would eventually rewrite the
+# thing being measured. Same reasoning as tests/fixtures.
+extend-exclude = [".pytest_temp", "tests/fixtures", "tests/eval/corpus"]
 
 [tool.ruff.lint]
 select = [
@@ -86,6 +114,10 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "S106"]
+# The OCR gate enumerates typographic punctuation (curly quotes, en/em dashes,
+# non-breaking space) so it is not scored as mojibake. RUF001 flags exactly
+# those characters as ASCII lookalikes, which is why they are listed at all.
+"app/ocr/gate.py" = ["RUF001"]
 
 [tool.ruff.lint.flake8-bugbear]
 extend-immutable-calls = [
@@ -104,7 +136,13 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 python_files = "test_*.py"
 python_functions = "test_*"
-addopts = "--basetemp=.pytest_temp"
+# The eval suite indexes a real corpus with real embedding and reranker models:
+# tens of seconds, and it needs those models on disk. Deselected by default so
+# `pytest tests/` stays fast and hermetic; run it with `-m eval`.
+addopts = "--basetemp=.pytest_temp -m 'not eval'"
+markers = [
+    "eval: retrieval quality benchmark (opt-in, needs local models)",
+]
 
 [tool.coverage.run]
 source = ["app"]
@@ -125,7 +163,13 @@ warn_unused_configs = true
 disallow_untyped_defs = false
 check_untyped_defs = true
 explicit_package_bases = true
-exclude = ['^\.pytest_temp/', '^tests/', '^dist/']
+# app/ocr/worker/ runs inside a separate virtualenv, not this interpreter. Its
+# modules import each other by bare name (they are copied flat and run by path)
+# and depend on packages that are deliberately absent here - rapidocr,
+# pypdfium2, opencv. Type-checking it against this environment can only produce
+# false positives. tests/test_ocr_protocol.py enforces its real constraint:
+# stdlib plus pinned venv deps, and never app.*.
+exclude = ['^\.pytest_temp/', '^tests/', '^dist/', '^app/ocr/worker/']
 
 [[tool.mypy.overrides]]
 module = [
@@ -134,8 +178,10 @@ module = [
     "tokenizers.*",
     "sentence_transformers.*",
     "torch.*",
-    "datasketch.*",
-    "nltk.*"
+    "nltk.*",
+    # Ships no py.typed marker. Only touched by app/ocr/raster_png.py, which
+    # wraps every call in its own try/except and returns bytes.
+    "pypdfium2.*"
 ]
 ignore_missing_imports = true
 

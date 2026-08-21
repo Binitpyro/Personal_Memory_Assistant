@@ -291,6 +291,16 @@ export class NavigationController {
     public getRootIndex(): number  { return this.rootIndex; }
 
     /**
+     * The parsed node behind a source/instance index, or undefined if the
+     * index is out of range.
+     *
+     * Callers that pick a crystal or bubble get back a source index and need
+     * the node to answer questions about it — most commonly whether it is a
+     * folder, via `flags & FLAG_FOLDER`.
+     */
+    public getGraphNode(index: number): NavNode | undefined { return this.nodes[index]; }
+
+    /**
      * Build the compacted per-frame instance buffers.
      *
      * Traversal rules:
@@ -312,6 +322,12 @@ export class NavigationController {
      * and in WHICH order across the tree. The renderer then does back-
      * hemisphere pass + front-hemisphere pass over the same compact set.
      */
+    private scratchMaxN = 0;
+    private scratchCrystalData = new Uint8Array(0);
+    private scratchBubbleData  = new Uint8Array(0);
+    private scratchCrystalIdx  = new Uint32Array(0);
+    private scratchBubbleIdx   = new Uint32Array(0);
+
     public buildVisibleSet(): VisibleSet {
         if (!this.srcBytes || this.rootIndex === -1) {
             return {
@@ -320,13 +336,19 @@ export class NavigationController {
             };
         }
 
-        // Worst case: every node in the tree is visible. Pre-size to that
-        // and slice down at the end. Avoids re-alloc during the recursion.
+        // Pre-size persistent scratch buffers to maxN once and reuse them.
         const maxN = this.nodes.length;
-        const crystalData = new Uint8Array(maxN * NODE_STRIDE);
-        const bubbleData  = new Uint8Array(maxN * NODE_STRIDE);
-        const crystalIdx  = new Uint32Array(maxN);
-        const bubbleIdx   = new Uint32Array(maxN);
+        if (this.scratchMaxN < maxN) {
+            this.scratchMaxN = maxN;
+            this.scratchCrystalData = new Uint8Array(maxN * NODE_STRIDE);
+            this.scratchBubbleData  = new Uint8Array(maxN * NODE_STRIDE);
+            this.scratchCrystalIdx  = new Uint32Array(maxN);
+            this.scratchBubbleIdx   = new Uint32Array(maxN);
+        }
+        const crystalData = this.scratchCrystalData;
+        const bubbleData  = this.scratchBubbleData;
+        const crystalIdx  = this.scratchCrystalIdx;
+        const bubbleIdx   = this.scratchBubbleIdx;
         let cCount = 0;
         let bCount = 0;
 

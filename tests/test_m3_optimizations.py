@@ -93,6 +93,146 @@ async def test_lancedb_table_caching_and_deferral(temp_db_dir):
     assert len(client._table_cache) == 0
 
 
+def _mk_embedder_service():
+    """IndexingService wired with stubs; _embedder_worker touches only the queues
+    and the embedding service."""
+    embedding_service = MagicMock(spec=EmbeddingService)
+    calls: list[int] = []
+
+    async def _embed_texts(texts, **_kwargs):
+        calls.append(len(texts))
+        return np.zeros((len(texts), 384), dtype=np.float32)
+
+    embedding_service.embed_texts = _embed_texts
+
+    svc = IndexingService(
+        db=MagicMock(), embedding_service=embedding_service, lancedb_client=MagicMock()
+    )
+    return svc, calls
+
+
+def _hdr(name):
+    return {"type": "header", "path": Path(name), "file_data": {"path": name}}
+
+
+def _chk(name, i):
+    return {
+        "type": "chunk",
+        "path": Path(name),
+        "chunk": {"text_preview": f"{name}#{i}", "start_offset": i, "end_offset": i + 1},
+    }
+
+
+def _ftr(name):
+    return {"type": "footer", "path": Path(name), "summary": "s", "sha256": "x"}
+
+
+async def _drain(store_queue):
+    out = []
+    while True:
+        item = store_queue.get_nowait()
+        if item is None:
+            return out
+        out.append(item)
+
+
+def _tag(item):
+    return (item["type"], item["path"].name, item.get("chunk", {}).get("text_preview"))
+
+
+@pytest.mark.asyncio
+async def test_embedder_worker_batches_across_file_boundaries():
+    """Headers and footers must stop cutting the embed batch.
+
+    The old code flushed on every non-chunk item, so an interleaved two-file
+    sequence produced one embed_texts call per file. It must now be one call,
+    with per-path relative order (header -> chunks -> footer) untouched, because
+    _storer_worker silently drops a chunk that arrives after its own footer.
+    """
+    svc, calls = _mk_embedder_service()
+
+    embed_queue: asyncio.Queue = asyncio.Queue()
+    store_queue: asyncio.Queue = asyncio.Queue()
+
+    sequence = [
+        _hdr("a.txt"),
+        _chk("a.txt", 0),
+        _chk("a.txt", 1),
+        _hdr("b.txt"),
+        _chk("b.txt", 0),
+        _ftr("a.txt"),
+        _ftr("b.txt"),
+    ]
+    for item in sequence:
+        embed_queue.put_nowait(item)
+    embed_queue.put_nowait(None)
+
+    await svc._embedder_worker(embed_queue, store_queue)
+
+    assert calls == [3], f"expected one batch of 3 chunks, got {calls}"
+
+    got = await _drain(store_queue)
+    assert [_tag(i) for i in got] == [_tag(i) for i in sequence]
+    assert store_queue.empty(), "sentinel must be the last item"
+
+    # Every chunk carries an embedding, and each file's header precedes and
+    # footer follows its own chunks.
+    for item in got:
+        if item["type"] == "chunk":
+            assert "_embedding" in item["chunk"]
+    for name in ("a.txt", "b.txt"):
+        idx = [n for n, i in enumerate(got) if i["path"].name == name]
+        types = [got[n]["type"] for n in idx]
+        assert types[0] == "header"
+        assert types[-1] == "footer"
+
+
+@pytest.mark.asyncio
+async def test_embedder_worker_flushes_at_threshold_and_keeps_order():
+    """The buffer is bounded: it flushes once the chunk count hits the threshold
+    rather than growing with the queue."""
+    svc, calls = _mk_embedder_service()
+    svc._embed_flush_threshold = 2
+
+    embed_queue: asyncio.Queue = asyncio.Queue()
+    store_queue: asyncio.Queue = asyncio.Queue()
+
+    sequence = [_hdr("a.txt")] + [_chk("a.txt", i) for i in range(5)] + [_ftr("a.txt")]
+    for item in sequence:
+        embed_queue.put_nowait(item)
+    embed_queue.put_nowait(None)
+
+    await svc._embedder_worker(embed_queue, store_queue)
+
+    assert sum(calls) == 5, f"every chunk must be embedded exactly once, got {calls}"
+    assert max(calls) <= 2, f"no batch may exceed the threshold, got {calls}"
+
+    got = await _drain(store_queue)
+    assert [_tag(i) for i in got] == [_tag(i) for i in sequence]
+
+
+@pytest.mark.asyncio
+async def test_embedder_worker_sends_sentinel_when_embedding_fails():
+    """C-03: _storer_worker must still drain if the embedder raises."""
+    svc, _calls = _mk_embedder_service()
+
+    async def _boom(texts, **_kwargs):
+        raise RuntimeError("onnx exploded")
+
+    svc.embedding_service.embed_texts = _boom
+
+    embed_queue: asyncio.Queue = asyncio.Queue()
+    store_queue: asyncio.Queue = asyncio.Queue()
+    embed_queue.put_nowait(_hdr("a.txt"))
+    embed_queue.put_nowait(_chk("a.txt", 0))
+    embed_queue.put_nowait(None)
+
+    with pytest.raises(RuntimeError):
+        await svc._embedder_worker(embed_queue, store_queue)
+
+    assert store_queue.get_nowait() is None
+
+
 @pytest.mark.asyncio
 async def test_storer_worker_commit_once_per_file(temp_db_path, temp_db_dir):
     db_mgr = DatabaseManager(temp_db_path, pool_size=1)

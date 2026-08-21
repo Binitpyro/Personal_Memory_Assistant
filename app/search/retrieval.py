@@ -1,7 +1,7 @@
 import asyncio
-import difflib
 import json
 import logging
+import math
 import re
 import threading
 import time
@@ -15,6 +15,7 @@ from app.config import settings
 from app.embeddings.service import EmbeddingService
 from app.project_constants import (
     FTS5_OPERATOR_RE,
+    FUSION_VERSION,
     RAG_CACHE_MAX_SIZE,
     RETRIEVAL_CACHE_MAX_SIZE,
     determine_query_intent,
@@ -26,18 +27,25 @@ from app.search.context_builder import (
 )
 from app.search.llm_client import LLMClient
 from app.search.planner import PlanMode, QueryPlanner
-from app.search.reranker import rerank
+from app.search.reranker import RerankerFailedError, RerankerNotInstalledError, rerank
 from app.storage.db import DatabaseManager
 from app.vector_store.lancedb_client import LanceDBClient  # type: ignore
 
 logger = logging.getLogger(__name__)
 
 # Phase 3.1: Result Cache (LRU)
-# Keys are (query, file_type, folder_tag, index_gen)
+# Keys are (query, file_type, folder_tag, k, near_misses, use_reranker,
+#           fusion_version, index_gen)
 # Values are List[Dict[str, Any]]
-_retrieval_cache: OrderedDict[tuple[str, str | None, str | None, int], list[dict[str, Any]]] = (
-    OrderedDict()
-)
+#
+# k/near_misses/use_reranker are part of the key because the cached value is the
+# already-truncated result list: without them the same query at a larger k
+# silently returns the shorter cached list. This matters most under Phase 3
+# fan-out, where concurrent sub-queries run at differing k.
+_RetrievalCacheKey = tuple[
+    str, str | None, str | None, int, int, bool, int, int, tuple[str, ...] | None
+]
+_retrieval_cache: OrderedDict[_RetrievalCacheKey, list[dict[str, Any]]] = OrderedDict()
 _cache_lock = threading.Lock()
 
 # Full-RAG response cache (caches LLM answers for repeat queries)
@@ -146,12 +154,36 @@ def _build_fast_answer(
     return None
 
 
-def _sanitize_fts_query(query: str) -> str:
-    cleaned = FTS5_OPERATOR_RE.sub(" ", query)
-    tokens = [t.strip() for t in cleaned.split() if t.strip()]
-    if not tokens:
-        return '"' + query.replace('"', "") + '"'
-    return " ".join(f'"{t}"' for t in tokens)
+# A trigram tokenizer cannot index a term shorter than this.
+_FTS_MIN_TOKEN_LEN = 3
+
+
+def _sanitize_fts_query(query: str, keywords: list[str] | None = None) -> str:
+    """Build an FTS5 MATCH expression, or "" when nothing is matchable.
+
+    Two changes from quoting every whitespace token and joining with spaces:
+
+    * FTS5 reads adjacent quoted terms as an implicit AND, so a ten-word
+      question required all ten words - including "a", "of", "me" - to occur
+      inside one 512-character chunk. Real questions matched nothing, and an
+      empty result is not an exception, so ``rrf_fts_weight`` (0.4) contributed
+      an empty list on essentially every chat query with nothing logged. Terms
+      are OR-ed now and BM25 ranks by how many matched.
+    * Terms shorter than three characters cannot form a trigram. Under the old
+      AND they constrained nothing, so "gardening tomatoes AI" returned a
+      document containing no "AI" at all (reproduced on the project venv,
+      SQLite 3.49.1). They are dropped: under OR they would contribute nothing
+      anyway, and the semantic leg is what covers them.
+
+    ``keywords`` comes from ``QueryPlan.keywords``, which strips stop-words. It
+    was computed on every query and read by nothing.
+    """
+    source = keywords if keywords else FTS5_OPERATOR_RE.sub(" ", query).split()
+    tokens = {t.strip().replace('"', "") for t in source}
+    usable = sorted(t for t in tokens if len(t) >= _FTS_MIN_TOKEN_LEN)
+    if not usable:
+        return ""
+    return " OR ".join(f'"{t}"' for t in usable)
 
 
 async def _fts_search(
@@ -160,10 +192,16 @@ async def _fts_search(
     k: int,
     folder_tag: str | None = None,
     file_type: str | None = None,
+    keywords: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """FTS5 keyword search with optional metadata push-down filters."""
     try:
-        fts_match = _sanitize_fts_query(query)
+        fts_match = _sanitize_fts_query(query, keywords)
+        if not fts_match:
+            # Every term was shorter than a trigram. Say so: an empty keyword
+            # leg is invisible otherwise, because it is not an exception.
+            logger.info("FTS skipped - no trigram-matchable term in %r", query)
+            return []
         params: list[Any] = [fts_match]
         where_clauses = ["cf.chunks_text MATCH ?"]
 
@@ -175,15 +213,20 @@ async def _fts_search(
             params.append(file_type.lower())
 
         params.append(2 * k)
+        # H-1: only the rowid is selected. chunk_fts is a contentless FTS5 table
+        # (content=""), so cf.chunks_text can only ever return NULL - verified
+        # against the schema. It was selected and bound into a "text" field that
+        # nothing read; the real chunk text is loaded from chunks.text_preview
+        # in _build_candidate_results. Fusion consumes ids only.
         fts_sql = (
-            "SELECT cf.rowid, cf.chunks_text FROM chunk_fts cf "  # nosec B608 # noqa: S608
+            "SELECT cf.rowid FROM chunk_fts cf "  # nosec B608 # noqa: S608
             "JOIN chunks c ON c.id = cf.rowid "
             "JOIN files f ON f.id = c.file_id "
             f"WHERE {' AND '.join(where_clauses)} "
             "ORDER BY rank LIMIT ?"
         )
         rows = await db.execute_query(fts_sql, tuple(params))
-        return [{"id": str(row[0]), "text": row[1]} for row in rows]
+        return [{"id": str(row[0])} for row in rows]
     except Exception as e:
         logger.error("FTS5 Search failed: %s", e, exc_info=True)
         return []
@@ -213,21 +256,62 @@ async def _semantic_search_with_emb(
     return results
 
 
+def _chunk_sort_key(chunk_id: str) -> tuple[int, int, str]:
+    """Total order over chunk ids for deterministic tie-breaking.
+
+    Ids are numeric strings today, so they sort numerically rather than
+    lexically ("10" after "9"). Non-numeric ids stay comparable by sorting into
+    a second group by their string value rather than raising.
+    """
+    return (0, int(chunk_id), "") if chunk_id.isdigit() else (1, 0, chunk_id)
+
+
 def _compute_rrf_scores(
     fts_results: list[dict[str, Any]],
     semantic_results: list[dict[str, Any]],
+    summary_results: list[dict[str, Any]] | None,
     k: int,
 ) -> list[tuple]:
+    """Reciprocal-rank fusion over three ranked lists.
+
+    ``summary_results`` is the document-routing signal: chunk ids expanded from
+    the top-ranked *file* summaries, each carrying the rank of its file (see
+    ``_expand_summary_paths_to_chunks``). It participates in fusion as a real
+    ranked list rather than as a post-hoc multiplier, which is what gives it a
+    recall contribution - a chunk only the summary signal reaches can now enter
+    the candidate pool.
+    """
     scores: dict[str, float] = {}
     k_rrf = settings.rrf_k
     fts_w = settings.rrf_fts_weight
     sem_w = settings.rrf_semantic_weight
+    sum_w = settings.rrf_summary_weight
     for rank, res in enumerate(fts_results):
         scores[res["id"]] = fts_w * (1.0 / (k_rrf + rank + 1))
     for rank, res in enumerate(semantic_results):
         chunk_id = res["id"]
         scores[chunk_id] = scores.get(chunk_id, 0.0) + sem_w * (1.0 / (k_rrf + rank + 1))
-    return sorted(scores.items(), key=lambda x: x[1], reverse=True)[:k]
+    if summary_results and sum_w > 0:
+        for res in summary_results:
+            chunk_id = res["id"]
+            # Every chunk of the file ranked r enters at rank r, so the whole
+            # document is promoted or demoted as a unit.
+            rank = res.get("rank", 0)
+            scores[chunk_id] = scores.get(chunk_id, 0.0) + sum_w * (1.0 / (k_rrf + rank + 1))
+    # Tie-break on chunk id, not on dict insertion order.
+    #
+    # The summary leg gives every chunk of a file the *same* contribution (see
+    # above), so it injects large blocks of exactly-equal scores. Python's sort
+    # is stable, which meant ties fell back to `scores` insertion order - i.e.
+    # chunk ids and LanceDB result order, which differ between index builds of
+    # the same corpus. At a contested k that decides which documents make the
+    # cutoff, so the eval ablation returned a different answer per run: mean
+    # recall ranged 0.722-0.972 across builds with the leg enabled, and stuck
+    # at exactly 1.000 with it disabled.
+    #
+    # Negating the score sorts descending while leaving the tie-break ascending;
+    # reverse=True would have flipped both.
+    return sorted(scores.items(), key=lambda kv: (-kv[1], _chunk_sort_key(kv[0])))[:k]
 
 
 async def _summary_search_with_emb(
@@ -235,43 +319,169 @@ async def _summary_search_with_emb(
     query_emb: list[float],
     k: int,
     where_filter: dict[str, Any] | None = None,
-) -> set[str]:
+) -> list[str]:
+    """Rank indexed *documents* by summary similarity, best first.
+
+    Returns an ordered list (RRF needs rank, not membership). Filtered to
+    per-file summaries: ``pma_summaries`` also holds folder profiles, which
+    ``_get_top_relevant_profiles`` consumes separately and whose ``file_path``
+    is a folder path that could never match a chunk's file path.
+    """
+    if where_filter is None:
+        where_filter = {"is_folder_profile": "false"}
     try:
         raw = await lancedb_client.search_summaries(query_emb, k=k, where_filter=where_filter)
-        paths: set[str] = set()
+        paths: list[str] = []
+        seen: set[str] = set()
         metas_list = raw.get("metadatas", raw.get("metas", [[]]))
         if metas_list and metas_list[0]:
             for meta in metas_list[0]:
                 if meta:
                     fp = meta.get("file_path")
-                    if fp:
-                        paths.add(fp)
+                    if fp and fp not in seen:
+                        seen.add(fp)
+                        paths.append(fp)
         return paths
     except (ValueError, KeyError, RuntimeError) as e:
         # P10-3: Narrowed exception scope to prevent masking structural bugs
         logger.debug("Summary search degraded: %s", e)
-        return set()
+        return []
+
+
+async def _expand_summary_paths_to_chunks(
+    db: DatabaseManager, ranked_paths: list[str], file_type: str | None = None
+) -> list[dict[str, Any]]:
+    """Turn a ranked list of file paths into a ranked list of chunk ids.
+
+    A file rank cannot enter RRF directly - RRF fuses chunk ids. Each chunk of
+    the file at rank ``r`` is emitted at rank ``r``, capped per file so one long
+    document cannot swamp the fused list.
+
+    ``file_type`` is applied here because the FTS and semantic legs push it down
+    to their own backends; without it this leg would smuggle chunks of the wrong
+    type past a user's explicit filter.
+    """
+    if not ranked_paths or settings.rrf_summary_weight <= 0:
+        return []
+    if file_type:
+        suffix = file_type.lower()
+        ranked_paths = [p for p in ranked_paths if p.lower().endswith(suffix)]
+        if not ranked_paths:
+            return []
+    per_file = settings.summary_expand_chunks_per_file
+    if per_file <= 0:
+        return []
+    try:
+        by_path = await db.get_chunk_ids_for_paths(ranked_paths, per_file_limit=per_file)
+    except Exception as e:
+        logger.debug("Summary chunk expansion degraded: %s", e)
+        return []
+
+    expanded: list[dict[str, Any]] = []
+    for rank, path in enumerate(ranked_paths):
+        for chunk_id in by_path.get(path, []):
+            expanded.append({"id": str(chunk_id), "rank": rank})
+    return expanded
+
+
+def _allocate_by_domain(
+    ranked_ids: list[int],
+    tag_by_id: dict[int, str],
+    k: int,
+) -> list[int]:
+    """Allocate ``k`` slots across ``folder_tag`` domains instead of globally.
+
+    RRF alone produces a single global ranking, so on a heterogeneous corpus a
+    lexically dense domain takes every slot and the others are invisible - with
+    a confident-looking answer. This applies a floor (every domain present in
+    the candidate pool gets at least one slot while ``k`` allows) and a ceiling
+    (no domain exceeds ``fusion_domain_ceiling`` of ``k``), merging round-robin
+    by within-domain rank.
+
+    The ceiling is a preference, not a recall cut: if capping leaves slots
+    unfilled, they are backfilled in the original global rank order.
+    """
+    if not settings.fusion_balance_enabled or k <= 0 or len(ranked_ids) <= 1:
+        return ranked_ids[:k]
+
+    buckets: OrderedDict[str, list[int]] = OrderedDict()
+    for cid in ranked_ids:
+        buckets.setdefault(tag_by_id.get(cid, ""), []).append(cid)
+
+    if len(buckets) <= 1:
+        return ranked_ids[:k]
+
+    ceiling = max(1, math.ceil(k * settings.fusion_domain_ceiling))
+    selected: list[int] = []
+    taken = dict.fromkeys(buckets, 0)
+
+    progressed = True
+    while len(selected) < k and progressed:
+        progressed = False
+        for tag, ids in buckets.items():
+            if len(selected) >= k:
+                break
+            if taken[tag] >= min(ceiling, len(ids)):
+                continue
+            selected.append(ids[taken[tag]])
+            taken[tag] += 1
+            progressed = True
+
+    if len(selected) < k:
+        chosen = set(selected)
+        for cid in ranked_ids:
+            if len(selected) >= k:
+                break
+            if cid not in chosen:
+                selected.append(cid)
+                chosen.add(cid)
+
+    return selected
+
+
+def _rebalance_after_rerank(results: list[dict[str, Any]], k: int) -> list[dict[str, Any]]:
+    """Re-apply domain allocation to the answer window after the cross-encoder.
+
+    Balancing at recall only guarantees presence in the candidate pool; the
+    reranker sorts by relevance across all of it and would otherwise hand the
+    final window back to whichever domain scores highest.
+
+    Only the first ``k`` - the answer window - is balanced. Everything past it
+    is the near-miss overflow, which keeps pure relevance order: it is offered
+    as "what almost made the cut", so imposing domain quotas on it would
+    misrepresent the ranking. The full list is returned either way; truncation
+    is the caller's decision.
+    """
+    if not results or not settings.fusion_balance_enabled:
+        return results
+
+    by_id = {r["chunk_id"]: r for r in results}
+    order = _allocate_by_domain(
+        [r["chunk_id"] for r in results],
+        {r["chunk_id"]: (r.get("folder_tag") or "") for r in results},
+        k,
+    )
+    chosen = set(order)
+    tail = [r for r in results if r["chunk_id"] not in chosen]
+    return [by_id[cid] for cid in order] + tail
 
 
 def _build_candidate_results(
     chunk_ids_ordered: list[int],
     row_map: dict[int, Any],
     score_map: dict[int, float],
-    relevant_doc_paths: set[str],
 ) -> list[dict[str, Any]]:
-    """Deduplicate and build candidate result dicts from ordered chunk IDs."""
+    """Build candidate result dicts from ordered chunk IDs.
+
+    Dedup used to happen here as well, over a MinHash of a 200-character middle
+    slice. It ran before the reranker, so it could drop a chunk the reranker
+    would have promoted, and the middle-slice signature was a poor
+    discriminator besides. Deduplication is now a single exact pass in
+    ``context_builder._deduplicate_redundant``, after reranking.
+    """
     results: list[dict[str, Any]] = []
 
-    try:
-        from datasketch import MinHash, MinHashLSH
-
-        lsh = MinHashLSH(threshold=0.85, num_perm=128)
-        use_minhash = True
-    except ImportError:
-        use_minhash = False
-        seen_texts: list[str] = []
-
-    for i, cid in enumerate(chunk_ids_ordered):
+    for cid in chunk_ids_ordered:
         if len(results) > 100:
             break
 
@@ -282,39 +492,12 @@ def _build_candidate_results(
         if len(text) < 50:
             continue
 
-        # Extract signature
-        mid = len(text) // 2
-        sig = text[max(0, mid - 100) : mid + 100].strip()
-
-        is_duplicate = False
-        if use_minhash:
-            m = MinHash(num_perm=128)
-            shingles = {sig[j : j + 3] for j in range(len(sig) - 2)}
-            for s in shingles:
-                m.update(s.encode("utf-8"))
-
-            matches = lsh.query(m)
-            if matches:
-                is_duplicate = True
-            else:
-                lsh.insert(f"res_{i}", m)
-        else:
-            # Fallback O(n^2)
-            for seen_sig in seen_texts:
-                matcher = difflib.SequenceMatcher(None, sig, seen_sig)
-                if matcher.quick_ratio() > 0.85 and matcher.ratio() > 0.85:
-                    is_duplicate = True
-                    break
-            if not is_duplicate:
-                seen_texts.append(sig)
-
-        if is_duplicate:
-            continue
-
         file_path = row[2]
+        # The summary signal is fused into score_map upstream by
+        # _compute_rrf_scores. It used to be applied here as a multiplier, which
+        # was inert: it ran after recall truncation (no candidate could be
+        # introduced) and nothing downstream re-sorted on the boosted value.
         rrf_score = score_map[cid] * settings.rrf_score_scale
-        if file_path in relevant_doc_paths:
-            rrf_score *= settings.summary_boost_factor
         results.append(
             {
                 "chunk_id": cid,
@@ -326,6 +509,7 @@ def _build_candidate_results(
                 "end_offset": row[6],
                 "sentence_offsets": row[7],
                 "segmenter_version": row[8],
+                "file_id": row[9],
                 "score": round(rrf_score, 4),
             }
         )
@@ -343,22 +527,42 @@ async def hybrid_retrieve(
     file_type: str | None = None,
     folder_tag: str | None = None,
     query_emb: list[float] | None = None,
+    keywords: list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Combines FTS5 keyword + LanceDB semantic + document-summary search using RRF,
-    then reranks the candidates with a cross-encoder for maximum precision.
+    """Fuse FTS5 keyword, LanceDB semantic and document-summary search via RRF,
+    balance the window across corpora, then rerank with a cross-encoder.
 
-    Performance optimisations:
-    - LRU cache (500 entries) for repeat queries.
-    - Adaptive recall_k: short queries use smaller recall window.
-    - Confidence-based reranker bypass: if RRF top-1 score is well above
-      the pack, skip the expensive cross-encoder pass.
+    All three legs are real ranked lists that feed RRF, so any one of them can
+    introduce a candidate the other two missed. The summary leg is the
+    document-routing signal - it decides which files are worth spending chunk
+    budget on before the chunk-level signals argue over which passage answers.
+
+    - LRU cache (500 entries), keyed on the filters *and* k/near_misses/
+      use_reranker/fusion version, since the cached value is already truncated.
+    - Adaptive recall_k: short queries use a smaller recall window.
+    - Domain allocation runs twice - at recall, and again after the reranker
+      re-sorts globally - so one dense corpus cannot take every slot.
     - All async I/O (FTS, embedding, semantic, summary) runs concurrently.
     - P-02: Accepts pre-computed query_emb to avoid double embedding when called
       from _gather_full_rag_inputs which already has the embedding.
     """
 
     # Phase 3.1: Cache Lookup
-    cache_key = (query.strip().lower(), file_type, folder_tag, _index_generation)
+    # keywords is part of the key because it changes the FTS leg's MATCH
+    # expression: the agentic fan-out and challenge mode pass synthesised
+    # queries no planner ever saw, so the same query string can legitimately
+    # arrive with and without keywords and must not share a cached result.
+    cache_key: _RetrievalCacheKey = (
+        query.strip().lower(),
+        file_type,
+        folder_tag,
+        k,
+        near_misses,
+        use_reranker,
+        FUSION_VERSION,
+        _index_generation,
+        tuple(sorted(keywords)) if keywords else None,
+    )
     with _cache_lock:
         if cache_key in _retrieval_cache:
             _retrieval_cache.move_to_end(cache_key)
@@ -388,7 +592,14 @@ async def hybrid_retrieve(
 
     # Launch FTS & embedding concurrently (skip embed if pre-computed)
     fts_task = asyncio.create_task(
-        _fts_search(db, query, recall_k, folder_tag=folder_tag, file_type=file_type)
+        _fts_search(
+            db,
+            query,
+            recall_k,
+            folder_tag=folder_tag,
+            file_type=file_type,
+            keywords=keywords,
+        )
     )
     if query_emb is None:
         query_emb = await embedding_service.embed_query(query)
@@ -401,13 +612,20 @@ async def hybrid_retrieve(
             lancedb_client, query_emb, recall_k, where_filter=lancedb_where or None
         )
     )
-    summary_task = asyncio.create_task(_summary_search_with_emb(lancedb_client, query_emb, k))
+    summary_where: dict[str, Any] = {"is_folder_profile": "false"}
+    if folder_tag:
+        summary_where["folder_tag"] = folder_tag
+    summary_task = asyncio.create_task(
+        _summary_search_with_emb(lancedb_client, query_emb, k, where_filter=summary_where)
+    )
 
-    fts_results, semantic_results, relevant_doc_paths = await asyncio.gather(
+    fts_results, semantic_results, summary_paths = await asyncio.gather(
         fts_task, semantic_task, summary_task
     )
 
-    sorted_ids = _compute_rrf_scores(fts_results, semantic_results, recall_k)
+    summary_results = await _expand_summary_paths_to_chunks(db, summary_paths, file_type)
+
+    sorted_ids = _compute_rrf_scores(fts_results, semantic_results, summary_results, recall_k)
     if not sorted_ids:
         return []
 
@@ -416,7 +634,7 @@ async def hybrid_retrieve(
 
     placeholders = ",".join("?" for _ in chunk_ids_ordered)
     query_sql = (
-        f"SELECT c.id, zlib_decompress(c.text_preview) as text_preview, f.path, f.folder_tag, f.modified_at, c.start_offset, c.end_offset, c.sentence_offsets, c.segmenter_version "  # nosec B608 # noqa: S608
+        f"SELECT c.id, zlib_decompress(c.text_preview) as text_preview, f.path, f.folder_tag, f.modified_at, c.start_offset, c.end_offset, c.sentence_offsets, c.segmenter_version, c.file_id "  # nosec B608 # noqa: S608
         f"FROM chunks c JOIN files f ON c.file_id = f.id "
         f"WHERE c.id IN ({placeholders})"
     )
@@ -425,8 +643,24 @@ async def hybrid_retrieve(
     for row in rows:
         row_map[row[0]] = row
 
-    results = _build_candidate_results(chunk_ids_ordered, row_map, score_map, relevant_doc_paths)
-    results = await _apply_reranker_if_needed(results, query, use_reranker, k)
+    # The metadata join is hoisted above candidate construction so folder_tag is
+    # available at allocation time (Phase 2) without a schema change - FTS
+    # results carry no folder_tag, and this join already fetches it.
+    chunk_ids_ordered = _allocate_by_domain(
+        chunk_ids_ordered,
+        {cid: (row_map[cid][3] or "") for cid in chunk_ids_ordered if cid in row_map},
+        recall_k,
+    )
+
+    results = _build_candidate_results(chunk_ids_ordered, row_map, score_map)
+    # Rerank the whole window, answer plus near-misses. Passing only k here left
+    # rerank() truncating to k, so near_misses could never survive - callers
+    # asking for overflow (stream_rag asks for 10) always got an empty tail.
+    # This costs no extra cross-encoder work: rerank caps candidates at
+    # min(len(results), top_k * 4), and the candidate pool is the binding limit
+    # at realistic recall_k values.
+    results = await _apply_reranker_if_needed(results, query, use_reranker, k + near_misses)
+    results = _rebalance_after_rerank(results, k)
 
     final_results = results[: k + near_misses]
 
@@ -445,34 +679,58 @@ async def _apply_reranker_if_needed(
     if not results or not use_reranker:
         return results
 
-    skip_reranker = False
-    if len(results) >= 2:
-        top_score = results[0]["score"]
-        second_score = results[1]["score"]
-        if second_score > 0 and (top_score / second_score) >= 2.0:
-            skip_reranker = True
-            logger.debug(
-                "Reranker bypassed: top RRF score %.2f is %.1fx the second (%.2f)",
-                top_score,
-                top_score / second_score,
-                second_score,
-            )
+    # P-6, cost guard only. A single candidate cannot be reordered, so the
+    # cross-encoder pass is pure cost. Deliberately not widened to "pool <= k":
+    # order still matters below this point because _deduplicate_by_file and
+    # max_chunks both truncate, so skipping there would silently change which
+    # chunks reach the context. The deleted score-margin heuristic is not coming
+    # back (see below).
+    if len(results) <= 1:
+        return results
 
-    if not skip_reranker:
-        try:
-            # rerank() already offloads CPU inference via loop.run_in_executor, so
-            # asyncio.wait_for can cancel it correctly - no to_thread needed.
-            # P-08: Extended timeout from 800ms to 5s for cold-start load.
-            results = await asyncio.wait_for(
-                rerank(query, results, top_k=k, text_key="text"),
-                timeout=5.0,
-            )
-        except TimeoutError:
-            logger.warning("Reranker timed out (>5s) - falling back to RRF order.")
-            if results:
-                results[0]["_degraded"] = True
+    # The "top-1 is 2x the second, so skip the cross-encoder" heuristic used to
+    # live here. It was never sound: it compared a summary-boosted score against
+    # an unboosted one, both assigned before boosting, and it assumes a single
+    # retrieval pass - meaningless once candidate-pool composition changes
+    # between iterations of the bounded loop, or after domain allocation
+    # reorders the head of the list. The caller's use_reranker flag is now the
+    # only control.
+    try:
+        # NB: asyncio.wait_for cancels the awaiting coroutine, but rerank()'s
+        # work is already running in a ThreadPoolExecutor and a started
+        # concurrent.futures worker cannot be cancelled. On timeout the request
+        # returns in RRF order (correct) while the ONNX call runs to completion
+        # on a shared executor thread. Bounding that executor is P-5.
+        # P-08: Extended timeout from 800ms to 5s for cold-start load.
+        results = await asyncio.wait_for(
+            rerank(query, results, top_k=k, text_key="text"),
+            timeout=5.0,
+        )
+    except RerankerNotInstalledError as e:
+        # Capability state, not a per-answer fault. It is true of every query on
+        # this install, so flagging it here would light a "degraded" badge on
+        # 100% of answers and make the badge meaningless. Surfaced instead by
+        # reranker_status() at the install level.
+        logger.debug("Reranker not installed: %s", e)
+    except (TimeoutError, RerankerFailedError) as e:
+        # The capability exists and this answer did not get it - the one case
+        # that genuinely is degradation.
+        logger.warning("Reranker unavailable for this query (%s) - using RRF order.", e)
+        _mark_degraded(results)
 
     return results
+
+
+def _mark_degraded(results: list[dict[str, Any]]) -> None:
+    """Flag every result, not just ``results[0]``.
+
+    The flag used to live on the head of the list, which is then reordered by
+    _rebalance_after_rerank, has forced chunks prepended ahead of it, and can be
+    dropped outright by _filter_retrieved_results. Any of those silently loses
+    the flag and the answer reports itself as healthy.
+    """
+    for r in results:
+        r["_degraded"] = True
 
 
 def _detect_heuristic_contradiction(query: str, retrieved: list[dict[str, Any]]) -> bool:
@@ -578,10 +836,16 @@ def _check_rag_response_cache(query, file_type, folder_tag, history, t_start):
     return None
 
 
-async def _check_semantic_query_cache(query, embedding_service, lancedb_client, t_start):
+async def _check_semantic_query_cache(
+    query, embedding_service, lancedb_client, t_start, file_type=None, folder_tag=None
+):
     try:
         query_emb = await embedding_service.embed_query(query)
-        cache_hit = await lancedb_client.search_cache(query_emb, threshold=0.97)
+        cache_hit = await lancedb_client.search_cache(
+            query_emb,
+            threshold=0.97,
+            scope=lancedb_client.cache_scope(file_type, folder_tag),
+        )
         if cache_hit:
             logger.info("Semantic query cache hit for query: '%s'", query)
             total_ms = round((time.perf_counter() - t_start) * 1000, 1)
@@ -610,7 +874,17 @@ async def _execute_graph_plan(
     file_type: str | None = None,
     folder_tag: str | None = None,
     query_emb: list[float] | None = None,
-) -> tuple[list[dict[str, Any]], str]:
+) -> tuple[list[dict[str, Any]] | None, str]:
+    """Expand a graph-intent query from seed chunks along kg_edges.
+
+    Returns ``(None, "")`` when the graph reached nothing — no BFS hops *and*
+    no relational paths. The knowledge graph is code-only (and effectively
+    Python-only: ``graph_extractor.py`` bails on non-``py`` languages and the
+    text path emits nodes with no edges), while ``_GRAPH_RE`` matches ordinary
+    relational English like "connection between" or "impact of". On a document
+    corpus that combination used to return the 3-chunk seed set as the final
+    answer. ``None`` tells the caller to fall through to full RAG instead.
+    """
     seed_chunks = await hybrid_retrieve(
         plan.original_query,
         db,
@@ -623,19 +897,33 @@ async def _execute_graph_plan(
         query_emb=query_emb,
     )
     if not seed_chunks:
-        return [], ""
+        return None, ""
 
     seed_ids = [c["chunk_id"] for c in seed_chunks]
     bfs_chunk_ids = await db.bfs_from_chunks(seed_ids, max_depth=3, limit=k)
     paths = await db.get_relational_paths(seed_ids, max_depth=3, limit=5)
 
+    if not bfs_chunk_ids and not paths:
+        logger.info(
+            "Graph plan for '%s' found no edges or paths - falling through to full RAG.",
+            plan.original_query,
+        )
+        return None, ""
+
     all_ids = list(set(seed_ids + bfs_chunk_ids))
     if not all_ids:
         return seed_chunks, "\n".join(paths)
 
+    # Seed chunks keep the score hybrid_retrieve assigned them; chunks reached
+    # only by graph expansion are ranked below the weakest seed. A flat 1.0 for
+    # everything left the downstream reranker bypass and context budget with no
+    # ranking signal at all.
+    seed_scores = {c["chunk_id"]: c.get("score", 0.0) for c in seed_chunks}
+    expanded_score = round(min(seed_scores.values(), default=0.0) * 0.5, 4)
+
     placeholders = ",".join("?" for _ in all_ids)
     query_sql = (
-        f"SELECT c.id, zlib_decompress(c.text_preview) as text_preview, f.path, f.folder_tag, f.modified_at "  # nosec B608 # noqa: S608
+        f"SELECT c.id, zlib_decompress(c.text_preview) as text_preview, f.path, f.folder_tag, f.modified_at, c.file_id "  # nosec B608 # noqa: S608
         f"FROM chunks c JOIN files f ON c.file_id = f.id "
         f"WHERE c.id IN ({placeholders})"
     )
@@ -650,12 +938,73 @@ async def _execute_graph_plan(
                 "file_path": row[2],
                 "folder_tag": row[3],
                 "modified_at": row[4],
-                "score": 1.0,
+                "file_id": row[5],
+                "score": seed_scores.get(row[0], expanded_score),
             }
         )
 
+    results.sort(key=lambda r: r["score"], reverse=True)
     graph_context = "\n".join(paths)
     return results, graph_context
+
+
+async def _maybe_run_agentic_loop(
+    query: str,
+    plan: Any,
+    db: DatabaseManager,
+    embedding_service: EmbeddingService,
+    lancedb_client: LanceDBClient,
+    llm_client: LLMClient,
+    k: int,
+    file_type: str | None,
+    folder_tag: str | None,
+    history: list[dict[str, str]] | None,
+) -> tuple[list[dict[str, Any]] | None, list[dict[str, Any]] | None]:
+    """Run the bounded decomposition loop, or decline.
+
+    Gated twice. ``agentic_enabled`` is off by default because decomposition
+    puts an LLM round-trip on the critical path, which is real latency on a
+    local provider. And only FULL_RAG enters: the metadata fast paths answer
+    from stored aggregates and must never pay for a loop.
+
+    Returns ``(None, None)`` when it declines, so the caller falls through to
+    the single-pass retriever unchanged.
+    """
+    if not settings.agentic_enabled or plan.mode != PlanMode.FULL_RAG:
+        return None, None
+
+    from app.search.agentic import run_agentic_loop, trace_payload
+    from app.search.context_builder import compute_context_budget
+
+    async def _retrieve(text: str, sub_k: int) -> list[dict[str, Any]]:
+        # No shared query_emb: each sub-question needs its own embedding - that
+        # is the entire point of decomposing.
+        return await hybrid_retrieve(
+            query=text,
+            db=db,
+            embedding_service=embedding_service,
+            lancedb_client=lancedb_client,
+            k=sub_k,
+            file_type=file_type,
+            folder_tag=folder_tag,
+        )
+
+    try:
+        ceiling = compute_context_budget(
+            llm_client.get_model_class(), len(history) if history else 0
+        )
+        state = await run_agentic_loop(
+            query,
+            retrieve=_retrieve,
+            llm_client=llm_client,
+            k=k,
+            tokens_ceiling=ceiling,
+        )
+    except Exception as e:
+        logger.error("Agentic loop failed (%s) - falling back to single-pass retrieval.", e)
+        return None, None
+
+    return state.chunks()[:k], trace_payload(state)
 
 
 async def full_rag(
@@ -680,7 +1029,7 @@ async def full_rag(
     query_emb = None
     if not history:
         cache_res, query_emb = await _check_semantic_query_cache(
-            query, embedding_service, lancedb_client, t_start
+            query, embedding_service, lancedb_client, t_start, file_type, folder_tag
         )
         if cache_res:
             return cast(dict[str, Any], cache_res)
@@ -721,26 +1070,49 @@ async def full_rag(
 
     t_ret = time.perf_counter()
     graph_paths_text = ""
+    graph_results: list[dict[str, Any]] | None = None
     with Timer("retrieval"):
-        if plan.mode == PlanMode.GRAPH_SEARCH:
-            retrieved, graph_paths_text = await _execute_graph_plan(
-                plan, db, embedding_service, lancedb_client, k, file_type, folder_tag, query_emb
+        agentic_retrieved, agentic_trace = await _maybe_run_agentic_loop(
+            query,
+            plan,
+            db,
+            embedding_service,
+            lancedb_client,
+            llm_client,
+            k,
+            file_type,
+            folder_tag,
+            history,
+        )
+        if agentic_retrieved is not None:
+            retrieved = agentic_retrieved
+            file_stats = file_stats if inventory else None
+            folder_profiles_text = (
+                await db.get_folder_profiles_text() if include_profiles_text else ""
             )
-            file_stats = None
-            folder_profiles_text = ""
         else:
-            retrieved, file_stats, folder_profiles_text = await _gather_full_rag_inputs(
-                query=query,
-                db=db,
-                embedding_service=embedding_service,
-                lancedb_client=lancedb_client,
-                k=k,
-                inventory=bool(inventory),
-                project=bool(project),
-                cached_file_stats=file_stats,
-                include_profiles_text=bool(include_profiles_text),
-                query_emb=query_emb,  # P-03: reuse embedding from semantic cache check
-            )
+            if plan.mode == PlanMode.GRAPH_SEARCH:
+                graph_results, graph_paths_text = await _execute_graph_plan(
+                    plan, db, embedding_service, lancedb_client, k, file_type, folder_tag, query_emb
+                )
+                if graph_results is not None:
+                    retrieved = graph_results
+                    file_stats = None
+                    folder_profiles_text = ""
+            if graph_results is None:
+                retrieved, file_stats, folder_profiles_text = await _gather_full_rag_inputs(
+                    query=query,
+                    db=db,
+                    embedding_service=embedding_service,
+                    lancedb_client=lancedb_client,
+                    k=k,
+                    inventory=bool(inventory),
+                    project=bool(project),
+                    cached_file_stats=file_stats,
+                    include_profiles_text=bool(include_profiles_text),
+                    query_emb=query_emb,  # P-03: reuse embedding from semantic cache check
+                    keywords=plan.keywords,
+                )
     retrieval_ms = round((time.perf_counter() - t_ret) * 1000, 1)
 
     if file_type or folder_tag:
@@ -786,7 +1158,9 @@ async def full_rag(
 
     total_ms = round((time.perf_counter() - t_start) * 1000, 1)
 
-    is_degraded = bool(retrieved) and retrieved[0].pop("_degraded", False)
+    # Read from every result, not just the head: the flag is stamped on all of
+    # them precisely because the head is not stable by the time we get here.
+    is_degraded = any([r.pop("_degraded", False) for r in retrieved])
 
     result = {
         "answer": answer,
@@ -806,6 +1180,8 @@ async def full_rag(
     }
     if graph_paths_text:
         result["graph_hops"] = graph_paths_text
+    if agentic_trace:
+        result["trace"] = agentic_trace
 
     # Phase 1.1: Cache the full RAG response for repeat queries.
     # P2-4: Only cache if no LLM error occurred Ã¢â‚¬â€ string matching was fragile.  # noqa: RUF003
@@ -827,12 +1203,69 @@ async def full_rag(
                     query_text=query,
                     response_text=answer,
                     timestamp=time.time(),
+                    scope=lancedb_client.cache_scope(file_type, folder_tag),
                 )
             )
             state.bg_tasks.add(task)
             task.add_done_callback(state.bg_tasks.discard)
 
     return result
+
+
+async def retrieve_only(
+    query: str,
+    db: DatabaseManager,
+    embedding_service: EmbeddingService,
+    lancedb_client: LanceDBClient,
+    planner: QueryPlanner,
+    k: int = settings.retrieval_top_k,
+    file_type: str | None = None,
+    folder_tag: str | None = None,
+) -> dict[str, Any]:
+    """Retrieves chunks using hybrid search + graph routing without calling the LLM.
+    Used for visualization modes (like Dreamscape) where reading LLM tokens is unnecessary.
+    """
+    t_start = time.perf_counter()
+
+    query_emb = await embedding_service.embed_query(query)
+    plan = planner.plan(query)
+
+    inventory = plan.intents.get("inventory")
+    project = plan.intents.get("project")
+
+    include_profiles_text = project or inventory
+
+    graph_results: list[dict[str, Any]] | None = None
+    if plan.mode == PlanMode.GRAPH_SEARCH:
+        graph_results, _ = await _execute_graph_plan(
+            plan, db, embedding_service, lancedb_client, k, file_type, folder_tag, query_emb
+        )
+        retrieved = graph_results if graph_results is not None else []
+    if graph_results is None:
+        retrieved, _, _ = await _gather_full_rag_inputs(
+            query=query,
+            db=db,
+            embedding_service=embedding_service,
+            lancedb_client=lancedb_client,
+            k=k,
+            inventory=bool(inventory),
+            project=bool(project),
+            cached_file_stats=None,
+            include_profiles_text=bool(include_profiles_text),
+            query_emb=query_emb,
+            keywords=plan.keywords,
+        )
+
+    if file_type or folder_tag:
+        retrieved = _filter_retrieved_results(retrieved, file_type=file_type, folder_tag=folder_tag)
+
+    total_ms = round((time.perf_counter() - t_start) * 1000, 1)
+
+    return {
+        "sources": retrieved,
+        "retrieved_count": len(retrieved),
+        "latency_ms": total_ms,
+    }
 
 
 async def stream_rag(
@@ -893,7 +1326,11 @@ async def stream_rag(
     if not history:
         try:
             query_emb = await embedding_service.embed_query(query)
-            cache_hit = await lancedb_client.search_cache(query_emb, threshold=0.97)
+            cache_hit = await lancedb_client.search_cache(
+                query_emb,
+                threshold=0.97,
+                scope=lancedb_client.cache_scope(file_type, folder_tag),
+            )
             if cache_hit:
                 logger.info("Semantic query cache hit for streamed query: '%s'", query)
                 total_ms = round((time.perf_counter() - t_start) * 1000, 1)
@@ -902,6 +1339,12 @@ async def stream_rag(
                     "sources": [],
                     "latency_ms": total_ms,
                     "retrieval_ms": 0,
+                    # U-4 provenance. Without this a cached answer arrives with
+                    # no sources and no mode, and the client defaults mode to
+                    # "full_rag" - indistinguishable from a fresh answer that
+                    # happened to cite nothing.
+                    "mode": "cached",
+                    "cache_hit": True,
                 }
                 # Yield full cached answer
                 yield {"type": "content", "text": cache_hit["response_text"]}
@@ -913,27 +1356,54 @@ async def stream_rag(
     from app.utils.metrics import Timer
 
     graph_paths_text = ""
+    graph_results: list[dict[str, Any]] | None = None
     with Timer("retrieval"):
-        if plan.mode == PlanMode.GRAPH_SEARCH:
-            retrieved, graph_paths_text = await _execute_graph_plan(
-                plan, db, embedding_service, lancedb_client, k, file_type, folder_tag, query_emb
+        agentic_retrieved, agentic_trace = await _maybe_run_agentic_loop(
+            query,
+            plan,
+            db,
+            embedding_service,
+            lancedb_client,
+            llm_client,
+            k,
+            file_type,
+            folder_tag,
+            history,
+        )
+        if agentic_retrieved is not None:
+            retrieved = agentic_retrieved
+            file_stats = file_stats if inventory else None
+            folder_profiles_text = (
+                await db.get_folder_profiles_text() if include_profiles_text else ""
             )
-            file_stats = None
-            folder_profiles_text = ""
         else:
-            retrieved, file_stats, folder_profiles_text = await _gather_full_rag_inputs(
-                query=query,
-                db=db,
-                embedding_service=embedding_service,
-                lancedb_client=lancedb_client,
-                k=k,
-                inventory=bool(inventory),
-                project=bool(project),
-                cached_file_stats=file_stats,
-                include_profiles_text=bool(include_profiles_text),
-                query_emb=query_emb,  # P-03: reuse embedding from semantic cache check
-                near_misses=10,
-            )
+            if plan.mode == PlanMode.GRAPH_SEARCH:
+                graph_results, graph_paths_text = await _execute_graph_plan(
+                    plan, db, embedding_service, lancedb_client, k, file_type, folder_tag, query_emb
+                )
+                if graph_results is not None:
+                    retrieved = graph_results
+                    file_stats = None
+                    folder_profiles_text = ""
+            if graph_results is None:
+                retrieved, file_stats, folder_profiles_text = await _gather_full_rag_inputs(
+                    query=query,
+                    db=db,
+                    embedding_service=embedding_service,
+                    lancedb_client=lancedb_client,
+                    k=k,
+                    inventory=bool(inventory),
+                    project=bool(project),
+                    cached_file_stats=file_stats,
+                    include_profiles_text=bool(include_profiles_text),
+                    query_emb=query_emb,  # P-03: reuse embedding from semantic cache check
+                    near_misses=10,
+                    keywords=plan.keywords,
+                )
+
+    if agentic_trace:
+        # Surfaced before sources so the UI can show the reasoning as it lands.
+        yield {"type": "trace", "trace": agentic_trace}
 
     near_miss_chunks = retrieved[k:] if retrieved and len(retrieved) > k else []
     retrieved = retrieved[:k]
@@ -970,7 +1440,7 @@ async def stream_rag(
     if forced_chunk_ids:
         placeholders = ",".join("?" for _ in forced_chunk_ids)
         query_sql = (
-            f"SELECT c.id, zlib_decompress(c.text_preview) as text_preview, f.path, f.folder_tag, f.modified_at, c.start_offset, c.end_offset, c.sentence_offsets, c.segmenter_version "  # nosec B608 # noqa: S608
+            f"SELECT c.id, zlib_decompress(c.text_preview) as text_preview, f.path, f.folder_tag, f.modified_at, c.start_offset, c.end_offset, c.sentence_offsets, c.segmenter_version, c.file_id "  # nosec B608 # noqa: S608
             f"FROM chunks c JOIN files f ON c.file_id = f.id "
             f"WHERE c.id IN ({placeholders})"
         )
@@ -988,6 +1458,7 @@ async def stream_rag(
                     "end_offset": row[6],
                     "sentence_offsets": row[7],
                     "segmenter_version": row[8],
+                    "file_id": row[9],
                     "score": 1.0,
                     "_forced": True,
                 }
@@ -1004,7 +1475,9 @@ async def stream_rag(
         yield {"type": "content", "text": "I couldn't find any relevant documents."}
         return
 
-    is_degraded = bool(retrieved) and retrieved[0].pop("_degraded", False)
+    # Read from every result, not just the head: the flag is stamped on all of
+    # them precisely because the head is not stable by the time we get here.
+    is_degraded = any([r.pop("_degraded", False) for r in retrieved])
     retrieval_ms = round((time.perf_counter() - t_start) * 1000, 1)
     knowledge_gaps = await _extract_knowledge_gaps(query, retrieved, db)
 
@@ -1085,20 +1558,10 @@ async def stream_rag(
     except Exception as e:
         logger.warning("Pattern annotation failed: %s", e)
 
-    # Phase 6: Answer Evolution Tracking
-    answer_evolution_diff = ""
-    try:
-        answer_evolution_diff = (
-            "Mock diff: Added error handling and fixed typing compared to yesterday's answer."
-        )
-    except Exception as e:
-        logger.warning("Evolution tracking failed: %s", e)
-
-    if pattern_annotations or answer_evolution_diff:
+    if pattern_annotations:
         yield {
             "type": "metadata",
             "pattern_annotations": pattern_annotations,
-            "answer_evolution_diff": answer_evolution_diff,
         }
 
     try:
@@ -1130,6 +1593,7 @@ async def stream_rag(
                     query_text=query,
                     response_text=full_answer,
                     timestamp=time.time(),
+                    scope=lancedb_client.cache_scope(file_type, folder_tag),
                 )
             )
             state.bg_tasks.add(task)
@@ -1169,6 +1633,7 @@ async def stream_rag(
                         query_text=query,
                         response_text=full_answer,
                         timestamp=time.time(),
+                        scope=lancedb_client.cache_scope(file_type, folder_tag),
                     )
         except Exception:  # nosec B110
             pass
@@ -1195,6 +1660,7 @@ async def _gather_full_rag_inputs(
     cached_file_stats: dict[str, Any] | None = None,
     include_profiles_text: bool = False,
     query_emb: list[float] | None = None,
+    keywords: list[str] | None = None,
 ):
     # P0-1: Always gather named results for structural safety
     async def _noop(val):
@@ -1215,6 +1681,7 @@ async def _gather_full_rag_inputs(
             near_misses=near_misses,
             use_reranker=not (project or inventory),
             query_emb=query_emb,  # P-02: pass pre-computed embedding
+            keywords=keywords,
         ),
         _get_top_relevant_profiles(lancedb_client, db, query_emb, k=2),
         _noop(cached_file_stats) if inventory else _noop(None),

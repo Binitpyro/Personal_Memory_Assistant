@@ -1,5 +1,5 @@
 import { Outlet, NavLink, useNavigate, useLocation } from 'react-router-dom'
-import { BookOpen, Search, FolderTree, BarChart3, Brain, Settings, RefreshCw } from 'lucide-react'
+import { BookOpen, Search, FolderTree, BarChart3, Brain, Settings, RefreshCw, AlertTriangle } from 'lucide-react'
 import { useApi } from '../useApi'
 import { getAppConfig, getHealth } from '../api'
 import { useEffect } from 'react'
@@ -35,6 +35,12 @@ export function AppShell() {
   })
 
   const syncStatus = health?.split_brain_sync_status
+
+  // Only genuine faults surface. 'disabled' and 'unknown' are not faults, so a
+  // default install (ocr_enabled=False) shows nothing at all here.
+  const downSubsystems = Object.entries(health?.subsystems ?? {})
+    .filter(([, info]) => info.state === 'down')
+    .map(([name]) => name)
 
   // P2-1: Refresh auth status when Tauri window regains focus.
   // This handles the case where user completes Google OAuth in system browser and returns.
@@ -95,6 +101,21 @@ export function AppShell() {
 
         {/* Footer */}
         <div className="px-5 py-4 border-t border-primary/10 flex flex-col gap-1">
+          {/* Degraded optional subsystems. The icon stays visible while the
+              sidebar is collapsed — a fault the user cannot see is the whole
+              problem this reports — and the names appear on hover. */}
+          {downSubsystems.length > 0 && (
+            <div
+              data-testid="subsystem-warning"
+              title={`Not running: ${downSubsystems.join(', ')}. Check the backend logs.`}
+              className="flex items-center gap-1.5 text-warning mb-1"
+            >
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+              <span className="text-[10px] font-medium opacity-0 group-hover:opacity-100 transition-opacity duration-300 whitespace-nowrap overflow-hidden">
+                {downSubsystems.join(', ')} off
+              </span>
+            </div>
+          )}
           <span className="text-xs text-text-secondary opacity-0 group-hover:opacity-100 transition-opacity duration-300 whitespace-nowrap">
             v{appConfig?.app_version ?? health?.version ?? '—'}
           </span>

@@ -2,7 +2,7 @@ import json
 import logging
 import time
 from collections.abc import AsyncGenerator
-from typing import cast
+from typing import Any, cast
 
 import httpx
 
@@ -71,10 +71,15 @@ class OpenAICompatibleProvider:
         return cast(list[ModelInfo], models)
 
     def _detect_family(self, model_id: str) -> str | None:
+        from app.providers.vision import looks_like_vision_model
+
         model_lower = model_id.lower()
         if any(x in model_lower for x in ["o1", "o3", "reasoning", "deepseek-r"]):
             return "reasoning"
-        if any(x in model_lower for x in ["vision", "vl"]):
+        # Shared with the Ollama lister rather than a local substring list: the
+        # bare "vl" test here missed llava, moondream, minicpm-v and pixtral,
+        # and also matched any id that happened to contain those two letters.
+        if looks_like_vision_model(model_lower):
             return "vision"
         return "chat"
 
@@ -191,7 +196,7 @@ class OpenAICompatibleProvider:
 
     async def chat(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         *,
         model: str | None = None,
         temperature: float = 0.2,
@@ -217,7 +222,7 @@ class OpenAICompatibleProvider:
 
     async def stream(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         *,
         model: str | None = None,
         temperature: float = 0.2,

@@ -11,11 +11,26 @@ def test_query_heuristics_and_fts_sanitization():
     assert determine_query_intent("show me the latest files")["latest"]
     assert determine_query_intent("what is the biggest file")["largest"]
 
+    # Terms are OR-ed, not implicitly AND-ed. The old expression required every
+    # token to co-occur in one 512-character chunk, so real questions matched
+    # nothing and the keyword leg contributed an empty list on every chat query.
     sanitized = retrieval._sanitize_fts_query('hello AND "world" * test')
-    assert sanitized == '"hello" "world" "test"'
+    assert sanitized == '"hello" OR "test" OR "world"'
 
-    fallback = retrieval._sanitize_fts_query('""')
-    assert fallback == '""'
+    # Sub-trigram terms are dropped: they cannot be indexed by a trigram
+    # tokenizer, and under the old AND they constrained nothing at all.
+    assert retrieval._sanitize_fts_query("3D pipeline") == '"pipeline"'
+
+    # Nothing matchable -> empty expression, which _fts_search reports and
+    # short-circuits rather than issuing a MATCH that cannot hit.
+    assert retrieval._sanitize_fts_query('""') == ""
+    assert retrieval._sanitize_fts_query("is a of") == ""
+
+    # plan.keywords wins when supplied - it is the stop-word-stripped form.
+    assert (
+        retrieval._sanitize_fts_query("what is the turbulence model", ["turbulence", "model"])
+        == '"model" OR "turbulence"'
+    )
 
 
 def test_compute_rrf_scores_and_filter_results(monkeypatch):
@@ -25,7 +40,7 @@ def test_compute_rrf_scores_and_filter_results(monkeypatch):
 
     fts = [{"id": "1"}, {"id": "2"}]
     sem = [{"id": "2"}, {"id": "3"}]
-    ranked = retrieval._compute_rrf_scores(fts, sem, k=3)
+    ranked = retrieval._compute_rrf_scores(fts, sem, None, k=3)
 
     ids = [chunk_id for chunk_id, _ in ranked]
     assert "2" in ids
@@ -129,54 +144,51 @@ async def test_rerank_with_mock_model(monkeypatch):
     assert ranked[0]["rerank_score"] == 0.9
 
 
-def test_build_candidate_results_deduplication(monkeypatch):
-    # Setup data with overlapping snippets
-    # The signature is extracted from max(0, mid-100) : mid+100
+def test_build_candidate_results_no_longer_deduplicates(monkeypatch):
+    """Dedup moved out of the candidate stage.
 
+    It used to run here on a MinHash of a 200-character middle slice, before
+    the reranker, so it could drop a chunk the reranker would have promoted -
+    and two chunks with similar middles but different heads and tails were
+    treated as duplicates. There is now a single exact pass after reranking in
+    ``context_builder._deduplicate_redundant``; this stage passes candidates
+    through untouched.
+    """
     base = "prefix" * 20  # 120 chars
     middle1 = " This is the target signature content that should match. " * 3  # ~150 chars
     suffix1 = " suffix1" * 10
     suffix2 = " suffix2" * 10
 
     text1 = base + middle1 + suffix1
-    text2 = base + middle1 + suffix2  # same middle, should be deduplicated
-    text3 = "different" * 50  # completely different
+    text2 = base + middle1 + suffix2  # same middle, different tail
+    text3 = "different" * 50
 
     row_map = {
-        1: (1, text1, "file1.txt", "tag1", 12345, 0, 10, "[]", "1.0"),
-        2: (2, text2, "file2.txt", "tag2", 12345, 0, 10, "[]", "1.0"),
-        3: (3, text3, "file3.txt", "tag3", 12345, 0, 10, "[]", "1.0"),
+        1: (1, text1, "file1.txt", "tag1", 12345, 0, 10, "[]", "1.0", 11),
+        2: (2, text2, "file2.txt", "tag2", 12345, 0, 10, "[]", "1.0", 12),
+        3: (3, text3, "file3.txt", "tag3", 12345, 0, 10, "[]", "1.0", 13),
     }
     chunk_ids_ordered = [1, 2, 3]
     score_map = {1: 1.0, 2: 0.9, 3: 0.8}
-    relevant_doc_paths = set()
 
     monkeypatch.setattr(retrieval.settings, "rrf_score_scale", 1.0)
 
-    results = retrieval._build_candidate_results(
-        chunk_ids_ordered, row_map, score_map, relevant_doc_paths
-    )
+    results = retrieval._build_candidate_results(chunk_ids_ordered, row_map, score_map)
 
-    # Expected: chunk 1 and chunk 3. Chunk 2 is a duplicate signature.
-    assert len(results) == 2
-    assert results[0]["chunk_id"] == 1
-    assert results[1]["chunk_id"] == 3
-
-    # Verify scores
-    assert results[0]["score"] == 1.0
-    assert results[1]["score"] == 0.8
+    assert [r["chunk_id"] for r in results] == [1, 2, 3]
+    assert [r["score"] for r in results] == [1.0, 0.9, 0.8]
 
 
 def test_build_candidate_results_short_text():
     # Chunks < 50 chars should be skipped
     row_map = {
-        1: (1, "too short", "file1.txt", "tag1", 12345, 0, 10, "[]", "1.0"),
-        2: (2, "A" * 60, "file2.txt", "tag2", 12345, 0, 10, "[]", "1.0"),
+        1: (1, "too short", "file1.txt", "tag1", 12345, 0, 10, "[]", "1.0", 11),
+        2: (2, "A" * 60, "file2.txt", "tag2", 12345, 0, 10, "[]", "1.0", 12),
     }
     chunk_ids_ordered = [1, 2]
     score_map = {1: 1.0, 2: 0.9}
 
-    results = retrieval._build_candidate_results(chunk_ids_ordered, row_map, score_map, set())
+    results = retrieval._build_candidate_results(chunk_ids_ordered, row_map, score_map)
 
     assert len(results) == 1
     assert results[0]["chunk_id"] == 2

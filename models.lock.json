@@ -1,0 +1,50 @@
+{
+  "schema": 1,
+  "models": {
+    "BAAI/bge-small-en-v1.5": {
+      "repo_id": "Xenova/bge-small-en-v1.5",
+      "revision": "ea104dacec62c0de699686887e3f920caeb4f3e3",
+      "family": "embedding",
+      "files": {
+        "onnx/model_quantized.onnx": {
+          "sha256": "6c9c6101a956d62dfb5e7190c538226c0c5bb9cb27b651234b6df063ee7dbfe4",
+          "size_bytes": 34014426
+        },
+        "tokenizer.json": {
+          "sha256": "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66",
+          "size_bytes": 711396
+        }
+      }
+    },
+    "cross-encoder/ms-marco-MiniLM-L-6-v2": {
+      "repo_id": "Xenova/ms-marco-MiniLM-L-6-v2",
+      "revision": "a09144355adeed5f58c8ed011d209bf8ee5a1fec",
+      "family": "reranker",
+      "files": {
+        "onnx/model_quantized.onnx": {
+          "sha256": "e9d8ebf845c413e981c175bfe49a3bfa9b3dcce2a3ba54875ee5df5a58639fbe",
+          "size_bytes": 23143499
+        },
+        "tokenizer.json": {
+          "sha256": "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66",
+          "size_bytes": 711396
+        }
+      }
+    },
+    "PP-OCRv4-server": {
+      "repo_id": "SWHL/RapidOCR",
+      "revision": "1cfba2e90fc938db55889873735088de210cc173",
+      "family": "ocr",
+      "files": {
+        "PP-OCRv4/ch_PP-OCRv4_det_server_infer.onnx": {
+          "sha256": "cfa39a3f298f6d3fc71789834d15da36d11a6c59b489fc16ea4733728012f786",
+          "size_bytes": 113352104
+        },
+        "PP-OCRv4/ch_PP-OCRv4_rec_server_infer.onnx": {
+          "sha256": "6a2676219be9907c7fc9cf61ebaa843bf2898777def567925b78886fcd90c07a",
+          "size_bytes": 90530732
+        }
+      }
+    }
+  }
+}

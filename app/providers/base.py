@@ -38,7 +38,7 @@ class BaseProvider(Protocol):
 
     async def chat(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         *,
         model: str | None = None,
         temperature: float = 0.2,
@@ -47,7 +47,7 @@ class BaseProvider(Protocol):
 
     def stream(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         *,
         model: str | None = None,
         temperature: float = 0.2,

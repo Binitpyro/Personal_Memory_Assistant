@@ -2,6 +2,7 @@ import { useMemo, useState, useCallback, useEffect, Suspense, lazy } from 'react
 import { BarChart3, PieChart, TrendingUp, FileType, Loader2, Flame, Snowflake, HardDrive, Box, LayoutGrid } from 'lucide-react'
 import { useApi } from '../useApi'
 import { getInsights, getInsightsByType, getFileTree } from '../api'
+import { KnowledgePortrait } from '../components/KnowledgePortrait'
 
 const WebGPUFallback = lazy(() => import('../components/WebGPUFallback').then(m => ({ default: m.WebGPUFallback })))
 const FileTypeTreemap = lazy(() => import('../components/FileTypeTreemap').then(m => ({ default: m.FileTypeTreemap })))
@@ -113,10 +114,16 @@ export function InsightsPage() {
           </div>
 
           {/* Charts area */}
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 flex-1">
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
             {/* File Type Distribution — 3D Crystal / Treemap fallback (spans 2 cols) */}
-            {/* FIX: Increased min-h and added h-full so the WebGPU canvas doesn't collapse */}
-            <div className="glass-card lg:col-span-2 flex flex-col min-h-[400px] h-full overflow-hidden">
+            {/* The panel height must be DEFINITE. This page's root is a block box,
+                so `flex-1` here was inert and the `h-full` it replaced resolved
+                against an auto-sized grid row - leaving the canvas at its attribute
+                size, which the ResizeObserver then fed back into itself. A pixel
+                height breaks that loop at the source. 560px leaves ~442px for the
+                canvas after the card's p-8 and the title row, comfortably clear of
+                the 400px floor on the wrapper. */}
+            <div className="glass-card lg:col-span-2 flex flex-col h-[560px] overflow-hidden">
               <div className="flex items-center justify-between mb-4 shrink-0">
                 <h2 className="text-lg font-bold text-primary flex items-center gap-2">
                   <PieChart className="w-5 h-5" />
@@ -262,6 +269,10 @@ export function InsightsPage() {
                 </div>
               )}
             </div>
+          </div>
+
+          <div className="mt-6">
+            <KnowledgePortrait />
           </div>
 
           {/* Error notice */}

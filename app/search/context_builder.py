@@ -1,4 +1,3 @@
-import difflib
 import functools
 import re
 from typing import Any
@@ -7,10 +6,14 @@ from app.config import settings
 
 try:
     import tiktoken  # type: ignore
-except Exception:  # pragma: no cover - optional dependency
-    tiktoken = None
+except Exception:  # pragma: no cover - tiktoken is a declared dependency
+    tiktoken = None  # type: ignore[assignment]
 
-_ENCODING = None
+# None = not yet resolved, False = resolution failed, otherwise the Encoding.
+# tiktoken is a declared dependency now, so the ImportError branch above should
+# be unreachable - but get_encoding() itself can still fail on a cold cache, and
+# _token_count silently degrades to len(text)//4 when it does.
+_ENCODING: Any = None
 
 
 def _get_encoding() -> Any:
@@ -45,6 +48,33 @@ def _token_count(text: str) -> int:
         # Conservative fallback when tiktoken is unavailable.
         return max(1, len(text) // 4)
     return len(_get_tokens(text))
+
+
+def token_count(text: str) -> int:
+    """Public alias for the module's token counter.
+
+    The agentic loop budgets in the same units the context builder spends in,
+    so both must go through one implementation.
+    """
+    return _token_count(text)
+
+
+def count_tokens_uncached(text: str) -> int:
+    """Token count for one-shot text: a whole prompt, a whole answer.
+
+    Deliberately bypasses the ``_get_tokens`` LRU. Those inputs are unique per
+    request, so caching them evicts reusable chunk entries and retains
+    multi-thousand-token id lists that will never be read again.
+
+    Callers must not use ``len(_get_tokens(text))`` for this: when tiktoken is
+    unavailable ``_get_tokens`` returns ``[]`` rather than raising, so a
+    ``len()`` of it reports a confident zero and any surrounding ``except``
+    fallback never runs.
+    """
+    enc = _get_encoding()
+    if not enc:
+        return max(1, len(text) // 4)
+    return len(enc.encode(text))  # type: ignore[union-attr]
 
 
 def _truncate_to_tokens(text: str, max_tokens: int) -> str:
@@ -85,67 +115,72 @@ def _format_file_stats(stats: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _semantic_deduplicate(
-    results: list[dict[str, Any]], similarity_threshold: float = 0.85
+def _span_overlap_ratio(a: tuple[int, int], b: tuple[int, int]) -> float:
+    """Fraction of the shorter of two spans that both spans cover."""
+    overlap = min(a[1], b[1]) - max(a[0], b[0])
+    if overlap <= 0:
+        return 0.0
+    shorter = min(a[1] - a[0], b[1] - b[0])
+    return overlap / shorter if shorter > 0 else 0.0
+
+
+def _chunk_span(res: dict[str, Any]) -> tuple[Any, tuple[int, int]] | None:
+    """``(file_id, (start, end))`` for a result, or None if it carries no offsets."""
+    file_id = res.get("file_id")
+    start, end = res.get("start_offset"), res.get("end_offset")
+    if file_id is None or start is None or end is None:
+        return None
+    return file_id, (int(start), int(end))
+
+
+def _deduplicate_redundant(
+    results: list[dict[str, Any]], min_span_overlap: float = 0.7
 ) -> list[dict[str, Any]]:
-    """Drop snippets that are semantically >85% similar using O(n) MinHash (P-02)."""
-    try:
-        from datasketch import MinHash, MinHashLSH
-    except ImportError:
-        # Fallback to current O(n^2) if datasketch is not installed
-        return _semantic_deduplicate_fallback(results, similarity_threshold)
+    """Drop chunks that add no text the context does not already carry.
 
-    lsh = MinHashLSH(threshold=similarity_threshold, num_perm=128)
+    Two exact tests replace the MinHash pass that used to live here:
+
+    * identical text after whitespace normalisation, from any file;
+    * at least *min_span_overlap* of the shorter span shared with an already
+      kept chunk of the same file, read straight off ``file_id`` /
+      ``start_offset`` / ``end_offset``.
+
+    Both are integer-cheap and exact. The MinHash version spent ~64k hashes per
+    chunk approximating the first test and could not perform the second at all:
+    it signed a 200-character middle slice, so two chunks with similar middles
+    and different heads and tails were dropped as duplicates. What is genuinely
+    given up is *near*-duplicate (not identical) text across different files -
+    datasketch priced that at ~98 MB of transitive scipy, which the 4 GB
+    hardware target does not justify.
+    """
     deduped: list[dict[str, Any]] = []
+    seen_texts: set[str] = set()
+    spans_by_file: dict[Any, list[tuple[int, int]]] = {}
 
-    for i, res in enumerate(results):
-        if len(deduped) >= 100:
-            break
-
-        text = res.get("text", "")
-        if len(text) < 50:
-            deduped.append(res)
-            continue
-
-        # Create MinHash for current text
-        m = MinHash(num_perm=128)
-        # Use 3-shingles for comparison
-        shingles = {text[j : j + 3] for j in range(len(text) - 2)}
-        for s in shingles:
-            m.update(s.encode("utf-8"))
-
-        # Query LSH for existing duplicates
-        matches = lsh.query(m)
-        if not matches:
-            lsh.insert(f"res_{i}", m)
-            deduped.append(res)
-
-    return deduped
-
-
-def _semantic_deduplicate_fallback(
-    results: list[dict[str, Any]], similarity_threshold: float = 0.85
-) -> list[dict[str, Any]]:
-    """O(n^2) fallback for deduplication."""
-    deduped: list[dict[str, Any]] = []
     for res in results:
         if len(deduped) >= 100:
             break
+
         text = res.get("text", "")
         if len(text) < 50:
             deduped.append(res)
             continue
-        is_duplicate = False
-        for saved in deduped:
-            saved_text = saved.get("text", "")
-            len_ratio = len(text) / max(1, len(saved_text))
-            if 0.7 < len_ratio < 1.3:
-                sim = difflib.SequenceMatcher(None, text, saved_text).ratio()
-                if sim > similarity_threshold:
-                    is_duplicate = True
-                    break
-        if not is_duplicate:
-            deduped.append(res)
+
+        normalized = " ".join(text.split())
+        if normalized in seen_texts:
+            continue
+
+        spanned = _chunk_span(res)
+        if spanned is not None:
+            file_id, span = spanned
+            kept = spans_by_file.setdefault(file_id, [])
+            if any(_span_overlap_ratio(span, other) >= min_span_overlap for other in kept):
+                continue
+            kept.append(span)
+
+        seen_texts.add(normalized)
+        deduped.append(res)
+
     return deduped
 
 
@@ -166,6 +201,50 @@ def append_inventory_type_lines(lines: list[str], file_stats: dict[str, Any]) ->
             lines.append(f"  - {t['ext'] or 'unknown'}: {t['count']} files ({t['size_mb']} MB)")
 
 
+def _apply_relevance_cutoff(
+    results: list[dict[str, Any]], score_multiplier: float
+) -> list[dict[str, Any]]:
+    """Drop weak chunks, reading whichever score scale actually ordered the list.
+
+    Two incompatible scales reach this point:
+
+    * ``rerank_score`` - cross-encoder logits, **signed**, roughly -10..+10
+    * ``score`` - RRF, strictly positive
+
+    The cutoff used to be a ratio of ``deduplicated[0]["score"]`` while the list
+    was ordered by ``rerank_score``, so the threshold came from whatever RRF
+    score the top-reranked chunk happened to hold: too low and the filter did
+    nothing, too high and it dropped exactly the chunks the reranker had
+    promoted.
+
+    The ratio cannot simply be repointed at ``rerank_score`` either. Multiplying
+    a *negative* top logit by ``score_multiplier`` raises the bar instead of
+    lowering it, so a healthy top result near -1.5 would filter the whole list
+    away and hand the LLM an empty context. On the cross-encoder scale the
+    correct test is an absolute floor.
+
+    When no chunk carries ``rerank_score`` the reranker did not run, the list is
+    genuinely in RRF order, and the original ratio cutoff applies. When only
+    some carry it the two scales are mixed and no single threshold is
+    meaningful, so nothing is dropped.
+    """
+    assessed = [r for r in results if r.get("rerank_score") is not None]
+
+    if len(assessed) == len(results):
+        floor = settings.agentic_evidence_score_floor
+        return [r for r in results if r["rerank_score"] >= floor] or results[:1]
+
+    if not assessed:
+        top_score = results[0].get("score", 1.0)
+        if top_score > 0:
+            threshold = top_score * score_multiplier
+            return [r for r in results if r.get("score", 1.0) >= threshold]
+        return results
+
+    # Mixed scales - not assessable as one ranking.
+    return results
+
+
 def _deduplicate_by_file(
     results: list[dict[str, Any]], max_per_file: int = 2
 ) -> list[dict[str, Any]]:
@@ -182,8 +261,9 @@ def _deduplicate_by_file(
         if file_counts[fp] <= max_per_file:
             deduped.append(res)
 
-    # Apply semantic deduplication for overlapping chunks (e.g. overlap windows)
-    return _semantic_deduplicate(deduped)
+    # The single dedup pass. It runs here, after reranking, so the reranker's
+    # ordering decides which of two redundant chunks survives.
+    return _deduplicate_redundant(deduped)
 
 
 def _format_snippets(
@@ -369,12 +449,7 @@ def build_context(
             deduplicated = _deduplicate_by_file(retrieved_results, max_per_file=max_per_file)
 
             if deduplicated:
-                top_score = deduplicated[0].get("score", 1.0)
-                if top_score > 0:
-                    score_threshold = top_score * score_multiplier
-                    deduplicated = [
-                        r for r in deduplicated if r.get("score", 1.0) >= score_threshold
-                    ]
+                deduplicated = _apply_relevance_cutoff(deduplicated, score_multiplier)
 
             # Keep only top max_chunks
             deduplicated = deduplicated[:max_chunks]

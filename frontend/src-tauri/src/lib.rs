@@ -153,7 +153,7 @@ pub fn run() {
                     use winapi::um::jobapi2::{AssignProcessToJobObject, SetInformationJobObject};
                     use winapi::um::winnt::{
                         JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-                        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                        JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
                     };
 
                     unsafe {
@@ -163,8 +163,13 @@ pub fn run() {
                         );
                         if !job.is_null() {
                             let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+                            // KILL_ON_JOB_CLOSE keeps the sidecar from being orphaned.
+                            // BREAKAWAY_OK lets the backend deliberately start a process
+                            // that must outlive PMA -- Ollama / LM Studio, spawned with
+                            // CREATE_BREAKAWAY_FROM_JOB (see app/providers/launcher.py).
+                            // Without it that spawn fails with ERROR_ACCESS_DENIED.
                             info.BasicLimitInformation.LimitFlags =
-                                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
 
                             let res = SetInformationJobObject(
                                 job,

@@ -2,7 +2,7 @@ import json
 import logging
 import time
 from collections.abc import AsyncGenerator
-from typing import cast
+from typing import Any, cast
 
 import httpx
 
@@ -47,12 +47,22 @@ class OllamaProvider:
         resp.raise_for_status()
         data = resp.json()
 
+        from app.providers.vision import looks_like_vision_model
+
         models = []
         for item in data.get("models", []):
             name = item.get("name")
             if name:
+                # Was hardcoded "chat" for every model, which made a vision model
+                # indistinguishable from a text one - so a picker had nothing to
+                # filter on and no way to detect "you have none installed".
                 models.append(
-                    {"id": name, "context_length": 8192, "pricing_hint": 0.0, "family": "chat"}
+                    {
+                        "id": name,
+                        "context_length": 8192,
+                        "pricing_hint": 0.0,
+                        "family": "vision" if looks_like_vision_model(name) else "chat",
+                    }
                 )
         return cast(list[ModelInfo], models)
 
@@ -115,7 +125,7 @@ class OllamaProvider:
 
     async def chat(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         *,
         model: str | None = None,
         temperature: float = 0.2,
@@ -139,7 +149,7 @@ class OllamaProvider:
 
     async def stream(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         *,
         model: str | None = None,
         temperature: float = 0.2,

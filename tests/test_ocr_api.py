@@ -1,9 +1,21 @@
 """OCR HTTP surface. Every endpoint must be reachable with OCR switched off."""
 
+from pathlib import Path
+
 import pytest
 
 from app.config import settings
 from app.ocr import queue as ocr_queue
+
+# Host-shaped, not Windows-shaped. /ocr/queue derives file_name with
+# Path(file_path).name, which splits on the *host* separator, so a hardcoded
+# "C:\\docs\\a.pdf" yields "a.pdf" on Windows and the whole string on Linux,
+# where a backslash is a legal filename character. In production the two never
+# disagree, because queued paths come from the host's own filesystem; only a
+# foreign literal can split them, and CI runs on Linux.
+DOC_A = str(Path("/docs/a.pdf"))
+DOC_B = str(Path("/docs/b.pdf"))
+UNINDEXED = str(Path("/nope.pdf"))
 
 # Note: /ocr/enable persists the toggle through SettingsStore. The autouse
 # `isolate_settings_file` fixture in conftest.py keeps that away from the
@@ -33,7 +45,7 @@ async def test_queue_is_empty_by_default(client):
 
 
 async def test_queue_reports_enqueued_work(client, mock_db):
-    await ocr_queue.enqueue_document(mock_db, r"C:\docs\a.pdf", [0, 1], 5)
+    await ocr_queue.enqueue_document(mock_db, DOC_A, [0, 1], 5)
 
     body = (await client.get("/api/ocr/queue")).json()
 
@@ -49,9 +61,9 @@ async def test_queue_reports_enqueued_work(client, mock_db):
 
 
 async def test_queue_status_filter(client, mock_db):
-    await ocr_queue.enqueue_document(mock_db, r"C:\docs\a.pdf", [0], 1)
-    await ocr_queue.enqueue_document(mock_db, r"C:\docs\b.pdf", [0], 1)
-    await ocr_queue.mark_failed(mock_db, r"C:\docs\a.pdf", "nope", terminal=True)
+    await ocr_queue.enqueue_document(mock_db, DOC_A, [0], 1)
+    await ocr_queue.enqueue_document(mock_db, DOC_B, [0], 1)
+    await ocr_queue.mark_failed(mock_db, DOC_A, "nope", terminal=True)
 
     body = (await client.get("/api/ocr/queue?status=failed")).json()
     assert [i["file_name"] for i in body["items"]] == ["a.pdf"]
@@ -80,12 +92,12 @@ async def test_disable_always_works(client):
 
 
 async def test_retry_on_an_unknown_file_is_rejected(client):
-    res = await client.post("/api/ocr/retry", json={"file_path": r"C:\nope.pdf"})
+    res = await client.post("/api/ocr/retry", json={"file_path": UNINDEXED})
     assert res.json()["error_code"] == "NOT_QUEUED"
 
 
 async def test_retry_rearms_a_failed_row(client, mock_db):
-    path = r"C:\docs\a.pdf"
+    path = DOC_A
     await ocr_queue.enqueue_document(mock_db, path, [0], 1)
     await ocr_queue.mark_failed(mock_db, path, "boom", terminal=True)
 
@@ -94,14 +106,14 @@ async def test_retry_rearms_a_failed_row(client, mock_db):
 
 
 async def test_force_ocr_on_an_unindexed_file_is_rejected(client):
-    res = await client.post("/api/ocr/force", json={"file_path": r"C:\nope.pdf"})
+    res = await client.post("/api/ocr/force", json={"file_path": UNINDEXED})
     assert res.json()["error_code"] == "NOT_INDEXED"
 
 
 async def test_clear_queue(client, mock_db):
-    await ocr_queue.enqueue_document(mock_db, r"C:\docs\a.pdf", [0], 1)
+    await ocr_queue.enqueue_document(mock_db, DOC_A, [0], 1)
     assert (await client.post("/api/ocr/queue/clear")).json()["removed"] == 1
-    assert await ocr_queue.get_row(mock_db, r"C:\docs\a.pdf") is None
+    assert await ocr_queue.get_row(mock_db, DOC_A) is None
 
 
 async def test_clear_cache(client):

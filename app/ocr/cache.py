@@ -62,7 +62,7 @@ async def get_pages(
         batch = page_list[i : i + _SQLITE_MAX_VARS]
         placeholders = ",".join("?" * len(batch))
         rows = await db.execute_query(
-            f"SELECT page_num, text FROM ocr_cache "  # noqa: S608
+            f"SELECT page_num, text FROM ocr_cache "  # noqa: S608  # nosec B608
             f"WHERE content_key = ? AND model_version = ? AND preproc_hash = ? "
             f"AND page_num IN ({placeholders})",
             (content_key, model_version, preproc, *batch),
@@ -77,7 +77,7 @@ async def get_pages(
             batch = hit_pages[i : i + _SQLITE_MAX_VARS]
             placeholders = ",".join("?" * len(batch))
             await db.execute_write(
-                f"UPDATE ocr_cache SET last_used_at = ? "  # noqa: S608
+                f"UPDATE ocr_cache SET last_used_at = ? "  # noqa: S608  # nosec B608
                 f"WHERE content_key = ? AND model_version = ? AND preproc_hash = ? "
                 f"AND page_num IN ({placeholders})",
                 (now_ts, content_key, model_version, preproc, *batch),
@@ -205,7 +205,7 @@ async def evict_lru(db, *, max_bytes: int | None = None, target_ratio: float = 0
         placeholders = " OR ".join(["(rowid = ? AND last_used_at = ?)"] * len(row_pairs))
         flat_params = [val for pair in row_pairs for val in pair]
         await db.execute_write(
-            f"DELETE FROM ocr_cache WHERE {placeholders}",  # noqa: S608
+            f"DELETE FROM ocr_cache WHERE {placeholders}",  # noqa: S608  # nosec B608
             tuple(flat_params),
         )
         freed += batch_bytes

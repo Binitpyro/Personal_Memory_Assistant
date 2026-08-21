@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 #: Neither is a tradeoff we get to make on their behalf - CLAUDE.md §1.4.
 _HF_PRIVACY_ENV = {
     "HF_HUB_DISABLE_TELEMETRY": "1",
-    "HF_HUB_DISABLE_IMPLICIT_TOKEN": "1",
+    "HF_HUB_DISABLE_IMPLICIT_TOKEN": "1",  # nosec B105
 }
 
 

@@ -912,7 +912,7 @@ class OcrManager:
                 if text:
                     self._stderr_tail.append(text)
                     logger.debug("ocr-worker: %s", text)
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
     def _send_sync(self, message: dict) -> bool:

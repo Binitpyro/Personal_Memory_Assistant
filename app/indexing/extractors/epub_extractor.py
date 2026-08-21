@@ -13,7 +13,7 @@ import zipfile
 from collections.abc import Iterator
 from pathlib import Path
 from urllib.parse import unquote
-from xml.etree import ElementTree as ET
+from xml.etree import ElementTree as ET  # nosec B405
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +57,7 @@ def _parse_zip_xml(zf: zipfile.ZipFile, name: str) -> ET.Element | None:
             # default), and entity-expansion ("billion laughs") is blocked
             # by expat's built-in amplification-factor limit. Verified
             # empirically against this target, not assumed.
-            return ET.parse(f).getroot()  # noqa: S314
+            return ET.parse(f).getroot()  # noqa: S314  # nosec B314
     except Exception:
         return None
 

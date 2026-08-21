@@ -22,7 +22,7 @@ regression here.
 """
 
 import logging
-import xml.etree.ElementTree as ET
+import xml.etree.ElementTree as ET  # nosec B405
 import zipfile
 from collections.abc import Iterator
 from pathlib import Path
@@ -84,7 +84,7 @@ def _parse_part(zf: zipfile.ZipFile, name: str) -> ET.Element:
     # input, and the entity-expansion vector it warns about is closed by the DTD
     # check above. OOXML needs no DTD support at all, so pulling in defusedxml
     # would buy nothing here.
-    return ET.fromstring(data)  # noqa: S314
+    return ET.fromstring(data)  # noqa: S314  # nosec B314
 
 
 def _read_rels(zf: zipfile.ZipFile, part: str) -> dict[str, tuple[str, str]]:

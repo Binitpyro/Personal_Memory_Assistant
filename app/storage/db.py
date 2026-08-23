@@ -520,6 +520,45 @@ class DatabaseManager:
         except Exception as exc:
             logger.warning("kg_nodes schema migration failed: %s", exc)
 
+        # Back-fill any node whose provenance lives only in the properties JSON.
+        # The rebuild above back-fills the column, but only when the column was
+        # missing entirely; a database that already had it keeps whatever was
+        # written, and NULL there is now the difference between a node being
+        # reachable as a graph seed and being invisible. Verified divergent: with
+        # one such row, the old json_extract predicate returned it and the column
+        # predicate did not. Orphans are left NULL deliberately - chunk_id is a
+        # FOREIGN KEY onto chunks(id) and foreign_keys is ON, so pointing it at a
+        # deleted chunk would fail the whole migration.
+        try:
+            await conn.execute("""
+                UPDATE kg_nodes
+                   SET chunk_id = CAST(json_extract(properties, '$.chunk_id') AS INTEGER)
+                 WHERE chunk_id IS NULL
+                   AND json_extract(properties, '$.chunk_id') IS NOT NULL
+                   AND EXISTS (
+                       SELECT 1 FROM chunks c
+                        WHERE c.id = CAST(json_extract(kg_nodes.properties, '$.chunk_id') AS INTEGER)
+                   )
+            """)
+            await conn.commit()
+        except Exception as exc:
+            logger.warning("kg_nodes chunk_id back-fill failed: %s", exc)
+
+        # The seed step of every graph traversal looks nodes up by chunk_id, and
+        # kg_nodes carried no index at all beyond its id PRIMARY KEY. Measured on
+        # 64,752 nodes: the shipped json_extract predicate scanned the table and
+        # parsed JSON per row at 22.54 ms; the column with this index is 0.06 ms.
+        # Created here rather than beside the CREATE TABLE above because the
+        # migration block just above may rename and rebuild kg_nodes, which would
+        # take the index with it.
+        try:
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_kg_nodes_chunk_id ON kg_nodes(chunk_id)"
+            )
+            await conn.commit()
+        except Exception as exc:
+            logger.warning("Failed to create idx_kg_nodes_chunk_id: %s", exc)
+
         # GraphRAG edges
         try:
             await conn.execute("""
@@ -602,6 +641,20 @@ class DatabaseManager:
             await conn.commit()
         except Exception as exc:
             logger.warning("Failed to drop idx_chunks_covering: %s", exc)
+
+        # The same defect, reintroduced under a second name: `id` is the rowid,
+        # so indexing (id, text_preview) kept a second full copy of the
+        # compressed corpus. Measured +90.2% on disk and +57.8% insert time for
+        # no read benefit (see the note in schema.sql). Dropped here as well as
+        # removed from schema.sql, because executescript(schema.sql) above does
+        # not reconcile away what it no longer declares - an existing database
+        # would keep the index forever. Space returns via the incremental_vacuum
+        # already running at startup.
+        try:
+            await conn.execute("DROP INDEX IF EXISTS idx_chunks_text_lookup")
+            await conn.commit()
+        except Exception as exc:
+            logger.warning("Failed to drop idx_chunks_text_lookup: %s", exc)
 
         # Phase 9.2: Rebuild chunk_fts with detail=column to save ~40% space
         try:
@@ -1155,7 +1208,7 @@ class DatabaseManager:
         bfs_nodes(id, depth) AS (
             SELECT id, 0
             FROM kg_nodes
-            WHERE json_extract(properties, '$.chunk_id') IN ({placeholders})
+            WHERE chunk_id IN ({placeholders})
 
             UNION
 
@@ -1183,10 +1236,10 @@ class DatabaseManager:
         placeholders = ",".join("?" for _ in chunk_ids)
         # Only bound placeholders are interpolated; every value is parameterized.
         projection = """
-        SELECT DISTINCT CAST(json_extract(n.properties, '$.chunk_id') AS INTEGER) as chunk_id
+        SELECT DISTINCT n.chunk_id as chunk_id
         FROM bfs_nodes b
         JOIN kg_nodes n ON b.id = n.id
-        WHERE json_extract(n.properties, '$.chunk_id') IS NOT NULL
+        WHERE n.chunk_id IS NOT NULL
         LIMIT ?
         """
         query = self._bfs_cte(placeholders) + projection  # nosec B608
@@ -1218,7 +1271,7 @@ class DatabaseManager:
         paths(id, path_str, depth, visited) AS (
             SELECT id, label || ' ' || id, 0, ',' || id || ','
             FROM kg_nodes
-            WHERE json_extract(properties, '$.chunk_id') IN ({placeholders})
+            WHERE chunk_id IN ({placeholders})
 
             UNION ALL
 

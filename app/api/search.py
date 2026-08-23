@@ -257,7 +257,22 @@ async def query_stream(
                 with contextlib.suppress(Exception):
                     await agen.aclose()
 
-    return StreamingResponse(stream_results(), media_type="application/x-ndjson")
+    # Content-Encoding opts this stream out of GZipMiddleware (app/main.py), and
+    # it has to: Starlette exempts only text/event-stream by content type
+    # (starlette.middleware.gzip.DEFAULT_EXCLUDED_CONTENT_TYPES), and its
+    # GZipResponder writes each chunk into a GzipFile without flushing, so
+    # deflate holds every token until the generator closes. Measured on this
+    # stack: 30 records yielded 50ms apart arrived with mean lag 0.795s / max
+    # 1.593s, i.e. all at once at the end - which silently defeats the keepalive
+    # above and the 50ms flush throttle in useChatStream.ts. Browsers cannot opt
+    # out; Accept-Encoding is a forbidden header name. IdentityResponder passes
+    # the body through untouched once content-encoding is already set.
+    # This is per-endpoint: a new NDJSON stream elsewhere needs the same header.
+    return StreamingResponse(
+        stream_results(),
+        media_type="application/x-ndjson",
+        headers={"Content-Encoding": "identity"},
+    )
 
 
 @router.get("/history")

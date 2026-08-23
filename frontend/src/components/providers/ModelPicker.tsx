@@ -4,12 +4,13 @@ import { getProviders } from '../../api';
 import type { ProviderStatus } from '../../api';
 import { useSessionProvider } from '../../context/SessionProviderContext';
 import { Sparkles, Search, X, Check } from 'lucide-react';
+import { CACHE_KEYS } from '../../cacheKeys'
 
 // STATIC_FALLBACK_MODELS removed in favor of dynamic backend discovery and persistent model heaps.
 // const STATIC_FALLBACK_MODELS: Record<string, string[]> = { ... };
 
 export function ModelPicker() {
-  const { data: providers, refetch: refreshProviders } = useApi(getProviders, { cacheKey: 'providers-list' });
+  const { data: providers, refetch: refreshProviders } = useApi(getProviders, { cacheKey: CACHE_KEYS.providersList });
   const { sessionModelOverride, setSessionModelOverride } = useSessionProvider();
   
   const [isOpen, setIsOpen] = useState(false);

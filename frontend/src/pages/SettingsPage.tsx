@@ -15,6 +15,7 @@ import {
   getProviderLaunchStatus,
   launchProvider,
   getOcrStatus,
+  type OcrStatus,
   getOcrTiers,
   selectOcrTier,
   getVlmModels,
@@ -37,6 +38,8 @@ import {
   type OcrInstallState,
   type OcrQueueItem
 } from '../api'
+import { CACHE_KEYS } from '../cacheKeys'
+import { useOptimisticMutation } from '../useOptimisticMutation'
 
 // STATIC_FALLBACK_MODELS removed in favor of dynamic backend discovery and persistent model heaps.
 
@@ -68,8 +71,8 @@ function StartLocalProviderButton({ providerId, displayName, offlineHint, onStar
     try {
       const res = await launchProvider(providerId)
       if (res.ok) {
-        invalidateCache('local-models')
-        invalidateCache('providers-list')
+        invalidateCache(CACHE_KEYS.localModels)
+        invalidateCache(CACHE_KEYS.providersList)
         onStarted()
       } else {
         setError(res.message)
@@ -231,8 +234,8 @@ function LLMPreferencesSection({
   saving: boolean
 }>) {
   const navigate = useNavigate()
-  const { data: llmPrefs } = useApi(getLLMPreferences, { cacheKey: 'llm-prefs' })
-  const { data: providers } = useApi(getProviders, { cacheKey: 'providers-list' })
+  const { data: llmPrefs } = useApi(getLLMPreferences, { cacheKey: CACHE_KEYS.llmPreferences })
+  const { data: providers } = useApi(getProviders, { cacheKey: CACHE_KEYS.providersList })
   
   const [provider, setProvider] = useState<string>('auto')
   const [selectedModels, setSelectedModels] = useState<Record<string, string>>({})
@@ -395,9 +398,9 @@ function VlmPicker({
   onChanged,
   setNote,
 }: Readonly<{ onChanged: () => void; setNote: (s: string) => void }>) {
-  const { data, loading, refetch } = useApi(getVlmModels, { cacheKey: 'ocr-vlm-models' })
+  const { data, loading, refetch } = useApi(getVlmModels, { cacheKey: CACHE_KEYS.ocrVlmModels })
   const { data: current, refetch: refetchSelection } = useApi(getVlmSelection, {
-    cacheKey: 'ocr-vlm-selection',
+    cacheKey: CACHE_KEYS.ocrVlmSelection,
   })
   const [saving, setSaving] = useState('')
   const [isChecking, setIsChecking] = useState(false)
@@ -412,8 +415,8 @@ function VlmPicker({
         return
       }
       setNote(`OCR will use ${model}.`)
-      invalidateCache('ocr-tiers')
-      invalidateCache('ocr-status-settings')
+      invalidateCache(CACHE_KEYS.ocrTiers)
+      invalidateCache(CACHE_KEYS.ocrStatus)
       refetchSelection()
       onChanged()
     } catch (e) {
@@ -425,7 +428,7 @@ function VlmPicker({
 
   const handleCheckAgain = async () => {
     setIsChecking(true)
-    invalidateCache('ocr-vlm-models')
+    invalidateCache(CACHE_KEYS.ocrVlmModels)
     try {
       await refetch()
     } finally {
@@ -440,8 +443,8 @@ function VlmPicker({
       const res = await launchProvider(providerId)
       if (res.ok) {
         setNote(`${displayName} started successfully.`)
-        invalidateCache('ocr-vlm-models')
-        invalidateCache('local-models')
+        invalidateCache(CACHE_KEYS.ocrVlmModels)
+        invalidateCache(CACHE_KEYS.localModels)
         await refetch()
       } else {
         setNote(res.message || `Could not start ${displayName}.`)
@@ -589,10 +592,10 @@ function VlmPicker({
 
 function OcrSection() {
   const { data: ocr, refetch } = useApi(getOcrStatus, {
-    cacheKey: 'ocr-status-settings',
+    cacheKey: CACHE_KEYS.ocrStatus,
     refetchInterval: 10_000,
   })
-  const { data: tierData, refetch: refetchTiers } = useApi(getOcrTiers, { cacheKey: 'ocr-tiers' })
+  const { data: tierData, refetch: refetchTiers } = useApi(getOcrTiers, { cacheKey: CACHE_KEYS.ocrTiers })
   const tiers = tierData?.tiers ?? []
   const [selectedTier, setSelectedTier] = useState<string>('cpu')
   const selectedTierInfo = tiers.find((t) => t.id === selectedTier)
@@ -621,8 +624,8 @@ function OcrSection() {
         const state = await getOcrInstallState()
         setInstall(state)
         if (state.status !== 'running') {
-          invalidateCache('ocr-tiers')
-          invalidateCache('ocr-status-settings')
+          invalidateCache(CACHE_KEYS.ocrTiers)
+          invalidateCache(CACHE_KEYS.ocrStatus)
           refetch()
           refetchTiers()
           setBusy(false)
@@ -667,8 +670,8 @@ function OcrSection() {
         return
       }
       setNote(`OCR switched to ${TIER_COPY[tier]?.short ?? tier}.`)
-      invalidateCache('ocr-tiers')
-      invalidateCache('ocr-status-settings')
+      invalidateCache(CACHE_KEYS.ocrTiers)
+      invalidateCache(CACHE_KEYS.ocrStatus)
       refetch()
       refetchTiers()
     } catch (e) {
@@ -685,8 +688,8 @@ function OcrSection() {
       await uninstallOcrTier(target)
       setInstall(null)
       setNote(`Uninstalled ${TIER_COPY[target]?.short ?? target} tier.`)
-      invalidateCache('ocr-tiers')
-      invalidateCache('ocr-status-settings')
+      invalidateCache(CACHE_KEYS.ocrTiers)
+      invalidateCache(CACHE_KEYS.ocrStatus)
       refetch()
       refetchTiers()
     } catch (e) {
@@ -696,16 +699,25 @@ function OcrSection() {
     }
   }
 
-  const handleToggle = async (enabled: boolean) => {
-    try {
-      const res = await setOcrEnabled(enabled)
+  // The checkbox reads `checked={!!ocr?.enabled}` straight off server data, so
+  // before this it visibly snapped back to its old position and stayed there
+  // until the refetch landed. The optimistic write moves it on click and the
+  // rollback puts it back only if the server actually refuses.
+  const toggleOcr = useOptimisticMutation<boolean, Awaited<ReturnType<typeof setOcrEnabled>>, OcrStatus>({
+    mutationFn: setOcrEnabled,
+    cacheKey: CACHE_KEYS.ocrStatus,
+    invalidates: [CACHE_KEYS.ocrTiers],
+    optimistic: (current, enabled) => (current ? { ...current, enabled } : current),
+    onSuccess: (res) => {
+      // A 200 that says "no" is not an error, so it does not roll back. The
+      // onSettled invalidation refetches and the real value wins; this only
+      // explains why.
       if (!res.ok) setNote(`Cannot enable: ${res.error_code}`)
-      invalidateCache('ocr-tiers')
-      invalidateCache('ocr-status-settings')
-      refetch()
-      refetchTiers()
-    } catch (e) { setNote(e instanceof Error ? e.message : 'Could not change OCR state.') }
-  }
+    },
+    onError: (e) => setNote(e instanceof Error ? e.message : 'Could not change OCR state.'),
+  })
+
+  const handleToggle = (enabled: boolean) => toggleOcr.mutate(enabled)
 
   const handleResume = async () => {
     try {
@@ -1133,10 +1145,10 @@ function ResetSection({ onRestartOnboarding, onFullReset }: Readonly<{ onRestart
 // ── Main Page Component ──────────────────────────────────────────────
 
 export function SettingsPage() {
-  const { data: localModels, refetch: refetchLocalModels } = useApi(getLocalModels, { cacheKey: 'local-models' })
-  const { data: sysInfo } = useApi(getSystemInfo, { cacheKey: 'system-info' })
-  const { refetch: refetchPrefs } = useApi(getLLMPreferences, { cacheKey: 'llm-prefs' })
-  const { data: driveInfo } = useApi(getDriveInfo, { cacheKey: 'drive-info' })
+  const { data: localModels, refetch: refetchLocalModels } = useApi(getLocalModels, { cacheKey: CACHE_KEYS.localModels })
+  const { data: sysInfo } = useApi(getSystemInfo, { cacheKey: CACHE_KEYS.systemInfo })
+  const { refetch: refetchPrefs } = useApi(getLLMPreferences, { cacheKey: CACHE_KEYS.llmPreferences })
+  const { data: driveInfo } = useApi(getDriveInfo, { cacheKey: CACHE_KEYS.driveInfo })
 
   const [message, setMessage] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
   const [savingPrefs, setSavingPrefs] = useState(false)
@@ -1154,8 +1166,8 @@ export function SettingsPage() {
           await setProviderDefaultModel(providerId, val).catch(() => {})
         }
       }
-      invalidateCache('llm-prefs')
-      invalidateCache('providers-list')
+      invalidateCache(CACHE_KEYS.llmPreferences)
+      invalidateCache(CACHE_KEYS.providersList)
       refetchPrefs()
       setMessage({ type: 'ok', text: 'LLM preferences saved.' })
     } catch (e) {

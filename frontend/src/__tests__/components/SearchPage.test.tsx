@@ -10,7 +10,7 @@ vi.mock('../../useApi', () => ({
     if (opts?.cacheKey === 'query-history') {
       return { data: { history: [] }, loading: false, error: null, refetch: vi.fn() };
     }
-    if (opts?.cacheKey === 'files-tree') {
+    if (opts?.cacheKey === 'file-tree') {
       return { data: { folders: {}, total_files: 0, total_size: 0 }, loading: false, error: null, refetch: vi.fn() };
     }
     if (opts?.cacheKey === 'app-config') {

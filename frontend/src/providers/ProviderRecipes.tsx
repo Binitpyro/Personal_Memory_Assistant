@@ -2,6 +2,7 @@ import { Rocket, Zap, Shield, Star, X, Loader2 } from 'lucide-react';
 import { useState } from 'react';
 import { setProviderSettings, setLLMPreferences, getLLMPreferences } from '../api';
 import { invalidateCache } from '../useApi';
+import { CACHE_KEYS } from '../cacheKeys'
 
 export function ProviderRecipes({
   onRecipeApplied,
@@ -32,8 +33,8 @@ export function ProviderRecipes({
         [`${defaultModel.provider}_model`]: defaultModel.model,
       });
 
-      invalidateCache('provider-settings');
-      invalidateCache('llm-preferences');
+      invalidateCache(CACHE_KEYS.providerSettings);
+      invalidateCache(CACHE_KEYS.llmPreferences);
       onRecipeApplied();
     } catch (e: any) {
       setApplyError(e.message || 'Failed to apply recipe');

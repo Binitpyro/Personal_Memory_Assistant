@@ -5,6 +5,7 @@ import { getAppConfig, getHealth } from '../api'
 import { useEffect } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useSessionProvider } from '../context/SessionProviderContext'
+import { CACHE_KEYS } from '../cacheKeys'
 
 const navItems = [
   { to: '/library', label: 'Library', icon: BookOpen },
@@ -26,11 +27,11 @@ export function AppShell() {
 
   // Poll faster while a sync is in progress so the banner dismisses quickly
   const { data: health } = useApi(getHealth, {
-    cacheKey: 'health',
+    cacheKey: CACHE_KEYS.health,
     refetchInterval: isSyncing ? 5_000 : 60_000,
   })
   const { data: appConfig } = useApi(getAppConfig, { 
-    cacheKey: 'app-config', 
+    cacheKey: CACHE_KEYS.appConfig, 
     refetchInterval: 60_000 
   })
 

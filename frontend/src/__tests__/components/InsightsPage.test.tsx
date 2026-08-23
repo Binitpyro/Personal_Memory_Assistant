@@ -76,12 +76,17 @@ vi.mock('../../api', () => ({
 }));
 
 describe('InsightsPage Component', () => {
-  it('renders Insights page title and cards', () => {
+  it('renders Insights page title and cards', async () => {
     renderWithProviders(<InsightsPage />);
 
     expect(screen.getByText('Insights')).toBeDefined();
     expect(screen.getByText('Total Files')).toBeDefined();
     expect(screen.getByText('Indexed Files Size')).toBeDefined();
     expect(screen.getByText('Database Size')).toBeDefined();
+
+    // KnowledgePortrait's getPortrait() promise (mocked to resolve with no
+    // themes) settles after the assertions above return, so its setState
+    // lands outside act() unless we wait for the resulting empty-state text.
+    expect(await screen.findByText('No Portrait Available')).toBeDefined();
   });
 });

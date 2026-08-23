@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { screen, fireEvent } from '@testing-library/react';
+import { screen, fireEvent, waitFor } from '@testing-library/react';
 import { ExplorerPage } from '../../pages/ExplorerPage';
 import { renderWithProviders } from '../test-utils';
 import { removeFolderIndex } from '../../api';
@@ -10,6 +10,9 @@ import { removeFolderIndex } from '../../api';
 // it agreed with the component and disagreed with the server, which is why the
 // broken tree it produced was never caught here.
 const ROOT = 'C:/projects/test';
+
+// Mutable so a test can report a background refetch without re-mocking.
+const state = { loading: false };
 
 vi.mock('../../useApi', () => ({
   useApi: vi.fn((_, opts) => {
@@ -25,7 +28,7 @@ vi.mock('../../useApi', () => ({
           total_files: 2,
           total_size: 3072,
         },
-        loading: false,
+        loading: state.loading,
         error: null,
         refetch: vi.fn(),
       };
@@ -50,6 +53,7 @@ vi.mock('../../api', () => ({
 describe('ExplorerPage Component', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    state.loading = false;
     vi.spyOn(window, 'confirm').mockReturnValue(true);
     vi.spyOn(window, 'alert').mockImplementation(() => {});
   });
@@ -92,6 +96,43 @@ describe('ExplorerPage Component', () => {
     const del = screen.getAllByTitle('Delete this folder index')[0];
     fireEvent.click(del);
 
-    expect(removeFolderIndex).toHaveBeenCalledWith([ROOT]);
+    // Awaited now that the delete goes through useMutation: `mutate` schedules
+    // the mutationFn rather than entering it synchronously the way the old bare
+    // `await removeFolderIndex(...)` in the click handler did.
+    await waitFor(() => expect(removeFolderIndex).toHaveBeenCalledWith([ROOT]));
+  });
+
+  it('does not fire a second removal while the first is in flight', async () => {
+    // The delete button had no pending state at all, so a double-click sent two
+    // requests for the same folder.
+    let resolveDelete: (v: unknown) => void = () => {};
+    vi.mocked(removeFolderIndex).mockImplementationOnce(
+      () => new Promise((resolve) => { resolveDelete = resolve; }) as ReturnType<typeof removeFolderIndex>,
+    );
+
+    renderWithProviders(<ExplorerPage />);
+
+    const del = screen.getAllByTitle('Delete this folder index')[0];
+    fireEvent.click(del);
+    await waitFor(() => expect(removeFolderIndex).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(del);
+    expect(removeFolderIndex).toHaveBeenCalledTimes(1);
+
+    resolveDelete({ message: 'ok', chunks_removed: 0 });
+  });
+  it('keeps the tree on screen while a background refetch is in flight', () => {
+    // useApi reports `isLoading || isFetching`, so this goes true on every
+    // background refetch - and with refetchOnWindowFocus enabled, alt-tabbing
+    // back replaced the entire explorer with a full-panel spinner. The guard is
+    // `loading && !tree`: spin only when there is nothing to show yet.
+    state.loading = true;
+
+    renderWithProviders(<ExplorerPage />);
+
+    expect(
+      screen.getAllByTitle('Delete this folder index').length,
+      'the rendered tree was replaced by a spinner during a refetch',
+    ).toBeGreaterThan(0);
   });
 });

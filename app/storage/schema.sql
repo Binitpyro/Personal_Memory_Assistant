@@ -40,7 +40,16 @@ CREATE TABLE IF NOT EXISTS chunks (
 
 -- FK index for efficient joins / cascading deletes
 CREATE INDEX IF NOT EXISTS idx_chunks_file_id ON chunks(file_id);
-CREATE INDEX IF NOT EXISTS idx_chunks_text_lookup ON chunks(id, text_preview);
+
+-- NOTE: idx_chunks_text_lookup ON chunks(id, text_preview) was dropped for the
+-- same reason idx_chunks_covering was (see below), and is dropped from existing
+-- databases in db.py _migrate. `id` is the rowid, so indexing (id, text_preview)
+-- stored a second full copy of the compressed corpus. Measured on 21,584 chunks
+-- of 512-char zlib bodies: +90.2% on disk (4792 -> 9112 KiB) and +57.8% insert
+-- time, for no read benefit at all. The planner did pick it, but only for scans
+-- that read the same bytes either way - the FTS-rebuild projection
+-- `SELECT id, zlib_decompress(text_preview) FROM chunks` measured 0.0815s with
+-- it against 0.0803s without. Do not reintroduce it under a third name.
 
 -- Chunk embeddings table for storing vector math as binary BLOBs
 -- This strictly isolates heavy binary data from normal metadata queries

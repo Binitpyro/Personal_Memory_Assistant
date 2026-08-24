@@ -3,6 +3,7 @@ import { BarChart3, PieChart, TrendingUp, FileType, Loader2, Flame, Snowflake, H
 import { useApi } from '../useApi'
 import { getInsights, getInsightsByType, getFileTree } from '../api'
 import { KnowledgePortrait } from '../components/KnowledgePortrait'
+import { CACHE_KEYS } from '../cacheKeys'
 
 const WebGPUFallback = lazy(() => import('../components/WebGPUFallback').then(m => ({ default: m.WebGPUFallback })))
 const FileTypeTreemap = lazy(() => import('../components/FileTypeTreemap').then(m => ({ default: m.FileTypeTreemap })))
@@ -15,8 +16,8 @@ function formatBytes(bytes: number): string {
 }
 
 export function InsightsPage() {
-  const { data: insights, loading: insightsLoading, error } = useApi(getInsights, { cacheKey: 'insights' })
-  const { data: tree, loading: treeLoading } = useApi(getFileTree, { cacheKey: 'file-tree' })
+  const { data: insights, loading: insightsLoading, error } = useApi(getInsights, { cacheKey: CACHE_KEYS.insights })
+  const { data: tree, loading: treeLoading } = useApi(getFileTree, { cacheKey: CACHE_KEYS.fileTree })
   const [typeFilter, setTypeFilter] = useState<string | null>(null)
   const [filteredTopFiles, setFilteredTopFiles] = useState<{ path: string; size: number }[]>([])
   const [filteredColdFiles, setFilteredColdFiles] = useState<{ path: string; usage_count?: number; size?: number }[]>([])

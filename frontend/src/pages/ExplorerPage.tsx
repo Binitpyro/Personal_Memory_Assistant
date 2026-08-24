@@ -1,9 +1,11 @@
 import { useState, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { FolderTree, File, Folder, ChevronRight, ChevronDown, Loader2, LayoutGrid, List, Trash2, Search, Download, Bot, ScanText } from 'lucide-react'
-import { useApi, invalidateCache } from '../useApi'
-import { getFileTree, removeFolderIndex, getOcrStatus, forceOcr, type FileEntry } from '../api'
+import { useApi } from '../useApi'
+import { getFileTree, removeFolderIndex, getOcrStatus, forceOcr, type FileEntry, type FileTree } from '../api'
 import { FileTypeTreemap } from '../components/FileTypeTreemap'
+import { CACHE_KEYS } from '../cacheKeys'
+import { useOptimisticMutation } from '../useOptimisticMutation'
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
@@ -29,13 +31,17 @@ interface FolderNodeProps {
   readonly onSelect: (file: FileEntry) => void
   readonly selectedPath: string | null
   readonly onDeleteFolder: (path: string) => void
+  readonly deletingPath: string | null
 }
 
-function FolderNode({ node, depth, onSelect, selectedPath, onDeleteFolder }: FolderNodeProps) {
+function FolderNode({ node, depth, onSelect, selectedPath, onDeleteFolder, deletingPath }: FolderNodeProps) {
   const [open, setOpen] = useState(depth === 0)
+
+  const isDeleting = deletingPath === node.fullPath
 
   const handleDelete = (e: React.MouseEvent) => {
     e.stopPropagation()
+    if (isDeleting) return
     if (confirm(`Are you sure you want to remove the index for this folder and all its contents?\n\nPath: ${node.fullPath}`)) {
       onDeleteFolder(node.fullPath)
     }
@@ -64,10 +70,11 @@ function FolderNode({ node, depth, onSelect, selectedPath, onDeleteFolder }: Fol
 
         <button
           onClick={handleDelete}
-          className="opacity-0 group-hover:opacity-100 p-1 hover:bg-error/20 hover:text-error rounded transition-all mr-2"
+          disabled={isDeleting}
+          className="opacity-0 group-hover:opacity-100 p-1 hover:bg-error/20 hover:text-error rounded transition-all mr-2 disabled:opacity-50 disabled:cursor-not-allowed"
           title="Delete this folder index"
         >
-          <Trash2 className="w-3.5 h-3.5" />
+          {isDeleting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
         </button>
       </div>
 
@@ -84,6 +91,7 @@ function FolderNode({ node, depth, onSelect, selectedPath, onDeleteFolder }: Fol
                   onSelect={onSelect}
                   selectedPath={selectedPath}
                   onDeleteFolder={onDeleteFolder}
+                  deletingPath={deletingPath}
                 />
               ))
             }
@@ -122,7 +130,7 @@ function FolderNode({ node, depth, onSelect, selectedPath, onDeleteFolder }: Fol
 /* ── Main Explorer Page ─────────────────────────────────── */
 
 export function ExplorerPage() {
-  const { data: tree, loading, refetch } = useApi(getFileTree, { cacheKey: 'file-tree' })
+  const { data: tree, loading, refetch } = useApi(getFileTree, { cacheKey: CACHE_KEYS.fileTree })
   const [selectedFile, setSelectedFile] = useState<FileEntry | null>(null)
   const [viewMode, setViewMode] = useState<'tree' | 'treemap'>('tree')
   const [activeExtension, setActiveExtension] = useState<string | null>(null)
@@ -131,7 +139,7 @@ export function ExplorerPage() {
   const [ocrMessage, setOcrMessage] = useState('')
   const navigate = useNavigate()
 
-  const { data: ocr } = useApi(getOcrStatus, { cacheKey: 'ocr-status' })
+  const { data: ocr } = useApi(getOcrStatus, { cacheKey: CACHE_KEYS.ocrStatus })
   const ocrReady = !!ocr?.installed && !!ocr?.enabled
 
   const handleForceOcr = async (path: string) => {
@@ -174,18 +182,38 @@ export function ExplorerPage() {
     URL.revokeObjectURL(url)
   }
 
-  const handleDeleteFolder = async (path: string) => {
-    try {
-      await removeFolderIndex([path])
-      invalidateCache('file-tree')
-      invalidateCache('insights')
-      refetch()
+  // The folder disappears from the tree on click rather than after the round
+  // trip. Previously this had no pending state at all, so the row stayed fully
+  // interactive and a double-click sent two removal requests.
+  const deleteFolder = useOptimisticMutation<string, unknown, FileTree>({
+    mutationFn: (path: string) => removeFolderIndex([path]),
+    cacheKey: CACHE_KEYS.fileTree,
+    invalidates: [CACHE_KEYS.insights],
+    optimistic: (current, path) => {
+      if (!current?.folders?.[path]) return current
+      const { [path]: removed, ...rest } = current.folders
+      return {
+        ...current,
+        folders: rest,
+        total_files: Math.max(0, current.total_files - removed.length),
+        total_size: Math.max(0, current.total_size - removed.reduce((n, f) => n + f.size, 0)),
+      }
+    },
+    onSuccess: (_data, path) => {
       if (selectedFile?.path.startsWith(path)) setSelectedFile(null)
-      alert(`Successfully removed index for: ${path}`)
-    } catch (e) {
+    },
+    onError: (e) => {
       alert(`Failed to delete folder index: ${e instanceof Error ? e.message : 'Unknown error'}`)
-    }
+    },
+  })
+
+  // Guarded rather than just disabling the button: the treemap has its own
+  // delete affordance, and useMutation does not dedupe concurrent calls.
+  const handleDeleteFolder = (path: string) => {
+    if (deleteFolder.isPending) return
+    deleteFolder.mutate(path)
   }
+  const deletingPath = deleteFolder.isPending ? deleteFolder.variables : null
 
   const hierarchicalTree = useMemo(() => {
     if (!tree?.folders) return null
@@ -276,7 +304,11 @@ export function ExplorerPage() {
   const isEmptyTree = !hierarchicalTree || hierarchicalTree.length === 0;
 
   const renderMainContent = () => {
-    if (loading) {
+    // `&& !tree` matters: useApi reports `isLoading || isFetching`, so this is
+    // true on every background refetch too - and with refetchOnWindowFocus on,
+    // alt-tabbing back replaced the whole explorer with a spinner. Only show it
+    // when there is genuinely nothing to display yet.
+    if (loading && !tree) {
       return (
         <div className="flex-1 flex items-center justify-center">
           <Loader2 className="w-12 h-12 text-primary animate-spin" />
@@ -304,6 +336,7 @@ export function ExplorerPage() {
                 onSelect={setSelectedFile}
                 selectedPath={selectedFile?.path ?? null}
                 onDeleteFolder={handleDeleteFolder}
+                deletingPath={deletingPath}
               />
             ))}
           </div>

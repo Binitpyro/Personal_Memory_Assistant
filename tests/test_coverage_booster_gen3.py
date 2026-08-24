@@ -80,19 +80,33 @@ async def test_db_manager_coverage_booster(mock_db):
         (10, file_id, 0, 20, compressed_text),
     )
 
+    # A second chunk so the graph below spans two of them. Needed now that
+    # kg_nodes.chunk_id is populated: the column carries
+    # FOREIGN KEY (chunk_id) REFERENCES chunks(id), which a NULL column left
+    # unenforced. Production always has the referent, so the fixture should too.
+    await db.execute_write(
+        "INSERT INTO chunks (id, file_id, start_offset, end_offset, text_preview) VALUES (?, ?, ?, ?, ?)",
+        (11, file_id, 20, 40, compressed_text),
+    )
+
     # 5. Test BFS and knowledge graph queries
     assert await db.bfs_from_chunks([]) == []
     assert await db.get_relational_paths([]) == []
 
-    # Insert kg_nodes and kg_edges
-    # properties contains chunk_id
+    # Insert kg_nodes and kg_edges.
+    # chunk_id goes in the column, not only in the properties JSON. This fixture
+    # used to omit the column and rely on json_extract(properties,'$.chunk_id'),
+    # which is a row shape production never writes: insert_kg_nodes_bulk fills
+    # both from the same variable (app/indexing/service.py), and the _migrate
+    # back-fill populates the column for pre-existing rows. The traversal reads
+    # the column now, so writing only the JSON tested a path nothing produced.
     await db.execute_write(
-        "INSERT INTO kg_nodes (id, label, type, properties) VALUES (?, ?, ?, ?)",
-        ("node1", "Class", "type_foo", '{"chunk_id": 10}'),
+        "INSERT INTO kg_nodes (id, label, type, properties, chunk_id) VALUES (?, ?, ?, ?, ?)",
+        ("node1", "Class", "type_foo", '{"chunk_id": 10}', 10),
     )
     await db.execute_write(
-        "INSERT INTO kg_nodes (id, label, type, properties) VALUES (?, ?, ?, ?)",
-        ("node2", "Method", "type_bar", '{"chunk_id": 11}'),
+        "INSERT INTO kg_nodes (id, label, type, properties, chunk_id) VALUES (?, ?, ?, ?, ?)",
+        ("node2", "Method", "type_bar", '{"chunk_id": 11}', 11),
     )
     await db.execute_write(
         "INSERT INTO kg_edges (source, target, relation) VALUES (?, ?, ?)",

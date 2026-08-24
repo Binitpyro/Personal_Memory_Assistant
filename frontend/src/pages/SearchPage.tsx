@@ -9,6 +9,7 @@ import { MessageBubble } from '../components/chat/MessageBubble';
 import { FilterBar } from '../components/chat/FilterBar';
 import { ModelPicker } from '../components/providers/ModelPicker';
 import { useDreamscapeStore } from '../store/dreamscapeStore';
+import { CACHE_KEYS } from '../cacheKeys'
 
 export function SearchPage() {
   const selectedChunks = useDreamscapeStore(state => state.selectedChunks);
@@ -22,10 +23,10 @@ export function SearchPage() {
   const [selectedFolderTag, setSelectedFolderTag] = useState('');
   const [selectedMode, setSelectedMode] = useState('');
 
-  const { data: historyData, refetch: refetchHistory } = useApi(getQueryHistory, { cacheKey: 'query-history' });
+  const { data: historyData, refetch: refetchHistory } = useApi(getQueryHistory, { cacheKey: CACHE_KEYS.queryHistory });
   
   const { messages, executeSearch, resetChat: resetChatStream, stopStream } = useChatStream(() => {
-    invalidateCache('query-history');
+    invalidateCache(CACHE_KEYS.queryHistory);
     refetchHistory();
   });
 
@@ -35,7 +36,7 @@ export function SearchPage() {
   // already pushes those events. A fixed 15s poll re-fetched the whole tree
   // forever on a corpus that had not moved.
   const { data: fileTree, refetch: refetchFileTree } = useApi(getFileTree, {
-    cacheKey: 'files-tree',
+    cacheKey: CACHE_KEYS.fileTree,
   });
 
   useEffect(() => {
@@ -45,7 +46,7 @@ export function SearchPage() {
       // frame - those arrive continuously during a scan.
       const status = evt?.status ?? '';
       if (status !== last && (status === 'completed' || status === 'idle')) {
-        invalidateCache('files-tree');
+        invalidateCache(CACHE_KEYS.fileTree);
         refetchFileTree();
       }
       last = status;
@@ -109,7 +110,7 @@ export function SearchPage() {
     const doClear = async () => {
       try {
         const res = await clearQueryHistory();
-        invalidateCache('query-history');
+        invalidateCache(CACHE_KEYS.queryHistory);
         refetchHistory();
         resetChatStream();
         // The backend reports whether the persistent semantic cache went with

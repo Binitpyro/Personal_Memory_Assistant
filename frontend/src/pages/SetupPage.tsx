@@ -3,6 +3,7 @@ import { Brain, Shield, ArrowRight, CheckCircle2, ChevronRight, HardDrive, Alert
 import { useNavigate } from 'react-router-dom'
 import { useApi } from '../useApi'
 import { getLocalModels, getDriveInfo, enableSplitBrain, getProviders, setProviderKey } from '../api'
+import { CACHE_KEYS } from '../cacheKeys'
 
 const PROVIDERS = [
     { id: 'gemini', name: 'Google Gemini', icon: '✨' },
@@ -12,7 +13,7 @@ const PROVIDERS = [
 ]
 
 function ApiKeyInput({ provider }: { provider: typeof PROVIDERS[0] }) {
-    const { data: providers, refetch } = useApi(getProviders, { cacheKey: 'providers-list' })
+    const { data: providers, refetch } = useApi(getProviders, { cacheKey: CACHE_KEYS.providersList })
     const pData = providers?.find(p => p.spec.id === provider.id)
     const [key, setKey] = useState('')
     const [saving, setSaving] = useState(false)
@@ -84,9 +85,9 @@ function ApiKeyInput({ provider }: { provider: typeof PROVIDERS[0] }) {
 
 export function SetupPage() {
     const navigate = useNavigate()
-    const { data: providers, refetch: refetchProviders, loading: providersLoading } = useApi(getProviders, { cacheKey: 'providers-list' })
-    const { data: localModels, loading: localModelsLoading } = useApi(getLocalModels, { cacheKey: 'local-models' })
-    const { data: driveInfo, loading: driveLoading } = useApi(getDriveInfo, { cacheKey: 'drive-info' })
+    const { data: providers, refetch: refetchProviders, loading: providersLoading } = useApi(getProviders, { cacheKey: CACHE_KEYS.providersList })
+    const { data: localModels, loading: localModelsLoading } = useApi(getLocalModels, { cacheKey: CACHE_KEYS.localModels })
+    const { data: driveInfo, loading: driveLoading } = useApi(getDriveInfo, { cacheKey: CACHE_KEYS.driveInfo })
 
     const isLoading = providersLoading || localModelsLoading || driveLoading
 
@@ -181,7 +182,14 @@ export function SetupPage() {
                             </div>
                         )}
 
-                        {!isLoading && !isDriveConfigSafe && driveInfo && !requiresRestart && (
+                        {/* Gated on data, not on fetching state. `isLoading` is
+                            `isLoading || isFetching`, and the focus/visibilitychange
+                            listeners above refetch on every alt-tab - so `!isLoading`
+                            made this storage-compatibility warning blink out exactly
+                            when the user returned to the page. `driveInfo` presence is
+                            the real guard, and isDriveConfigSafe already defaults to
+                            true while it is absent. */}
+                        {!isDriveConfigSafe && driveInfo && !requiresRestart && (
                             <div className="p-4 rounded-xl border border-warning bg-warning/10 flex flex-col gap-3">
                                 <div className="flex items-start gap-3">
                                     <AlertTriangle className="w-5 h-5 text-warning flex-shrink-0 mt-0.5" />
@@ -230,7 +238,9 @@ export function SetupPage() {
                         )}
 
                         {/* Drive OK badge — shown when split_brain is active on portable drive */}
-                        {!isLoading && isDriveConfigSafe && driveInfo?.is_portable_fs && (
+                        {/* Same reasoning as the warning above: `driveInfo?.is_portable_fs`
+                            already requires the data to have arrived. */}
+                        {isDriveConfigSafe && driveInfo?.is_portable_fs && (
                             <div className="p-3 rounded-xl border border-success bg-success/5 flex items-center gap-3">
                                 <CheckCircle2 className="w-4 h-4 text-success flex-shrink-0" />
                                 <p className="text-sm text-success font-medium">

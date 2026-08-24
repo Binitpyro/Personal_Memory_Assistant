@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { screen, fireEvent, waitFor } from '@testing-library/react';
+import { screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { SettingsPage } from '../../pages/SettingsPage';
 import { renderWithProviders } from '../test-utils';
 import { invalidateCache } from '../../useApi';
@@ -62,10 +62,10 @@ vi.mock('../../useApi', () => ({
     if (opts?.cacheKey === 'auth-status') return wrap(mockAuthStatus);
     if (opts?.cacheKey === 'local-models') return wrap(state.localModels);
     if (opts?.cacheKey === 'system-info') return wrap(mockSystemInfo);
-    if (opts?.cacheKey === 'llm-prefs') return wrap(mockLLMPrefs);
+    if (opts?.cacheKey === 'llm-preferences') return wrap(mockLLMPrefs);
     if (opts?.cacheKey === 'drive-info') return wrap(mockDriveInfo);
     if (opts?.cacheKey === 'providers-list') return wrap(mockProviders);
-    if (opts?.cacheKey === 'ocr-status-settings') return wrap(state.ocrStatus);
+    if (opts?.cacheKey === 'ocr-status') return wrap(state.ocrStatus);
     if (opts?.cacheKey === 'ocr-tiers') return wrap(state.ocrTiers);
     if (opts?.cacheKey === 'ocr-vlm-models') return wrap(state.vlmModels);
     if (opts?.cacheKey === 'ocr-vlm-selection') return wrap({ selection: null });
@@ -106,7 +106,9 @@ vi.mock('../../api', () => {
     getVlmSelection: vi.fn(),
     selectVlmModel: vi.fn(),
     getOcrInstallState: vi.fn(),
-    getOcrQueue: vi.fn(),
+    // OcrSection awaits this and reads .items - a bare vi.fn() resolves
+    // undefined and sends every test down loadFailed()'s catch branch.
+    getOcrQueue: vi.fn(() => Promise.resolve({ items: [] })),
     installOcrTier: vi.fn(),
     uninstallOcrTier: vi.fn(),
     cancelOcrInstall: vi.fn(),
@@ -116,6 +118,16 @@ vi.mock('../../api', () => {
     clearOcrCache: vi.fn(),
   };
 });
+
+// OcrSection's loadFailed() effect calls getOcrQueue() and setStates in the
+// resulting microtask. A synchronous test body never yields, so that update
+// lands outside act(). Awaiting inside act() flushes it - React keeps the act
+// queue installed across the await, so the continuation is covered.
+async function renderSettings() {
+  const result = renderWithProviders(<SettingsPage />);
+  await act(async () => {});
+  return result;
+}
 
 describe('SettingsPage Component', () => {
   beforeEach(() => {
@@ -130,40 +142,40 @@ describe('SettingsPage Component', () => {
     };
   });
 
-  it('renders SettingsPage with settings groups', () => {
-    renderWithProviders(<SettingsPage />);
+  it('renders SettingsPage with settings groups', async () => {
+    await renderSettings();
 
     expect(screen.getByText('Settings')).toBeDefined();
     expect(screen.getByText('Model Selection')).toBeDefined();
   });
 
-  it('offers to start an installed local provider that is offline', () => {
-    renderWithProviders(<SettingsPage />);
+  it('offers to start an installed local provider that is offline', async () => {
+    await renderSettings();
 
     expect(screen.getByRole('button', { name: /Start Ollama/i })).toBeDefined();
     expect(screen.getByRole('button', { name: /Start LM Studio/i })).toBeDefined();
   });
 
-  it('links to the installer when the provider is not installed', () => {
+  it('links to the installer when the provider is not installed', async () => {
     state.launchStatus.ollama = { ...offlineInstalled('ollama'), installed: false, method: null };
-    renderWithProviders(<SettingsPage />);
+    await renderSettings();
 
     expect(screen.queryByRole('button', { name: /Start Ollama/i })).toBeNull();
     const link = screen.getByRole('link', { name: /Install Ollama/i });
     expect(link.getAttribute('href')).toBe('https://ollama.com/download');
   });
 
-  it('hides the start button once the provider is detected', () => {
+  it('hides the start button once the provider is detected', async () => {
     state.localModels.ollama = { detected: true, models: ['llama3:8b'] };
-    renderWithProviders(<SettingsPage />);
+    await renderSettings();
 
     expect(screen.queryByRole('button', { name: /Start Ollama/i })).toBeNull();
     expect(screen.getByText('llama3:8b')).toBeDefined();
   });
 
-  it('falls back to the manual hint when launch status is unavailable', () => {
+  it('falls back to the manual hint when launch status is unavailable', async () => {
     state.launchStatus = {};
-    renderWithProviders(<SettingsPage />);
+    await renderSettings();
 
     expect(screen.getByText(/Ensure Ollama is running on localhost:11434/i)).toBeDefined();
   });
@@ -178,7 +190,7 @@ describe('SettingsPage Component', () => {
       elapsed_ms: 2100,
     });
 
-    renderWithProviders(<SettingsPage />);
+    await renderSettings();
     fireEvent.click(screen.getByRole('button', { name: /Start Ollama/i }));
 
     await waitFor(() => expect(launchProvider).toHaveBeenCalledWith('ollama'));
@@ -196,7 +208,7 @@ describe('SettingsPage Component', () => {
       elapsed_ms: 5,
     });
 
-    renderWithProviders(<SettingsPage />);
+    await renderSettings();
     fireEvent.click(screen.getByRole('button', { name: /Start Ollama/i }));
 
     expect(await screen.findByText(/doesn't appear to be installed/i)).toBeDefined();
@@ -206,7 +218,7 @@ describe('SettingsPage Component', () => {
     const { selectOcrTier } = await import('../../api');
     vi.mocked(selectOcrTier).mockResolvedValue({ ok: true, tier: 'gpu' });
 
-    renderWithProviders(<SettingsPage />);
+    await renderSettings();
 
     // Click GPU tier tab ("High accuracy")
     fireEvent.click(screen.getByRole('button', { name: /High accuracy/i }));
@@ -220,7 +232,7 @@ describe('SettingsPage Component', () => {
   });
 
   it('renders VLM picker with check again and start buttons when offline', async () => {
-    renderWithProviders(<SettingsPage />);
+    await renderSettings();
 
     // Click Vision model tab ("Your own AI model")
     fireEvent.click(screen.getByRole('button', { name: /Your own AI model/i }));

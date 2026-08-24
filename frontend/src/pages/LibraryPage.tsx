@@ -41,6 +41,13 @@ export function LibraryPage() {
     refetchInterval: 10_000,
   })
 
+  // OCR runs after the index run finishes, so this keeps polling regardless of
+  // indexing state. Without it "indexing complete" is a lie for scanned PDFs.
+  const { data: ocr } = useApi(getOcrStatus, {
+    cacheKey: 'ocr-status',
+    refetchInterval: 10_000,
+  })
+
   // Derive running state from BOTH local flag and polled backend status
   const isRunning = indexing || status?.status === 'running'
 

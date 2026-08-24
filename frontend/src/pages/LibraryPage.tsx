@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect } from 'react'
+import { useMutation } from '@tanstack/react-query'
 import { BookOpen, HardDrive, FolderPlus, RefreshCw, Loader2, CheckCircle2, AlertCircle, Play, Trash2, ScanText } from 'lucide-react'
-import { useApi, invalidateCache } from '../useApi'
+import { useApi, invalidateCorpusCaches } from '../useApi'
 import {
   getHealth,
   getIndexStatus,
@@ -16,6 +17,7 @@ import {
   clearBackendCaches,
   type IndexStatus,
 } from '../api'
+import { CACHE_KEYS } from '../cacheKeys'
 
 export function LibraryPage() {
   const [folderPath, setFolderPath] = useState('')
@@ -26,16 +28,16 @@ export function LibraryPage() {
 
   // Pause /index/status polling while local "indexing" is true; SSE drives live progress.
   const { data: status, refetch: refetchStatus } = useApi(getIndexStatus, {
-    cacheKey: 'index-status',
+    cacheKey: CACHE_KEYS.indexStatus,
     refetchInterval: indexing ? 0 : 10_000,
   })
-  const { data: sysInfo } = useApi(getSystemInfo, { cacheKey: 'system-info' })
-  const { data: config } = useApi(getAppConfig, { cacheKey: 'app-config' })
+  const { data: sysInfo } = useApi(getSystemInfo, { cacheKey: CACHE_KEYS.systemInfo })
+  const { data: config } = useApi(getAppConfig, { cacheKey: CACHE_KEYS.appConfig })
 
   // OCR runs after the index run finishes, so this keeps polling regardless of
   // indexing state. Without it "indexing complete" is a lie for scanned PDFs.
   const { data: ocr } = useApi(getOcrStatus, {
-    cacheKey: 'ocr-status',
+    cacheKey: CACHE_KEYS.ocrStatus,
     refetchInterval: 10_000,
   })
 
@@ -44,7 +46,7 @@ export function LibraryPage() {
 
   // Pause background polling while SSE stream is active
   const { data: health, refetch: refetchHealth } = useApi(getHealth, {
-    cacheKey: 'health',
+    cacheKey: CACHE_KEYS.health,
     refetchInterval: isRunning ? 0 : 10_000
   })
 
@@ -63,7 +65,7 @@ export function LibraryPage() {
         setIndexing(false)
         setCancelling(false)
         setLiveProgress(null)
-        invalidateCache()
+        invalidateCorpusCaches()
         refetchHealth()
         refetchStatus()
         setMessage({ type: 'ok', text: `Indexing complete — ${data.processed_files} files processed` })
@@ -105,19 +107,27 @@ export function LibraryPage() {
     }
   }, [isRunning, cancelling])
 
-  const handleClear = useCallback(async () => {
-    if (isRunning) return
-    if (!confirm('This will permanently delete ALL indexed data. Continue?')) return
-    try {
-      await clearIndex()
-      invalidateCache()
+  // Neither of these has optimistic state worth showing - what they need is a
+  // pending one. Both used to run with no indication at all, so the button
+  // stayed live and a second click sent a second request.
+  const clearIndexMutation = useMutation({
+    mutationFn: clearIndex,
+    onSuccess: () => {
+      invalidateCorpusCaches()
       refetchHealth()
       refetchStatus()
       setMessage({ type: 'ok', text: 'All indexed data cleared' })
-    } catch (e) {
+    },
+    onError: (e) => {
       setMessage({ type: 'err', text: e instanceof Error ? e.message : 'Clear failed' })
-    }
-  }, [refetchHealth, refetchStatus, isRunning])
+    },
+  })
+
+  const handleClear = useCallback(() => {
+    if (isRunning || clearIndexMutation.isPending) return
+    if (!confirm('This will permanently delete ALL indexed data. Continue?')) return
+    clearIndexMutation.mutate()
+  }, [isRunning, clearIndexMutation])
 
 
 
@@ -132,21 +142,26 @@ export function LibraryPage() {
     }
   }, [isRunning])
 
-  const handleRefresh = useCallback(async () => {
-    try {
-      await clearBackendCaches()
-      invalidateCache()
+  const refreshMutation = useMutation({
+    mutationFn: clearBackendCaches,
+    // The local refresh happens either way: a backend cache that refuses to
+    // clear is not a reason to leave the user looking at stale numbers.
+    onSettled: (_data, error) => {
+      if (error) console.error('Failed to clear backend caches:', error)
+      invalidateCorpusCaches()
       refetchHealth()
       refetchStatus()
-      setMessage({ type: 'ok', text: 'Data refreshed successfully' })
-    } catch (e) {
-      console.error('Failed to clear backend caches:', e)
-      invalidateCache()
-      refetchHealth()
-      refetchStatus()
-      setMessage({ type: 'ok', text: 'Local data refreshed' })
-    }
-  }, [refetchHealth, refetchStatus])
+      setMessage({
+        type: 'ok',
+        text: error ? 'Local data refreshed' : 'Data refreshed successfully',
+      })
+    },
+  })
+
+  const handleRefresh = useCallback(() => {
+    if (refreshMutation.isPending) return
+    refreshMutation.mutate()
+  }, [refreshMutation])
 
   const filesIndexed = status?.files_indexed ?? 0
   const chunksIndexed = status?.chunks_indexed ?? 0
@@ -167,7 +182,7 @@ export function LibraryPage() {
           </p>
         </div>
         <div className="flex gap-3">
-          <button onClick={handleRefresh} className="glass-button !bg-primary !border-primary !text-white hover:!bg-primary-h hover:!text-white !py-2 gap-2 shadow-lg transition-all duration-200">
+          <button onClick={handleRefresh} disabled={refreshMutation.isPending} className="glass-button !bg-primary !border-primary !text-white hover:!bg-primary-h hover:!text-white !py-2 gap-2 shadow-lg transition-all duration-200 disabled:opacity-60">
             <RefreshCw className="w-4 h-4" />
             Refresh
           </button>
@@ -359,11 +374,13 @@ export function LibraryPage() {
           </button>
           <button
             onClick={handleClear}
-            disabled={isRunning}
+            disabled={isRunning || clearIndexMutation.isPending}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-600 border border-red-500/20 transition-all font-black text-[10px] uppercase tracking-widest shadow-sm disabled:opacity-40 disabled:cursor-not-allowed"
           >
-            <Trash2 className="w-3 h-3" />
-            Clear Index
+            {clearIndexMutation.isPending
+              ? <Loader2 className="w-3 h-3 animate-spin" />
+              : <Trash2 className="w-3 h-3" />}
+            {clearIndexMutation.isPending ? 'Clearing…' : 'Clear Index'}
           </button>
         </div>
       </div>

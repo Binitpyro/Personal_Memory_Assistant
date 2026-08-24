@@ -897,3 +897,84 @@ async def test_agentic_loop_is_off_by_default(monkeypatch):
         "q", plan, MagicMock(), MagicMock(), MagicMock(), MagicMock(), 10, None, None, None
     )
     assert got is None and trace is None
+
+
+@pytest.mark.asyncio
+async def test_graph_seed_lookup_uses_an_index_rather_than_scanning(real_db):
+    """The seed step must be an index search, not a full scan of kg_nodes.
+
+    `_bfs_cte` used to select seeds with
+    `json_extract(properties, '$.chunk_id') IN (...)`, which is not sargable, so
+    every GRAPH_SEARCH began by scanning kg_nodes and JSON-parsing each row -
+    while `kg_nodes.chunk_id` sat right there, written on every insert and
+    indexed by nothing. Measured on 64,752 nodes with 20 seeds: 22.54 ms
+    scanning against 0.06 ms through the index.
+
+    Asserted against the query plan because that is the property; a behavioural
+    test passes either way, which is exactly why this survived so long.
+    """
+    chunk_ids = await _seed_cycle(real_db, size=3)
+
+    query = DatabaseManager._bfs_cte("?") + " SELECT COUNT(*) FROM bfs_nodes"  # noqa: S608
+    plan = [
+        row[3]
+        for row in await real_db.execute_query("EXPLAIN QUERY PLAN " + query, (chunk_ids[0], 3, 3))
+    ]
+
+    seed_steps = [step for step in plan if "kg_nodes" in step]
+    assert seed_steps, plan
+    assert any("idx_kg_nodes_chunk_id" in step for step in seed_steps), plan
+    assert not any(step.startswith("SCAN kg_nodes") for step in seed_steps), plan
+
+
+@pytest.mark.asyncio
+async def test_nodes_whose_chunk_id_lives_only_in_json_are_backfilled(tmp_path: Path):
+    """A NULL chunk_id column would silently drop a node from every graph seed.
+
+    The traversal reads `kg_nodes.chunk_id` rather than parsing
+    `properties`. The existing rebuild migration back-fills that column, but
+    only when the column is absent altogether - a database that already had it
+    keeps whatever was written. Verified divergent before this back-fill
+    existed: with one JSON-only row, the old predicate returned it and the
+    column predicate did not.
+
+    Orphans stay NULL on purpose: chunk_id is a FOREIGN KEY onto chunks(id) with
+    foreign_keys ON, so adopting a deleted chunk would fail the migration.
+    """
+    db_file = tmp_path / "backfill.db"
+    mgr = DatabaseManager(str(db_file))
+    await mgr.init_db(schema_path="app/storage/schema.sql")
+    conn = mgr._get_conn()
+    await conn.execute("INSERT INTO files (path,size,modified_at,type) VALUES ('f',1,'now','.py')")
+    await conn.execute(
+        "INSERT INTO chunks (id,file_id,start_offset,end_offset,text_preview) VALUES (7,1,0,10,?)",
+        (zlib.compress(b"body"),),
+    )
+    # Provenance in the JSON only, as a pre-existing row could carry it.
+    await conn.execute(
+        "INSERT INTO kg_nodes (id,type,label,properties,chunk_id) VALUES (?,?,?,?,?)",
+        ("orphaned_col", "func", "f", json.dumps({"chunk_id": 7}), None),
+    )
+    # Same shape, but the chunk it names is gone.
+    await conn.execute(
+        "INSERT INTO kg_nodes (id,type,label,properties,chunk_id) VALUES (?,?,?,?,?)",
+        ("dangling", "func", "g", json.dumps({"chunk_id": 999}), None),
+    )
+    await conn.commit()
+    await mgr.close()
+
+    # Re-open: _migrate runs again and should adopt the recoverable row.
+    mgr = DatabaseManager(str(db_file))
+    try:
+        await mgr.init_db(schema_path="app/storage/schema.sql")
+        rows = dict(
+            (r[0], r[1])
+            for r in await mgr.execute_query("SELECT id, chunk_id FROM kg_nodes ORDER BY id")
+        )
+        seeds = await mgr.bfs_from_chunks([7], max_depth=1, limit=5)
+    finally:
+        await mgr.close()
+
+    assert rows["orphaned_col"] == 7, "a recoverable node was left unreachable"
+    assert rows["dangling"] is None, "a node pointing at a deleted chunk must stay NULL"
+    assert 7 in seeds, "the back-filled node is still not reachable as a graph seed"

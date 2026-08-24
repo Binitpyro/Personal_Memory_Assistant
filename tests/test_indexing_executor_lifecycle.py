@@ -394,3 +394,79 @@ class TestExtractStatus:
         # derives a fallback root for exactly these rows.
         assert [tuple(r) for r in rows] == [("/srv/proj/a.py", "")]
         assert "idx_files_root_path" in idx
+
+    @pytest.mark.asyncio
+    async def test_the_redundant_text_lookup_index_is_gone_and_stays_gone(self, tmp_path):
+        """`idx_chunks_text_lookup` duplicated the whole compressed corpus.
+
+        `chunks.id` is the rowid, so an index on (id, text_preview) is a second
+        full copy of the text column. Measured on 21,584 chunks: +90.2% on disk
+        and +57.8% insert time, against no read benefit on any query shape -
+        including the FTS-rebuild projection, the only one the planner chose it
+        for. This is the same defect as `idx_chunks_covering`, which was already
+        dropped for the same reason.
+
+        What this test pins is the DROP in `_migrate`. It is the load-bearing
+        half: `executescript(schema.sql)` runs *before* `_migrate`, so the drop
+        wins regardless of what schema.sql declares - verified by restoring the
+        CREATE line and watching this still pass. Removing the CREATE is
+        therefore not what makes the behaviour correct; it is what stops every
+        startup from building the index and immediately dropping it again.
+
+        The reverse control does bite: disable the DROP and the legacy half
+        fails, because `executescript` never reconciles away a declaration that
+        schema.sql has stopped making.
+        """
+        import aiosqlite
+
+        from app.storage.db import DatabaseManager
+
+        # Half one: an existing index that already carries it must lose it.
+        legacy = tmp_path / "legacy.db"
+        async with aiosqlite.connect(str(legacy)) as conn:
+            await conn.execute(
+                "CREATE TABLE chunks (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " file_id INTEGER NOT NULL, start_offset INTEGER NOT NULL,"
+                " end_offset INTEGER NOT NULL, text_preview TEXT NOT NULL)"
+            )
+            await conn.execute("CREATE INDEX idx_chunks_text_lookup ON chunks(id, text_preview)")
+            await conn.commit()
+            async with conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name=?",
+                ("idx_chunks_text_lookup",),
+            ) as cur:
+                assert await cur.fetchone(), "fixture did not create the index"
+
+        mgr = DatabaseManager(str(legacy))
+        try:
+            await mgr.init_db(schema_path="app/storage/schema.sql")
+            migrated = {
+                r[0]
+                for r in await mgr.execute_query(
+                    "SELECT name FROM sqlite_master WHERE type='index'"
+                )
+            }
+        finally:
+            await mgr.close()
+
+        assert "idx_chunks_text_lookup" not in migrated, (
+            "an existing database kept the redundant index through init_db"
+        )
+        # The FK index is the one that earns its keep; it must survive.
+        assert "idx_chunks_file_id" in migrated
+
+        # Half two: a fresh database must never grow it in the first place.
+        fresh_mgr = DatabaseManager(str(tmp_path / "fresh.db"))
+        try:
+            await fresh_mgr.init_db(schema_path="app/storage/schema.sql")
+            fresh = {
+                r[0]
+                for r in await fresh_mgr.execute_query(
+                    "SELECT name FROM sqlite_master WHERE type='index'"
+                )
+            }
+        finally:
+            await fresh_mgr.close()
+
+        assert "idx_chunks_text_lookup" not in fresh, "schema.sql still declares it"
+        assert "idx_chunks_file_id" in fresh

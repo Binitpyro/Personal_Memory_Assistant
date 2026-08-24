@@ -5,6 +5,7 @@ import {
   setLLMPreferences,
   getLLMPreferences,
   getProviderSettings,
+  type ProviderRoutingSettings,
   setProviderSettings,
 } from '../api';
 import type {
@@ -31,31 +32,43 @@ import {
   Zap,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
+import { CACHE_KEYS } from '../cacheKeys'
+import { useOptimisticMutation } from '../useOptimisticMutation'
 
 export function ProvidersPage() {
   const navigate = useNavigate();
-  const { data: providers, refetch: refetchProviders, loading } = useApi(getProviders, { cacheKey: 'providers-list' });
-  const { data: prefs, refetch: refetchPrefs } = useApi(getLLMPreferences, { cacheKey: 'llm-preferences' });
-  const { data: routingSettings, refetch: refetchSettings } = useApi(getProviderSettings, { cacheKey: 'provider-settings' });
+  const { data: providers, refetch: refetchProviders, loading } = useApi(getProviders, { cacheKey: CACHE_KEYS.providersList });
+  const { data: prefs, refetch: refetchPrefs } = useApi(getLLMPreferences, { cacheKey: CACHE_KEYS.llmPreferences });
+  const { data: routingSettings, refetch: refetchSettings } = useApi(getProviderSettings, { cacheKey: CACHE_KEYS.providerSettings });
 
-  const handleMoveFallback = async (index: number, direction: number) => {
+  // Both of these write provider settings, so they share one cache entry and one
+  // optimistic path: the list reorders and the checkbox moves on click instead
+  // of waiting for the round trip and the refetch behind it.
+  const updateRoutingSettings = useOptimisticMutation<
+    Partial<ProviderRoutingSettings>,
+    unknown,
+    ProviderRoutingSettings
+  >({
+    mutationFn: setProviderSettings,
+    cacheKey: CACHE_KEYS.providerSettings,
+    optimistic: (current, patch) => (current ? { ...current, ...patch } : current),
+  });
+
+  const handleMoveFallback = (index: number, direction: number) => {
     if (!routingSettings) return;
     const newChain = [...routingSettings.fallback_chain];
     const targetIndex = index + direction;
     if (targetIndex < 0 || targetIndex >= newChain.length) return;
-    
+
     // Swap
     const temp = newChain[index];
     newChain[index] = newChain[targetIndex];
     newChain[targetIndex] = temp;
-    
-    await setProviderSettings({
+
+    updateRoutingSettings.mutate({
       provider: routingSettings.provider,
-      fallback_chain: newChain
+      fallback_chain: newChain,
     });
-    
-    invalidateCache('provider-settings');
-    refetchSettings();
   };
 
   const [selectedId, setSelectedId] = useState<string>('gemini');
@@ -429,10 +442,9 @@ export function ProvidersPage() {
                       <input
                         type="checkbox"
                         checked={!!routingSettings?.cloud_privacy_consent}
-                        onChange={async e => {
-                          await setProviderSettings({ cloud_privacy_consent: e.target.checked });
-                          invalidateCache('provider-settings');
-                          refetchSettings();
+                        disabled={updateRoutingSettings.isPending}
+                        onChange={e => {
+                          updateRoutingSettings.mutate({ cloud_privacy_consent: e.target.checked });
                         }}
                         className="rounded border-amber-500/40"
                       />

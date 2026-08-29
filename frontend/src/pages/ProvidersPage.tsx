@@ -11,7 +11,8 @@ import {
 import type {
   ValidationResponse,
 } from '../api';
-import { useApi, invalidateCache } from '../useApi';
+import { toast } from 'sonner';
+import { useApi } from '../useApi';
 
 import { ProviderIcon } from '../providers/icons';
 import { useProviderValidation } from '../providers/useProviderValidation';
@@ -137,10 +138,22 @@ export function ProvidersPage() {
   const handleSave = async () => {
     setSaveError(null);
     try {
-      if (apiKey && apiKey !== '••••••••••••••••') {
-        const ok = await saveKey(apiKey);
+      const keyChanged = !!apiKey && apiKey !== '••••••••••••••••';
+      // The Base Endpoint URL was editable, was sent on Validate, and was
+      // silently dropped on Save - handleSave only ever passed the API key, so
+      // an endpoint change appeared to succeed and never persisted. Gated on
+      // base_url_editable because the backend 400s otherwise.
+      const urlChanged =
+        !!selectedProvider?.spec.base_url_editable &&
+        (baseUrl || null) !== (selectedProvider.base_url || null);
+
+      if (keyChanged || urlChanged) {
+        const ok = await saveKey(
+          keyChanged ? apiKey : null,
+          urlChanged ? (baseUrl || null) : undefined,
+        );
         if (!ok) {
-          setSaveError('Failed to verify and save the API key.');
+          setSaveError('Failed to verify and save the connection details.');
           return;
         }
       }
@@ -152,7 +165,17 @@ export function ProvidersPage() {
     }
   };
 
-  const handleDelete = async () => {
+  const handleDelete = () => {
+    // Removing a connection deletes the stored key from the OS keyring;
+    // there is no undo and no copy of it left in the app.
+    toast('Remove this connection?', {
+      description: `The stored key for ${selectedProvider?.spec.display_name ?? 'this provider'} is deleted from your keyring.`,
+      action: { label: 'Remove', onClick: () => void doDelete() },
+      cancel: { label: 'Cancel', onClick: () => {} },
+    });
+  };
+
+  const doDelete = async () => {
     setSaveError(null);
     try {
       const ok = await deleteKey();
@@ -234,13 +257,13 @@ export function ProvidersPage() {
     <div className="flex-1 flex flex-col h-full bg-background overflow-hidden relative">
       <TourOverlay />
       {/* Top Header */}
-      <div className="flex items-center justify-between px-8 py-4 border-b border-primary/10 bg-white/40 backdrop-blur-md relative z-10">
+      <div className="flex items-center justify-between px-8 py-4 border-b border-primary/10 bg-surface backdrop-blur-md relative z-10">
         <div className="flex items-center gap-3">
           <button onClick={() => navigate('/settings')} className="p-2 hover:bg-primary/5 rounded-lg transition-colors">
             <ArrowLeft className="w-5 h-5 text-text-secondary" />
           </button>
           <div>
-            <h1 className="text-xl font-bold tracking-tight">Intelligence Engines</h1>
+            <h1 className="font-serif text-xl font-normal tracking-tight">Intelligence Engines</h1>
             <p className="text-xs text-text-secondary">Configure cloud providers and local model backends</p>
           </div>
         </div>
@@ -258,9 +281,9 @@ export function ProvidersPage() {
       {/* Main Panel */}
       <div className="flex-1 flex overflow-hidden">
         {/* Left Side: Providers list */}
-        <div id="tour-providers-list" className="w-80 border-r border-primary/10 bg-white/20 flex flex-col overflow-y-auto p-4 gap-2">
+        <div id="tour-providers-list" className="w-80 border-r border-primary/10 bg-raised flex flex-col overflow-y-auto p-4 gap-2">
           {routingSettings && routingSettings.fallback_chain && routingSettings.fallback_chain.length > 0 && (
-            <div id="tour-fallback-router" className="glass rounded-2xl p-3 border border-primary/10 bg-white/30 flex flex-col gap-2.5 mb-2 shrink-0">
+            <div id="tour-fallback-router" className="glass rounded-2xl p-3 border border-primary/10 bg-surface flex flex-col gap-2.5 mb-2 shrink-0">
               <div className="text-[10px] font-bold text-text-secondary uppercase tracking-wider flex items-center justify-between">
                 <span>Backup Cascade</span>
                 <span className="text-[8px] normal-case text-text-secondary/60">cascading retries</span>
@@ -270,13 +293,13 @@ export function ProvidersPage() {
                   const p = providers?.find(prov => prov.spec.id === providerId);
                   if (!p) return null;
                   return (
-                    <div key={providerId} className="flex items-center justify-between px-2.5 py-1.5 bg-background/50 border border-white/5 rounded-xl text-xs font-semibold">
+                    <div key={providerId} className="flex items-center justify-between px-2.5 py-1.5 bg-background/50 border border-rule rounded-xl text-xs font-semibold">
                       <span className="truncate">{p.spec.display_name}</span>
                       <div className="flex items-center gap-1">
                         <button
                           disabled={index === 0}
                           onClick={() => handleMoveFallback(index, -1)}
-                          className="p-1 hover:bg-white/10 rounded disabled:opacity-30 cursor-pointer"
+                          className="p-1 hover:bg-raised rounded disabled:opacity-30 cursor-pointer"
                           title="Move Up"
                         >
                           ▲
@@ -284,7 +307,7 @@ export function ProvidersPage() {
                         <button
                           disabled={index === routingSettings.fallback_chain.length - 1}
                           onClick={() => handleMoveFallback(index, 1)}
-                          className="p-1 hover:bg-white/10 rounded disabled:opacity-30 cursor-pointer"
+                          className="p-1 hover:bg-raised rounded disabled:opacity-30 cursor-pointer"
                           title="Move Down"
                         >
                           ▼
@@ -299,7 +322,7 @@ export function ProvidersPage() {
 
           {loading && !providers && (
             Array.from({ length: 4 }).map((_, i) => (
-              <div key={i} className="w-full flex items-center gap-3 p-3.5 rounded-2xl border border-primary/5 bg-white/30 animate-pulse">
+              <div key={i} className="w-full flex items-center gap-3 p-3.5 rounded-2xl border border-primary/5 bg-surface animate-pulse">
                 <div className="w-5 h-5 rounded bg-primary/10" />
                 <div className="flex flex-col gap-1.5 flex-1">
                   <div className="h-3.5 bg-primary/10 rounded w-1/2" />
@@ -352,7 +375,7 @@ export function ProvidersPage() {
                 className={`w-full flex items-center justify-between p-3.5 rounded-2xl border text-left transition-all duration-200 ${
                   isSelected
                     ? 'bg-primary/10 border-primary text-primary shadow-sm'
-                    : 'bg-white/50 border-primary/5 hover:border-primary/20 text-text-primary'
+                    : 'bg-surface border-primary/5 hover:border-primary/20 text-text-primary'
                 }`}
               >
                 <div className="flex items-center gap-3">
@@ -407,7 +430,7 @@ export function ProvidersPage() {
               </div>
 
               {/* URL and API Key Form */}
-              <div id="tour-connection-details" className="glass rounded-3xl p-6 border border-primary/10 bg-white/40 flex flex-col gap-5">
+              <div id="tour-connection-details" className="glass rounded-3xl p-6 border border-primary/10 bg-surface flex flex-col gap-5">
                 {/* Base URL (if editable or present) */}
                 {(selectedProvider.spec.base_url_editable || selectedProvider.spec.default_base_url) && (
                   <div className="flex flex-col gap-1.5">
@@ -429,7 +452,7 @@ export function ProvidersPage() {
                 )}
 
                 {(selectedProvider.spec.kind === 'cloud' || selectedProvider.spec.kind === 'aggregator') && (
-                  <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-xl text-xs text-amber-800 flex flex-col gap-2.5">
+                  <div id="cloud-consent" className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-xl text-xs text-amber-800 flex flex-col gap-2.5 scroll-mt-6">
                     <div className="flex items-start gap-2">
                       <Zap className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
                       <span>
@@ -525,7 +548,7 @@ export function ProvidersPage() {
                     <button
                       onClick={handleSave}
                       disabled={isSaving || selectedProvider.stored_in === 'env' || !formatCheck.isValid}
-                      className="glass-button !bg-primary !text-white hover:opacity-90 px-5 py-2 rounded-xl text-xs font-semibold disabled:opacity-50 flex items-center gap-1.5"
+                      className="glass-button !bg-plate !text-on-plate hover:opacity-90 px-5 py-2 rounded-xl text-xs font-semibold disabled:opacity-50 flex items-center gap-1.5"
                     >
                       {isSaving && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
                       Save Configuration
@@ -577,7 +600,7 @@ export function ProvidersPage() {
 
               {/* Models List Dropdown / Card */}
               {validationResult?.ok && (
-                <div id="tour-model-selection" className="glass rounded-3xl p-6 border border-primary/10 bg-white/40 flex flex-col gap-4">
+                <div id="tour-model-selection" className="glass rounded-3xl p-6 border border-primary/10 bg-surface flex flex-col gap-4">
                   <div className="flex items-center justify-between">
                     <h3 className="font-bold text-sm uppercase tracking-wider text-text-secondary">Default Target Model</h3>
                     <span className="text-xs font-medium text-primary">
@@ -609,7 +632,7 @@ export function ProvidersPage() {
                           className={`flex items-center justify-between p-3 rounded-xl border transition-all ${
                             isDefault
                               ? 'bg-primary/10 border-primary/30 text-primary'
-                              : 'bg-white/30 border-primary/5 hover:border-primary/10'
+                              : 'bg-surface border-primary/5 hover:border-primary/10'
                           }`}
                         >
                           <div className="flex items-center gap-3">
@@ -627,7 +650,7 @@ export function ProvidersPage() {
                                   {model.context_length.toLocaleString()} ctx
                                 </span>
                                 {model.pricing_hint > 0 && (
-                                  <span className="text-[10px] font-semibold bg-emerald-400/10 text-emerald-500 px-1.5 py-0.5 rounded">
+                                  <span className="text-[10px] font-semibold bg-surface text-success px-1.5 py-0.5 rounded">
                                     ${model.pricing_hint.toFixed(2)}/1M tok
                                   </span>
                                 )}
@@ -640,7 +663,7 @@ export function ProvidersPage() {
                             disabled={isDefault}
                             className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
                               isDefault
-                                ? 'bg-primary text-white pointer-events-none'
+                                ? 'bg-plate text-on-plate pointer-events-none'
                                 : 'bg-primary/5 text-primary hover:bg-primary/10'
                             }`}
                           >

@@ -57,9 +57,39 @@ async def _get_effective_fallback_chain_async() -> list[str]:
 
 
 class ProviderNotConfiguredError(Exception):
-    """Raised when no active LLM provider can be resolved."""
+    """Raised when no active LLM provider can be resolved.
 
-    pass
+    `code` is a stable machine-readable reason. The streaming path surfaces it
+    to the client so the UI can offer the matching remedy instead of printing
+    the message into the answer body.
+    """
+
+    def __init__(self, message: str, code: str | None = None):
+        super().__init__(message)
+        self.code = code
+
+
+def provider_leaves_device(pid: str, base_url: str | None) -> bool:
+    """Whether dispatching to `pid` sends data off this machine.
+
+    Gated on the resolved *destination*, not the provider's kind. Kind describes
+    what a provider usually is; base_url is a free-text setting, so a provider
+    registered as kind="local" - ollama, lm_studio - can be aimed at another
+    host. Checking kind alone makes this a label check rather than a data-egress
+    check. openai_compatible stays exempt when it points at this machine, which
+    is the self-hosted case the exemption was written for.
+
+    Shared by the dispatch gate below and the `consent_required` field on
+    GET /api/providers/settings, so the banner cannot drift from the gate.
+    """
+    spec = PROVIDER_REGISTRY.get(pid)
+    if spec is None:
+        return False
+    if spec.kind in ("cloud", "aggregator"):
+        return True
+    if spec.kind == "local":
+        return not is_loopback_url(base_url or spec.default_base_url)
+    return False
 
 
 # "llama3.2:1b" -> 1, "qwen2.5:14b" -> 14, "qwen2.5:0.5b" -> 0.5. The version
@@ -373,21 +403,16 @@ Answer:
         # Anything that leaves this machine needs explicit, region-independent
         # opt-in (llm.cloud_privacy_consent).
         #
-        # Gated on the resolved *destination*, not the provider's kind. Kind
-        # describes what a provider usually is; base_url is a free-text setting,
-        # so a provider registered as kind="local" - ollama, lm_studio - can be
-        # aimed at another host and used to be exempt forever. That made the
-        # gate a label check rather than a data-egress check. openai_compatible
-        # is still exempt when it points at this machine, which is the
-        # self-hosted case the exemption was written for.
-        spec = PROVIDER_REGISTRY.get(pid)
-        leaves_device = spec is not None and spec.kind in ("cloud", "aggregator")
-        if not leaves_device and spec is not None and spec.kind == "local":
-            leaves_device = not is_loopback_url(base_url or spec.default_base_url)
-        if leaves_device and not data.get("llm", {}).get("cloud_privacy_consent", False):
+        # The destination-vs-kind reasoning now lives in provider_leaves_device,
+        # which GET /api/providers/settings also calls so the consent banner
+        # cannot disagree with this gate.
+        if provider_leaves_device(pid, base_url) and not data.get("llm", {}).get(
+            "cloud_privacy_consent", False
+        ):
             raise ProviderNotConfiguredError(
                 f"Cloud privacy consent required before using provider {pid}. "
-                "Free-tier cloud dispatches may use inputs for model training."
+                "Free-tier cloud dispatches may use inputs for model training.",
+                code="cloud_consent_required",
             )
 
         # Normalize legacy Anthropic base_url if pointing to spec default with appended /v1
@@ -425,14 +450,20 @@ Answer:
             if hasattr(self, "_check_lm_studio_health"):
                 is_healthy = await self._check_lm_studio_health()
                 if not is_healthy:
-                    raise ProviderNotConfiguredError("LM Studio is not running.")
+                    raise ProviderNotConfiguredError(
+                        "LM Studio is not running.", code="local_provider_down"
+                    )
         elif pid == "ollama":
             if hasattr(self, "_check_ollama_health"):
                 is_healthy = await self._check_ollama_health()
                 if not is_healthy:
-                    raise ProviderNotConfiguredError("Ollama is not running.")
+                    raise ProviderNotConfiguredError(
+                        "Ollama is not running.", code="local_provider_down"
+                    )
         elif not api_key and pid not in ("ollama", "lm_studio"):
-            raise ProviderNotConfiguredError(f"API Key for {pid} is not set.")
+            raise ProviderNotConfiguredError(
+                f"API Key for {pid} is not set.", code="api_key_missing"
+            )
 
         return create_provider(
             pid, api_key=api_key, base_url=base_url, default_model=default_model, timeout=timeout
@@ -678,10 +709,17 @@ Answer:
                     if provider_instance:
                         await provider_instance.close()
             else:
+                # A control chunk, not prose. Yielding the message as text put
+                # the error into the answer body, where it reads as content the
+                # model produced and carries no affordance for fixing it. The
+                # retrieval layer turns this into a typed error event.
                 if last_error:
-                    yield f"Streaming error: All providers in fallback chain failed. Last error: {last_error!s}"
+                    message = f"All providers in fallback chain failed. Last error: {last_error!s}"
+                    code = getattr(last_error, "code", None)
                 else:
-                    yield "Streaming error: No providers configured."
+                    message = "No providers configured."
+                    code = "no_providers_configured"
+                yield json.dumps({"control": "provider_error", "code": code, "message": message})
 
         buffer = ""
         found_claim = False

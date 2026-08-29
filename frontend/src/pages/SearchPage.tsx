@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
+import { Link } from 'react-router-dom';
 import { Search, Send, Square, Sparkles, Clock, Trash2, RotateCcw } from 'lucide-react';
 import { toast } from 'sonner';
 import { useApi, invalidateCache } from '../useApi';
@@ -17,7 +18,7 @@ export function SearchPage() {
   const clearChunks = useDreamscapeStore(state => state.clearChunks);
 
   const [question, setQuestion] = useState('');
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ text: string; code?: string } | null>(null);
   const [showHistory, setShowHistory] = useState(false);
   const [selectedFileType, setSelectedFileType] = useState('');
   const [selectedFolderTag, setSelectedFolderTag] = useState('');
@@ -92,7 +93,10 @@ export function SearchPage() {
         isRetry: !!overrideQuestion || !!forcedChunkId
       });
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Search failed');
+      setError({
+        text: err instanceof Error ? err.message : 'Search failed',
+        code: (err as Error & { code?: string })?.code,
+      });
     }
   }, [question, isSearching, executeSearch, selectedFileType, selectedFolderTag, selectedMode, messages, selectedChunks]);
 
@@ -153,7 +157,7 @@ export function SearchPage() {
       {/* Header */}
       <div className="flex items-center justify-between p-6 shrink-0">
         <div>
-          <h1 className="text-2xl font-bold flex items-center gap-3 text-text-primary">
+          <h1 className="font-serif text-2xl font-normal flex items-center gap-3 text-text-primary">
             <Search className="w-7 h-7 text-primary" />
             AI Chat
           </h1>
@@ -163,19 +167,26 @@ export function SearchPage() {
         </div>
         <button
           onClick={resetChat}
-          className="flex items-center gap-2 px-4 py-2 bg-white/5 hover:bg-white/10 rounded-xl text-xs font-bold transition-all text-text-secondary border border-white/5 shadow-sm"
+          className="flex items-center gap-2 px-4 py-2 bg-raised hover:bg-raised rounded-xl text-xs font-bold transition-all text-text-secondary border border-rule shadow-sm"
         >
           <RotateCcw className="w-3.5 h-3.5" /> NEW CHAT
         </button>
       </div>
 
       {/* Chat Area */}
-      <div className="flex-1 overflow-y-auto p-6 space-y-6 custom-scrollbar">
+      {/* `log` + polite: an answer streams in token by token, so assertive
+          would interrupt continuously. A screen reader got nothing here before. */}
+      <div
+        className="flex-1 overflow-y-auto p-6 space-y-6 custom-scrollbar"
+        role="log"
+        aria-live="polite"
+        aria-label="Conversation"
+      >
         {messages.length === 0 ? (
-          <div className="h-full flex flex-col items-center justify-center text-center opacity-40">
-            <Sparkles className="w-16 h-16 text-primary mb-4" />
-            <h2 className="text-xl font-bold text-white mb-2">How can I help you?</h2>
-            <p className="max-w-sm text-sm">Ask about your documents, codebases, or project statistics. I remember our conversation context.</p>
+          <div className="h-full flex flex-col items-center justify-center text-center">
+            <Sparkles className="w-12 h-12 text-text-tertiary mb-4" aria-hidden />
+            <h2 className="text-xl font-bold text-text-primary mb-2">How can I help you?</h2>
+            <p className="max-w-sm text-sm text-text-secondary">Ask about your documents, codebases, or project statistics. I remember our conversation context.</p>
           </div>
         ) : (
           <div className="max-w-4xl mx-auto space-y-8">
@@ -192,12 +203,22 @@ export function SearchPage() {
       </div>
 
       {/* Input Area */}
-      <div className="p-6 shrink-0 bg-surface-dark/50 backdrop-blur-md border-t border-white/5">
+      <div className="p-6 shrink-0 bg-surface-dark/50 backdrop-blur-md border-t border-rule">
         <div className="max-w-4xl mx-auto flex flex-col gap-3">
           {error && (
-            <div className="bg-error/10 border border-error/20 text-error text-xs p-3 rounded-xl flex items-center justify-between">
-              <span>{error}</span>
-              <button onClick={() => setError(null)} className="font-bold opacity-60 hover:opacity-100">&times;</button>
+            <div className="bg-error/10 border border-error/20 text-error text-xs p-3 rounded-xl flex items-center justify-between gap-3">
+              <span>{error.text}</span>
+              <span className="flex items-center gap-3 shrink-0">
+                {error.code === 'cloud_consent_required' && (
+                  <Link
+                    to="/settings/providers#cloud-consent"
+                    className="underline font-semibold hover:opacity-80"
+                  >
+                    Review cloud settings
+                  </Link>
+                )}
+                <button onClick={() => setError(null)} className="font-bold opacity-60 hover:opacity-100">&times;</button>
+              </span>
             </div>
           )}
           {/* Recent searches dropdown */}
@@ -206,14 +227,14 @@ export function SearchPage() {
               className="absolute bottom-full mb-2 left-0 right-0 glass rounded-2xl border border-primary/10 shadow-2xl overflow-hidden z-20"
               role="listbox"
             >
-              <div className="px-4 py-2 text-[10px] font-black text-text-secondary border-b border-white/5 uppercase tracking-widest">Recent Searches</div>
+              <div className="px-4 py-2 text-[10px] font-black text-text-secondary border-b border-rule uppercase tracking-widest">Recent Searches</div>
               <div className="max-h-48 overflow-y-auto custom-scrollbar">
                 {historyData.history.slice(0, 10).map((h: HistoryItem) => (
                   <button
                     key={`${h.created_at}-${h.question}`}
                     role="option"
                     aria-selected="false"
-                    className="w-full text-left px-4 py-2.5 text-sm text-text-primary hover:bg-primary/10 transition-colors flex items-center gap-3 border-b border-white/5 last:border-none"
+                    className="w-full text-left px-4 py-2.5 text-sm text-text-primary hover:bg-primary/10 transition-colors flex items-center gap-3 border-b border-rule last:border-none"
                     onClick={() => {
                       setQuestion(h.question);
                       setShowHistory(false);
@@ -249,9 +270,11 @@ export function SearchPage() {
               </button>
             </div>
           )}
+          {/* The blurred gradient halo that used to sit behind this input was the
+              clearest instance of the register the redesign moves away from —
+              glow, not material. Focus is carried by the edge and the ring. */}
           <div className="relative group">
-            <div className="absolute -inset-0.5 bg-gradient-to-r from-primary to-accent rounded-2xl blur opacity-20 group-focus-within:opacity-40 transition duration-1000"></div>
-            <div className="relative flex items-center glass rounded-2xl overflow-hidden shadow-2xl">
+            <div className="relative flex items-center bg-surface border border-edge rounded-md overflow-hidden focus-within:border-primary transition-colors">
               <input
                 ref={inputRef}
                 type="text"
@@ -268,7 +291,7 @@ export function SearchPage() {
                   onClick={stopStream}
                   aria-label="Stop generating"
                   title="Stop generating"
-                  className="p-3 mr-2 bg-white/10 hover:bg-white/20 text-white rounded-xl transition-all shadow-lg"
+                  className="p-3 mr-2 bg-raised hover:bg-raised text-text-primary rounded-xl transition-all shadow-lg"
                 >
                   <Square className="w-5 h-5 fill-current" />
                 </button>
@@ -277,7 +300,7 @@ export function SearchPage() {
                   onClick={() => handleSearch()}
                   disabled={!question.trim()}
                   aria-label="Send question"
-                  className="p-3 mr-2 bg-primary hover:bg-primary-dark disabled:bg-white/5 text-white rounded-xl transition-all shadow-lg"
+                  className="p-3 mr-2 bg-plate hover:brightness-110 disabled:bg-surface disabled:text-text-tertiary text-on-plate rounded-xl transition-all shadow-lg"
                 >
                   <Send className="w-5 h-5" />
                 </button>

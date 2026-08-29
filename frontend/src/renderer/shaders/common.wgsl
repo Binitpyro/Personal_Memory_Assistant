@@ -174,9 +174,9 @@ fn hsv2rgb(hsv: vec3<f32>) -> vec3<f32> {
 fn sky_gradient(dir: vec3<f32>) -> vec3<f32> {
     let y = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
     // Deep indigo #0a0a2e → violet #2a1a5e → soft magenta zenith #5a2e7a
-    let horizon = vec3<f32>(0.035, 0.035, 0.180);
-    let mid     = vec3<f32>(0.165, 0.100, 0.360);
-    let zenith  = vec3<f32>(0.350, 0.180, 0.520);
+    let horizon = PMA_SKY_HORIZON;
+    let mid     = PMA_SKY_MID;
+    let zenith  = PMA_SKY_ZENITH;
     let a = mix(horizon, mid, smoothstep(0.0, 0.55, y));
     return mix(a, zenith, smoothstep(0.45, 1.0, y));
 }

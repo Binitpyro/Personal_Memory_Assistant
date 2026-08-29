@@ -231,6 +231,68 @@ async def clear_index(
     return res
 
 
+class ReembedRequest(BaseModel):
+    confirm: bool = False
+
+
+@router.post("/reembed")
+@limiter.limit("3/minute")
+async def reembed_vectors(
+    request: Request,
+    payload: ReembedRequest,
+    db: DatabaseManager = Depends(get_db),
+    emb=Depends(get_emb),
+    lancedb_client=Depends(get_lancedb),
+):
+    """Rebuild every vector without touching files, chunks, FTS or history.
+
+    The repair for an embedding-model signature mismatch. Deliberately
+    user-initiated and confirmed: wiring this into the boot-time mismatch check
+    would turn a config change into an unprompted destructive wipe on every
+    start, which is why it was left unwired for so long.
+    """
+    from app import state
+    from app.indexing.reembed import reembed_all
+
+    if not payload.confirm:
+        return JSONResponse(
+            status_code=400,
+            content={"error": 'This rebuilds every embedding. Send {"confirm": true}.'},
+        )
+
+    if state.embedding_signature.get("reembed") == "running":
+        return JSONResponse(status_code=409, content={"error": "A re-embed is already running."})
+
+    async def _run():
+        from app.state import file_tree_cache as _file_tree_cache
+        from app.state import insights_cache as _insights_cache
+
+        state.embedding_signature["reembed"] = "running"
+        try:
+            result = await reembed_all(db, emb, lancedb_client)
+            # Only now is the index genuinely consistent with the live model,
+            # which is the one moment the stored signature may be advanced.
+            current_sig = getattr(emb, "model_signature", "")
+            if current_sig:
+                await db.set_system_state("embedding_model_signature", current_sig)
+                state.set_embedding_signature(current_sig, current_sig)
+            state.embedding_signature["reembed"] = "done"
+            _file_tree_cache["data"] = _insights_cache["data"] = None
+            logger.info("Re-embed finished: %s", result)
+        except Exception as err:
+            # ReembedError (summaries empty after rebuild) lands here too - it is
+            # a RuntimeError. Either way the run failed and the signature must
+            # NOT be advanced, or the mismatch warning disappears while the
+            # vectors are still wrong.
+            state.embedding_signature["reembed"] = "error"
+            logger.error("Re-embed failed: %s", err)
+
+    task = asyncio.create_task(_run())
+    state.bg_tasks.add(task)
+    task.add_done_callback(state.bg_tasks.discard)
+    return {"message": "Re-embed started.", "status": "running"}
+
+
 @router.get("/export")
 @limiter.limit("10/minute")
 async def export_index(request: Request, db: DatabaseManager = Depends(get_db)):

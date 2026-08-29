@@ -230,3 +230,99 @@ def test_launch_uses_saved_base_url(mock_read, mock_launch):
     assert resp.status_code == 200
     assert resp.json()["ok"] is True
     mock_launch.assert_awaited_once_with("ollama", "http://127.0.0.1:9999")
+
+
+# ── consent_required: the onboarding trap ────────────────────────────────────
+#
+# Setup can store a cloud API key and finish without ever collecting consent.
+# `auto` then resolves to that provider and every query dies in the dispatch
+# gate, with the only remedy on a page absent from the nav. This field is what
+# lets the UI offer the fix before the user hits the wall.
+
+
+@patch("app.api.providers.get_default_chain_async", new_callable=AsyncMock)
+@patch("app.api.providers.read_settings")
+def test_consent_required_when_auto_resolves_to_a_cloud_provider(mock_read, mock_chain):
+    mock_chain.return_value = ["gemini"]
+    mock_read.return_value = {
+        "llm": {"provider": "auto", "per_provider": {}, "cloud_privacy_consent": False}
+    }
+
+    data = client.get("/api/providers/settings", headers=headers).json()
+    assert data["consent_required"] is True
+
+
+@patch("app.api.providers.get_default_chain_async", new_callable=AsyncMock)
+@patch("app.api.providers.read_settings")
+def test_consent_required_is_false_once_consent_is_given(mock_read, mock_chain):
+    mock_chain.return_value = ["gemini"]
+    mock_read.return_value = {
+        "llm": {"provider": "auto", "per_provider": {}, "cloud_privacy_consent": True}
+    }
+
+    data = client.get("/api/providers/settings", headers=headers).json()
+    assert data["consent_required"] is False
+
+
+@patch("app.api.providers.get_default_chain_async", new_callable=AsyncMock)
+@patch("app.api.providers.read_settings")
+def test_consent_not_required_with_an_empty_chain(mock_read, mock_chain):
+    """Nothing configured cannot dispatch anywhere, so nothing to consent to."""
+    mock_chain.return_value = []
+    mock_read.return_value = {
+        "llm": {"provider": "auto", "per_provider": {}, "cloud_privacy_consent": False}
+    }
+
+    data = client.get("/api/providers/settings", headers=headers).json()
+    assert data["consent_required"] is False
+
+
+@patch("app.api.providers.get_default_chain_async", new_callable=AsyncMock)
+@patch("app.api.providers.read_settings")
+def test_consent_required_follows_an_explicit_preference_not_the_chain(mock_read, mock_chain):
+    """An explicit local preference is not overruled by a cloud entry in the chain."""
+    mock_chain.return_value = ["gemini"]
+    mock_read.return_value = {
+        "llm": {"provider": "ollama", "per_provider": {}, "cloud_privacy_consent": False}
+    }
+
+    data = client.get("/api/providers/settings", headers=headers).json()
+    assert data["consent_required"] is False
+
+
+@patch("app.api.providers.get_default_chain_async", new_callable=AsyncMock)
+@patch("app.api.providers.read_settings")
+def test_consent_required_for_a_local_provider_aimed_off_box(mock_read, mock_chain):
+    """The case a `spec.kind` check gets wrong.
+
+    ollama is kind="local", but pointed at another host it still ships the
+    user's documents off this machine. The dispatch gate keys on the resolved
+    base_url, so this field must too or the banner disagrees with the gate.
+    """
+    mock_chain.return_value = ["ollama"]
+    mock_read.return_value = {
+        "llm": {
+            "provider": "auto",
+            "per_provider": {"ollama": {"base_url": "http://192.168.1.50:11434"}},
+            "cloud_privacy_consent": False,
+        }
+    }
+
+    data = client.get("/api/providers/settings", headers=headers).json()
+    assert data["consent_required"] is True
+
+
+@patch("app.api.providers.get_default_chain_async", new_callable=AsyncMock)
+@patch("app.api.providers.read_settings")
+def test_no_consent_required_for_a_loopback_local_provider(mock_read, mock_chain):
+    mock_chain.return_value = ["ollama"]
+    mock_read.return_value = {
+        "llm": {
+            "provider": "auto",
+            "per_provider": {"ollama": {"base_url": "http://localhost:11434"}},
+            "cloud_privacy_consent": False,
+        }
+    }
+
+    data = client.get("/api/providers/settings", headers=headers).json()
+    assert data["consent_required"] is False

@@ -71,9 +71,51 @@ export interface HealthResponse {
    * 'unknown' means startup has not been attempted, which is not 'down'.
    */
   subsystems?: Record<string, { state: 'up' | 'down' | 'disabled' | 'unknown'; detail: string }>;
+  /**
+   * Boot-time comparison of the index's embedding signature against the live
+   * model. A mismatch means every stored vector came from a different vector
+   * space, so semantic search is quietly wrong. It used to exist only as a log
+   * banner nobody reads.
+   */
+  embedding_signature?: {
+    stored: string;
+    current: string;
+    mismatch: boolean;
+    reembed: 'idle' | 'running' | 'done' | 'error';
+  };
 }
 
 export const getHealth = () => json<HealthResponse>('/health');
+
+/**
+ * Per-stage latency percentiles. The endpoint has existed since the metrics
+ * tracker landed and had no frontend caller at all, so every p50/p95/p99 the
+ * app measured was unreachable.
+ */
+export interface StageMetrics {
+  avg: number;
+  p50: number;
+  p95: number;
+  p99: number;
+  max: number;
+  count: number;
+}
+
+export const getMetrics = () => json<Record<string, StageMetrics>>('/system/metrics');
+
+/**
+ * Rebuild every vector. Requires explicit confirmation server-side too: this is
+ * the repair for an embedding-model change, and wiring it to run automatically
+ * would make a config change a destructive wipe on every boot.
+ *
+ * Leaves files, chunks, the FTS index and query history untouched.
+ */
+export const reembedVectors = () =>
+  json<{ message: string; status: string }>('/index/reembed', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ confirm: true }),
+  });
 
 export interface AppConfig {
   app_version: string
@@ -141,6 +183,13 @@ export interface OcrStatus {
   ep?: string | null;
   /** Non-empty when the running engine disagrees with the install stamp. */
   engine_mismatch?: string;
+  /* Returned by /api/ocr/status all along, but absent from this type and so
+     unreachable from the UI. Diagnostics renders them. */
+  model_version?: string;
+  installed_at?: string;
+  protocol?: string;
+  docs_this_session?: number;
+  stderr_tail?: string[];
 }
 
 export interface OcrInstallState {
@@ -304,7 +353,7 @@ export const cancelIndexing = () =>
   });
 
 export const removeFolderIndex = (folders: string[]) =>
-  json<{ message: string }>('/index/folder/remove', {
+  json<{ message: string; chunks_removed: number }>('/index/folder/remove', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ folders }),
@@ -601,12 +650,23 @@ export interface QueryStreamChunk {
   retrieval_ms?: number;
   graph_hops?: string;
   contradictions_found?: boolean;
+  /** Chunk ids the conflict was detected in, so the banner can name them. */
+  contradiction_sources?: (string | number)[];
   knowledge_gaps?: string[];
   pattern_annotations?: string[];
   trace?: TraceEvent[];
   to?: string;
   prompt_tokens?: number;
   completion_tokens?: number;
+  /** Machine-readable reason on `type: 'error'`, e.g. 'cloud_consent_required'. */
+  code?: string;
+  /**
+   * The prompt mode the user picked (explain|verify|explore|distill|challenge).
+   * Distinct from `mode`, which is the retrieval path the backend took. They
+   * used to collide on one field, so the selected mode was overwritten and
+   * never reached the UI.
+   */
+  query_mode?: string;
 }
 
 
@@ -758,11 +818,13 @@ export const validateProvider = (id: string, body: { api_key?: string | null; ba
     body: JSON.stringify(body)
   });
 export const selfTestProvider = (id: string) => json<ValidationResponse>(`/providers/${id}/self_test`, { method: 'POST' });
-export const setProviderKey = (id: string, api_key: string) =>
+export const setProviderKey = (id: string, api_key: string | null, base_url?: string | null) =>
   json<{ status: string }>(`/providers/${id}/key`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ api_key })
+    // base_url is omitted rather than sent as null when untouched, so saving a
+    // key never clears a previously stored endpoint.
+    body: JSON.stringify(base_url === undefined ? { api_key } : { api_key, base_url })
   });
 export const deleteProviderKey = (id: string) => json<{ status: string }>(`/providers/${id}/key`, { method: 'DELETE' });
 export const setProviderDefaultModel = (id: string, model: string) =>
@@ -806,6 +868,12 @@ export interface ProviderRoutingSettings {
   fallback_chain: string[];
   cloud_privacy_consent?: boolean;
   cloud_privacy_notice?: string;
+  /**
+   * Server-computed: would the next dispatch be refused for want of consent?
+   * Derived from the same predicate as the backend gate, so this cannot drift
+   * from what actually happens when the user asks a question.
+   */
+  consent_required?: boolean;
 }
 
 export const getProviderSettings = () => json<ProviderRoutingSettings>('/providers/settings');

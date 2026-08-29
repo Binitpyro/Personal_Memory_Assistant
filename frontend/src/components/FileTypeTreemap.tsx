@@ -36,7 +36,7 @@ interface BreadcrumbProps {
 }
 
 const Breadcrumb: React.FC<BreadcrumbProps> = ({ navPath, onBreadcrumbClick }) => (
-  <div className="flex items-center gap-1 bg-black/5 px-3 py-2 rounded-xl border border-white/10 overflow-x-auto no-scrollbar scroll-smooth">
+  <div className="flex items-center gap-1 bg-raised px-3 py-2 rounded-xl border border-rule overflow-x-auto no-scrollbar scroll-smooth">
     {navPath.map((seg, i) => {
       const isLast = i === navPath.length - 1;
       const isFile = isLast && !seg.fullPath;
@@ -49,7 +49,7 @@ const Breadcrumb: React.FC<BreadcrumbProps> = ({ navPath, onBreadcrumbClick }) =
         <div key={itemKey} className="flex items-center shrink-0">
           <button
             onClick={() => onBreadcrumbClick(i)}
-            className={`flex items-center gap-1.5 px-2 py-1 rounded-lg text-[11px] font-medium transition-all hover:bg-black/5 ${isLast ? 'text-primary bg-primary/10' : 'text-text-secondary hover:text-text-primary'}`}
+            className={`flex items-center gap-1.5 px-2 py-1 rounded-lg text-[11px] font-medium transition-all hover:bg-raised ${isLast ? 'text-primary bg-primary/10' : 'text-text-secondary hover:text-text-primary'}`}
           >
             <Icon className="w-3 h-3" />
             <span className="max-w-[120px] truncate">{seg.name}</span>
@@ -241,26 +241,26 @@ export function FileTypeTreemap({ allFiles, activeFilter, onFilterChange, onFile
 
   return (
     <div className="flex-1 flex flex-col min-h-0">
-      <div className="flex flex-col gap-3 glass p-3 rounded-2xl border border-white/30 shadow-inner mb-4 shrink-0">
+      <div className="flex flex-col gap-3 glass p-3 rounded-2xl border border-edge shadow-inner mb-4 shrink-0">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <button onClick={handleBack} disabled={navPath.length <= 1} className="flex items-center gap-1 px-3 py-1.5 bg-black/5 hover:bg-primary/10 border border-white/20 rounded-xl text-xs font-bold transition-all disabled:opacity-20 text-text-primary"><ChevronLeft className="w-4 h-4" /> BACK</button>
-            <button onClick={handleHome} className="flex items-center gap-1 px-3 py-1.5 bg-black/5 hover:bg-primary/10 border border-white/20 rounded-xl text-xs font-bold transition-all text-text-primary"><Home className="w-4 h-4" /> HOME</button>
+            <button onClick={handleBack} disabled={navPath.length <= 1} className="flex items-center gap-1 px-3 py-1.5 bg-raised hover:bg-primary/10 border border-rule rounded-xl text-xs font-bold transition-all disabled:opacity-20 text-text-primary"><ChevronLeft className="w-4 h-4" /> BACK</button>
+            <button onClick={handleHome} className="flex items-center gap-1 px-3 py-1.5 bg-raised hover:bg-primary/10 border border-rule rounded-xl text-xs font-bold transition-all text-text-primary"><Home className="w-4 h-4" /> HOME</button>
           </div>
           <div className="flex items-center gap-3">
             {onDeleteFolder && navPath.length > 1 && navPath.at(-1)?.fullPath && (
               <button onClick={handleDeleteCurrent} className="flex items-center gap-1 px-3 py-1.5 bg-error/10 hover:bg-error/20 border border-error/20 text-error rounded-xl text-[10px] font-bold transition-all"><Trash2 className="w-3.5 h-3.5" /> DELETE FOLDER INDEX</button>
             )}
-            <div className="flex items-center bg-black/5 p-1 rounded-xl border border-white/20">
-              <button onClick={() => { setGroupMode('folder'); handleHome() }} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-bold transition-all ${groupMode === 'folder' ? 'bg-primary text-white shadow-lg' : 'text-text-secondary hover:text-text-primary'}`}><Folder className="w-3.5 h-3.5" /> BY FOLDERS</button>
-              <button onClick={() => { setGroupMode('type'); handleHome() }} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-bold transition-all ${groupMode === 'type' ? 'bg-primary text-white shadow-lg' : 'text-text-secondary hover:text-text-primary'}`}><Layers className="w-3.5 h-3.5" /> BY FILE TYPE</button>
+            <div className="flex items-center bg-raised p-1 rounded-xl border border-rule">
+              <button onClick={() => { setGroupMode('folder'); handleHome() }} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-bold transition-all ${groupMode === 'folder' ? 'bg-plate text-on-plate shadow-lg' : 'text-text-secondary hover:text-text-primary'}`}><Folder className="w-3.5 h-3.5" /> BY FOLDERS</button>
+              <button onClick={() => { setGroupMode('type'); handleHome() }} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-bold transition-all ${groupMode === 'type' ? 'bg-plate text-on-plate shadow-lg' : 'text-text-secondary hover:text-text-primary'}`}><Layers className="w-3.5 h-3.5" /> BY FILE TYPE</button>
             </div>
           </div>
         </div>
         <Breadcrumb navPath={navPath} onBreadcrumbClick={handleBreadcrumbClick} />
       </div>
-      <div className="flex-1 relative rounded-2xl overflow-hidden border border-white/40 shadow-xl bg-white/30 group">
-        <div className="absolute top-12 right-4 z-10 pointer-events-none opacity-0 group-hover:opacity-60 transition-opacity text-[10px] font-bold text-text-primary uppercase bg-white/80 border border-white/40 px-3 py-1.5 rounded-full shadow-sm">Right-click: Back • Scroll: Zoom • Drag: Pan</div>
+      <div className="flex-1 relative rounded-2xl overflow-hidden border border-edge shadow-xl bg-surface group">
+        <div className="absolute top-12 right-4 z-10 pointer-events-none opacity-0 group-hover:opacity-60 transition-opacity text-[10px] font-bold text-text-primary uppercase bg-surface border border-edge px-3 py-1.5 rounded-full shadow-sm">Right-click: Back • Scroll: Zoom • Drag: Pan</div>
         {buildError ? (
           <div className="flex items-center justify-center h-full text-text-secondary font-medium">{buildError}</div>
         ) : (

@@ -1,18 +1,30 @@
 import { Outlet, NavLink, useNavigate, useLocation } from 'react-router-dom'
-import { BookOpen, Search, FolderTree, BarChart3, Brain, Settings, RefreshCw, AlertTriangle } from 'lucide-react'
+import { AlertTriangle, RefreshCw } from 'lucide-react'
 import { useApi } from '../useApi'
-import { getAppConfig, getHealth } from '../api'
+import { getAppConfig, getHealth, getProviderSettings } from '../api'
 import { useEffect } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useSessionProvider } from '../context/SessionProviderContext'
 import { CACHE_KEYS } from '../cacheKeys'
+import { ThemeToggle } from './ui'
 
+/**
+ * The catalogue index.
+ *
+ * Replaces a five-item hover-expand glyph rail, which was the single strongest
+ * "generic dark app" tell in the product. Each route is a drawer front carrying
+ * a real label slip — a mono catalogue line over a serif name — and nothing is
+ * hover-gated, so labels are always legible and content is never overlaid.
+ *
+ * The `label` values must stay exactly as the route names: AppShell.test.tsx
+ * locates each one by text.
+ */
 const navItems = [
-  { to: '/library', label: 'Library', icon: BookOpen },
-  { to: '/search', label: 'Search', icon: Search },
-  { to: '/explorer', label: 'Explorer', icon: FolderTree },
-  { to: '/insights', label: 'Insights', icon: BarChart3 },
-  { to: '/settings', label: 'Settings', icon: Settings },
+  { to: '/library', mark: 'I · LIB', label: 'Library' },
+  { to: '/search', mark: 'II · SRCH', label: 'Search' },
+  { to: '/explorer', mark: 'III · EXPL', label: 'Explorer' },
+  { to: '/insights', mark: 'IV · INS', label: 'Insights' },
+  { to: '/settings', mark: 'V · SET', label: 'Settings' },
 ] as const
 
 export function AppShell() {
@@ -30,10 +42,20 @@ export function AppShell() {
     cacheKey: CACHE_KEYS.health,
     refetchInterval: isSyncing ? 5_000 : 60_000,
   })
-  const { data: appConfig } = useApi(getAppConfig, { 
-    cacheKey: CACHE_KEYS.appConfig, 
-    refetchInterval: 60_000 
+  const { data: appConfig } = useApi(getAppConfig, {
+    cacheKey: CACHE_KEYS.appConfig,
+    refetchInterval: 60_000
   })
+
+  // Onboarding can store a cloud API key and finish without ever collecting
+  // consent, after which every query dies in the dispatch gate with the only
+  // remedy on a page that is not in this nav. Server-computed so it cannot
+  // disagree with the gate.
+  const { data: routingSettings } = useApi(getProviderSettings, {
+    cacheKey: CACHE_KEYS.providerSettings,
+    refetchInterval: 60_000,
+  })
+  const consentRequired = routingSettings?.consent_required === true
 
   const syncStatus = health?.split_brain_sync_status
 
@@ -67,87 +89,161 @@ export function AppShell() {
     }
   }, [navigate, location.pathname])
 
+  /**
+   * One status region, severity-ordered.
+   *
+   * Three stacked full-width banners used to push content down and compete for
+   * the same attention. At most one shows now: a failed sync outranks a missing
+   * consent, which outranks a sync in progress.
+   */
+  let notice: { tone: string; border: string; body: React.ReactNode; action: React.ReactNode } | null = null
+  if (syncStatus === 'error') {
+    notice = {
+      tone: 'text-error',
+      border: 'border-b-error/40',
+      body: (
+        <span className="text-text-primary">
+          <strong className="font-medium">Vector index sync failed</strong>
+          <span className="text-text-secondary"> — semantic search may return incomplete results.</span>
+        </span>
+      ),
+      action: (
+        <NavLink to="/settings/diagnostics" className="text-primary underline underline-offset-4 font-medium shrink-0">
+          Diagnostics
+        </NavLink>
+      ),
+    }
+  } else if (consentRequired) {
+    notice = {
+      tone: 'text-warning',
+      border: 'border-b-warning/40',
+      body: (
+        <span className="text-text-primary">
+          <strong className="font-medium">Cloud provider needs your consent</strong>
+          <span className="text-text-secondary"> — answers will fail until you review it.</span>
+        </span>
+      ),
+      action: (
+        <NavLink
+          to="/settings/providers#cloud-consent"
+          className="text-primary underline underline-offset-4 font-medium shrink-0"
+        >
+          Review now
+        </NavLink>
+      ),
+    }
+  } else if (syncStatus === 'syncing') {
+    notice = {
+      tone: 'text-primary',
+      border: 'border-b-rule',
+      body: (
+        <span className="text-text-primary">
+          <strong className="font-medium">Rebuilding vector index</strong>
+          <span className="text-text-secondary"> — semantic search returns once this completes.</span>
+        </span>
+      ),
+      action: null,
+    }
+  }
+
   return (
-    <div className="flex min-h-screen w-full">
-      {/* ── Side Navigation ───────────────────────────────── */}
-      <aside className="glass flex flex-col w-20 hover:w-56 transition-all duration-300 group border-r border-primary/10 fixed h-full z-50">
-        {/* Logo */}
-        <div className="flex items-center gap-3 px-5 py-6">
-          <Brain className="w-8 h-8 text-primary shrink-0" />
-          <span className="text-lg font-bold text-primary-light opacity-0 group-hover:opacity-100 transition-opacity duration-300 whitespace-nowrap">
-            PMA
-          </span>
-        </div>
+    // The case: a hard outer rail, with everything set inside it.
+    <div className="flex-1 min-w-0 h-screen box-border bg-raised p-2">
+      <div className="h-full border border-edge flex overflow-hidden">
 
-        {/* Nav Items */}
-        <nav className="flex flex-col gap-1 px-3 mt-4 flex-1">
-          {navItems.map(({ to, label, icon: Icon }) => (
-            <NavLink
-              key={to}
-              to={to}
-              className={({ isActive }) =>
-                `flex items-center gap-3 px-3 py-3 rounded-xl transition-all duration-200 ${isActive
-                  ? 'bg-white/80 text-primary shadow-[inset_2px_2px_4px_rgba(149,159,147,0.1),inset_-2px_-2px_4px_rgba(255,255,255,0.8),2px_2px_5px_rgba(149,159,147,0.2)]'
-                  : 'text-text-secondary hover:bg-black/5 hover:text-text-primary'
-                }`
-              }
-            >
-              <Icon className="w-5 h-5 shrink-0" />
-              <span className="opacity-0 group-hover:opacity-100 transition-opacity duration-300 whitespace-nowrap text-sm font-medium">
-                {label}
-              </span>
-            </NavLink>
-          ))}
-        </nav>
+        {/* ── Catalogue index ──────────────────────────────────────── */}
+        <aside className="w-[216px] shrink-0 bg-raised flex flex-col border-r border-black/40">
+          <div className="px-4 pt-4 pb-3 border-b border-black/40">
+            <div className="font-mono text-[10px] tracking-[0.16em] uppercase text-text-tertiary">
+              Personal Memory Assistant
+            </div>
+            <div className="font-serif text-lg font-medium mt-0.5">The Cabinet</div>
+          </div>
 
-        {/* Footer */}
-        <div className="px-5 py-4 border-t border-primary/10 flex flex-col gap-1">
-          {/* Degraded optional subsystems. The icon stays visible while the
-              sidebar is collapsed — a fault the user cannot see is the whole
-              problem this reports — and the names appear on hover. */}
-          {downSubsystems.length > 0 && (
-            <div
-              data-testid="subsystem-warning"
-              title={`Not running: ${downSubsystems.join(', ')}. Check the backend logs.`}
-              className="flex items-center gap-1.5 text-warning mb-1"
-            >
-              <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-              <span className="text-[10px] font-medium opacity-0 group-hover:opacity-100 transition-opacity duration-300 whitespace-nowrap overflow-hidden">
-                {downSubsystems.join(', ')} off
+          <nav className="flex flex-col">
+            {navItems.map(({ to, mark, label }) => (
+              <NavLink key={to} to={to} className="block">
+                {({ isActive }) => (
+                  <div
+                    className={
+                      'px-3 py-2.5 border-t border-t-white/[0.06] border-b border-b-black/40 transition-colors duration-150 ' +
+                      (isActive
+                        ? 'bg-surface shadow-[inset_3px_0_0_var(--color-plate),5px_0_12px_rgba(0,0,0,.45)]'
+                        : 'bg-raised hover:bg-surface')
+                    }
+                  >
+                    <div className="flex items-center gap-3">
+                      {/* The pull is a rule, not a knob: a handle by position and
+                          material, without rendering a physical object. */}
+                      <span
+                        aria-hidden
+                        className={`w-5 h-[3px] rounded-[1px] bg-plate shrink-0 ${isActive ? 'opacity-100' : 'opacity-70'}`}
+                      />
+                      <div className="flex-grow min-w-0">
+                        <div
+                          className={`font-mono text-[10px] tracking-[0.16em] uppercase ${
+                            isActive ? 'text-primary' : 'text-text-tertiary'
+                          }`}
+                        >
+                          {mark}
+                        </div>
+                        <div className="font-serif text-base leading-tight truncate">{label}</div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </NavLink>
+            ))}
+          </nav>
+
+          {/* Colophon */}
+          <div className="mt-auto px-4 py-3 border-t border-black/40 flex flex-col gap-2">
+            {/* Degraded optional subsystems. A fault the user cannot see is the
+                whole problem this reports, so it is never hover-gated. */}
+            {downSubsystems.length > 0 && (
+              <NavLink
+                to="/settings/diagnostics"
+                data-testid="subsystem-warning"
+                title={`Not running: ${downSubsystems.join(', ')}. Open Diagnostics for the reason.`}
+                className="flex items-center gap-2 text-warning text-xs hover:opacity-80"
+              >
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                <span className="truncate">{downSubsystems.join(', ')} off</span>
+              </NavLink>
+            )}
+            <div className="flex items-center justify-between">
+              <span className="font-mono text-[10px] text-text-tertiary">this week</span>
+              <span className="font-mono text-[10px] text-text-secondary">${weeklyCost.toFixed(3)}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="font-mono text-[10px] text-text-tertiary">
+                v{appConfig?.app_version ?? health?.version ?? '—'}
               </span>
+              <ThemeToggle />
+            </div>
+          </div>
+        </aside>
+
+        {/* ── Main ─────────────────────────────────────────────────── */}
+        <main className="flex-grow min-w-0 flex flex-col bg-raised">
+          {notice && (
+            <div className={`flex items-center gap-3 px-5 py-2 bg-surface border-b ${notice.border} text-[13px]`}>
+              {syncStatus === 'syncing' ? (
+                <RefreshCw className={`w-3.5 h-3.5 shrink-0 animate-spin ${notice.tone}`} />
+              ) : (
+                <AlertTriangle className={`w-3.5 h-3.5 shrink-0 ${notice.tone}`} />
+              )}
+              {notice.body}
+              {notice.action && <span className="ml-auto">{notice.action}</span>}
             </div>
           )}
-          <span className="text-xs text-text-secondary opacity-0 group-hover:opacity-100 transition-opacity duration-300 whitespace-nowrap">
-            v{appConfig?.app_version ?? health?.version ?? '—'}
-          </span>
-          {/* Weekly Cost Roll-up */}
-          <div className="text-[10px] text-text-secondary font-medium opacity-0 group-hover:opacity-100 transition-opacity duration-300 mt-2 whitespace-nowrap overflow-hidden">
-            This week: ${weeklyCost.toFixed(3)}
-          </div>
-        </div>
-      </aside>
 
-      {/* ── Main Content ──────────────────────────────────── */}
-      <main className="flex-1 ml-20 h-screen overflow-hidden flex flex-col">
-
-        {/* Split-Brain sync banner — only visible while the boot-time back-fill is running */}
-        {syncStatus === 'syncing' && (
-          <div className="flex items-center gap-3 px-5 py-2.5 bg-warning/10 border-b border-warning/20 text-warning text-sm animate-fade-in-up">
-            <RefreshCw className="w-4 h-4 shrink-0 animate-spin" />
-            <span>
-              <strong>Rebuilding vector index</strong> — PMA is migrating your embeddings into the local cache.
-              Semantic search will be available once this completes.
-            </span>
+          {/* The well: content is cut into the case, not floated on it. */}
+          <div className="well flex-grow min-w-0 m-2.5 overflow-hidden flex flex-col">
+            <Outlet />
           </div>
-        )}
-        {syncStatus === 'error' && (
-          <div className="flex items-center gap-3 px-5 py-2.5 bg-error/10 border-b border-error/20 text-error text-sm">
-            <span>⚠ Vector index sync failed — check backend logs. Semantic search may return incomplete results.</span>
-          </div>
-        )}
-
-        <Outlet />
-      </main>
+        </main>
+      </div>
     </div>
   )
 }

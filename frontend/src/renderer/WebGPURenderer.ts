@@ -29,7 +29,7 @@
  *       → Bloom(down×5, up×5) → Tonemap → SwapChain → Copy(SceneColorPrev).
  */
 
-import commonShaderCode      from './shaders/common.wgsl?raw';
+import rawCommonShaderCode   from './shaders/common.wgsl?raw';
 import skyShaderCode         from './shaders/aurora_sky.wgsl?raw';
 import crystalShaderCode     from './shaders/crystal.wgsl?raw';
 import bubbleShaderCode      from './shaders/bubble.wgsl?raw';
@@ -42,7 +42,16 @@ import tonemapShaderCode     from './shaders/tonemap.wgsl?raw';
 import pickingShaderCode     from './shaders/picking.wgsl?raw';
 import outlineShaderCode     from './shaders/outline.wgsl?raw';
 
+import { wgslPalette, VITRINE } from './palette';
 import { generateCrystalVariants, CRYSTAL_VARIANTS, type MeshData } from './geometry/icosahedron';
+
+/**
+ * Every shader module below is built as `commonShaderCode + '\n' + <module>`,
+ * so prepending the palette here is the one place it needs to happen for all
+ * twelve. The shaders reference the injected `PMA_*` consts by name instead of
+ * carrying their own colour literals.
+ */
+const commonShaderCode = wgslPalette() + '\n' + rawCommonShaderCode;
 import { generateIcosphereMulti } from './geometry/icosphere';
 import { NavigationController, NODE_STRIDE, NODE_OFF_TYPE_HASH, NO_PARENT } from '../interaction/NavigationController';
 
@@ -1137,7 +1146,11 @@ export class WebGPURenderer {
 
         // ── 7. Bloom chain ──────────────────────────────────────────────
         // Prefilter: sceneColor → bloomMips[0]
-        this.writeBloomParams(0, this.dimsOf(this.bloomMips[0]), 1.05, 0.35, 1.0);
+        // Intensity comes from the palette: glow is the register this redesign
+        // moves away from, so the vitrine reads as lamp-lit rather than
+        // lit-from-within. Threshold and knee are unchanged — this is a
+        // strength change, not a change to the bloom curve.
+        this.writeBloomParams(0, this.dimsOf(this.bloomMips[0]), 1.05, 0.35, VITRINE.bloomStrength);
         {
             const p = encoder.beginRenderPass({
                 colorAttachments: [{ view: this.bloomMips[0].createView(), loadOp: 'clear', clearValue: [0,0,0,0], storeOp: 'store' }],

@@ -14,8 +14,11 @@ export interface Message {
   /** Set when the user stopped generation. The partial answer is kept. */
   stopped?: boolean;
   mode?: 'fast_path' | 'full_rag' | 'degraded_rag' | 'cached';
+  /** The prompt mode the user chose, echoed back. A different axis to `mode`. */
+  query_mode?: string;
   graph_hops?: string;
   contradictions_found?: boolean;
+  contradiction_sources?: (string | number)[];
   knowledge_gaps?: string[];
   pattern_annotations?: string[];
   trace?: TraceEvent[];
@@ -31,8 +34,8 @@ type ChatAction =
   | { type: 'START_ASSISTANT_STREAM'; payload: { id: string } }
   | { type: 'APPEND_STREAM'; payload: { text: string } }
   | { type: 'FINISH_STREAM'; payload: { graph_hops?: string; stopped?: boolean } }
-  | { type: 'SET_FAST_PATH'; payload: { content: string; sources?: QuerySource[]; latency_ms?: number; graph_hops?: string } }
-  | { type: 'SET_SOURCES'; payload: { sources: QuerySource[]; near_misses: QuerySource[]; latency_ms: number; mode: 'fast_path' | 'full_rag' | 'degraded_rag' | 'cached'; graph_hops?: string; contradictions_found?: boolean; knowledge_gaps?: string[] } }
+  | { type: 'SET_FAST_PATH'; payload: { content: string; sources?: QuerySource[]; latency_ms?: number; query_mode?: string; graph_hops?: string } }
+  | { type: 'SET_SOURCES'; payload: { sources: QuerySource[]; near_misses: QuerySource[]; latency_ms: number; mode: 'fast_path' | 'full_rag' | 'degraded_rag' | 'cached'; query_mode?: string; graph_hops?: string; contradictions_found?: boolean; contradiction_sources?: (string | number)[]; knowledge_gaps?: string[] } }
   | { type: 'SET_METADATA'; payload: { pattern_annotations?: string[] } }
   | { type: 'SET_TRACE'; payload: { trace: TraceEvent[] } }
   | { type: 'SET_FALLBACK'; payload: { to: string } }
@@ -76,6 +79,7 @@ function chatReducer(state: Message[], action: ChatAction): Message[] {
           sources: action.payload.sources || last.sources,
           latency_ms: action.payload.latency_ms || last.latency_ms,
           mode: 'fast_path',
+          query_mode: action.payload.query_mode ?? last.query_mode,
           graph_hops: action.payload.graph_hops || last.graph_hops
         }];
       }
@@ -90,8 +94,10 @@ function chatReducer(state: Message[], action: ChatAction): Message[] {
           near_misses: action.payload.near_misses,
           latency_ms: action.payload.latency_ms,
           mode: action.payload.mode,
+          query_mode: action.payload.query_mode,
           graph_hops: action.payload.graph_hops,
           contradictions_found: action.payload.contradictions_found,
+          contradiction_sources: action.payload.contradiction_sources,
           knowledge_gaps: action.payload.knowledge_gaps
         }];
       }
@@ -314,7 +320,12 @@ export function useChatStream(onHistoryUpdate: () => void) {
           unsubscribeRef.current = null;
           finalizeStreamRef.current = null;
           dispatch({ type: 'SET_ERROR', payload: { text: chunk.text || 'Search failed' } });
-          reject(new Error(chunk.text || 'Search failed'));
+          // Carry the machine-readable reason onto the Error so the page can
+          // offer the matching remedy. A consent failure is one click from
+          // fixable; a bare message is not.
+          const streamError = new Error(chunk.text || 'Search failed');
+          if (chunk.code) (streamError as Error & { code?: string }).code = chunk.code;
+          reject(streamError);
           return;
         }
 
@@ -353,8 +364,10 @@ export function useChatStream(onHistoryUpdate: () => void) {
               near_misses: chunk.near_misses || [],
               latency_ms: currentLatency,
               mode: (chunk.mode as any) || 'full_rag',
+              query_mode: chunk.query_mode,
               graph_hops: chunk.graph_hops,
               contradictions_found: chunk.contradictions_found,
+              contradiction_sources: chunk.contradiction_sources,
               knowledge_gaps: chunk.knowledge_gaps
             }
           });
@@ -371,6 +384,7 @@ export function useChatStream(onHistoryUpdate: () => void) {
               content: chunk.answer || chunk.text || '',
               sources: chunk.sources || currentSources,
               latency_ms: chunk.latency_ms || currentLatency,
+              query_mode: chunk.query_mode,
               graph_hops: chunk.graph_hops
             }
           });

@@ -75,8 +75,8 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VOut {
     // Hue: 90% warm amber (fireflies), 10% cool cyan (dust motes) — dictated
     // by seed. Amplitude modulated by life so freshly-born particles glow.
     let cool = step(0.90, p.seed);
-    let warm = vec3<f32>(1.00, 0.72, 0.32);
-    let cyan = vec3<f32>(0.40, 0.85, 1.00);
+    let warm = PMA_MOTE_WARM;
+    let cyan = PMA_MOTE_COOL;
     o.color  = mix(warm, cyan, cool) * (0.6 + 0.4 * sin(camera.time * 4.0 + p.seed * TWO_PI));
     // Alpha: strong at spawn, fades with life.
     let normLife = clamp(p.life / 4.0, 0.0, 1.0);

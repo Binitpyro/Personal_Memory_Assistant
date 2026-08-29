@@ -54,8 +54,8 @@ export function ProviderRecipes({
       title: 'Free & Local',
       desc: '100% private. Runs entirely on your machine.',
       icon: Shield,
-      color: 'text-emerald-500',
-      bg: 'bg-emerald-500/10',
+      color: 'text-success',
+      bg: 'bg-surface',
       fallback: ['ollama', 'lmstudio'],
       defaultModel: { provider: 'ollama', model: 'llama3:8b' }
     },
@@ -82,10 +82,10 @@ export function ProviderRecipes({
   ];
 
   return (
-    <div className="glass rounded-3xl p-5 border border-primary/10 bg-white/40 mb-2 relative">
+    <div className="glass rounded-3xl p-5 border border-primary/10 bg-surface mb-2 relative">
       <button 
         onClick={dismiss} 
-        className="absolute top-4 right-4 p-1.5 hover:bg-black/5 rounded-full transition-colors"
+        className="absolute top-4 right-4 p-1.5 hover:bg-raised rounded-full transition-colors"
       >
         <X className="w-4 h-4 text-text-secondary" />
       </button>
@@ -104,7 +104,7 @@ export function ProviderRecipes({
               key={r.id}
               disabled={applying !== null}
               onClick={() => handleApply(r.id, r.fallback, r.defaultModel)}
-              className="relative flex flex-col items-start text-left p-4 rounded-2xl border border-primary/10 hover:border-primary/30 hover:bg-white/50 transition-all group disabled:opacity-50 disabled:cursor-not-allowed"
+              className="relative flex flex-col items-start text-left p-4 rounded-2xl border border-primary/10 hover:border-primary/30 hover:bg-surface transition-all group disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <div className={`p-2 rounded-xl ${r.bg} mb-3`}>
                 <Icon className={`w-4 h-4 ${r.color}`} />
@@ -113,7 +113,7 @@ export function ProviderRecipes({
               <p className="text-[11px] text-text-secondary mt-1">{r.desc}</p>
               
               {isApplying && (
-                <div className="absolute inset-0 bg-white/50 backdrop-blur-[1px] rounded-2xl flex items-center justify-center">
+                <div className="absolute inset-0 bg-surface backdrop-blur-[1px] rounded-2xl flex items-center justify-center">
                   <Loader2 className="w-5 h-5 text-primary animate-spin" />
                 </div>
               )}

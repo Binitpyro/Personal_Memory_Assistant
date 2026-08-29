@@ -4,6 +4,7 @@ import { useApi } from '../useApi'
 import { getInsights, getInsightsByType, getFileTree } from '../api'
 import { KnowledgePortrait } from '../components/KnowledgePortrait'
 import { CACHE_KEYS } from '../cacheKeys'
+import { SkeletonText } from '../components/ui'
 
 const WebGPUFallback = lazy(() => import('../components/WebGPUFallback').then(m => ({ default: m.WebGPUFallback })))
 const FileTypeTreemap = lazy(() => import('../components/FileTypeTreemap').then(m => ({ default: m.FileTypeTreemap })))
@@ -75,7 +76,7 @@ export function InsightsPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold flex items-center gap-3">
+          <h1 className="font-serif text-2xl font-normal flex items-center gap-3">
             <BarChart3 className="w-7 h-7 text-primary" />
             Insights
           </h1>
@@ -126,20 +127,20 @@ export function InsightsPage() {
                 the 400px floor on the wrapper. */}
             <div className="glass-card lg:col-span-2 flex flex-col h-[560px] overflow-hidden">
               <div className="flex items-center justify-between mb-4 shrink-0">
-                <h2 className="text-lg font-bold text-primary flex items-center gap-2">
+                <h2 className="font-serif text-lg font-medium text-primary flex items-center gap-2">
                   <PieChart className="w-5 h-5" />
                   File Type Hierarchy
                 </h2>
-                <div className="flex items-center bg-black/5 p-1 rounded-xl border border-black/5 shadow-inner">
+                <div className="flex items-center bg-raised p-1 rounded-xl border border-rule shadow-inner">
                   <button
                     onClick={() => setVizMode('3d')}
-                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-bold transition-all ${vizMode === '3d' ? 'bg-primary text-white shadow-lg' : 'text-text-secondary hover:text-text-primary'}`}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-bold transition-all ${vizMode === '3d' ? 'bg-plate text-on-plate shadow-lg' : 'text-text-secondary hover:text-text-primary'}`}
                   >
                     <Box className="w-3.5 h-3.5" /> 3D CRYSTAL
                   </button>
                   <button
                     onClick={() => setVizMode('2d')}
-                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-bold transition-all ${vizMode === '2d' ? 'bg-primary text-white shadow-lg' : 'text-text-secondary hover:text-text-primary'}`}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-bold transition-all ${vizMode === '2d' ? 'bg-plate text-on-plate shadow-lg' : 'text-text-secondary hover:text-text-primary'}`}
                   >
                     <LayoutGrid className="w-3.5 h-3.5" /> 2D TREEMAP
                   </button>
@@ -173,16 +174,16 @@ export function InsightsPage() {
                   </Suspense>
                 </div>
               ) : (
-                <div className="flex-1 flex flex-col items-center justify-center text-text-secondary text-sm bg-white/5 rounded-2xl border border-white/5">
+                <div className="flex-1 flex flex-col items-center justify-center text-text-secondary text-sm bg-raised rounded-2xl border border-rule">
                   {treeLoading ? (
                     <div className="flex flex-col items-center gap-3">
                       <Loader2 className="w-8 h-8 text-primary animate-spin" />
                       <p>Loading folder structure...</p>
                     </div>
                   ) : (
-                    <div className="flex flex-col items-center gap-3 opacity-60">
-                      <Box className="w-12 h-12" />
-                      <p>No file hierarchy data available.</p>
+                    <div className="flex flex-col items-center gap-3 text-text-tertiary">
+                      <Box className="w-10 h-10" aria-hidden />
+                      <p className="m-0">No file hierarchy data available.</p>
                     </div>
                   )}
                 </div>
@@ -209,16 +210,16 @@ export function InsightsPage() {
 
               {/* Top Files */}
               <div>
-                <h2 className="text-lg font-semibold mb-3 flex items-center gap-2 text-text-primary">
+                <h2 className="font-serif text-lg font-medium mb-3 flex items-center gap-2 text-text-primary">
                   <Flame className="w-5 h-5 text-warning" />
                   Top Files
                 </h2>
                 {(() => {
                   if (filterLoading) {
                     return (
-                      <div className="flex items-center justify-center py-12">
-                        <Loader2 className="w-6 h-6 text-primary animate-spin" />
-                      </div>
+                      // The layout is known here, so show its shape rather than
+                      // a spinner that only says "wait".
+                      <div className="py-2"><SkeletonText lines={5} /></div>
                     )
                   }
                   if (filterError) {
@@ -230,19 +231,21 @@ export function InsightsPage() {
                   }
                   if (filteredTopFiles.length > 0) {
                     return (
-                      <div className="space-y-2">
+                      // A ruled register, not ten stacked cards. Cards in a
+                      // narrow column read as a dashboard; this is an index.
+                      <div>
                         {filteredTopFiles.slice(0, 10).map((f) => (
-                          <div key={f.path} className="group flex items-center justify-between text-sm bg-white/5 hover:bg-white/10 rounded-xl px-4 py-3 transition-all border border-white/5">
-                            <span className="truncate text-text-primary font-medium">{f.path.split(/[\\/]/).pop()}</span>
-                            <span className="text-primary-light text-xs font-mono font-bold shrink-0 ml-2">{formatBytes(f.size)}</span>
+                          <div key={f.path} className="flex items-baseline justify-between gap-3 py-2 border-b border-rule last:border-b-0">
+                            <span className="truncate text-[13px] text-text-primary">{f.path.split(/[\\/]/).pop()}</span>
+                            <span className="font-mono text-[11px] text-primary shrink-0">{formatBytes(f.size)}</span>
                           </div>
                         ))}
                       </div>
                     )
                   }
                   return (
-                    <div className="text-center py-8 opacity-40">
-                      <p className="text-text-secondary text-sm">
+                    <div className="text-center py-8">
+                      <p className="text-text-tertiary text-sm">
                         {typeFilter ? `No ${typeFilter} files found` : 'No files indexed yet'}
                       </p>
                     </div>
@@ -253,15 +256,15 @@ export function InsightsPage() {
               {/* Cold Files */}
               {!filterLoading && filteredColdFiles.length > 0 && (
                 <div>
-                  <h2 className="text-lg font-semibold mb-3 flex items-center gap-2 text-text-primary">
+                  <h2 className="font-serif text-lg font-medium mb-3 flex items-center gap-2 text-text-primary">
                     <Snowflake className="w-5 h-5 text-accent" />
                     Cold Files
                   </h2>
-                  <div className="space-y-2">
+                  <div>
                     {filteredColdFiles.slice(0, 8).map((f) => (
-                      <div key={f.path} className="group flex items-center justify-between text-sm bg-white/5 hover:bg-white/10 rounded-xl px-4 py-3 transition-all border border-white/5">
-                        <span className="truncate text-text-primary font-medium">{f.path.split(/[\\/]/).pop()}</span>
-                        <span className="text-accent text-xs font-bold shrink-0 ml-2">
+                      <div key={f.path} className="flex items-baseline justify-between gap-3 py-2 border-b border-rule last:border-b-0">
+                        <span className="truncate text-[13px] text-text-primary">{f.path.split(/[\\/]/).pop()}</span>
+                        <span className="font-mono text-[11px] text-info shrink-0">
                           {f.usage_count === undefined ? formatBytes(f.size || 0) : `${f.usage_count} hits`}
                         </span>
                       </div>

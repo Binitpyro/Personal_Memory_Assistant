@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Bot, User, Sparkles, FileText, ChevronDown, ChevronRight, Clock, Plus, Network, SearchX, Split, ExternalLink } from 'lucide-react';
+import { Bot, User, Sparkles, ChevronDown, ChevronRight, Clock, Plus, Network, SearchX, Split, ExternalLink } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
@@ -61,15 +61,15 @@ const ReasoningTrace = ({ trace }: Readonly<{ trace: TraceEvent[] }>) => {
   return (
     <div className="mt-2 flex flex-col gap-2">
       {missing.length > 0 && (
-        <div className="bg-slate-500/10 border border-slate-400/20 rounded-lg overflow-hidden">
-          <div className="px-3 py-2 flex items-center gap-2 text-slate-200/90 text-xs font-bold border-b border-slate-400/10">
+        <div className="bg-surface border border-rule rounded-lg overflow-hidden">
+          <div className="px-3 py-2 flex items-center gap-2 text-text-primary text-xs font-bold border-b border-rule">
             <SearchX className="w-4 h-4" />
             Searched for, but not found in your files
           </div>
-          <div className="p-3 text-xs text-slate-200/70 flex flex-col gap-1.5">
+          <div className="p-3 text-xs text-text-secondary flex flex-col gap-1.5">
             {missing.map((q) => (
               <span key={q} className="flex items-start gap-2">
-                <span className="text-slate-400 mt-px">–</span>
+                <span className="text-text-tertiary mt-px">–</span>
                 <span>{q}</span>
               </span>
             ))}
@@ -99,7 +99,7 @@ const ReasoningTrace = ({ trace }: Readonly<{ trace: TraceEvent[] }>) => {
                 </div>
               ))}
               {summary && (
-                <div className="mt-1 pt-2 border-t border-white/5 text-[10px] text-text-secondary/70">
+                <div className="mt-1 pt-2 border-t border-rule text-[10px] text-text-secondary/70">
                   {summary.detail}
                 </div>
               )}
@@ -125,7 +125,7 @@ const GraphTraceViewer = ({ traceData }: Readonly<{ traceData: string }>) => {
       {isOpen && (
         <div className="p-3 border-t border-primary/10">
           <CrystalGraphTrace traceData={traceData} />
-          <div className="mt-4 text-xs font-mono text-text-secondary overflow-x-auto whitespace-pre p-2 bg-black/20 rounded-md">
+          <div className="mt-4 text-xs font-mono text-text-secondary overflow-x-auto whitespace-pre p-2 bg-raised rounded-md">
             {traceData}
           </div>
         </div>
@@ -160,18 +160,41 @@ const SourceViewer = ({ src, onForceInclude }: Readonly<{ src: QuerySource, onFo
 
   return (
     <div className="flex flex-col gap-1 w-full max-w-sm mt-1">
-      <div className="flex items-center gap-1.5">
-        <button 
+      {/* A shelf mark, not a chip. The answer is the text and its sources are
+          the margin: file, folder tag, then the catalogue line (chunk id and
+          score). Those four are exactly what QuerySource carries — there are no
+          section anchors in the data, so none are invented here. */}
+      <div className="flex items-start gap-1.5">
+        <button
           onClick={() => setIsOpen(!isOpen)}
-          className={`flex items-center gap-1.5 px-2 py-1 transition-colors rounded-lg text-[10px] border w-fit ${
-            src._challenge_source 
-              ? 'bg-red-500/10 hover:bg-red-500/20 text-red-300 border-red-500/30' 
-              : 'bg-white/5 hover:bg-white/10 text-text-secondary border-white/5'
-          }`}
+          className="flex items-start gap-2 text-left w-full group/mark"
+          aria-expanded={isOpen}
         >
-          <FileText className={`w-3 h-3 ${src._challenge_source ? 'text-red-400' : 'text-primary-light'}`} />
-          <span className="max-w-[150px] truncate">{src.file_path.split(/[\\/]/).pop()}</span>
-          {isOpen ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+          <span
+            aria-hidden
+            className={`font-mono text-[10px] mt-px shrink-0 ${src._challenge_source ? 'text-error' : 'text-primary'}`}
+          >
+            {isOpen ? '−' : '+'}
+          </span>
+          <span className="min-w-0">
+            <span className={`block font-mono text-[11px] leading-relaxed truncate group-hover/mark:text-primary transition-colors ${
+              src._challenge_source ? 'text-error' : 'text-text-secondary'
+            }`}>
+              {src.file_path.split(/[\\/]/).pop()}
+            </span>
+            {src.folder_tag && (
+              <span className="block font-mono text-[10px] leading-relaxed text-text-tertiary truncate">
+                {src.folder_tag}
+              </span>
+            )}
+            {(src.chunk_id !== undefined || src.score !== undefined) && (
+              <span className="block font-mono text-[10px] leading-relaxed text-text-tertiary">
+                {src.chunk_id !== undefined ? `chunk ${src.chunk_id}` : ''}
+                {src.chunk_id !== undefined && src.score !== undefined ? ' · ' : ''}
+                {src.score !== undefined ? src.score.toFixed(2) : ''}
+              </span>
+            )}
+          </span>
         </button>
         {onForceInclude && (
           <button 
@@ -186,7 +209,7 @@ const SourceViewer = ({ src, onForceInclude }: Readonly<{ src: QuerySource, onFo
       </div>
       {isOpen && src.text && (
         <div className="flex flex-col gap-1">
-          <div className="p-2 text-xs text-text-secondary bg-black/20 border border-white/5 rounded-lg max-h-48 overflow-y-auto whitespace-pre-wrap leading-relaxed">
+          <div className="p-2 text-xs text-text-secondary bg-raised border border-rule rounded-lg max-h-48 overflow-y-auto whitespace-pre-wrap leading-relaxed">
             {content}
           </div>
           {/* Until now the expanded panel was a dead end: you could read the
@@ -196,7 +219,7 @@ const SourceViewer = ({ src, onForceInclude }: Readonly<{ src: QuerySource, onFo
           {isTauri && (
             <button
               onClick={() => { void openFile(src.file_path); }}
-              className="flex items-center gap-1.5 px-2 py-1 self-start bg-white/5 hover:bg-white/10 transition-colors rounded-lg text-[10px] text-text-secondary border border-white/5"
+              className="flex items-center gap-1.5 px-2 py-1 self-start bg-raised hover:bg-raised transition-colors rounded-lg text-[10px] text-text-secondary border border-rule"
               title={`Open ${src.file_path}`}
             >
               <ExternalLink className="w-3 h-3 text-primary-light" />
@@ -216,6 +239,9 @@ export interface MessageBubbleProps {
 
 export function MessageBubble({ message: msg, onNearMissClick }: Readonly<MessageBubbleProps>) {
   const [annotationsOpen, setAnnotationsOpen] = useState(true);
+  // The '+N more' label was static text with nothing behind it, so sources
+  // beyond the third were unreachable.
+  const [showAllSources, setShowAllSources] = useState(false);
 
   return (
     <div className={`flex gap-4 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
@@ -226,8 +252,8 @@ export function MessageBubble({ message: msg, onNearMissClick }: Readonly<Messag
       )}
       <div className={`flex flex-col gap-2 max-w-[85%] ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
         <div className={`px-5 py-3 rounded-2xl text-sm leading-relaxed shadow-sm border ${msg.role === 'user'
-          ? 'bg-primary text-white border-primary-light/20 rounded-tr-none'
-          : 'glass-card !p-3 text-text-primary border-white/80 rounded-tl-none'
+          ? 'bg-plate text-on-plate border-primary-light/20 rounded-tr-none'
+          : 'glass-card !p-3 text-text-primary border-edge rounded-tl-none'
           }`}>
           {msg.isStreaming && !msg.content ? (
             <div className="flex gap-1 py-1">
@@ -236,7 +262,9 @@ export function MessageBubble({ message: msg, onNearMissClick }: Readonly<Messag
               <span className="w-1.5 h-1.5 bg-primary-light rounded-full animate-bounce [animation-delay:0.4s]"></span>
             </div>
           ) : (
-            <div className="prose prose-invert prose-sm max-w-none">
+            // `prose prose-invert prose-sm` emitted no CSS at all —
+            // @tailwindcss/typography is not a dependency of this project.
+            <div className="prose-answer max-w-none">
               <ReactMarkdown 
                 remarkPlugins={[remarkGfm]}
                 // Order is load-bearing: rehypeRaw parses the raw HTML into the
@@ -250,16 +278,26 @@ export function MessageBubble({ message: msg, onNearMissClick }: Readonly<Messag
                     const numSources = (sourcesStr.match(/\[\d+\]/g) || []).length;
                     
                     if (isInference) {
-                      return <span className="bg-amber-500/10 text-amber-200/90 px-1 rounded border-b border-amber-500/30" title="Inference (Ungrounded)" {...props} />;
+                      return <span className="text-text-secondary px-0.5 border-b border-dotted border-warning/70" title="Inference (Ungrounded)" {...props} />;
                     }
                     
+                    // D10: this used to paint >=3 citations green and call it
+                    // "High Confidence". The only input is how many [n] tokens
+                    // the model emitted in the attribute - not a relevance
+                    // score, not a reranker score, and not any check that the
+                    // cited chunk supports the sentence. A model that cites
+                    // three times confidently and wrongly scored highest, which
+                    // is the "hallucination with a citation" failure mode
+                    // exactly. Report the citation count, which is what is
+                    // actually known, and leave the confidence judgement to the
+                    // reader until a real signal exists to key on.
                     if (numSources >= 3) {
-                      return <span className="underline decoration-green-500/50 decoration-2 underline-offset-4 bg-green-500/10 px-1 rounded text-green-100" title={`High Confidence (Sources: ${sourcesStr})`} {...props} />;
+                      return <span className="underline decoration-primary-light/60 decoration-2 underline-offset-4 px-1 rounded cursor-help" title={`Cited ${numSources} sources: ${sourcesStr}`} {...props} />;
                     }
                     
-                    return <span className="underline decoration-primary-light/40 decoration-1 underline-offset-4 hover:bg-primary/5 px-1 rounded transition-colors cursor-help" title={`Sources: ${sourcesStr}`} {...props} />;
+                    return <span className="underline decoration-primary-light/40 decoration-1 underline-offset-4 hover:bg-primary/5 px-1 rounded transition-colors cursor-help" title={numSources === 1 ? `Cited 1 source: ${sourcesStr}` : `Sources: ${sourcesStr}`} {...props} />;
                   },
-                  inference: ({ ...props }: Readonly<Record<string, any>>) => <span className="bg-amber-500/10 text-amber-200/90 px-1 rounded border-b border-amber-500/30" title="Inference (Ungrounded)" {...props} />
+                  inference: ({ ...props }: Readonly<Record<string, any>>) => <span className="text-text-secondary px-0.5 border-b border-dotted border-warning/70" title="Inference (Ungrounded)" {...props} />
                 } as Record<string, React.ComponentType<any>>}
               >
                 {msg.content}
@@ -274,7 +312,7 @@ export function MessageBubble({ message: msg, onNearMissClick }: Readonly<Messag
             from an answer that simply ended. */}
         {msg.role === 'assistant' && msg.stopped && (
           <div className="flex items-center gap-2 mt-1">
-            <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full border bg-white/5 text-text-secondary border-white/10">
+            <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full border bg-raised text-text-secondary border-rule">
               Stopped · partial answer
             </span>
           </div>
@@ -290,11 +328,11 @@ export function MessageBubble({ message: msg, onNearMissClick }: Readonly<Messag
                 presented as fresh. */}
             <span className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full border ${
               msg.mode === 'fast_path'
-                ? 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+                ? 'bg-surface text-warning border-edge'
                 : msg.mode === 'degraded_rag'
-                  ? 'bg-orange-500/10 text-orange-400 border-orange-500/20'
+                  ? 'bg-surface text-warning border-edge'
                   : msg.mode === 'cached'
-                    ? 'bg-white/5 text-text-secondary border-white/10'
+                    ? 'bg-raised text-text-secondary border-rule'
                     : 'bg-primary/10 text-primary-light border-primary/20'
               }`}>
               {msg.mode === 'fast_path'
@@ -305,8 +343,20 @@ export function MessageBubble({ message: msg, onNearMissClick }: Readonly<Messag
                     ? '⟳ Saved answer'
                     : '🔍 RAG Answer'}
             </span>
+            {msg.query_mode && (
+              <span
+                title="The answering style you selected"
+                className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full border capitalize ${
+                  msg.query_mode === 'challenge'
+                    ? 'bg-surface text-error border-error/40'
+                    : 'bg-raised text-text-secondary border-rule'
+                }`}
+              >
+                {msg.query_mode === 'challenge' ? '⚔' : '◆'} {msg.query_mode}
+              </span>
+            )}
             {msg.fallbackTo && (
-              <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full border bg-red-500/10 text-red-400 border-red-500/20">
+              <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full border bg-surface text-error border-error/40">
                 ⚠️ Backup: {msg.fallbackTo}
               </span>
             )}
@@ -329,11 +379,28 @@ export function MessageBubble({ message: msg, onNearMissClick }: Readonly<Messag
 
         {/* Contradictions Banner */}
         {msg.role === 'assistant' && msg.contradictions_found && (
-          <div className="mt-2 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2 flex items-start gap-2 text-amber-200/90 text-xs">
-            <span className="text-amber-400 mt-0.5">⚠️</span>
+          <div className="mt-2 bg-surface border border-rule border-l-2 border-l-warning rounded-lg px-3 py-2 flex items-start gap-2 text-text-secondary text-xs">
+            <span className="text-warning mt-0.5">⚠️</span>
             <div className="flex flex-col">
-              <span className="font-bold text-amber-300">Potential Source Conflicts</span>
-              <span>The system identified information in your files that might be conflicting.</span>
+              <span className="font-bold text-warning">Potential Source Conflicts</span>
+              {(() => {
+                // The banner used to assert a conflict and never say where, which
+                // the reader could neither check nor dismiss. Name the files it
+                // is actually pointing at.
+                const ids = new Set((msg.contradiction_sources ?? []).map(String));
+                const named = (msg.sources ?? [])
+                  .filter(src => ids.has(String(src.chunk_id)))
+                  .map(src => src.file_path.split(/[\\/]/).pop())
+                  .filter((n, i, a): n is string => !!n && a.indexOf(n) === i);
+                if (named.length === 0) {
+                  return <span>Some retrieved passages may disagree. Check the sources below.</span>;
+                }
+                return (
+                  <span>
+                    Possible disagreement in {named.join(', ')} — worth reading those passages yourself.
+                  </span>
+                );
+              })()}
             </div>
           </div>
         )}
@@ -345,14 +412,14 @@ export function MessageBubble({ message: msg, onNearMissClick }: Readonly<Messag
 
         {/* Knowledge Gaps Panel */}
         {msg.role === 'assistant' && msg.knowledge_gaps && msg.knowledge_gaps.length > 0 && (
-          <div className="mt-2 bg-purple-500/10 border border-purple-500/20 rounded-lg overflow-hidden">
-            <div className="px-3 py-2 flex items-center gap-2 text-purple-200/90 text-xs font-bold border-b border-purple-500/10">
+          <div className="mt-2 bg-surface border border-rule rounded-lg overflow-hidden">
+            <div className="px-3 py-2 flex items-center gap-2 text-text-primary text-xs font-bold border-b border-rule">
               <Sparkles className="w-4 h-4" />
               What You Don't Know
             </div>
-            <div className="p-3 text-xs text-purple-200/70 flex flex-wrap gap-2">
+            <div className="p-3 text-xs text-text-secondary flex flex-wrap gap-2">
               {msg.knowledge_gaps.map((gap, i) => (
-                <span key={i} className="bg-purple-500/20 px-2 py-1 rounded-md border border-purple-500/30">
+                <span key={i} className="bg-raised px-2 py-1 rounded-md border border-edge">
                   {gap}
                 </span>
               ))}
@@ -362,10 +429,10 @@ export function MessageBubble({ message: msg, onNearMissClick }: Readonly<Messag
 
         {/* Pattern Annotator Panel */}
         {msg.role === 'assistant' && msg.pattern_annotations && msg.pattern_annotations.length > 0 && (
-          <div className="mt-2 bg-blue-500/10 border border-blue-500/20 rounded-lg overflow-hidden">
+          <div className="mt-2 bg-surface border border-rule rounded-lg overflow-hidden">
             <button 
               onClick={() => setAnnotationsOpen(!annotationsOpen)}
-              className="w-full px-3 py-2 flex items-center justify-between text-blue-200/90 text-xs font-bold border-b border-blue-500/10 hover:bg-blue-500/5 transition-colors"
+              className="w-full px-3 py-2 flex items-center justify-between text-text-primary text-xs font-bold border-b border-rule hover:bg-raised transition-colors"
             >
               <span className="flex items-center gap-2">
                 <User className="w-4 h-4" />
@@ -374,10 +441,10 @@ export function MessageBubble({ message: msg, onNearMissClick }: Readonly<Messag
               {annotationsOpen ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
             </button>
             {annotationsOpen && (
-              <div className="p-3 text-xs text-blue-200/70 flex flex-col gap-1.5">
+              <div className="p-3 text-xs text-text-secondary flex flex-col gap-1.5">
                 {msg.pattern_annotations.map((annotation, i) => (
                   <div key={i} className="flex items-start gap-1.5">
-                    <span className="text-blue-400/80 mt-0.5">•</span>
+                    <span className="text-info mt-0.5">•</span>
                     <span>{annotation}</span>
                   </div>
                 ))}
@@ -387,12 +454,25 @@ export function MessageBubble({ message: msg, onNearMissClick }: Readonly<Messag
         )}
 
         {msg.role === 'assistant' && msg.sources && msg.sources.length > 0 && (
-          <div className="flex flex-col gap-2 mt-2">
-            {msg.sources.slice(0, 3).map((src) => (
+          // The provenance apparatus. A left rule and a mono column set this
+          // apart from the answer as a different KIND of text — the margin of a
+          // page rather than a row of chips under it.
+          <div className="flex flex-col gap-3 mt-3 pl-4 border-l border-rule">
+            <div className="font-mono text-[10px] tracking-[0.16em] uppercase text-text-tertiary">
+              Provenance
+            </div>
+            {(showAllSources ? msg.sources : msg.sources.slice(0, 3)).map((src) => (
               <SourceViewer key={`${src.file_path}-${src.score || 0}`} src={src} />
             ))}
             {msg.sources.length > 3 && (
-              <span className="text-[10px] text-text-secondary self-start ml-2">+{msg.sources.length - 3} more</span>
+              <button
+                onClick={() => setShowAllSources(v => !v)}
+                className="font-mono text-[10px] text-text-tertiary self-start underline underline-offset-4 hover:text-primary transition-colors"
+              >
+                {showAllSources
+                  ? 'Show fewer sources'
+                  : `+${msg.sources.length - 3} more`}
+              </button>
             )}
             {(() => {
               const dates = msg.sources
@@ -403,7 +483,7 @@ export function MessageBubble({ message: msg, onNearMissClick }: Readonly<Messag
                 const maxDate = new Date(Math.max(...dates)).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
                 const dateText = minDate === maxDate ? minDate : `${minDate} to ${maxDate}`;
                 return (
-                  <div className="text-[10px] text-text-secondary mt-1 flex items-center gap-1.5 border-t border-white/5 pt-2 pl-2">
+                  <div className="text-[10px] text-text-secondary mt-1 flex items-center gap-1.5 border-t border-rule pt-2 pl-2">
                     <Clock className="w-3 h-3 opacity-70" />
                     Based on documents from {dateText}
                   </div>
@@ -415,7 +495,7 @@ export function MessageBubble({ message: msg, onNearMissClick }: Readonly<Messag
         )}
 
         {msg.role === 'assistant' && msg.near_misses && msg.near_misses.length > 0 && (
-          <div className="mt-4 pt-4 border-t border-white/5">
+          <div className="mt-4 pt-4 border-t border-rule">
             <details className="group cursor-pointer">
               <summary className="text-[11px] font-medium text-text-secondary/70 hover:text-text-primary transition-colors flex items-center gap-2 select-none mb-2">
                 <span className="w-4 h-4 flex items-center justify-center rounded-sm bg-surface-elevation-2/50 group-hover:bg-surface-elevation-3 transition-colors">
@@ -442,7 +522,7 @@ export function MessageBubble({ message: msg, onNearMissClick }: Readonly<Messag
         )}
       </div>
       {msg.role === 'user' && (
-        <div className="w-8 h-8 rounded-full bg-surface-lighter flex items-center justify-center shrink-0 border border-white/10 shadow-lg">
+        <div className="w-8 h-8 rounded-full bg-surface-lighter flex items-center justify-center shrink-0 border border-rule shadow-lg">
           <User className="w-4 h-4 text-text-secondary" />
         </div>
       )}

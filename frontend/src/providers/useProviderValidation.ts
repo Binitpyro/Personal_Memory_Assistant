@@ -56,11 +56,11 @@ export function useProviderValidation(providerId: string) {
     }
   }, [providerId]);
 
-  const saveKey = useCallback(async (key: string) => {
+  const saveKey = useCallback(async (key: string | null, baseUrl?: string | null) => {
     setIsSaving(true);
     setError(null);
     try {
-      await setProviderKey(providerId, key);
+      await setProviderKey(providerId, key, baseUrl);
       return true;
     } catch (err: any) {
       setError(err.message || 'Failed to save API key');

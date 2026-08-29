@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { screen } from '@testing-library/react';
+import { screen, fireEvent } from '@testing-library/react';
 import { MessageBubble } from '../../components/chat/MessageBubble';
 import { renderWithProviders } from '../test-utils';
 import { type Message } from '../../hooks/useChatStream';
@@ -126,5 +126,94 @@ describe('MessageBubble Component', () => {
     );
 
     expect(screen.queryByText('Open file')).toBeNull();
+  });
+});
+
+// ── Phase 5: what the answer actually tells you about itself ────────────────
+
+describe('MessageBubble provenance', () => {
+  const src = (n: number, path: string) => ({
+    id: String(n),
+    chunk_id: n,
+    file_path: path,
+    score: 0.9,
+    text: `chunk ${n}`,
+    _challenge_source: false,
+  });
+
+  const answer = (extra: Partial<Message> = {}): Message => ({
+    id: 'a',
+    role: 'assistant',
+    content: 'An answer.',
+    mode: 'full_rag',
+    ...extra,
+  });
+
+  it('labels the answering style the user chose', () => {
+    // `mode` on the response is the retrieval path; the user's prompt mode was
+    // overwritten by it and never reached the UI. Challenge suffered most - it
+    // drives the red challenge-source styling but nothing named the answer.
+    renderWithProviders(
+      <MessageBubble message={answer({ query_mode: 'challenge' })} onNearMissClick={vi.fn()} />,
+    );
+
+    expect(screen.getByText(/challenge/i)).toBeDefined();
+    // The retrieval-path badge must still be there and unchanged.
+    expect(screen.getByText(/RAG Answer/i)).toBeDefined();
+  });
+
+  it('shows no style pill when the backend did not echo one', () => {
+    // A cached answer genuinely does not know which mode produced it, and an
+    // empty badge is worse than no badge.
+    renderWithProviders(<MessageBubble message={answer()} onNearMissClick={vi.fn()} />);
+
+    expect(screen.queryByText(/^◆/)).toBeNull();
+  });
+
+  it('can expand past the first three sources', () => {
+    // '+N more' was static text with nothing behind it.
+    const sources = [1, 2, 3, 4, 5].map(n => src(n, `C:/docs/file${n}.md`));
+
+    renderWithProviders(
+      <MessageBubble message={answer({ sources })} onNearMissClick={vi.fn()} />,
+    );
+
+    expect(screen.queryByText('file5.md')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /\+2 more/ }));
+    expect(screen.getByText('file5.md')).toBeDefined();
+  });
+
+  it('names the files a conflict was detected in', () => {
+    // The banner asserted a conflict and never said where, so the reader could
+    // neither verify nor dismiss it.
+    // Backslash paths on purpose: the file-name split has to handle Windows
+    // separators, and a forward-slash-only fixture would not notice if it did not.
+    const sources = [src(1, 'C:\\docs\\alpha.md'), src(2, 'C:\\docs\\beta.md')];
+
+    renderWithProviders(
+      <MessageBubble
+        message={answer({ sources, contradictions_found: true, contradiction_sources: [2] })}
+        onNearMissClick={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(/Possible disagreement in beta\.md/)).toBeDefined();
+  });
+
+  it('does not claim high confidence from a citation count', () => {
+    // The only input was how many [n] tokens the model emitted - not relevance,
+    // not a reranker score, and no check that the cited chunk supports the
+    // sentence. Painting that green as "High Confidence" is the
+    // hallucination-with-a-citation failure mode.
+    renderWithProviders(
+      <MessageBubble
+        message={answer({ content: '<claim sources="[1][2][3]">A grounded sentence.</claim>' })}
+        onNearMissClick={vi.fn()}
+      />,
+    );
+
+    const claim = screen.getByText('A grounded sentence.');
+    expect(claim.getAttribute('title')).toContain('Cited 3 sources');
+    expect(claim.getAttribute('title')).not.toContain('High Confidence');
   });
 });

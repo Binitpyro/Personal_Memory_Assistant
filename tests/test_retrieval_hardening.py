@@ -299,7 +299,7 @@ class _FakeLance:
 @pytest.mark.asyncio
 async def test_reindex_rebuilds_file_summaries_and_folder_profiles(real_db):
     """clear_all() drops pma_summaries; the re-embed loop only refills pma_chunks."""
-    from scripts.reindex_embeddings import _rebuild_summaries
+    from app.indexing.reembed import _rebuild_summaries
 
     await _seed_file_with_chunks(real_db, "doc_a.md", "notes", ["body a " * 20])
     await _seed_file_with_chunks(real_db, "doc_b.md", "code", ["body b " * 20])
@@ -328,7 +328,7 @@ async def test_reindex_rebuilds_file_summaries_and_folder_profiles(real_db):
 @pytest.mark.asyncio
 async def test_reindex_hard_fails_on_an_empty_summary_table(real_db):
     """A silent-empty summary table is the exact failure being fixed."""
-    from scripts.reindex_embeddings import _rebuild_summaries
+    from app.indexing.reembed import _rebuild_summaries
 
     await _seed_file_with_chunks(real_db, "doc.md", "notes", ["body " * 20])
 
@@ -336,15 +336,18 @@ async def test_reindex_hard_fails_on_an_empty_summary_table(real_db):
     emb.embed_texts = AsyncMock(side_effect=lambda texts: [[0.1] for _ in texts])
     lance = _FakeLance(rows_after=0)  # writes silently went nowhere
 
-    with pytest.raises(SystemExit) as exc:
-        await _rebuild_summaries(real_db, emb, lance, batch_size=100)
+    # Raises rather than sys.exit()ing now that this is library code with an
+    # API caller as well as a CLI one. scripts/reindex_embeddings.py catches
+    # ReembedError and still exits 1, so the command-line behaviour is unchanged.
+    from app.indexing.reembed import ReembedError
 
-    assert exc.value.code == 1
+    with pytest.raises(ReembedError, match="document-routing signal"):
+        await _rebuild_summaries(real_db, emb, lance, batch_size=100)
 
 
 @pytest.mark.asyncio
 async def test_reindex_skips_error_summaries(real_db):
-    from scripts.reindex_embeddings import _rebuild_summaries
+    from app.indexing.reembed import _rebuild_summaries
 
     await _seed_file_with_chunks(real_db, "ok.md", "notes", ["body " * 20])
     conn = real_db._get_conn()

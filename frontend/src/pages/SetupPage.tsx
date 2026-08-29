@@ -1,18 +1,46 @@
 import { useState, useEffect } from 'react'
 import { Brain, Shield, ArrowRight, CheckCircle2, ChevronRight, HardDrive, AlertTriangle, Save, Loader2 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
-import { useApi } from '../useApi'
-import { getLocalModels, getDriveInfo, enableSplitBrain, getProviders, setProviderKey } from '../api'
+import { toast } from 'sonner'
+import { useApi, invalidateCache } from '../useApi'
+import {
+    getLocalModels, getDriveInfo, enableSplitBrain, getProviders, setProviderKey,
+    getProviderSettings, setProviderSettings, seedDemo, type ProviderStatus
+} from '../api'
 import { CACHE_KEYS } from '../cacheKeys'
 
-const PROVIDERS = [
-    { id: 'gemini', name: 'Google Gemini', icon: '✨' },
-    { id: 'groq', name: 'Groq', icon: '⚡' },
-    { id: 'nvidia_nim', name: 'NVIDIA NIM', icon: '🟢' },
-    { id: 'openrouter', name: 'OpenRouter', icon: '🌐' }
-]
+// Which providers onboarding leads with, and in what order. The list used to
+// carry hardcoded ids AND display names, which drifted from PROVIDER_REGISTRY
+// and - more importantly - omitted spec.kind, the field that decides whether
+// cloud consent applies. Names and kinds now come from the server; only the
+// curation stays local. Everything else is one link away.
+const SETUP_FEATURED_IDS = ['gemini', 'groq', 'nvidia_nim', 'openrouter'] as const
 
-function ApiKeyInput({ provider }: { provider: typeof PROVIDERS[0] }) {
+const PROVIDER_ICONS: Record<string, string> = {
+    gemini: '✨',
+    groq: '⚡',
+    nvidia_nim: '🟢',
+    openrouter: '🌐',
+}
+
+interface SetupProvider {
+    id: string
+    name: string
+    icon: string
+}
+
+function featuredProviders(providers: ProviderStatus[] | null | undefined): SetupProvider[] {
+    if (!providers) return []
+    return SETUP_FEATURED_IDS.map(id => providers.find(p => p.spec.id === id))
+        .filter((p): p is ProviderStatus => !!p)
+        .map(p => ({
+            id: p.spec.id,
+            name: p.spec.display_name || p.spec.id,
+            icon: PROVIDER_ICONS[p.spec.id] || '🔌',
+        }))
+}
+
+function ApiKeyInput({ provider }: { provider: SetupProvider }) {
     const { data: providers, refetch } = useApi(getProviders, { cacheKey: CACHE_KEYS.providersList })
     const pData = providers?.find(p => p.spec.id === provider.id)
     const [key, setKey] = useState('')
@@ -27,6 +55,9 @@ function ApiKeyInput({ provider }: { provider: typeof PROVIDERS[0] }) {
             await setProviderKey(provider.id, key)
             setKey('')
             await refetch()
+            // Storing a cloud key is what creates the consent obligation, so the
+            // gate below has to re-evaluate against the new chain.
+            invalidateCache(CACHE_KEYS.providerSettings)
         } catch (e: any) {
             setSaveError(e.message || 'Failed to save API key')
         } finally {
@@ -35,7 +66,7 @@ function ApiKeyInput({ provider }: { provider: typeof PROVIDERS[0] }) {
     }
 
     return (
-        <div className={`p-4 rounded-xl border flex items-center justify-between gap-4 ${pData?.is_set ? 'border-success bg-success/5' : 'border-primary/10 bg-white/50'}`}>
+        <div className={`p-4 rounded-xl border flex items-center justify-between gap-4 ${pData?.is_set ? 'border-success bg-success/5' : 'border-primary/10 bg-surface'}`}>
             <div className="flex items-center gap-3 w-1/3">
                 <span className="text-xl">{provider.icon}</span>
                 <span className="font-semibold">{provider.name}</span>
@@ -88,8 +119,47 @@ export function SetupPage() {
     const { data: providers, refetch: refetchProviders, loading: providersLoading } = useApi(getProviders, { cacheKey: CACHE_KEYS.providersList })
     const { data: localModels, loading: localModelsLoading } = useApi(getLocalModels, { cacheKey: CACHE_KEYS.localModels })
     const { data: driveInfo, loading: driveLoading } = useApi(getDriveInfo, { cacheKey: CACHE_KEYS.driveInfo })
+    const { data: routingSettings, refetch: refetchRouting } = useApi(getProviderSettings, { cacheKey: CACHE_KEYS.providerSettings })
 
     const isLoading = providersLoading || localModelsLoading || driveLoading
+
+    const featured = featuredProviders(providers)
+    // Server-computed from the same predicate as the dispatch gate. Setup used
+    // to finish with a cloud key stored and consent never asked, after which
+    // the very first question failed with the remedy two pages away.
+    const consentRequired = routingSettings?.consent_required === true
+    const [savingConsent, setSavingConsent] = useState(false)
+
+    const handleConsent = async (checked: boolean) => {
+        setSavingConsent(true)
+        try {
+            await setProviderSettings({ cloud_privacy_consent: checked })
+            invalidateCache(CACHE_KEYS.providerSettings)
+            await refetchRouting()
+        } catch (e) {
+            toast.error(e instanceof Error ? e.message : 'Could not save your consent choice.')
+        } finally {
+            setSavingConsent(false)
+        }
+    }
+
+    const completeSetup = () => localStorage.setItem('pma_setup_complete', 'true')
+
+    const [seeding, setSeeding] = useState(false)
+    const handleTryDemo = async () => {
+        setSeeding(true)
+        try {
+            await seedDemo()
+            toast.success('Demo corpus is indexing — ask it something.')
+        } catch (e) {
+            // Never strand the user on this screen because a sample failed.
+            toast.warning(e instanceof Error ? e.message : 'Could not load the demo corpus.')
+        } finally {
+            setSeeding(false)
+            completeSetup()
+            navigate('/')
+        }
+    }
 
     const [step, setStep] = useState(1)
 
@@ -140,7 +210,7 @@ export function SetupPage() {
         ? !(driveInfo.is_portable_fs && driveInfo.lancedb_mode !== 'split_brain')
         : true
 
-    const canProceed = (isConnected || hasLocalModels) && isDriveConfigSafe && !requiresRestart
+    const canProceed = (isConnected || hasLocalModels) && isDriveConfigSafe && !requiresRestart && !consentRequired
 
     return (
         <div className="fixed inset-0 bg-background flex flex-col items-center p-6 z-50 overflow-y-auto">
@@ -154,9 +224,9 @@ export function SetupPage() {
                 {/* Header */}
                 <div className="flex flex-col items-center text-center mb-10">
                     <div className="w-16 h-16 bg-gradient-to-br from-primary to-accent-blue rounded-2xl flex items-center justify-center mb-6 shadow-lg shadow-primary/20">
-                        <Brain className="w-8 h-8 text-white" />
+                        <Brain className="w-8 h-8 text-on-plate" />
                     </div>
-                    <h1 className="text-3xl font-bold text-text-primary tracking-tight">Welcome to PMA</h1>
+                    <h1 className="font-serif text-3xl font-normal text-text-primary tracking-tight">Welcome to PMA</h1>
                     <p className="text-text-secondary mt-2 max-w-sm">
                         Your offline-first personal memory assistant. Let&apos;s get your intelligence engine connected.
                     </p>
@@ -213,7 +283,7 @@ export function SetupPage() {
                                         {isEnablingSplitBrain ? 'Enabling...' : 'Enable Split-Brain Mode'}
                                     </button>
                                     {splitBrainError && (
-                                        <p className="text-red-500 text-xs mt-2">{splitBrainError}</p>
+                                        <p className="text-error text-xs mt-2">{splitBrainError}</p>
                                     )}
                                     <p className="text-xs text-text-secondary mt-2">
                                         This will configure PMA to safely store its cache on your local computer, allowing the portable drive to function correctly.
@@ -251,7 +321,7 @@ export function SetupPage() {
 
                         {(!isLoading || providers) && (
                             <>
-                                <div className={`p-5 rounded-2xl border transition-all duration-300 ${isConnected ? 'border-success bg-success/5' : 'border-primary/10 bg-white/50'}`}>
+                                <div className={`p-5 rounded-2xl border transition-all duration-300 ${isConnected ? 'border-success bg-success/5' : 'border-primary/10 bg-surface'}`}>
                                     <div className="flex items-center justify-between mb-4">
                                         <div>
                                             <h3 className="font-bold text-lg flex items-center gap-2">
@@ -262,8 +332,41 @@ export function SetupPage() {
                                     </div>
 
                                     <div className="flex flex-col gap-3">
-                                        {PROVIDERS.map(p => <ApiKeyInput key={p.id} provider={p} />)}
+                                        {featured.map(p => <ApiKeyInput key={p.id} provider={p} />)}
                                     </div>
+
+                                    {consentRequired && (
+                                        <div className="mt-4 p-3 bg-amber-500/10 border border-amber-500/20 rounded-xl text-xs text-amber-800 flex flex-col gap-2.5">
+                                            <div className="flex items-start gap-2">
+                                                <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                                                <span>
+                                                    <strong>Privacy Notice:</strong>{' '}
+                                                    {routingSettings?.cloud_privacy_notice ||
+                                                        'Free-tier cloud dispatches may use data inputs for model training/improvement per provider terms and are restricted for EEA, Switzerland, and UK users.'}
+                                                </span>
+                                            </div>
+                                            <label className="flex items-center gap-2 pl-6 cursor-pointer select-none">
+                                                <input
+                                                    type="checkbox"
+                                                    checked={!!routingSettings?.cloud_privacy_consent}
+                                                    disabled={savingConsent}
+                                                    onChange={e => void handleConsent(e.target.checked)}
+                                                    className="rounded border-amber-500/40"
+                                                />
+                                                <span className="font-medium">I understand and consent to cloud data processing</span>
+                                            </label>
+                                        </div>
+                                    )}
+
+                                    <p className="mt-3 text-xs text-text-secondary">
+                                        Using something else?{' '}
+                                        <button
+                                            onClick={() => { completeSetup(); navigate('/settings/providers') }}
+                                            className="underline hover:text-primary transition-colors"
+                                        >
+                                            See all providers
+                                        </button>
+                                    </p>
                                 </div>
 
                                 <div className="flex items-center gap-4 my-2">
@@ -273,7 +376,7 @@ export function SetupPage() {
                                 </div>
 
                                 <div className="grid grid-cols-2 gap-4">
-                                    <div className={`p-4 rounded-xl border ${localModels?.ollama.detected ? 'border-success bg-success/5' : 'border-primary/10 bg-white/50'}`}>
+                                    <div className={`p-4 rounded-xl border ${localModels?.ollama.detected ? 'border-success bg-success/5' : 'border-primary/10 bg-surface'}`}>
                                         <h4 className="font-semibold mb-1 flex items-center gap-2">🦙 Ollama</h4>
                                         {localModels?.ollama.detected ? (
                                             <span className="text-success text-sm flex items-center gap-1"><CheckCircle2 className="w-4 h-4" /> Detected</span>
@@ -281,7 +384,7 @@ export function SetupPage() {
                                             <span className="text-text-secondary text-sm">Not detected on port 11434</span>
                                         )}
                                     </div>
-                                    <div className={`p-4 rounded-xl border ${localModels?.lm_studio.detected ? 'border-success bg-success/5' : 'border-primary/10 bg-white/50'}`}>
+                                    <div className={`p-4 rounded-xl border ${localModels?.lm_studio.detected ? 'border-success bg-success/5' : 'border-primary/10 bg-surface'}`}>
                                         <h4 className="font-semibold mb-1 flex items-center gap-2">🖥️ LM Studio</h4>
                                         {localModels?.lm_studio.detected ? (
                                             <span className="text-success text-sm flex items-center gap-1"><CheckCircle2 className="w-4 h-4" /> Detected</span>
@@ -297,7 +400,7 @@ export function SetupPage() {
                             <button
                                 onClick={() => setStep(2)}
                                 disabled={!canProceed}
-                                className={`glass-button !bg-text-primary !text-white hover:opacity-90 gap-2 px-8 py-3 disabled:opacity-50 disabled:cursor-not-allowed transition-all ${
+                                className={`glass-button !bg-plate !text-on-plate hover:opacity-90 gap-2 px-8 py-3 disabled:opacity-50 disabled:cursor-not-allowed transition-all ${
                                     canProceed && isConnected ? 'animate-pulse ring-2 ring-primary ring-offset-2 ring-offset-background' : ''
                                 }`}
                             >
@@ -317,18 +420,32 @@ export function SetupPage() {
 
                         <h3 className="font-bold text-2xl">Engine Assigned</h3>
                         <p className="text-text-secondary max-w-sm">
-                            Your memory assistant is now intelligent. Next, add some folders to your Library to give it memory context.
+                            Your memory assistant is now intelligent — but it has nothing to remember yet.
+                            Give it something to read.
                         </p>
 
-                        <div className="mt-6 flex gap-4 w-full">
+                        {/* Setup used to end here with an empty index, on a screen whose
+                            only action was "Go to Library". Both buttons now finish setup
+                            AND leave; the demo is the bounded option, and indexing a real
+                            folder is handed to Library, which already owns that flow and
+                            its error states. */}
+                        <div className="mt-6 flex flex-col sm:flex-row gap-4 w-full">
+                            <button
+                                onClick={() => void handleTryDemo()}
+                                disabled={seeding}
+                                className="flex-1 glass-button !bg-plate !text-on-plate justify-center py-4 text-lg font-semibold hover:shadow-lg transition-all disabled:opacity-60"
+                            >
+                                {seeding ? <Loader2 className="w-5 h-5 animate-spin" /> : null}
+                                Try the demo corpus
+                            </button>
                             <button
                                 onClick={() => {
-                                    localStorage.setItem('pma_setup_complete', 'true')
+                                    completeSetup()
                                     navigate('/')
                                 }}
-                                className="flex-1 glass-button !bg-primary !text-white justify-center py-4 text-lg font-semibold hover:shadow-lg transition-all"
+                                className="flex-1 glass-button justify-center py-4 text-lg font-semibold hover:shadow-lg transition-all"
                             >
-                                Go to Library
+                                Index my first folder
                                 <ChevronRight className="w-5 h-5 ml-1" />
                             </button>
                         </div>

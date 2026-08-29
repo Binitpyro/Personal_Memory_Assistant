@@ -122,7 +122,7 @@ export function ModelPicker() {
       {/* Trigger Button */}
       <button
         onClick={() => setIsOpen(true)}
-        className="flex items-center gap-1.5 px-2.5 py-1 text-[10px] font-bold text-text-secondary hover:text-text-primary hover:bg-white/5 rounded-md transition-all uppercase tracking-wider cursor-pointer border border-white/5 bg-white/[0.02]"
+        className="flex items-center gap-1.5 px-2.5 py-1 text-[10px] font-bold text-text-secondary hover:text-text-primary hover:bg-raised rounded-md transition-all uppercase tracking-wider cursor-pointer border border-rule bg-raised"
         title="Change active session model (Cmd+K)"
       >
         <Sparkles className="w-3 h-3 text-primary animate-pulse" />
@@ -134,9 +134,9 @@ export function ModelPicker() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
           <div className="absolute inset-0" onClick={() => setIsOpen(false)} />
           
-          <div className="relative w-full max-w-lg glass rounded-2xl shadow-2xl border border-white/10 overflow-hidden flex flex-col max-h-[80vh] animate-in fade-in zoom-in duration-200">
+          <div className="relative w-full max-w-lg glass rounded-2xl shadow-2xl border border-rule overflow-hidden flex flex-col max-h-[80vh] animate-in fade-in zoom-in duration-200">
             {/* Header */}
-            <div className="flex items-center gap-3 px-4 py-3.5 border-b border-white/5 bg-white/[0.02]">
+            <div className="flex items-center gap-3 px-4 py-3.5 border-b border-rule bg-raised">
               <Search className="w-4 h-4 text-text-secondary" />
               <input
                 ref={inputRef}
@@ -152,14 +152,14 @@ export function ModelPicker() {
               />
               <button
                 onClick={() => refreshProviders()}
-                className="p-1 hover:bg-white/5 rounded-md text-text-secondary hover:text-text-primary text-[10px] transition-all"
+                className="p-1 hover:bg-raised rounded-md text-text-secondary hover:text-text-primary text-[10px] transition-all"
                 title="Refresh model list"
               >
                 🔄 Refresh
               </button>
               <button
                 onClick={() => setIsOpen(false)}
-                className="p-1 hover:bg-white/5 rounded-md text-text-secondary hover:text-text-primary transition-all"
+                className="p-1 hover:bg-raised rounded-md text-text-secondary hover:text-text-primary transition-all"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -168,7 +168,7 @@ export function ModelPicker() {
             {/* List */}
             <div
               ref={listRef}
-              className="flex-1 overflow-y-auto p-2 space-y-1 divide-y divide-white/[0.02]"
+              className="flex-1 overflow-y-auto p-2 space-y-1 divide-y divide-rule"
             >
               {displayedModels.length > 0 ? (
                 displayedModels.map((item, index) => {
@@ -183,12 +183,12 @@ export function ModelPicker() {
                       onClick={() => handleSelectModel(item)}
                       onMouseEnter={() => setSelectedIndex(index)}
                       className={`flex items-center justify-between px-3 py-2.5 rounded-lg cursor-pointer transition-all ${
-                        isSelected ? 'bg-primary text-white shadow-md' : 'hover:bg-white/5 text-text-secondary hover:text-text-primary'
+                        isSelected ? 'bg-plate text-on-plate shadow-md' : 'hover:bg-raised text-text-secondary hover:text-text-primary'
                       }`}
                     >
                       <div className="flex flex-col items-start text-left min-w-0">
                         <div className="flex items-center gap-2">
-                          <span className={`text-xs font-semibold truncate ${isSelected ? 'text-white' : 'text-text-primary'}`}>
+                          <span className={`text-xs font-semibold truncate ${isSelected ? 'text-on-plate' : 'text-text-primary'}`}>
                             {item.modelId}
                           </span>
                           {item.isOffline && (
@@ -197,12 +197,12 @@ export function ModelPicker() {
                             </span>
                           )}
                         </div>
-                        <span className={`text-[10px] uppercase tracking-wider ${isSelected ? 'text-white/80' : 'text-text-secondary/80'}`}>
+                        <span className={`text-[10px] uppercase tracking-wider ${isSelected ? 'text-text-secondary' : 'text-text-secondary/80'}`}>
                           {item.providerName}
                         </span>
                       </div>
                       {(isActiveOverride || (!sessionModelOverride && item.modelId === currentModelDisplay)) && (
-                        <Check className={`w-4 h-4 flex-shrink-0 ${isSelected ? 'text-white' : 'text-primary'}`} />
+                        <Check className={`w-4 h-4 flex-shrink-0 ${isSelected ? 'text-on-plate' : 'text-primary'}`} />
                       )}
                     </div>
                   );
@@ -215,11 +215,11 @@ export function ModelPicker() {
             </div>
 
             {/* Custom Model Input Form */}
-            <form onSubmit={handleCustomSubmit} className="p-3 border-t border-white/5 bg-white/[0.02] flex items-center gap-2">
+            <form onSubmit={handleCustomSubmit} className="p-3 border-t border-rule bg-raised flex items-center gap-2">
               <select
                 value={customProvider}
                 onChange={(e) => setCustomProvider(e.target.value)}
-                className="bg-white/5 border border-white/10 rounded px-2 py-1 text-xs text-text-primary focus:outline-none"
+                className="bg-raised border border-rule rounded px-2 py-1 text-xs text-text-primary focus:outline-none"
               >
                 {(providers || []).map((p: ProviderStatus) => (
                   <option key={p.spec.id} value={p.spec.id} className="bg-background text-text-primary">
@@ -232,27 +232,27 @@ export function ModelPicker() {
                 placeholder="Or enter custom model ID..."
                 value={customModel}
                 onChange={(e) => setCustomModel(e.target.value)}
-                className="flex-1 bg-white/5 border border-white/10 rounded px-2.5 py-1 text-xs text-text-primary focus:outline-none placeholder:text-text-secondary/40"
+                className="flex-1 bg-raised border border-rule rounded px-2.5 py-1 text-xs text-text-primary focus:outline-none placeholder:text-text-secondary/40"
               />
               <button
                 type="submit"
                 disabled={!customModel.trim()}
-                className="px-3 py-1 bg-primary hover:bg-primary/80 disabled:opacity-50 text-white rounded text-xs font-medium transition-all"
+                className="px-3 py-1 bg-plate hover:brightness-110 disabled:opacity-50 text-on-plate rounded text-xs font-medium transition-all"
               >
                 Use
               </button>
             </form>
 
             {/* Footer */}
-            <div className="px-4 py-2 border-t border-white/5 bg-white/[0.01] flex items-center justify-between text-[10px] text-text-secondary">
+            <div className="px-4 py-2 border-t border-rule bg-raised flex items-center justify-between text-[10px] text-text-secondary">
               <span>
                 {filteredModels.length > MAX_DISPLAY
                   ? `Showing 30 of ${filteredModels.length} models. Type to narrow search.`
                   : `${filteredModels.length} models available`}
               </span>
               <span className="flex items-center gap-1.5">
-                <kbd className="px-1.5 py-0.5 bg-white/5 border border-white/10 rounded text-[9px]">↑↓</kbd> navigate
-                <kbd className="px-1.5 py-0.5 bg-white/5 border border-white/10 rounded text-[9px]">Enter</kbd> select
+                <kbd className="px-1.5 py-0.5 bg-raised border border-rule rounded text-[9px]">↑↓</kbd> navigate
+                <kbd className="px-1.5 py-0.5 bg-raised border border-rule rounded text-[9px]">Enter</kbd> select
               </span>
             </div>
           </div>

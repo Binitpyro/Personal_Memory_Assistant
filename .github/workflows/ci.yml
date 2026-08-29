@@ -74,6 +74,20 @@ jobs:
         run: |
           npm run lint
 
+      - name: Build frontend
+        working-directory: ./frontend
+        run: |
+          npm run build
+
+      # Tailwind emits NOTHING for a class it does not know - no build error,
+      # no lint warning, no failing test. The UI/UX audit found 58 such usages
+      # across 22 names, several of them on error text. Keep in step with
+      # scripts/run_ci_checks.bat.
+      - name: Utility diff (every class must produce CSS)
+        working-directory: ./frontend
+        run: |
+          node scripts/check-utilities.mjs
+
       - name: Run Vitest (Unit Tests)
         working-directory: ./frontend
         run: |

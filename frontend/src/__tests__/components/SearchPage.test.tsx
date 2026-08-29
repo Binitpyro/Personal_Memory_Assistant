@@ -63,15 +63,18 @@ describe('SearchPage Component', () => {
   });
 
   it('submits query when search button is clicked', () => {
-    const { container } = renderWithProviders(<SearchPage />);
+    renderWithProviders(<SearchPage />);
 
     const input = screen.getByPlaceholderText('Ask a follow-up or a new question...');
     fireEvent.change(input, { target: { value: 'How does LinearBVH work?' } });
-    
-    // Find the button inside the input container (the only button in that container)
-    const sendButton = container.querySelector('.relative.flex.items-center.glass.rounded-2xl button') as HTMLButtonElement;
-    expect(sendButton).toBeDefined();
-    
+
+    // Located by accessible name, not by presentation. This previously read
+    // `container.querySelector('.relative.flex.items-center.glass.rounded-2xl button')`,
+    // which coupled the test to the composer's Tailwind classes and broke the
+    // moment the glass styling was replaced — while still passing if the button
+    // lost its label entirely. The name is the contract that matters.
+    const sendButton = screen.getByRole('button', { name: /send question/i });
+
     fireEvent.click(sendButton);
 
     expect(mockExecuteSearch).toHaveBeenCalledWith('How does LinearBVH work?', expect.any(Object));

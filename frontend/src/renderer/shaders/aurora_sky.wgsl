@@ -54,7 +54,7 @@ fn star_field(dir: vec3<f32>, t: f32) -> vec3<f32> {
     let twinkle = 0.55 + 0.45 * sin(t * (1.5 + hash21(cell + 7.0) * 3.0) + hash21(cell + 5.0) * TWO_PI);
     // Color temperature — bluer for brighter (Wien-ish), warmer for dim.
     let bright = pow(hash21(cell + 13.0), 4.0);
-    let tint = mix(vec3<f32>(1.0, 0.85, 0.72), vec3<f32>(0.78, 0.88, 1.0), bright);
+    let tint = mix(PMA_KEY, PMA_FILL, bright);
     return (core + halo) * twinkle * tint * (0.6 + bright * 1.4);
 }
 
@@ -67,8 +67,8 @@ fn nebula(dir: vec3<f32>, t: f32) -> vec3<f32> {
     let n = fbm3(p, 4u);
     let s = smoothstep(0.42, 0.85, n);
     // Two-tone gradient: teal-cyan drifting into magenta.
-    let cA = vec3<f32>(0.10, 0.35, 0.60);
-    let cB = vec3<f32>(0.55, 0.18, 0.50);
+    let cA = PMA_WASH_WARM;
+    let cB = PMA_WASH_COOL;
     let col = mix(cA, cB, smoothstep(0.4, 0.9, fbm3(p * 0.5 + 7.7, 2u)));
     // Fade nebula toward the horizon — it lives in the "high atmosphere"
     let hFade = smoothstep(-0.05, 0.55, dir.y);
@@ -81,7 +81,7 @@ fn nebula(dir: vec3<f32>, t: f32) -> vec3<f32> {
 // so the crystal cluster doesn't feel like it's floating on nothing.
 fn ground_haze(dir: vec3<f32>) -> vec3<f32> {
     let below = smoothstep(0.1, -0.25, dir.y);
-    return vec3<f32>(0.015, 0.010, 0.028) * below;
+    return PMA_WASH_BELOW * below;
 }
 
 @fragment

@@ -100,6 +100,16 @@ export function wgslPalette(): string {
   ].join('\n');
 }
 
+/**
+ * `vec3(r, g, b)` for the WebGL2 tier's inline GLSL.
+ *
+ * That shader is a template literal inside WebGL2Renderer.ts, so it was
+ * invisible both to a search for `0x......`/`new THREE.Color(...)` in the TS and
+ * to a search for `vec3<f32>` in shaders/. Its violet sky survived the first
+ * re-grade untouched — and WebGL2 is the tier most machines actually run.
+ */
+export const glslVec3 = (c: RGB) => `vec3(${c.map((n) => n.toFixed(4)).join(', ')})`;
+
 /** 0xRRGGBB for the three.js tier, which takes hex or Color triples. */
 export const hex = (c: RGB): number =>
   (Math.round(c[0] * 255) << 16) | (Math.round(c[1] * 255) << 8) | Math.round(c[2] * 255);

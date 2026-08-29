@@ -34,7 +34,7 @@ import { NavigationController, NODE_STRIDE } from '../interaction/NavigationCont
 import { generateCrystalVariants, CRYSTAL_VARIANTS, type MeshData } from './geometry/icosahedron';
 import { crystalXform, crystalPalette } from './crystalInstance';
 import { generateIcosphereMulti } from './geometry/icosphere';
-import { VITRINE, hex } from './palette';
+import { VITRINE, hex, glslVec3 } from './palette';
 
 // ─── Sky dome shaders (single hemispherical wash + stars + nebula) ────────
 const skyVert = /* glsl */`
@@ -86,16 +86,16 @@ const skyFrag = /* glsl */`
         vec3 d = normalize(vDir);
         float y = clamp(d.y * 0.5 + 0.5, 0.0, 1.0);
         // Sky gradient (linear space)
-        vec3 horizon = vec3(0.035, 0.035, 0.180);
-        vec3 mid     = vec3(0.165, 0.100, 0.360);
-        vec3 zenith  = vec3(0.350, 0.180, 0.520);
+        vec3 horizon = ${glslVec3(VITRINE.skyHorizon)};
+        vec3 mid     = ${glslVec3(VITRINE.skyMid)};
+        vec3 zenith  = ${glslVec3(VITRINE.skyZenith)};
         vec3 col = mix(horizon, mid, smoothstep(0.0, 0.55, y));
         col = mix(col, zenith, smoothstep(0.45, 1.0, y));
 
         // Nebula
         float n = fbm(d * 2.7 + vec3(0.0, uTime * 0.008, 0.0));
-        vec3 nebA = vec3(0.10, 0.35, 0.60);
-        vec3 nebB = vec3(0.55, 0.18, 0.50);
+        vec3 nebA = ${glslVec3(VITRINE.washWarm)};
+        vec3 nebB = ${glslVec3(VITRINE.washCool)};
         vec3 nebCol = mix(nebA, nebB, smoothstep(0.4, 0.9, fbm(d * 0.5 + 7.7)));
         float hFade = smoothstep(-0.05, 0.55, d.y);
         col += nebCol * smoothstep(0.42, 0.85, n) * 0.55 * hFade;
@@ -113,7 +113,7 @@ const skyFrag = /* glsl */`
             float halo = smoothstep(sz * 4.0, 0.0, dist) * 0.15;
             float tw = 0.55 + 0.45 * sin(uTime * (1.5 + hash21(cell + 7.0) * 3.0));
             float bright = pow(hash21(cell + 13.0), 4.0);
-            vec3 tint = mix(vec3(1.0, 0.85, 0.72), vec3(0.78, 0.88, 1.0), bright);
+            vec3 tint = mix(${glslVec3(VITRINE.moteWarm)}, ${glslVec3(VITRINE.moteCool)}, bright);
             col += (core + halo) * tw * tint * (0.6 + bright * 1.4);
         }
 

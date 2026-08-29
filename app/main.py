@@ -109,6 +109,57 @@ def _missing_frontend_response() -> HTMLResponse:
     )
 
 
+async def check_model_signature(db_manager, emb) -> None:
+    """Compare the index's embedding signature against the live model.
+
+    Extracted from the lifespan closure so the no-overwrite behaviour below can
+    be tested. It had no test at all, which is how the self-erasing bug below
+    survived unnoticed.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+        is_ready = await loop.run_in_executor(None, emb.wait_until_ready, 60.0)
+        if not is_ready or not emb.is_ready or emb.has_failed:
+            logger.warning(
+                "Embedding service not ready or failed to load. Skipping model signature check."
+            )
+            return
+
+        current_sig = emb.model_signature
+        if not current_sig:
+            return
+
+        stored_sig = await db_manager.get_system_state("embedding_model_signature")
+        if stored_sig is None:
+            await db_manager.set_system_state("embedding_model_signature", current_sig)
+            logger.info("Recorded initial embedding model signature: %s", current_sig)
+            state.set_embedding_signature(current_sig, current_sig)
+        elif stored_sig != current_sig:
+            logger.warning(
+                "EMBEDDING MODEL SIGNATURE MISMATCH\n"
+                "Stored:  %s\n"
+                "Current: %s\n"
+                "The vector space has changed. Existing vectors in LanceDB are STALE.\n"
+                "Re-embed from Diagnostics to rebuild them.",
+                stored_sig[:63],
+                current_sig[:63],
+            )
+            # Deliberately NOT writing current_sig here. Doing so marked the
+            # index consistent while its vectors were still from the old model,
+            # so the warning vanished on the next boot and the corruption became
+            # permanent and invisible. The signature is written only after a
+            # successful re-embed.
+            #
+            # Still not auto-triggering the rebuild: that would make a config
+            # change an unprompted destructive wipe on every boot. The user
+            # drives it from Diagnostics.
+            state.set_embedding_signature(stored_sig, current_sig)
+        else:
+            state.set_embedding_signature(stored_sig, current_sig)
+    except Exception as err:
+        logger.warning("Failed during model signature check: %s", err)
+
+
 def health(db: DatabaseManager):
     """Shared payload for /health and /api/health."""
     emb = get_emb()
@@ -120,8 +171,13 @@ def health(db: DatabaseManager):
         "status": status,
         "db": "connected" if db_ok else "disconnected",
         "model_ready": model_ready,
-        "indexing": "idle",
+        # Was hardcoded "idle" - a value that read as real state and never was.
+        # Read from the progress object once a run has touched it; untouched
+        # genuinely means idle. Deliberately does not call ensure_indexing(),
+        # which would force the indexing import on the first health poll.
+        "indexing": getattr(state.progress_obj, "status", "idle") or "idle",
         "split_brain_sync_status": state.split_brain_sync_status,
+        "embedding_signature": dict(state.embedding_signature),
         # Copied, not aliased: the payload must not hand a caller a live handle
         # on process state. `status` deliberately ignores these — OCR being off
         # does not degrade search, and ocr_enabled defaults to False, so folding
@@ -232,46 +288,7 @@ async def lifespan(fastapi_app: FastAPI):
     state.bg_tasks.add(sync_task)
     sync_task.add_done_callback(state.bg_tasks.discard)
 
-    async def _check_model_signature_task():
-        try:
-            is_ready = await loop.run_in_executor(None, emb.wait_until_ready, 60.0)
-            if not is_ready or not emb.is_ready or emb.has_failed:
-                logger.warning(
-                    "Embedding service not ready or failed to load. Skipping model signature check."
-                )
-                return
-
-            current_sig = emb.model_signature
-            if not current_sig:
-                return
-
-            stored_sig = await db_manager.get_system_state("embedding_model_signature")
-            if stored_sig is None:
-                await db_manager.set_system_state("embedding_model_signature", current_sig)
-                logger.info("Recorded initial embedding model signature: %s", current_sig)
-            elif stored_sig != current_sig:
-                logger.warning(
-                    "╔══════════════════════════════════════════════════════════════════════════╗\n"
-                    "║ WARNING: EMBEDDING MODEL SIGNATURE MISMATCH DETECTED                    ║\n"
-                    "║ Stored:  %-63s ║\n"
-                    "║ Current: %-63s ║\n"
-                    "║ The vector space has changed. Existing vectors in LanceDB are STALE.    ║\n"
-                    "║ Please manually clear and re-ingest your indexed folders.              ║\n"
-                    "╚══════════════════════════════════════════════════════════════════════════╝",
-                    stored_sig[:63],
-                    current_sig[:63],
-                )
-                await db_manager.set_system_state("embedding_model_signature", current_sig)
-                # TODO: Auto-trigger a vector-only re-embed here using
-                # db_manager.clear_vectors_only() + LanceDBClient.clear_all()
-                # (see scripts/reindex_embeddings.py for the full rebuild flow).
-                # Not wired in automatically: this warn-only path would become
-                # an unprompted destructive wipe on every boot after a config
-                # change. Left as a manual step for now.
-        except Exception as err:
-            logger.warning("Failed during model signature check: %s", err)
-
-    sig_task = asyncio.create_task(_check_model_signature_task())
+    sig_task = asyncio.create_task(check_model_signature(db_manager, emb))
     state.bg_tasks.add(sig_task)
     sig_task.add_done_callback(state.bg_tasks.discard)
 

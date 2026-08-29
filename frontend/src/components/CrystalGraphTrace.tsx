@@ -162,7 +162,7 @@ export const CrystalGraphTrace = ({ traceData }: { traceData: string }) => {
   }
 
   return (
-    <div className="w-full h-[350px] mt-2 rounded-2xl border border-white/10 bg-black/40 overflow-hidden relative group shadow-2xl">
+    <div className="w-full h-[350px] mt-2 rounded-2xl border border-rule bg-black/40 overflow-hidden relative group shadow-2xl">
       <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,_var(--tw-gradient-stops))] from-primary/10 via-transparent to-transparent pointer-events-none" />
       <ReactECharts 
         option={options} 
@@ -170,7 +170,7 @@ export const CrystalGraphTrace = ({ traceData }: { traceData: string }) => {
         opts={{ renderer: 'canvas' }} 
         notMerge={true}
       />
-      <div className="absolute bottom-2 left-2 px-2 py-1 bg-black/60 backdrop-blur-md rounded-md text-[10px] text-white/70 border border-white/10">
+      <div className="absolute bottom-2 left-2 px-2 py-1 bg-black/60 backdrop-blur-md rounded-md text-[10px] text-text-secondary border border-rule">
         ✨ 3D Crystal Dreamscape (Hover & Drag)
       </div>
     </div>

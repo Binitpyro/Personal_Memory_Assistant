@@ -34,6 +34,7 @@ import { NavigationController, NODE_STRIDE } from '../interaction/NavigationCont
 import { generateCrystalVariants, CRYSTAL_VARIANTS, type MeshData } from './geometry/icosahedron';
 import { crystalXform, crystalPalette } from './crystalInstance';
 import { generateIcosphereMulti } from './geometry/icosphere';
+import { VITRINE, hex } from './palette';
 
 // ─── Sky dome shaders (single hemispherical wash + stars + nebula) ────────
 const skyVert = /* glsl */`
@@ -140,7 +141,7 @@ function makeCrystalMaterial(env: THREE.Texture): THREE.MeshPhysicalMaterial {
         envMap: env,
         envMapIntensity: 1.4,
         attenuationDistance: 4.0,
-        attenuationColor: new THREE.Color(0.85, 0.65, 1.00),
+        attenuationColor: new THREE.Color(...VITRINE.crystalAttenuation),
         side: THREE.DoubleSide,   // reveal back facets through transmission
     });
     // Golden-ratio hue rotation seeded by (implicit) instance-color path in
@@ -151,7 +152,7 @@ function makeCrystalMaterial(env: THREE.Texture): THREE.MeshPhysicalMaterial {
 
 function makeBubbleMaterial(env: THREE.Texture): THREE.MeshPhysicalMaterial {
     const mat = new THREE.MeshPhysicalMaterial({
-        color: new THREE.Color(0.92, 0.72, 0.85),
+        color: new THREE.Color(...VITRINE.bubbleBase),
         metalness: 0.0,
         roughness: 0.02,
         transmission: 1.0,        // fully transparent body
@@ -177,7 +178,7 @@ function makeProceduralEnv(renderer: THREE.WebGLRenderer): THREE.Texture {
     // 4-corner gradient baked into a small cube map, then PMREM-blurred.
     const pmrem = new THREE.PMREMGenerator(renderer);
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x2a1a5e);
+    scene.background = new THREE.Color(...VITRINE.background);
     // Simple ambient scene with a bright zenith and warm horizon.
     const zenith = new THREE.Mesh(
         new THREE.SphereGeometry(500, 32, 16),
@@ -195,11 +196,11 @@ function makeProceduralEnv(renderer: THREE.WebGLRenderer): THREE.Texture {
         const y = pos.getY(i) / 500;
         const t = y * 0.5 + 0.5;
         // Match the sky gradient stops from aurora_sky.wgsl.
-        const c = new THREE.Color(0.035, 0.035, 0.180).lerp(
-            new THREE.Color(0.165, 0.100, 0.360), Math.min(1, t / 0.55),
+        const c = new THREE.Color(...VITRINE.skyHorizon).lerp(
+            new THREE.Color(...VITRINE.skyMid), Math.min(1, t / 0.55),
         );
         if (t > 0.45) {
-            c.lerp(new THREE.Color(0.350, 0.180, 0.520),
+            c.lerp(new THREE.Color(...VITRINE.skyZenith),
                    THREE.MathUtils.clamp((t - 0.45) / 0.55, 0, 1));
         }
         colors[i*3+0] = c.r; colors[i*3+1] = c.g; colors[i*3+2] = c.b;
@@ -280,7 +281,7 @@ export class WebGL2Renderer {
             alpha: false,
             powerPreference: 'high-performance',
         });
-        this.renderer.setClearColor(0x02030a, 1);
+        this.renderer.setClearColor(hex(VITRINE.ground), 1);
         // Pixel ratio stays 1 because `resize()` is fed DEVICE pixels (the
         // ResizeObserver reports devicePixelContentBoxSize). Leaving three.js to
         // apply the ratio as well multiplied the backing store by DPR a second
@@ -305,15 +306,15 @@ export class WebGL2Renderer {
         this.scene.environment = env;
 
         // Exponential fog matched to WebGPU tier.
-        this.scene.fog = new THREE.FogExp2(0x0a0a2e, 0.00025);
+        this.scene.fog = new THREE.FogExp2(hex(VITRINE.fog), 0.00025);
 
         // Three-point lighting — sun/sky/back key.
-        const sun = new THREE.DirectionalLight(0xffefd8, 1.4);
+        const sun = new THREE.DirectionalLight(hex(VITRINE.keyLight), 1.4);
         sun.position.set(30, 45, 20);
         this.scene.add(sun);
-        const sky = new THREE.HemisphereLight(0x8ac1ff, 0x201040, 0.55);
+        const sky = new THREE.HemisphereLight(hex(VITRINE.fillLight), hex(VITRINE.groundBounce), 0.55);
         this.scene.add(sky);
-        const back = new THREE.DirectionalLight(0xff8fd6, 0.35);
+        const back = new THREE.DirectionalLight(hex(VITRINE.rimLight), 0.35);
         back.position.set(-20, -12, -30);
         this.scene.add(back);
 

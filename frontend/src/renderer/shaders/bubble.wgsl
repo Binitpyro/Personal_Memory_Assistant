@@ -97,7 +97,7 @@ fn fs_main(in: VertexOutput) -> FragOut {
     let hue = fract(f32(in.inst_hash) * 0.61803398875 + 0.05);
     let base_full = hsv2rgb(vec3<f32>(hue, 0.35, 1.0));
     // Pull toward warm-pastel to keep the whole cluster harmonic.
-    let base = mix(vec3<f32>(0.92, 0.72, 0.85), base_full, 0.55);
+    let base = mix(PMA_BUBBLE_BASE, base_full, 0.55);
 
     // Three-point lighting matching the crystals (identical directions so
     // the two mesh types read as being in the same world).
@@ -111,8 +111,8 @@ fn fs_main(in: VertexOutput) -> FragOut {
     let wrap_key  = clamp(NdotL_key  * 0.5 + 0.5, 0.0, 1.0);
     let wrap_fill = clamp(NdotL_fill * 0.5 + 0.5, 0.0, 1.0);
 
-    let sun_col = vec3<f32>(1.00, 0.94, 0.86) * 1.6;
-    let sky_col = vec3<f32>(0.55, 0.75, 1.00) * 0.55;
+    let sun_col = PMA_KEY * 1.6;
+    let sky_col = PMA_FILL * 0.55;
 
     let F_surf = F_Schlick(NdotV, vec3<f32>(0.04));
     var diffuse = base * (wrap_key * sun_col + wrap_fill * sky_col) * (vec3<f32>(1.0) - F_surf) * INV_PI;
@@ -136,7 +136,7 @@ fn fs_main(in: VertexOutput) -> FragOut {
 
     // Inner tint — very slight backlight because file "bubbles" contain
     // "code content" — hint of amber-warm inside.
-    let inner_tint = vec3<f32>(1.00, 0.86, 0.72);
+    let inner_tint = PMA_BUBBLE_INNER;
 
     var rgb = diffuse
             + vec3<f32>(spec)

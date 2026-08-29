@@ -733,10 +733,21 @@ def _mark_degraded(results: list[dict[str, Any]]) -> None:
         r["_degraded"] = True
 
 
-def _detect_heuristic_contradiction(query: str, retrieved: list[dict[str, Any]]) -> bool:
-    """Identify potential contradictions using TF-IDF proxy overlap and negation words."""
+def _detect_heuristic_contradiction(query: str, retrieved: list[dict[str, Any]]) -> list[Any]:
+    """Chunk ids whose text looks like it contradicts the query, or an empty list.
+
+    Returns the offending ids rather than a bare bool so the UI can name what it
+    is warning about. A banner that says "sources may conflict" without saying
+    which ones is unfalsifiable - the reader cannot check it and cannot dismiss
+    it.
+
+    The heuristic itself is deliberately unchanged here: it fires on any chunk
+    that overlaps the query and contains a negation word, and "but"/"however"/
+    "except" are ordinary prose, so it is expected to be noisy. Tightening it
+    changes retrieval behaviour and needs an eval run, not a green gate.
+    """
     if not retrieved:
-        return False
+        return []
 
     negation_words = {
         "not",
@@ -753,8 +764,9 @@ def _detect_heuristic_contradiction(query: str, retrieved: list[dict[str, Any]])
     }
     query_terms = set(re.findall(r"\w+", query.lower()))
     if not query_terms:
-        return False
+        return []
 
+    offenders: list[Any] = []
     for chunk in retrieved:
         text = chunk.get("text", "").lower()
         chunk_terms = set(re.findall(r"\w+", text))
@@ -762,8 +774,8 @@ def _detect_heuristic_contradiction(query: str, retrieved: list[dict[str, Any]])
         overlap = query_terms.intersection(chunk_terms)
         if len(overlap) / len(query_terms) > 0.5:  # noqa: SIM102
             if negation_words.intersection(chunk_terms):
-                return True
-    return False
+                offenders.append(chunk.get("chunk_id"))
+    return [o for o in offenders if o is not None]
 
 
 async def _extract_knowledge_gaps(
@@ -1062,6 +1074,7 @@ async def full_rag(
             "retrieved_count": len(source_rows),
             "latency_ms": total_ms,
             "mode": "fast_path",
+            "query_mode": mode,
             "timing": {"metadata_ms": total_ms, "retrieval_ms": 0, "llm_ms": 0},
         }
 
@@ -1167,6 +1180,7 @@ async def full_rag(
         "sources": retrieved,
         "retrieved_count": len(retrieved),
         "latency_ms": total_ms,
+        "query_mode": mode,
         "mode": "degraded_rag" if is_degraded else "full_rag",
         "timing": {"retrieval_ms": retrieval_ms, "llm_ms": llm_ms, "total_ms": total_ms},
         "_is_error": _llm_error,
@@ -1409,6 +1423,7 @@ async def stream_rag(
     retrieved = retrieved[:k]
 
     contradictions_found = False
+    contradiction_sources: list[Any] = []
     if mode == "challenge":
         with Timer("challenge_retrieval"):
             negated_query = (
@@ -1432,10 +1447,12 @@ async def stream_rag(
                 for nr in neg_retrieved:
                     if nr["chunk_id"] not in neg_ids:
                         nr["_challenge_source"] = True
+                        contradiction_sources.append(nr["chunk_id"])
                         retrieved.append(nr)
     else:
         # Standard heuristic
-        contradictions_found = _detect_heuristic_contradiction(query, retrieved)
+        contradiction_sources = _detect_heuristic_contradiction(query, retrieved)
+        contradictions_found = bool(contradiction_sources)
 
     if forced_chunk_ids:
         placeholders = ",".join("?" for _ in forced_chunk_ids)
@@ -1486,8 +1503,10 @@ async def stream_rag(
         "sources": retrieved,
         "near_misses": near_miss_chunks,
         "contradictions_found": contradictions_found,
+        "contradiction_sources": contradiction_sources,
         "knowledge_gaps": knowledge_gaps,
         "latency_ms": retrieval_ms,
+        "query_mode": mode,
         "retrieval_ms": retrieval_ms,
         "mode": "degraded_rag" if is_degraded else "full_rag",
     }
@@ -1528,6 +1547,16 @@ async def stream_rag(
                             "type": "usage",
                             "prompt_tokens": control_data.get("prompt_tokens"),
                             "completion_tokens": control_data.get("completion_tokens"),
+                        }
+                    elif ctrl_type == "provider_error":
+                        # Chain exhausted. Surfaced as a typed error so the UI
+                        # can offer the matching remedy - a consent failure is
+                        # one click from fixable - instead of printing the
+                        # message into the answer body.
+                        yield {
+                            "type": "error",
+                            "text": control_data.get("message", "Provider unavailable."),
+                            "code": control_data.get("code"),
                         }
                 except Exception:
                     # Fallback to normal text if JSON fails to parse

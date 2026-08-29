@@ -56,7 +56,7 @@ function FolderNode({ node, depth, onSelect, selectedPath, onDeleteFolder, delet
       <div
         role="button"
         tabIndex={0}
-        className={`group flex items-center gap-2 w-full px-2 py-1 rounded-lg transition-colors cursor-pointer text-left ${open ? 'bg-black/5' : 'hover:bg-black/5'}`}
+        className={`group flex items-center gap-2 w-full px-2 py-1 rounded-lg transition-colors cursor-pointer text-left ${open ? 'bg-raised' : 'hover:bg-raised'}`}
         onClick={() => setOpen(!open)}
         onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(!open); } }}
       >
@@ -80,7 +80,7 @@ function FolderNode({ node, depth, onSelect, selectedPath, onDeleteFolder, delet
 
       {
         open && (
-          <div className="ml-4 border-l border-white/5 pl-1">
+          <div className="ml-4 border-l border-rule pl-1">
             {Array.from(node.children.values())
               .sort((a, b) => a.name.localeCompare(b.name))
               .map((child) => (
@@ -103,7 +103,7 @@ function FolderNode({ node, depth, onSelect, selectedPath, onDeleteFolder, delet
                   <button
                     key={f.path}
                     onClick={() => onSelect(f)}
-                    className={`flex items-center gap-2 w-full px-6 py-1 rounded-lg text-left text-sm transition-colors cursor-pointer ${isSelected ? 'bg-primary/20 text-primary-light' : 'hover:bg-white/5 text-text-secondary'
+                    className={`flex items-center gap-2 w-full px-6 py-1 rounded-lg text-left text-sm transition-colors cursor-pointer ${isSelected ? 'bg-primary/20 text-primary-light' : 'hover:bg-raised text-text-secondary'
                       }`}
                   >
                     <File className="w-3.5 h-3.5 shrink-0 opacity-60" />
@@ -130,7 +130,7 @@ function FolderNode({ node, depth, onSelect, selectedPath, onDeleteFolder, delet
 /* ── Main Explorer Page ─────────────────────────────────── */
 
 export function ExplorerPage() {
-  const { data: tree, loading, refetch } = useApi(getFileTree, { cacheKey: CACHE_KEYS.fileTree })
+  const { data: tree, loading } = useApi(getFileTree, { cacheKey: CACHE_KEYS.fileTree })
   const [selectedFile, setSelectedFile] = useState<FileEntry | null>(null)
   const [viewMode, setViewMode] = useState<'tree' | 'treemap'>('tree')
   const [activeExtension, setActiveExtension] = useState<string | null>(null)
@@ -361,7 +361,7 @@ export function ExplorerPage() {
       {/* Header */}
       <div className="flex items-center justify-between mb-6 shrink-0">
         <div>
-          <h1 className="text-2xl font-bold flex items-center gap-3 text-text-primary">
+          <h1 className="font-serif text-2xl font-normal flex items-center gap-3 text-text-primary">
             <FolderTree className="w-7 h-7 text-primary" />
             Explorer
           </h1>
@@ -384,28 +384,28 @@ export function ExplorerPage() {
               placeholder="Filter files..."
               value={searchQuery}
               onChange={e => setSearchQuery(e.target.value)}
-              className="pl-9 pr-4 py-2 bg-black/5 rounded-xl border border-black/5 text-sm text-text-primary placeholder:text-text-secondary focus:outline-none focus:ring-2 focus:ring-primary/40 shadow-inner w-56"
+              className="pl-9 pr-4 py-2 bg-raised rounded-xl border border-rule text-sm text-text-primary placeholder:text-text-secondary focus:outline-none focus:ring-2 focus:ring-primary/40 shadow-inner w-56"
             />
           </div>
           <button
             onClick={handleExportCSV}
             aria-label="Export file list to CSV format"
-            className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold text-text-secondary hover:text-text-primary hover:bg-black/5 border border-black/5 transition-all shadow-sm"
+            className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold text-text-secondary hover:text-text-primary hover:bg-raised border border-rule transition-all shadow-sm"
           >
             <Download className="w-4 h-4" /> CSV
           </button>
 
-          <div className="flex bg-black/5 p-1 rounded-xl border border-black/5 shadow-inner ml-2">
+          <div className="flex bg-raised p-1 rounded-xl border border-rule shadow-inner ml-2">
             <button
               onClick={() => setViewMode('tree')}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${viewMode === 'tree' ? 'bg-primary text-white shadow-lg' : 'text-text-secondary hover:text-text-primary'
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${viewMode === 'tree' ? 'bg-plate text-on-plate shadow-lg' : 'text-text-secondary hover:text-text-primary'
                 }`}
             >
               <List className="w-4 h-4" /> TREE
             </button>
             <button
               onClick={() => setViewMode('treemap')}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${viewMode === 'treemap' ? 'bg-primary text-white shadow-lg' : 'text-text-secondary hover:text-text-primary'
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${viewMode === 'treemap' ? 'bg-plate text-on-plate shadow-lg' : 'text-text-secondary hover:text-text-primary'
                 }`}
             >
               <LayoutGrid className="w-4 h-4" /> TREEMAP
@@ -426,8 +426,8 @@ export function ExplorerPage() {
           {activeExtension && (
             <div className="glass rounded-2xl flex items-center justify-between p-4 shrink-0">
               <div className="flex items-center gap-4">
-                <div className="bg-primary p-2 rounded-xl shadow-lg">
-                  <LayoutGrid className="w-5 h-5 text-white" />
+                <div className="bg-plate p-2 rounded-xl shadow-lg">
+                  <LayoutGrid className="w-5 h-5 text-on-plate" />
                 </div>
                 <div className="flex flex-col">
                   <span className="text-[10px] uppercase font-bold text-primary tracking-widest leading-tight">Active Filter</span>
@@ -436,7 +436,7 @@ export function ExplorerPage() {
               </div>
               <button
                 onClick={() => setActiveExtension(null)}
-                className="text-[10px] font-black bg-white/20 text-primary hover:bg-white/40 px-3 py-2 rounded-lg transition-all border border-primary/10"
+                className="text-[10px] font-black bg-raised text-primary hover:bg-surface px-3 py-2 rounded-lg transition-all border border-primary/10"
               >
                 CLEAR
               </button>
@@ -447,7 +447,7 @@ export function ExplorerPage() {
           <div className="glass-card shrink-0 p-4">
             {selectedFile ? (
               <div className="space-y-3">
-                <div className="flex items-center gap-3 border-b border-black/5 pb-2">
+                <div className="flex items-center gap-3 border-b border-rule pb-2">
                   <div className="bg-primary/10 p-2 rounded-xl border border-primary/20 shrink-0">
                     <File className="w-5 h-5 text-primary" />
                   </div>
@@ -459,7 +459,7 @@ export function ExplorerPage() {
                 <dl className="grid grid-cols-2 gap-3">
                   <div className="col-span-2">
                     <dt className="text-[9px] font-black text-text-secondary uppercase tracking-widest mb-1">Path</dt>
-                    <dd className="text-[10px] text-text-primary bg-black/5 p-2 rounded-lg break-all font-mono border border-black/5 leading-tight">{selectedFile.path}</dd>
+                    <dd className="text-[10px] text-text-primary bg-raised p-2 rounded-lg break-all font-mono border border-rule leading-tight">{selectedFile.path}</dd>
                   </div>
                   <div>
                     <dt className="text-[9px] font-black text-text-secondary uppercase tracking-widest">Size</dt>
@@ -497,9 +497,11 @@ export function ExplorerPage() {
                 )}
               </div>
             ) : (
-              <div className="text-center py-4 opacity-30">
-                <File className="w-8 h-8 mx-auto mb-1 text-primary" />
-                <p className="text-[10px] font-black uppercase tracking-[0.3em]">No Selection</p>
+              // opacity-30 put this text at roughly a third of its measured
+              // ratio. The tertiary token already means "quiet" and stays legible.
+              <div className="text-center py-4">
+                <File className="w-8 h-8 mx-auto mb-1 text-text-tertiary" aria-hidden />
+                <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-text-tertiary">No Selection</p>
               </div>
             )}
           </div>
@@ -514,9 +516,9 @@ export function ExplorerPage() {
                 <button
                   key={f.path}
                   onClick={() => setSelectedFile(f)}
-                  className="w-full text-left group flex items-center gap-3 p-2 rounded-xl bg-black/[0.02] hover:bg-primary/10 cursor-pointer transition-all border border-black/5 hover:border-primary/20"
+                  className="w-full text-left group flex items-center gap-3 p-2 rounded-xl bg-raised hover:bg-primary/10 cursor-pointer transition-all border border-rule hover:border-primary/20"
                 >
-                  <div className="bg-white/40 px-1.5 py-1 rounded-lg border border-white/60 shrink-0 text-center min-w-[32px]">
+                  <div className="bg-surface px-1.5 py-1 rounded-lg border border-edge shrink-0 text-center min-w-[32px]">
                     <span className="text-[9px] font-black text-primary uppercase">{f.type.replace('.', '').slice(0, 3) || '??'}</span>
                   </div>
                   <div className="flex-1 min-w-0">
@@ -539,9 +541,9 @@ export function ExplorerPage() {
                 <button
                   key={f.path}
                   onClick={() => setSelectedFile(f)}
-                  className="w-full text-left group flex items-center gap-3 p-2 rounded-xl bg-black/[0.02] hover:bg-accent/10 cursor-pointer transition-all border border-black/5 hover:border-accent/20"
+                  className="w-full text-left group flex items-center gap-3 p-2 rounded-xl bg-raised hover:bg-accent/10 cursor-pointer transition-all border border-rule hover:border-accent/20"
                 >
-                  <div className="bg-white/40 px-1.5 py-1 rounded-lg border border-white/60 shrink-0 text-center min-w-[32px]">
+                  <div className="bg-surface px-1.5 py-1 rounded-lg border border-edge shrink-0 text-center min-w-[32px]">
                     <span className="text-[9px] font-black text-accent uppercase">{f.type.replace('.', '').slice(0, 3) || '??'}</span>
                   </div>
                   <div className="flex-1 min-w-0">

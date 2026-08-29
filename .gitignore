@@ -218,6 +218,10 @@ static/
 # dist_readme.txt <-- Deleted
 data/lancedb/
 app/vector_store/lancedb_data/
+/lancedb_data/
+/lancedb_test_temp/
+/temp_db/
+test_pma_*.db
 
 # Jupyter etc (if you use them)
 .ipynb_checkpoints/

@@ -14,12 +14,14 @@
  */
 export const CACHE_KEYS = {
   appConfig: 'app-config',
+  compactStatus: 'compact-status',
   driveInfo: 'drive-info',
   fileTree: 'file-tree',
   health: 'health',
   indexStatus: 'index-status',
   insights: 'insights',
   llmPreferences: 'llm-preferences',
+  metrics: 'system-metrics',
   localModels: 'local-models',
   ocrStatus: 'ocr-status',
   ocrTiers: 'ocr-tiers',

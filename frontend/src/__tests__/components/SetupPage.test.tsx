@@ -12,19 +12,34 @@ const state = {
     free_bytes: 100000000,
   } as Record<string, unknown> | undefined,
   loading: false,
+  routingSettings: undefined as Record<string, unknown> | undefined,
+  providers: [] as Record<string, unknown>[],
+};
+
+/** A gemini card with a key already stored - the state that creates the obligation. */
+const geminiConnected = {
+  spec: { id: 'gemini', display_name: 'Google Gemini', kind: 'cloud' },
+  is_set: true,
+  stored_in: 'keyring',
+  preview: 'AIza...',
+  base_url: null,
+  default_model: null,
 };
 
 // Mock useApi directly using cacheKey
 vi.mock('../../useApi', () => ({
   useApi: vi.fn((_, opts) => {
     if (opts?.cacheKey === 'providers-list') {
-      return { data: [], loading: state.loading, error: null, refetch: vi.fn() };
+      return { data: state.providers, loading: state.loading, error: null, refetch: vi.fn() };
     }
     if (opts?.cacheKey === 'local-models') {
       return { data: { ollama: { detected: false, models: [] }, lm_studio: { detected: false, models: [] } }, loading: state.loading, error: null, refetch: vi.fn() };
     }
     if (opts?.cacheKey === 'drive-info') {
       return { data: state.driveInfo, loading: state.loading, error: null, refetch: vi.fn() };
+    }
+    if (opts?.cacheKey === 'provider-settings') {
+      return { data: state.routingSettings, loading: state.loading, error: null, refetch: vi.fn() };
     }
 
     return { data: undefined, loading: false, error: null, refetch: vi.fn() };
@@ -39,6 +54,9 @@ vi.mock('../../api', () => ({
   getDriveInfo: vi.fn(),
   enableSplitBrain: vi.fn(),
   setProviderKey: vi.fn(),
+  getProviderSettings: vi.fn(),
+  setProviderSettings: vi.fn(),
+  seedDemo: vi.fn(),
 }));
 
 describe('SetupPage Component', () => {
@@ -50,6 +68,8 @@ describe('SetupPage Component', () => {
       free_bytes: 100000000,
     };
     state.loading = false;
+    state.routingSettings = undefined;
+    state.providers = [];
   });
 
   it('renders Welcome to PMA header and step 1 content', () => {
@@ -95,5 +115,48 @@ describe('SetupPage Component', () => {
 
     renderWithProviders(<SetupPage />);
     expect(screen.queryByText('Incompatible Storage Detected')).toBeNull();
+  });
+
+  // ── Cloud consent ────────────────────────────────────────────────────────
+  //
+  // Setup could store a cloud API key and finish without ever asking for
+  // consent. `auto` then resolved to that provider and the very first question
+  // died in the dispatch gate, with the only consent control on a page absent
+  // from the nav. Finishing setup must now be impossible in that state.
+
+  const continueButton = () => screen.getByRole('button', { name: /continue/i });
+
+  it('blocks Continue while a cloud provider still needs consent', () => {
+    state.providers = [geminiConnected];
+    state.routingSettings = { consent_required: true, cloud_privacy_consent: false };
+
+    renderWithProviders(<SetupPage />);
+
+    expect(screen.queryByText(/I understand and consent to cloud data processing/)).not.toBeNull();
+    expect((continueButton() as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('allows Continue once consent is no longer required', () => {
+    state.providers = [geminiConnected];
+    state.routingSettings = { consent_required: false, cloud_privacy_consent: true };
+    state.driveInfo = {
+      is_portable_fs: false,
+      lancedb_mode: 'local',
+      mount_path: '/mock/path',
+      free_bytes: 100000000,
+    };
+
+    renderWithProviders(<SetupPage />);
+
+    expect((continueButton() as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('never asks for consent when nothing leaves the machine', () => {
+    // A local-only install must not see a cloud privacy prompt at all.
+    state.routingSettings = { consent_required: false, cloud_privacy_consent: false };
+
+    renderWithProviders(<SetupPage />);
+
+    expect(screen.queryByText(/I understand and consent to cloud data processing/)).toBeNull();
   });
 });

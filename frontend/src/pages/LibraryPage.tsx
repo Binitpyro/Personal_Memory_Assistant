@@ -18,6 +18,7 @@ import {
   type IndexStatus,
 } from '../api'
 import { CACHE_KEYS } from '../cacheKeys'
+import { Well, Button } from '../components/ui'
 
 export function LibraryPage() {
   const [folderPath, setFolderPath] = useState('')
@@ -173,7 +174,7 @@ export function LibraryPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold flex items-center gap-3">
+          <h1 className="font-serif text-2xl font-normal flex items-center gap-3">
             <BookOpen className="w-7 h-7 text-primary" />
             Library
           </h1>
@@ -182,7 +183,7 @@ export function LibraryPage() {
           </p>
         </div>
         <div className="flex gap-3">
-          <button onClick={handleRefresh} disabled={refreshMutation.isPending} className="glass-button !bg-primary !border-primary !text-white hover:!bg-primary-h hover:!text-white !py-2 gap-2 shadow-lg transition-all duration-200 disabled:opacity-60">
+          <button onClick={handleRefresh} disabled={refreshMutation.isPending} className="glass-button !py-2 gap-2 disabled:opacity-60">
             <RefreshCw className="w-4 h-4" />
             Refresh
           </button>
@@ -197,36 +198,55 @@ export function LibraryPage() {
         </div>
       )}
 
-      {/* Hero Metrics */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+      {/* Compartments, not tiles.
+          Deliberately uneven — an even four-column stat row is the most generic
+          layout in software, and the running scan is the thing worth the space.
+          Values are left-aligned so the eye reads down a column. */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5 md:[grid-template-columns:1.6fr_1fr_1fr_1.4fr]">
         {[
-          { label: 'Total Files', value: filesIndexed.toLocaleString(), color: 'text-primary-light' },
-          { label: 'Chunks Indexed', value: chunksIndexed.toLocaleString(), color: 'text-accent' },
+          // Casing is load-bearing for LibraryPage.test.tsx, and the label renders
+          // uppercase regardless, so there is nothing to gain by changing it.
+          { label: 'Total Files', value: filesIndexed.toLocaleString(), color: 'text-text-primary' },
+          { label: 'Chunks Indexed', value: chunksIndexed.toLocaleString(), color: 'text-text-primary' },
           { label: 'Scan Status', value: scanStatus, color: scanStatus === 'Idle' ? 'text-success' : 'text-warning' },
           { label: 'Model', value: health?.model_ready ? (config?.gemini_model || 'Ready') : 'Loading…', color: health?.model_ready ? 'text-success' : 'text-warning' },
         ].map(({ label, value, color }) => (
-          <div key={label} className="glass-card flex flex-col items-center justify-center py-6 px-4">
-            <span className={`text-xl md:text-2xl lg:text-3xl font-bold ${color} text-center break-words w-full px-2`}>{value}</span>
-            <span className="text-text-secondary text-xs mt-1 uppercase tracking-wider font-semibold text-center">{label}</span>
-          </div>
+          <Well key={label} className="px-4 py-3.5 min-w-0">
+            <div className="font-mono text-[10px] tracking-[0.16em] uppercase text-text-tertiary mb-2">{label}</div>
+            <div className={`font-serif text-2xl leading-none truncate ${color}`} title={value}>{value}</div>
+          </Well>
         ))}
       </div>
 
       {/* Indexing progress bar */}
       {isRunning && (
-        <div className="glass-card">
+        // Indexing is the longest operation in the product and a screen reader
+        // previously got nothing at all from it. Polite, so it does not
+        // interrupt; the file name changes far too often to announce, so only
+        // the progress summary is live.
+        <div className="glass-card" role="group" aria-label="Indexing progress">
           <div className="flex items-center gap-3 mb-2">
-            <Loader2 className="w-5 h-5 text-primary animate-spin" />
+            <Loader2 className="w-5 h-5 text-primary animate-spin" aria-hidden />
             <span className="text-sm text-text-secondary truncate">
               {liveProgress?.current_file || 'Processing…'} ({liveProgress?.processed_files ?? status?.processed_files ?? 0}/{liveProgress?.total_files ?? status?.total_files ?? 0})
             </span>
           </div>
-          <div className="w-full bg-white/40 border border-white/60 rounded-full h-2.5 shadow-inner">
+          <div
+            className="w-full bg-deep border border-rule rounded-full h-2.5"
+            role="progressbar"
+            aria-valuenow={Math.round(progressPct)}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-label={`Indexing ${liveProgress?.processed_files ?? status?.processed_files ?? 0} of ${liveProgress?.total_files ?? status?.total_files ?? 0} files`}
+          >
             <div
-              className="bg-primary h-2.5 rounded-full transition-all duration-300"
+              className="bg-plate h-2.5 rounded-full transition-all duration-300"
               style={{ width: `${progressPct}%` }}
             />
           </div>
+          <span className="sr-only" aria-live="polite">
+            {`${Math.round(progressPct)} percent, ${liveProgress?.processed_files ?? 0} of ${liveProgress?.total_files ?? 0} files indexed`}
+          </span>
         </div>
       )}
 
@@ -271,7 +291,7 @@ export function LibraryPage() {
           }
         }}
       >
-        <h2 className="text-lg font-semibold mb-4 flex items-center gap-2 text-text-primary">
+        <h2 className="font-serif text-lg font-medium mb-4 flex items-center gap-2 text-text-primary">
           <FolderPlus className="w-5 h-5 text-primary" />
           Add to Memory
         </h2>
@@ -281,24 +301,26 @@ export function LibraryPage() {
             value={folderPath}
             onChange={(e) => setFolderPath(e.target.value)}
             placeholder="Select or drag a folder here..."
-            className="flex-1 bg-white/40 border border-primary/20 rounded-xl px-4 py-3 text-text-primary placeholder:text-text-secondary/50 focus:outline-none focus:ring-2 focus:ring-primary/40 shadow-inner"
+            className="flex-1 bg-surface border border-primary/20 rounded-xl px-4 py-3 text-text-primary placeholder:text-text-secondary/50 focus:outline-none focus:ring-2 focus:ring-primary/40 shadow-inner"
           />
-          <button onClick={handleBrowse} className="glass-button flex items-center gap-2">
-            <HardDrive className="w-4 h-4" /> Browse
-          </button>
-          <button
+          <Button onClick={handleBrowse} icon={<HardDrive className="w-4 h-4" />}>
+            Browse
+          </Button>
+          {/* The one plate on this screen. */}
+          <Button
+            variant="plate"
             onClick={handleIndex}
             disabled={!folderPath.trim() || isRunning}
-            className={`flex items-center justify-center gap-2 bg-primary hover:brightness-110 text-white font-bold rounded-xl px-6 py-3 shadow-lg transition-all active:scale-95 disabled:opacity-40 ${isRunning ? 'hidden' : ''}`}
+            icon={<Play className="w-4 h-4" />}
+            className={isRunning ? 'hidden' : ''}
           >
-            {isRunning ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
             Index
-          </button>
+          </Button>
           {isRunning && (
             <button
               onClick={handleCancel}
               disabled={cancelling}
-              className="flex items-center justify-center gap-2 bg-error hover:brightness-110 text-white font-bold rounded-xl px-6 py-3 shadow-lg transition-all active:scale-95 disabled:opacity-40"
+              className="flex items-center justify-center gap-2 bg-danger-fill hover:brightness-110 text-on-danger font-bold rounded-xl px-6 py-3 shadow-lg transition-all active:scale-95 disabled:opacity-40"
             >
               {cancelling ? <Loader2 className="w-4 h-4 animate-spin" /> : <AlertCircle className="w-4 h-4" />}
               {cancelling ? 'Cancelling...' : 'Cancel'}
@@ -326,7 +348,7 @@ export function LibraryPage() {
                   <p className="text-text-secondary text-sm">
                     {vol.used_gb} / {vol.total_gb} GB used ({usedPct}%)
                   </p>
-                  <div className="w-full bg-white/40 border border-white/60 rounded-full h-1.5 mt-2 shadow-inner">
+                  <div className="w-full bg-surface border border-edge rounded-full h-1.5 mt-2 shadow-inner">
                     <div
                       className={`h-1.5 rounded-full ${colorClass}`}
                       style={{ width: `${usedPct}%` }}
@@ -363,11 +385,11 @@ export function LibraryPage() {
             <span className="font-mono font-bold text-text-primary">{sysInfo?.scan_method ?? '—'}</span>
           </span>
         </div>
-        <div className="flex gap-2 pl-4 ml-auto border-l border-white/20">
+        <div className="flex gap-2 pl-4 ml-auto border-l border-rule">
           <button
             onClick={handleDemo}
             disabled={isRunning}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 border border-emerald-500/20 transition-all font-black text-[10px] uppercase tracking-widest shadow-sm disabled:opacity-40 disabled:cursor-not-allowed"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface hover:bg-raised text-success border border-edge transition-all font-black text-[10px] uppercase tracking-widest shadow-sm disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <Play className="w-3 h-3" />
             Seed Demo
@@ -375,7 +397,7 @@ export function LibraryPage() {
           <button
             onClick={handleClear}
             disabled={isRunning || clearIndexMutation.isPending}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-600 border border-red-500/20 transition-all font-black text-[10px] uppercase tracking-widest shadow-sm disabled:opacity-40 disabled:cursor-not-allowed"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface hover:bg-raised text-error border border-edge transition-all font-black text-[10px] uppercase tracking-widest shadow-sm disabled:opacity-40 disabled:cursor-not-allowed"
           >
             {clearIndexMutation.isPending
               ? <Loader2 className="w-3 h-3 animate-spin" />

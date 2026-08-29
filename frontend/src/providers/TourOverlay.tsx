@@ -108,7 +108,7 @@ export function TourOverlay() {
       {/* Popover */}
       {targetRect && (
         <div 
-          className="absolute glass bg-white/60 backdrop-blur-2xl border border-primary/10 rounded-3xl shadow-2xl p-6 w-80 pointer-events-auto transition-all duration-300 flex flex-col gap-3"
+          className="absolute glass bg-surface backdrop-blur-2xl border border-primary/10 rounded-3xl shadow-2xl p-6 w-80 pointer-events-auto transition-all duration-300 flex flex-col gap-3"
           style={{
             top: step.position === 'bottom' ? targetRect.bottom + 16 :
                  step.position === 'top' ? targetRect.top - 16 - 200 :
@@ -121,7 +121,7 @@ export function TourOverlay() {
         >
           <button 
             onClick={endTour}
-            className="absolute top-3 right-3 p-1 hover:bg-black/5 rounded-full text-text-secondary"
+            className="absolute top-3 right-3 p-1 hover:bg-raised rounded-full text-text-secondary"
           >
             <X className="w-4 h-4" />
           </button>
@@ -146,7 +146,7 @@ export function TourOverlay() {
             </button>
             <button 
               onClick={handleNext}
-              className="glass-button !bg-primary !text-white px-5 py-2.5 rounded-xl text-xs font-bold flex items-center gap-1.5 hover:opacity-90 transition-all shadow-md shadow-primary/20"
+              className="glass-button !bg-plate !text-on-plate px-5 py-2.5 rounded-xl text-xs font-bold flex items-center gap-1.5 hover:opacity-90 transition-all shadow-md shadow-primary/20"
             >
               {currentStep < steps.length - 1 ? (
                 <>Next <ChevronRight className="w-4 h-4" /></>
@@ -160,9 +160,9 @@ export function TourOverlay() {
       
       {/* If target isn't found, just show a fallback dialog */}
       {!targetRect && (
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 glass bg-white/60 backdrop-blur-2xl border border-primary/10 rounded-3xl shadow-2xl p-6 w-80 pointer-events-auto flex flex-col gap-3 text-center">
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 glass bg-surface backdrop-blur-2xl border border-primary/10 rounded-3xl shadow-2xl p-6 w-80 pointer-events-auto flex flex-col gap-3 text-center">
           <p className="text-sm text-text-secondary">Tour item not visible yet. Please configure a provider first, or skip the tour.</p>
-          <button onClick={handleNext} className="glass-button !bg-primary !text-white px-4 py-2.5 rounded-xl text-xs font-bold w-full mt-2">Next Step</button>
+          <button onClick={handleNext} className="glass-button !bg-plate !text-on-plate px-4 py-2.5 rounded-xl text-xs font-bold w-full mt-2">Next Step</button>
           <button onClick={endTour} className="text-xs font-semibold text-text-secondary hover:text-text-primary w-full mt-1">Skip Tour</button>
         </div>
       )}

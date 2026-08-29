@@ -6,6 +6,7 @@ import { renderWithProviders } from '../test-utils';
 // Mutable so each case can vary the payload. The mock factory is hoisted, so it
 // has to read this lazily rather than close over a value.
 let health: Record<string, unknown> = {};
+let routingSettings: Record<string, unknown> | undefined;
 
 vi.mock('../../useApi', () => ({
   useApi: vi.fn((_fn, opts) => {
@@ -14,6 +15,9 @@ vi.mock('../../useApi', () => ({
     }
     if (opts?.cacheKey === 'health') {
       return { data: health, loading: false, error: null, refetch: vi.fn() };
+    }
+    if (opts?.cacheKey === 'provider-settings') {
+      return { data: routingSettings, loading: false, error: null, refetch: vi.fn() };
     }
     return { data: undefined, loading: false, error: null, refetch: vi.fn() };
   }),
@@ -25,6 +29,7 @@ vi.mock('../../useApi', () => ({
 vi.mock('../../api', () => ({
   getAppConfig: vi.fn(),
   getHealth: vi.fn(),
+  getProviderSettings: vi.fn(),
 }));
 
 const base = { version: '0.0.72', status: 'ok', db: 'connected', split_brain_sync_status: 'idle' };
@@ -32,6 +37,7 @@ const base = { version: '0.0.72', status: 'ok', db: 'connected', split_brain_syn
 describe('AppShell subsystem health', () => {
   beforeEach(() => {
     health = { ...base };
+    routingSettings = undefined;
   });
 
   it('says nothing when every subsystem is fine', () => {
@@ -76,12 +82,57 @@ describe('AppShell subsystem health', () => {
     expect(warning).toBeTruthy();
     expect(warning.textContent).toContain('ocr');
     expect(warning.textContent).toContain('reranker');
-    expect(warning.getAttribute('title')).toContain('Check the backend logs');
+    // The pip used to say "check the backend logs" because there was nowhere to
+    // send anyone - the `detail` string the backend records was rendered nowhere
+    // in the app. It is a link to Diagnostics now, which shows the reason.
+    expect(warning.getAttribute('title')).toContain('Diagnostics');
+    expect(warning.getAttribute('href')).toBe('/settings/diagnostics');
   });
 
   it('renders nothing when the backend omits the field entirely', () => {
     // An older backend, or a health call that failed - must not throw.
     renderWithProviders(<AppShell />);
     expect(screen.queryByTestId('subsystem-warning')).toBeNull();
+  });
+});
+
+// ── Cloud consent banner ───────────────────────────────────────────────────
+//
+// The remediation path for installs that finished onboarding before consent was
+// asked for: they hold a cloud key, every query fails in the dispatch gate, and
+// the consent control lives on a route that is not in this nav. Nobody should
+// have to re-run onboarding to fix that.
+
+describe('AppShell cloud consent banner', () => {
+  beforeEach(() => {
+    health = { ...base };
+    routingSettings = undefined;
+  });
+
+  it('warns and offers a way through when consent is outstanding', () => {
+    routingSettings = { consent_required: true };
+
+    renderWithProviders(<AppShell />);
+
+    expect(screen.queryByText(/Cloud provider needs your consent/)).not.toBeNull();
+    const link = screen.getByRole('link', { name: /Review now/i });
+    expect(link.getAttribute('href')).toBe('/settings/providers#cloud-consent');
+  });
+
+  it('stays quiet when consent is not required', () => {
+    routingSettings = { consent_required: false };
+
+    renderWithProviders(<AppShell />);
+
+    expect(screen.queryByText(/Cloud provider needs your consent/)).toBeNull();
+  });
+
+  it('stays quiet when the backend omits the field entirely', () => {
+    // An older backend must not make the shell shout at a healthy install.
+    routingSettings = {};
+
+    renderWithProviders(<AppShell />);
+
+    expect(screen.queryByText(/Cloud provider needs your consent/)).toBeNull();
   });
 });

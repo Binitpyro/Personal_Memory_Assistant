@@ -31,7 +31,7 @@ export function FilterBar({
       <select
         value={selectedFileType}
         onChange={(e) => setSelectedFileType(e.target.value)}
-        className="text-[11px] bg-white/5 border border-white/10 rounded-lg px-2 py-1 text-text-primary"
+        className="text-[11px] bg-raised border border-rule rounded-lg px-2 py-1 text-text-primary"
         disabled={disabled}
       >
         <option value="">All file types</option>
@@ -42,7 +42,7 @@ export function FilterBar({
       <select
         value={selectedFolderTag}
         onChange={(e) => setSelectedFolderTag(e.target.value)}
-        className="text-[11px] bg-white/5 border border-white/10 rounded-lg px-2 py-1 text-text-primary"
+        className="text-[11px] bg-raised border border-rule rounded-lg px-2 py-1 text-text-primary"
         disabled={disabled}
       >
         <option value="">All folders</option>
@@ -53,7 +53,7 @@ export function FilterBar({
       <select
         value={selectedMode}
         onChange={(e) => setSelectedMode(e.target.value)}
-        className="text-[11px] bg-white/5 border border-white/10 rounded-lg px-2 py-1 text-text-primary"
+        className="text-[11px] bg-raised border border-rule rounded-lg px-2 py-1 text-text-primary"
         disabled={disabled}
       >
         <option value="">Default Mode</option>

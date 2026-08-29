@@ -20,6 +20,7 @@ from app.providers.base import ValidationResult
 from app.providers.cache import validation_cache
 from app.providers.launcher import get_launch_status
 from app.providers.launcher import launch as launch_local_provider
+from app.search.llm_client import provider_leaves_device
 from app.settings_store import CURRENT_SCHEMA_VERSION, SettingsStore
 
 logger = logging.getLogger(__name__)
@@ -108,12 +109,35 @@ async def get_llm_settings():
     saved_chain = llm.get("fallback_chain")
     if data.get("schema_version") != CURRENT_SCHEMA_VERSION:
         saved_chain = None
+    chain = saved_chain or await get_default_chain_async()
+    consent = llm.get("cloud_privacy_consent", False)
     return {
         "provider": llm.get("provider", "auto"),
-        "fallback_chain": saved_chain or await get_default_chain_async(),
-        "cloud_privacy_consent": llm.get("cloud_privacy_consent", False),
+        "fallback_chain": chain,
+        "cloud_privacy_consent": consent,
         "cloud_privacy_notice": PRIVACY_NOTICE,
+        "consent_required": _consent_required(llm, chain, consent),
     }
+
+
+def _consent_required(llm: dict, chain: list[str], consent: bool) -> bool:
+    """Would the next dispatch be refused for want of consent?
+
+    Onboarding could store a cloud API key and finish without ever asking for
+    consent, leaving `auto` to resolve to that provider and every query to fail
+    in the dispatch gate. This is what the UI reads to offer the remedy up
+    front, so it calls the same `provider_leaves_device` predicate the gate
+    does - keying on the resolved base_url, not on the provider's kind.
+    """
+    if consent:
+        return False
+    preference = llm.get("provider", "auto")
+    effective = chain if preference == "auto" else [preference]
+    per_provider = llm.get("per_provider", {})
+    return any(
+        provider_leaves_device(pid, per_provider.get(pid, {}).get("base_url") or env_base_url(pid))
+        for pid in effective
+    )
 
 
 @providers_router.put("/settings")

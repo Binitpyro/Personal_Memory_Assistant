@@ -82,12 +82,29 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo.
-echo [5/6] Running ESLint (TypeScript Security)...
+echo [5/6] Running ESLint, frontend build, and the utility diff...
 cd frontend
 call npx eslint . --format json -o eslint-report.json
 if %ERRORLEVEL% NEQ 0 (
     cd ..
     echo ESLint security check failed!
+    goto :error
+)
+call npm run build
+if %ERRORLEVEL% NEQ 0 (
+    cd ..
+    echo Frontend build failed!
+    goto :error
+)
+REM Tailwind emits NOTHING for a class it does not know - no build error, no
+REM lint warning, no failing test. The UI/UX audit found 58 such usages across
+REM 22 names, several on error text. This is the guard that keeps it at zero.
+REM Must stay in step with .github/workflows/ci.yml - section 13 records the
+REM local gate and CI drifting apart twice already.
+call node scripts/check-utilities.mjs
+if %ERRORLEVEL% NEQ 0 (
+    cd ..
+    echo Utility diff failed: a class used in src/ produces no CSS!
     goto :error
 )
 cd ..

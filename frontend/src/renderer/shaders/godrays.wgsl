@@ -79,6 +79,6 @@ fn fs_radial(in: VOut) -> @location(0) vec4<f32> {
     }
 
     // Tint god-rays warm amber to match the sky's aurora highlights.
-    let tint = vec3<f32>(1.00, 0.78, 0.55);
+    let tint = PMA_GODRAY_TINT;
     return vec4<f32>(acc * tint * exposure, 1.0);
 }

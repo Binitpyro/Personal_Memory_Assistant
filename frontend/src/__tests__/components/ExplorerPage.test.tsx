@@ -105,7 +105,7 @@ describe('ExplorerPage Component', () => {
   it('does not fire a second removal while the first is in flight', async () => {
     // The delete button had no pending state at all, so a double-click sent two
     // requests for the same folder.
-    let resolveDelete: (v: unknown) => void = () => {};
+    let resolveDelete: (v: { message: string; chunks_removed: number }) => void = () => {};
     vi.mocked(removeFolderIndex).mockImplementationOnce(
       () => new Promise((resolve) => { resolveDelete = resolve; }) as ReturnType<typeof removeFolderIndex>,
     );

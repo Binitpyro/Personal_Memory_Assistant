@@ -855,3 +855,59 @@ async def test_stream_answer_monitoring():
             results.append(chunk)
 
         mock_report.assert_called_once_with(client)
+
+
+# ── Chain exhaustion is a typed event, not answer text ───────────────────────
+
+
+async def _drain(gen):
+    return [c async for c in gen]
+
+
+async def test_chain_exhaustion_yields_a_control_chunk_not_prose():
+    """The consent failure used to arrive as the answer itself.
+
+    `stream_answer` yielded "Streaming error: All providers ..." as a plain
+    chunk, so a first-run user who onboarded with a cloud key and no consent
+    got that sentence rendered in the answer bubble as though the model had
+    written it - with no affordance for fixing it. It is a control chunk now,
+    carrying the machine-readable reason.
+    """
+    from app.search.llm_client import LLMClient, ProviderNotConfiguredError
+
+    client = LLMClient()
+
+    with (
+        patch.object(LLMClient, "_ensure_token_loaded", new=AsyncMock()),
+        patch.object(
+            LLMClient,
+            "_resolve_provider_by_id",
+            new=AsyncMock(
+                side_effect=ProviderNotConfiguredError(
+                    "Cloud privacy consent required before using provider gemini.",
+                    code="cloud_consent_required",
+                )
+            ),
+        ),
+        patch(
+            "app.search.llm_client._get_effective_fallback_chain_async",
+            new=AsyncMock(return_value=["gemini"]),
+        ),
+        patch(
+            "app.search.capability_detector.capability_detector.detect_capabilities",
+            new=AsyncMock(return_value=False),
+        ),
+    ):
+        chunks = await _drain(client.stream_answer("q", "ctx"))
+
+    assert chunks, "expected at least one chunk"
+    control = [json.loads(c) for c in chunks if c.startswith('{"control":')]
+    assert control, f"no control chunk emitted; got {chunks!r}"
+    err = [c for c in control if c.get("control") == "provider_error"]
+    assert err, f"no provider_error control chunk; got {control!r}"
+    assert err[0]["code"] == "cloud_consent_required"
+
+    # The regression itself: nothing may reach the user as bare prose.
+    assert not [c for c in chunks if not c.startswith('{"control":')], (
+        f"error leaked into the answer body as text: {chunks!r}"
+    )

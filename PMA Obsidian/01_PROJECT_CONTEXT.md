@@ -313,6 +313,9 @@ Read in this order (these are the files that actually exist in this folder):
 3. `05_CHANGELOGS.md` — what changed and, more usefully, why
 4. `PERFORMANCE_BOTTLENECKS_AND_ROADMAP.md`
 5. `03_ROADMAP_AND_VISION.md`
+6. `06_DESIGN_SYSTEM.md` — the frontend design system, its measured contrast
+   table, and the constraints that bite. Read before touching anything under
+   `frontend/src/`.
 
 `.claude/CLAUDE.md` at the repo root carries the working rules and the current defect state. It is untracked, so it is a state file rather than history.
 

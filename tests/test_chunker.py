@@ -8,6 +8,7 @@ import logging
 import time
 from unittest.mock import MagicMock
 
+import pytest
 import rust_core
 
 import app.indexing.service as service
@@ -151,12 +152,17 @@ def test_create_chunks_routing(monkeypatch):
     ldb = MagicMock()
     idx_service = IndexingService(db, emb, ldb)
 
-    # 1. Test markdown routing
+    # 1. Markdown routes to the SECTION-aware chunker.
+    #
+    # This assertion used to be the other way round - .md was expected to reach
+    # create_chunks, the generic sliding window - which locked in the defect
+    # CLAUDE.md 8.7 A3 describes: chunk_markdown had no caller anywhere, and the
+    # test said that was correct.
     called.clear()
     idx_service._create_chunks("some text", "test.md")
     if service.RUST_CORE_AVAILABLE:
-        assert called.get("txt") is True
-        assert not called.get("markdown")
+        assert called.get("markdown") is True
+        assert not called.get("txt")
 
     # 2. Test plain text routing
     called.clear()
@@ -175,3 +181,44 @@ def test_create_chunks_routing(monkeypatch):
     idx_service._create_chunks("def hello(): pass", "test.py")
     assert not called.get("markdown")
     assert not called.get("txt")
+
+
+def test_chunk_markdown_merges_small_sections_up_to_the_budget():
+    """chunk_size must act as a floor as well as a ceiling.
+
+    The first version applied it only as a maximum, so a section shorter than it
+    became a chunk of that length however short it was - chunk size followed
+    heading density rather than any budget. Measured consequence on a
+    heading-dense corpus: 589 chunks became 1060 and every retrieval metric moved
+    the wrong way (CLAUDE.md 8.7 A3).
+    """
+    if not service.RUST_CORE_AVAILABLE:
+        pytest.skip("rust_core not built")
+
+    # Twenty tiny sections. Un-merged that is twenty chunks of ~40 characters.
+    text = "".join(f"### Heading {i}\nA short line of body text here.\n\n" for i in range(20))
+    chunks = service.rust_core.chunk_markdown(text, 512, 51, "[MD: t.md] ")
+
+    spans = [c["end_offset"] - c["start_offset"] for c in chunks]
+    assert len(chunks) < 20, f"small sections were not merged: {len(chunks)} chunks for 20 sections"
+    # Everything except the final remainder should be a substantial fraction of
+    # the budget rather than one stray heading.
+    assert max(spans) <= 512, "a merged run exceeded the budget"
+    assert max(spans) > 200, f"merging produced nothing near the budget: spans={spans}"
+
+
+def test_chunk_markdown_span_matches_the_text_it_stores():
+    """`retrieval._chunk_body` recovers a chunk's prefix length as
+    `len(text_preview) - (end_offset - start_offset)` when stitching parent
+    windows. A span that disagrees with its own stored text silently mis-slices
+    that window, so the trim has to be reflected in the offsets."""
+    if not service.RUST_CORE_AVAILABLE:
+        pytest.skip("rust_core not built")
+
+    prefix = "[MD: t.md] "
+    text = "# Title\n\nBody one.\n\n## Second\n\nBody two is a little longer.\n\n"
+    for c in service.rust_core.chunk_markdown(text, 512, 51, prefix):
+        span = c["end_offset"] - c["start_offset"]
+        assert len(c["text_preview"]) - span == len(prefix), (
+            f"span {span} disagrees with stored text {c['text_preview']!r}"
+        )

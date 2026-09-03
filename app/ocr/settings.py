@@ -109,11 +109,6 @@ def ocr_scratch_dir() -> Path:
     return ocr_root() / "scratch"
 
 
-def reset_path_cache() -> None:
-    """Drop memoized paths. For tests that repoint ``settings.db_path``."""
-    _path_cache.clear()
-
-
 def worker_source_dir() -> Path:
     """Where ``worker/*.py`` lives *now*, so the registry can copy it.
 

@@ -1,8 +1,6 @@
 from app.providers.anthropic import AnthropicProvider
 from app.providers.base import BaseProvider, ModelInfo, ValidationResult
 from app.providers.gemini import GeminiProvider
-from app.providers.groq import GroqProvider
-from app.providers.lm_studio import LMStudioProvider
 from app.providers.manifest import (
     PROVIDER_IDS,
     env_base_url,
@@ -12,10 +10,8 @@ from app.providers.manifest import (
     get_default_chain_async,
     is_loopback_url,
 )
-from app.providers.nvidia_nim import NvidiaNimProvider
 from app.providers.ollama import OllamaProvider
-from app.providers.openai import OpenAIProvider
-from app.providers.openai_compatible import OpenAICompatibleProviderInstance
+from app.providers.openai_compat import OpenAICompatibleProvider
 from app.providers.openrouter import OpenRouterProvider
 from app.providers.registry import PROVIDER_REGISTRY, ProviderSpec, spec_of
 
@@ -25,13 +21,9 @@ __all__ = [
     "AnthropicProvider",
     "BaseProvider",
     "GeminiProvider",
-    "GroqProvider",
-    "LMStudioProvider",
     "ModelInfo",
-    "NvidiaNimProvider",
     "OllamaProvider",
-    "OpenAICompatibleProviderInstance",
-    "OpenAIProvider",
+    "OpenAICompatibleProvider",
     "OpenRouterProvider",
     "ProviderSpec",
     "ValidationResult",
@@ -45,6 +37,24 @@ __all__ = [
     "spec_of",
 ]
 
+# These providers are plain OpenAI-compatible endpoints: they differ from each
+# other only by their registry spec and, for two of them, a default model. That
+# used to be five modules (openai, openai_compatible, groq, lm_studio,
+# nvidia_nim) whose entire body was `spec_of("<id>")` plus a string, dispatched
+# by an if/elif chain keyed on the same id `spec_of` already keys on.
+# openrouter is not in here because it genuinely overrides list_models.
+_OPENAI_COMPATIBLE_DEFAULT_MODEL: dict[str, str | None] = {
+    "openai": None,
+    "openai_compatible": None,
+    "lm_studio": None,
+    "groq": "llama-3.3-70b-versatile",
+    "nvidia_nim": "meta/llama-3.3-70b-instruct",
+}
+
+# LM Studio is a local server and create_provider has never forwarded a key to
+# it. Kept explicit so the table above does not silently start sending one.
+_NO_API_KEY = frozenset({"lm_studio"})
+
 
 def create_provider(
     provider_id: str,
@@ -54,37 +64,26 @@ def create_provider(
     default_model: str | None = None,
     timeout: float = 30.0,
 ) -> BaseProvider:
+    if provider_id in _OPENAI_COMPATIBLE_DEFAULT_MODEL:
+        return OpenAICompatibleProvider(
+            spec_of(provider_id),
+            api_key=None if provider_id in _NO_API_KEY else api_key,
+            base_url=base_url,
+            default_model=default_model or _OPENAI_COMPATIBLE_DEFAULT_MODEL[provider_id],
+            timeout=timeout,
+        )
     if provider_id == "gemini":
         return GeminiProvider(
             api_key=api_key, base_url=base_url, default_model=default_model, timeout=timeout
         )
-    elif provider_id == "openai":
-        return OpenAIProvider(
-            api_key=api_key, base_url=base_url, default_model=default_model, timeout=timeout
-        )
-    elif provider_id == "anthropic":
+    if provider_id == "anthropic":
         return AnthropicProvider(
             api_key=api_key, base_url=base_url, default_model=default_model, timeout=timeout
         )
-    elif provider_id == "groq":
-        return GroqProvider(
-            api_key=api_key, base_url=base_url, default_model=default_model, timeout=timeout
-        )
-    elif provider_id == "openrouter":
+    if provider_id == "openrouter":
         return OpenRouterProvider(
             api_key=api_key, base_url=base_url, default_model=default_model, timeout=timeout
         )
-    elif provider_id == "nvidia_nim":
-        return NvidiaNimProvider(
-            api_key=api_key, base_url=base_url, default_model=default_model, timeout=timeout
-        )
-    elif provider_id == "openai_compatible":
-        return OpenAICompatibleProviderInstance(
-            api_key=api_key, base_url=base_url, default_model=default_model, timeout=timeout
-        )
-    elif provider_id == "ollama":
+    if provider_id == "ollama":
         return OllamaProvider(base_url=base_url, default_model=default_model, timeout=timeout)
-    elif provider_id == "lm_studio":
-        return LMStudioProvider(base_url=base_url, default_model=default_model, timeout=timeout)
-    else:
-        raise ValueError(f"Unknown provider ID: {provider_id}")
+    raise ValueError(f"Unknown provider ID: {provider_id}")

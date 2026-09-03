@@ -7,8 +7,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
+from app.providers import create_provider
 from app.providers.gemini import GeminiProvider
-from app.providers.lm_studio import LMStudioProvider
 from app.providers.ollama import OllamaProvider
 
 # 1. Mock the optional ollama library before import
@@ -699,7 +699,7 @@ async def test_stream_ollama():
 
 @pytest.mark.asyncio
 async def test_call_lm_studio_success():
-    provider = LMStudioProvider(api_key=None, base_url="http://lmstudio", default_model="phi3")
+    provider = create_provider("lm_studio", base_url="http://lmstudio", default_model="phi3")
 
     mock_resp = MagicMock()
     mock_resp.status_code = 200
@@ -768,7 +768,7 @@ async def test_stream_gemini_error():
 
 @pytest.mark.asyncio
 async def test_stream_lm_studio_success():
-    provider = LMStudioProvider(api_key=None, base_url="http://lmstudio", default_model="phi3")
+    provider = create_provider("lm_studio", base_url="http://lmstudio", default_model="phi3")
 
     mock_resp = MagicMock()
     mock_resp.status_code = 200
@@ -790,7 +790,7 @@ async def test_stream_lm_studio_success():
 
 @pytest.mark.asyncio
 async def test_stream_lm_studio_error():
-    provider = LMStudioProvider(api_key=None, base_url="http://lmstudio", default_model="phi3")
+    provider = create_provider("lm_studio", base_url="http://lmstudio", default_model="phi3")
 
     mock_resp = httpx.Response(
         500, text="Internal Server Error", request=httpx.Request("POST", "http://lmstudio")

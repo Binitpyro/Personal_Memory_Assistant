@@ -773,13 +773,8 @@ export interface ProviderSpec {
   base_url_editable: boolean;
   auth: 'bearer' | 'x-api-key' | 'x-goog-api-key' | 'none';
   models_endpoint: string;
-  models_parser: string;
   api_key_pattern: string | null;
   api_key_docs_url: string;
-  supports_streaming: boolean;
-  supports_tools: boolean;
-  supports_vision: boolean;
-  supported_features: string[];
 }
 
 export interface ProviderStatus {

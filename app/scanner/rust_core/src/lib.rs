@@ -132,56 +132,79 @@ fn create_chunks(py: Python, text: &str, chunk_size_chars: usize, chunk_overlap_
 fn chunk_markdown(py: Python, text: &str, chunk_size_chars: usize, chunk_overlap_chars: usize, prefix: &str) -> PyResult<Vec<Py<PyAny>>> {
     let mut chunks = Vec::new();
     let re = regex::Regex::new(r"(?m)^#{1,3}\s").unwrap();
-    
-    let mut last_byte = 0;
+
+    // Section starts, in byte offsets, plus the end of the text as a sentinel.
+    let mut bounds: Vec<usize> = vec![0];
     for mat in re.find_iter(text) {
-        if mat.start() > last_byte {
-            let sec = &text[last_byte..mat.start()];
-            if !sec.trim().is_empty() {
-                // Calculate char offset for this section
-                let start_char = text[..last_byte].chars().count();
-                let sec_chars = sec.chars().count();
-                
-                if sec_chars <= chunk_size_chars {
-                    let dict = PyDict::new(py);
-                    dict.set_item("start_offset", start_char)?;
-                    dict.set_item("end_offset", start_char + sec_chars)?;
-                    let full_text = format!("{}{}", prefix, sec.trim());
-                    dict.set_item("text_preview", &full_text)?;
-                    dict.set_item("sentence_offsets", get_sentence_offsets_json(&full_text))?;
-                    dict.set_item("segmenter_version", "rs_v1")?;
-                    chunks.push(dict.into());
-                } else {
-                    let mut c = create_chunks(py, sec, chunk_size_chars, chunk_overlap_chars, prefix, start_char)?;
-                    chunks.append(&mut c);
-                }
+        if mat.start() > 0 {
+            bounds.push(mat.start());
+        }
+    }
+    bounds.dedup();
+    bounds.push(text.len());
+
+    // Merge adjacent sections up to `chunk_size_chars` instead of emitting each
+    // one however short it is.
+    //
+    // The first version applied chunk_size only as a MAXIMUM, so a heading every
+    // few lines produced a chunk every few lines and chunk size ended up
+    // following heading density rather than any budget. On a heading-dense
+    // reference corpus that took 589 chunks to 1060 and moved every retrieval
+    // metric the wrong way - document nDCG 0.891 -> 0.80, answer coverage
+    // 0.597 -> 0.542 - which is why the Python side stopped routing .md here at
+    // all (CLAUDE.md 8.7 A3).
+    //
+    // Headings stay the PREFERRED break points; they are just no longer the only
+    // consideration. A section that alone exceeds the budget still falls through
+    // to the sliding window.
+    let mut i = 0usize;
+    while i + 1 < bounds.len() {
+        let start_byte = bounds[i];
+        let mut end_byte = bounds[i + 1];
+        let mut j = i + 1;
+
+        // Greedily absorb following sections while the merged run still fits.
+        while j + 1 < bounds.len() {
+            let candidate_end = bounds[j + 1];
+            if text[start_byte..candidate_end].chars().count() <= chunk_size_chars {
+                end_byte = candidate_end;
+                j += 1;
+            } else {
+                break;
             }
         }
-        last_byte = mat.start();
-    }
-    
-    if last_byte < text.len() {
-        let sec = &text[last_byte..];
-        if !sec.trim().is_empty() {
-            let start_char = text[..last_byte].chars().count();
+
+        let sec = &text[start_byte..end_byte];
+        let trimmed = sec.trim();
+        if !trimmed.is_empty() {
             let sec_chars = sec.chars().count();
-            
             if sec_chars <= chunk_size_chars {
+                // Span describes the TRIMMED text that is actually stored, not
+                // the raw slice. They differed before, and the Python side
+                // recovers a chunk's prefix length as
+                // `len(text_preview) - (end_offset - start_offset)`
+                // (retrieval._chunk_body), so a span that disagrees with its own
+                // text silently mis-slices the parent window.
+                let lead_bytes = sec.len() - sec.trim_start().len();
+                let start_char = text[..start_byte + lead_bytes].chars().count();
                 let dict = PyDict::new(py);
                 dict.set_item("start_offset", start_char)?;
-                dict.set_item("end_offset", start_char + sec_chars)?;
-                let full_text = format!("{}{}", prefix, sec.trim());
+                dict.set_item("end_offset", start_char + trimmed.chars().count())?;
+                let full_text = format!("{}{}", prefix, trimmed);
                 dict.set_item("text_preview", &full_text)?;
                 dict.set_item("sentence_offsets", get_sentence_offsets_json(&full_text))?;
                 dict.set_item("segmenter_version", "rs_v1")?;
                 chunks.push(dict.into());
             } else {
+                let start_char = text[..start_byte].chars().count();
                 let mut c = create_chunks(py, sec, chunk_size_chars, chunk_overlap_chars, prefix, start_char)?;
                 chunks.append(&mut c);
             }
         }
+
+        i = j;
     }
-    
+
     Ok(chunks)
 }
 

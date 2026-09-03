@@ -8,6 +8,7 @@ import { type Message } from '../../hooks/useChatStream';
 import { type QuerySource, type TraceEvent } from '../../api';
 import { CrystalGraphTrace } from '../CrystalGraphTrace';
 import { isTauri, openFile } from '../../utils/tauriShell';
+import { formatCurrency } from '../../utils/format';
 
 /**
  * Sanitisation schema for model output.
@@ -80,11 +81,13 @@ const ReasoningTrace = ({ trace }: Readonly<{ trace: TraceEvent[] }>) => {
       {steps.length > 0 && (
         <div className="border border-primary/20 rounded-xl overflow-hidden bg-surface-dark/30">
           <button
+            type="button"
             onClick={() => setIsOpen(!isOpen)}
+            aria-expanded={isOpen}
             className="w-full flex items-center justify-between px-3 py-2 text-xs font-bold text-primary-light hover:bg-primary/5 transition-colors"
           >
             <span className="flex items-center gap-1.5">
-              <Split className="w-3.5 h-3.5" /> How this answer was assembled
+              <Split className="w-3.5 h-3.5" aria-hidden /> How this answer was assembled
             </span>
             {isOpen ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
           </button>
@@ -115,11 +118,13 @@ const GraphTraceViewer = ({ traceData }: Readonly<{ traceData: string }>) => {
   const [isOpen, setIsOpen] = useState(false);
   return (
     <div className="mt-3 border border-primary/20 rounded-xl overflow-hidden bg-surface-dark/30">
-      <button 
+      <button
+        type="button"
         onClick={() => setIsOpen(!isOpen)}
+        aria-expanded={isOpen}
         className="w-full flex items-center justify-between px-3 py-2 text-xs font-bold text-primary-light hover:bg-primary/5 transition-colors"
       >
-        <span className="flex items-center gap-1.5"><Network className="w-3.5 h-3.5" /> Graph Trace: Crystal Dreamscape</span>
+        <span className="flex items-center gap-1.5"><Network className="w-3.5 h-3.5" aria-hidden /> Graph Trace: Crystal Dreamscape</span>
         {isOpen ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
       </button>
       {isOpen && (
@@ -141,18 +146,28 @@ const SourceViewer = ({ src, onForceInclude }: Readonly<{ src: QuerySource, onFo
   if (src.text && src.sentence_offsets) {
     try {
       const offsets = JSON.parse(src.sentence_offsets) as [number, number][];
-      content = (
-        <>
-          {offsets.map(([start, end], i) => (
-            <span key={i} className="hover:bg-primary/30 transition-colors rounded px-0.5 cursor-text relative group">
-              {src.text!.substring(start, end)}
-              <span className="absolute -top-6 left-1/2 -translate-x-1/2 bg-black/80 text-[9px] text-white px-2 py-1 rounded opacity-0 group-hover:opacity-100 pointer-events-none whitespace-nowrap z-10 transition-opacity">
-                Precision Match
+      // Guard on the PARSED value, not on the truthiness of the string. Every
+      // chunk ships sentence_offsets as the literal string "[]" — the offsets
+      // are only computed when PMA_SENTENCE_OFFSETS is set, and it defaults to
+      // "0" (app/indexing/service.py). "[]" is truthy, so this branch was
+      // always taken, offsets.map produced nothing, and `content` was
+      // overwritten with an empty fragment — discarding the src.text assigned
+      // just above. The panel opened (it is gated on src.text, which is fine)
+      // and showed a blank box for every source.
+      if (Array.isArray(offsets) && offsets.length > 0) {
+        content = (
+          <>
+            {offsets.map(([start, end], i) => (
+              <span key={i} className="hover:bg-primary/30 transition-colors rounded px-0.5 cursor-text relative group">
+                {src.text!.substring(start, end)}
+                <span className="absolute -top-7 left-1/2 -translate-x-1/2 bg-surface border border-edge text-[11px] text-text-primary px-2 py-1 rounded-sm shadow-md opacity-0 group-hover:opacity-100 pointer-events-none whitespace-nowrap z-10 transition-opacity">
+                  Precision match
+                </span>
               </span>
-            </span>
-          ))}
-        </>
-      );
+            ))}
+          </>
+        );
+      }
     } catch (e) {
       console.error("Failed to parse sentence offsets", e);
     }
@@ -256,15 +271,19 @@ export function MessageBubble({ message: msg, onNearMissClick }: Readonly<Messag
           : 'glass-card !p-3 text-text-primary border-edge rounded-tl-none'
           }`}>
           {msg.isStreaming && !msg.content ? (
-            <div className="flex gap-1 py-1">
-              <span className="w-1.5 h-1.5 bg-primary-light rounded-full animate-bounce"></span>
-              <span className="w-1.5 h-1.5 bg-primary-light rounded-full animate-bounce [animation-delay:0.2s]"></span>
-              <span className="w-1.5 h-1.5 bg-primary-light rounded-full animate-bounce [animation-delay:0.4s]"></span>
+            <div className="flex gap-1 py-1" role="status" aria-label="Generating answer…">
+              <span aria-hidden className="w-1.5 h-1.5 bg-primary-light rounded-full animate-bounce"></span>
+              <span aria-hidden className="w-1.5 h-1.5 bg-primary-light rounded-full animate-bounce [animation-delay:0.2s]"></span>
+              <span aria-hidden className="w-1.5 h-1.5 bg-primary-light rounded-full animate-bounce [animation-delay:0.4s]"></span>
             </div>
           ) : (
             // `prose prose-invert prose-sm` emitted no CSS at all —
             // @tailwindcss/typography is not a dependency of this project.
-            <div className="prose-answer max-w-none">
+            <div
+              className="prose-answer max-w-none"
+              aria-live={msg.role === 'assistant' && msg.isStreaming ? 'polite' : undefined}
+              aria-busy={msg.isStreaming || undefined}
+            >
               <ReactMarkdown 
                 remarkPlugins={[remarkGfm]}
                 // Order is load-bearing: rehypeRaw parses the raw HTML into the
@@ -272,13 +291,25 @@ export function MessageBubble({ message: msg, onNearMissClick }: Readonly<Messag
                 // Reversed, sanitisation runs before the dangerous nodes exist.
                 rehypePlugins={[rehypeRaw, [rehypeSanitize, claimSchema]]}
                 components={{
-                  claim: ({ ...props }: Readonly<Record<string, any>>) => {
-                    const sourcesStr = String(props.sources || "");
+                  // The citation detail used to live ONLY in `title`, which is
+                  // a mouse-hover affordance: not focusable, not announced by
+                  // screen readers, and unreachable by keyboard. It stays for
+                  // pointer users, but the same text now also renders as an
+                  // inline sr-only suffix so it is read as part of the
+                  // sentence. Deliberately NOT a tab stop — a focusable span
+                  // per citation would put dozens of stops inside one answer.
+                  claim: ({ sources, node, children, ...rest }: Readonly<Record<string, any>>) => {
+                    const sourcesStr = String(sources || "");
                     const isInference = sourcesStr.toLowerCase().includes("inference");
                     const numSources = (sourcesStr.match(/\[\d+\]/g) || []).length;
-                    
+
                     if (isInference) {
-                      return <span className="text-text-secondary px-0.5 border-b border-dotted border-warning/70" title="Inference (Ungrounded)" {...props} />;
+                      return (
+                        <span className="text-text-secondary px-0.5 border-b border-dotted border-warning/70" title="Inference (Ungrounded)" {...rest}>
+                          {children}
+                          <span className="sr-only"> (inference — not grounded in a retrieved passage)</span>
+                        </span>
+                      );
                     }
                     
                     // D10: this used to paint >=3 citations green and call it
@@ -292,12 +323,28 @@ export function MessageBubble({ message: msg, onNearMissClick }: Readonly<Messag
                     // actually known, and leave the confidence judgement to the
                     // reader until a real signal exists to key on.
                     if (numSources >= 3) {
-                      return <span className="underline decoration-primary-light/60 decoration-2 underline-offset-4 px-1 rounded cursor-help" title={`Cited ${numSources} sources: ${sourcesStr}`} {...props} />;
+                      return (
+                        <span className="underline decoration-primary-light/60 decoration-2 underline-offset-4 px-1 rounded cursor-help" title={`Cited ${numSources} sources: ${sourcesStr}`} {...rest}>
+                          {children}
+                          <span className="sr-only"> (cited {numSources} sources: {sourcesStr})</span>
+                        </span>
+                      );
                     }
-                    
-                    return <span className="underline decoration-primary-light/40 decoration-1 underline-offset-4 hover:bg-primary/5 px-1 rounded transition-colors cursor-help" title={numSources === 1 ? `Cited 1 source: ${sourcesStr}` : `Sources: ${sourcesStr}`} {...props} />;
+
+                    const label = numSources === 1 ? `Cited 1 source: ${sourcesStr}` : `Sources: ${sourcesStr}`;
+                    return (
+                      <span className="underline decoration-primary-light/40 decoration-1 underline-offset-4 hover:bg-primary/5 px-1 rounded transition-colors cursor-help" title={label} {...rest}>
+                        {children}
+                        <span className="sr-only"> ({label})</span>
+                      </span>
+                    );
                   },
-                  inference: ({ ...props }: Readonly<Record<string, any>>) => <span className="text-text-secondary px-0.5 border-b border-dotted border-warning/70" title="Inference (Ungrounded)" {...props} />
+                  inference: ({ node, children, ...rest }: Readonly<Record<string, any>>) => (
+                    <span className="text-text-secondary px-0.5 border-b border-dotted border-warning/70" title="Inference (Ungrounded)" {...rest}>
+                      {children}
+                      <span className="sr-only"> (inference — not grounded in a retrieved passage)</span>
+                    </span>
+                  )
                 } as Record<string, React.ComponentType<any>>}
               >
                 {msg.content}
@@ -370,7 +417,7 @@ export function MessageBubble({ message: msg, onNearMissClick }: Readonly<Messag
             )}
             {msg.cost != null && msg.cost > 0 && (
               <span className="text-[10px] text-success/80 font-semibold" title={msg.isEstimatedCost ? 'Estimated cost' : 'Token usage cost'}>
-                • {msg.isEstimatedCost ? '~' : ''}${msg.cost.toFixed(5)}
+                • {msg.isEstimatedCost ? '~' : ''}{formatCurrency(msg.cost)}
               </span>
             )}
           </div>
@@ -430,12 +477,14 @@ export function MessageBubble({ message: msg, onNearMissClick }: Readonly<Messag
         {/* Pattern Annotator Panel */}
         {msg.role === 'assistant' && msg.pattern_annotations && msg.pattern_annotations.length > 0 && (
           <div className="mt-2 bg-surface border border-rule rounded-lg overflow-hidden">
-            <button 
+            <button
+              type="button"
               onClick={() => setAnnotationsOpen(!annotationsOpen)}
+              aria-expanded={annotationsOpen}
               className="w-full px-3 py-2 flex items-center justify-between text-text-primary text-xs font-bold border-b border-rule hover:bg-raised transition-colors"
             >
               <span className="flex items-center gap-2">
-                <User className="w-4 h-4" />
+                <User className="w-4 h-4" aria-hidden />
                 Personal Pattern Annotator
               </span>
               {annotationsOpen ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}

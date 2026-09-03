@@ -54,6 +54,10 @@ pytest-report.xml
 bandit-report.json
 sonar-issues.json
 **/sonar-issues.json
+# Sonar-Scan.bat writes these with underscores, which the two globs
+# above never matched - so both stayed tracked.
+sonar_issues.json
+sonar_output.txt
 frontend/eslint-report.json
 *.cover
 *.py,cover
@@ -287,3 +291,14 @@ pma_metadata.db*
 
 # Graphify AST extraction output (local tool artifact)
 graphify-out/
+
+# BEIR corpora materialised by scripts/fetch_beir.py. SciFact alone is 5,183
+# files; it is downloadable and reproducible from the provenance recorded in the
+# queries JSON, so it does not belong in git. The queries file is generated with
+# it and would rot against a re-download.
+/tests/eval/corpus_scifact/
+/tests/eval/queries_scifact.json
+
+# research/journal.jsonl is deliberately NOT ignored - it is the evidence record
+# for every experiment the loop has run, and the reason a later session does not
+# repeat work. research/PROGRAM.md and EDITABLE.md are tracked for the same reason.

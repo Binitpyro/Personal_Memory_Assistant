@@ -1,7 +1,6 @@
 import type { ReactNode } from 'react';
 import { Moon, Sun } from 'lucide-react';
-import { resolveTheme, setTheme, type Theme } from '../../theme';
-import { useState } from 'react';
+import { setTheme, useTheme } from '../../theme';
 
 export type Tone = 'neutral' | 'success' | 'warning' | 'error' | 'info' | 'accent';
 
@@ -54,6 +53,11 @@ export function Badge({
  * and zero skeletons — a spinner says "wait", a skeleton says what is coming.
  */
 export function Skeleton({ className = '' }: Readonly<{ className?: string }>) {
+  // The radius is NOT overridable through `className`. Tailwind emits
+  // `.rounded-full` before `.rounded-sm`, and equal-specificity rules are
+  // decided by emission order rather than by the order of the class attribute,
+  // so `rounded-sm` here wins over anything a caller passes. Passing
+  // `rounded-full` for a circular placeholder looks right and does nothing.
   return <div aria-hidden className={`bg-raised rounded-sm ${className}`} />;
 }
 
@@ -150,38 +154,42 @@ export function ShelfMark({
   );
 }
 
-/** Cabinet / Paper. Writes the choice through so it survives a reload. */
+/**
+ * Cabinet / Paper. Writes the choice through so it survives a reload.
+ *
+ * Reads `useTheme` rather than seeding local state from `resolveTheme()` once:
+ * with no stored choice the theme still tracks the OS, so a one-shot read left
+ * the toggle showing the wrong side after the user changed their system
+ * appearance.
+ */
 export function ThemeToggle({ className = '' }: Readonly<{ className?: string }>) {
-  const [theme, setLocal] = useState<Theme>(() => resolveTheme());
-
-  const choose = (next: Theme) => {
-    setTheme(next);
-    setLocal(next);
-  };
+  const theme = useTheme();
 
   return (
     <div className={`inline-flex border border-edge rounded-sm overflow-hidden ${className}`} role="group" aria-label="Theme">
       <button
         type="button"
-        onClick={() => choose('cabinet')}
+        onClick={() => setTheme('cabinet')}
         aria-pressed={theme === 'cabinet'}
+        aria-label="Cabinet — dark theme"
         title="Cabinet — dark"
         className={`w-7 h-5 flex items-center justify-center transition-colors ${
           theme === 'cabinet' ? 'bg-surface text-text-primary' : 'text-text-tertiary hover:text-text-secondary'
         }`}
       >
-        <Moon className="w-3 h-3" />
+        <Moon className="w-3 h-3" aria-hidden />
       </button>
       <button
         type="button"
-        onClick={() => choose('paper')}
+        onClick={() => setTheme('paper')}
         aria-pressed={theme === 'paper'}
+        aria-label="Paper — light theme"
         title="Paper — light"
         className={`w-7 h-5 flex items-center justify-center border-l border-edge transition-colors ${
           theme === 'paper' ? 'bg-surface text-text-primary' : 'text-text-tertiary hover:text-text-secondary'
         }`}
       >
-        <Sun className="w-3 h-3" />
+        <Sun className="w-3 h-3" aria-hidden />
       </button>
     </div>
   );

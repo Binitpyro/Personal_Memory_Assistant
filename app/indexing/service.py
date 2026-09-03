@@ -367,6 +367,52 @@ def shutdown_executors() -> None:
     _EXTRACT_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pma-extract")
 
 
+# Extensions whose chunker needs the WHOLE file rather than a stream.
+#
+# Reviving the dispatcher that CLAUDE.md 8.7 A2/A3 found dead. Deliberately not
+# "everything": routing all types through `_create_chunks` would send PDFs and
+# office documents to `CodeChunker._chunk_fallback`, a blind character split
+# with no sentence snapping at all, which is strictly worse than the
+# StreamChunker they use today. Only the types with a genuinely better chunker
+# move:
+#
+#   code     -> CodeChunker, syntax-aware, and the only producer of kg_nodes /
+#               kg_edges, so this is also what finally populates the knowledge
+#               graph (A4)
+# .txt/.log stay streamed: rust_core.create_chunks is the same sliding window
+# StreamChunker already runs, so switching them would trade streaming for
+# nothing.
+#
+# **Markdown was tried here twice and measured worse both times, so it is NOT
+# routed.** `rust_core.chunk_markdown` is section-aware, which sounds like a
+# clear win for prose and is not on this corpus.
+#
+# First attempt: it applied `chunk_size` only as a MAXIMUM, so a section shorter
+# than the budget became a chunk that short and chunk size followed heading
+# density. 589 chunks -> 1060, document nDCG 0.891 -> 0.80, answer coverage
+# 0.597 -> 0.542.
+#
+# That defect is now fixed in Rust - adjacent sections merge up to the budget,
+# and the stored span finally matches the trimmed text it describes. Re-measured
+# at chunk_size=2048 it is no longer catastrophic and is still worse:
+#
+#     chunks           140 -> 137   (fine)
+#     answer coverage  1.000 -> 1.000   (tied, saturated)
+#     chunk precision  0.163 -> 0.100   (clearly worse)
+#     document nDCG    0.94 -> 0.91 with the reranker on
+#
+# Merged runs join unrelated subsections - a parameter entry with a worked
+# example - so each chunk is less topically focused than the sliding window's
+# uniform, sentence-snapped output. Coverage cannot show this because it is
+# already saturated; precision can, and does.
+#
+# So A3 stays open deliberately. The function is better than it was and is
+# exercised by tests; routing prose to it needs a corpus where section
+# boundaries carry more signal than they do here.
+_CODE_EXTENSIONS = frozenset({".py", ".js", ".ts", ".jsx", ".tsx", ".rs"})
+_WHOLE_TEXT_EXTENSIONS = _CODE_EXTENSIONS
+
+
 class StreamChunker:
     """Helper to process a stream of text fragments into properly sized chunks."""
 
@@ -822,6 +868,21 @@ class IndexingService:
                 ft_summary = ""
                 meta = None
 
+                # Code and markdown are chunked from the whole file: an AST
+                # needs the complete source and chunk_markdown needs to see
+                # every heading, so neither can work off a stream. Everything
+                # else keeps streaming.
+                #
+                # `buffered_chars` against settings.chunk_buffer_max_chars is
+                # what keeps the section 6 boundedness invariant true - peak
+                # stays a function of the tunables, never of how large a
+                # document happens to be. A file over the cap gives up the
+                # syntax-aware chunker and streams instead, which is a quality
+                # tradeoff rather than a failure.
+                buffering = path.suffix.lower() in _WHOLE_TEXT_EXTENSIONS
+                buffered: list[str] = []
+                buffered_chars = 0
+
                 chunks_emitted = 0
                 stub_skipped = False
                 stub_kind = ""
@@ -872,12 +933,40 @@ class IndexingService:
                             transient_stub = fragment.startswith(_TRANSIENT_STUB_PREFIXES)
                             break
 
-                        for c in chunker.process(fragment):
-                            if progress.is_cancelled:
-                                return "CANCELLED", "", None, "cancelled"
-                            chunks_emitted += 1
-                            if not _offer(c):
-                                return "CANCELLED", "", None, "cancelled"
+                        if buffering:
+                            as_text = (
+                                fragment
+                                if isinstance(fragment, str)
+                                else fragment.decode("utf-8", errors="replace")
+                            )
+                            buffered.append(as_text)
+                            buffered_chars += len(as_text)
+                            if buffered_chars > settings.chunk_buffer_max_chars:
+                                # Over the cap. Give up the whole-text chunker
+                                # and replay what has been held through the
+                                # streaming one, so nothing read so far is lost.
+                                logger.info(
+                                    "%s exceeded chunk_buffer_max_chars (%d); "
+                                    "streaming it instead of syntax-aware chunking.",
+                                    path.name,
+                                    settings.chunk_buffer_max_chars,
+                                )
+                                buffering = False
+                                for part in buffered:
+                                    for c in chunker.process(part):
+                                        if progress.is_cancelled:
+                                            return "CANCELLED", "", None, "cancelled"
+                                        chunks_emitted += 1
+                                        if not _offer(c):
+                                            return "CANCELLED", "", None, "cancelled"
+                                buffered.clear()
+                        else:
+                            for c in chunker.process(fragment):
+                                if progress.is_cancelled:
+                                    return "CANCELLED", "", None, "cancelled"
+                                chunks_emitted += 1
+                                if not _offer(c):
+                                    return "CANCELLED", "", None, "cancelled"
                         if len(ft_summary) < 2000:
                             ft_summary += (
                                 fragment
@@ -885,7 +974,18 @@ class IndexingService:
                                 else fragment.decode("utf-8", errors="replace")
                             )
 
-                    for c in chunker.finalize():
+                    if buffering:
+                        # The syntax-aware path. _create_chunks routes on the
+                        # extension: CodeChunker for source, chunk_markdown for
+                        # markdown. This is the call CLAUDE.md 8.7 A2/A3 found
+                        # had no production caller at all, and A4's kg_nodes /
+                        # kg_edges ride out on the chunks it returns.
+                        final_chunks = self._create_chunks("".join(buffered), file_path=str(path))
+                        buffered.clear()
+                    else:
+                        final_chunks = chunker.finalize()
+
+                    for c in final_chunks:
                         if progress.is_cancelled:
                             return "CANCELLED", "", None, "cancelled"
                         chunks_emitted += 1
@@ -1365,7 +1465,22 @@ class IndexingService:
                         "end_line": node.get("end_line"),
                     }
                 )
-                kg_nodes_data.append((node["id"], "entity", node["label"], props, chunk_id))
+                # CodeGraphExtractor's contract is {"id", "label", "name", ...}
+                # where `label` is the KIND ("class"/"function") and `name` is
+                # the identifier. The row is (id, type, label, ...), so the kind
+                # belongs in `type` and the name in `label`.
+                #
+                # This used to store a constant "entity" as the type and the
+                # kind as the label, discarding the name altogether - which also
+                # broke edge resolution silently: resolve_pending_graph_edges
+                # matches `kg_nodes.label = substr(target, 10)`, i.e. against the
+                # pending *name*, so with the kind in that column nothing could
+                # ever match and every PENDING:: edge was deleted by its cleanup
+                # step. Only same-file CONTAINS edges survived. Invisible until
+                # now because nothing wrote to these tables at all (8.7 A4).
+                kg_nodes_data.append(
+                    (node["id"], node.get("label", "entity"), node.get("name", ""), props, chunk_id)
+                )
 
             for edge in chunk.get("kg_edges", []):
                 props = json.dumps({"chunk_id": chunk_id})
@@ -1797,10 +1912,23 @@ class IndexingService:
         ext = Path(file_path).suffix.lower() if file_path else ""
         if RUST_CORE_AVAILABLE and ext in (".txt", ".md", ".markdown", ".log"):
             try:
-                # Offload to create_chunks PyO3 binding
-                chunks = rust_core.create_chunks(
-                    text, self.chunk_size, self.chunk_overlap, prefix, 0
-                )
+                # Markdown goes to the SECTION-aware chunker. `chunk_markdown`
+                # splits on `^#{1,3}\s` and emits a whole section as one chunk
+                # when it fits, falling back to the sliding window only for
+                # oversized sections - so a chunk is a heading's worth of one
+                # subject rather than 512 characters that happen to be adjacent.
+                # It had no caller at all before this: the routing here sent .md
+                # to create_chunks, which is the generic window (CLAUDE.md 8.7
+                # A3). .txt/.log have no section structure to exploit and stay
+                # on the window.
+                if ext in (".md", ".markdown"):
+                    chunks = rust_core.chunk_markdown(
+                        text, self.chunk_size, self.chunk_overlap, prefix
+                    )
+                else:
+                    chunks = rust_core.create_chunks(
+                        text, self.chunk_size, self.chunk_overlap, prefix, 0
+                    )
                 if os.environ.get("PMA_SENTENCE_OFFSETS", "0") == "0":
                     for c in chunks:
                         c["sentence_offsets"] = "[]"

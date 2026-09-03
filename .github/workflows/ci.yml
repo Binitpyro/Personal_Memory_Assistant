@@ -103,6 +103,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # rust-toolchain.toml at the repo root pins the version and declares
+      # clippy/rustfmt; rustup honours it and auto-installs on the first cargo
+      # call. This step only bootstraps rustup - changing a version here does
+      # nothing. See CLAUDE.md section 4.
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:

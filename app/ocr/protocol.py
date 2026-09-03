@@ -186,9 +186,5 @@ def make_shutdown() -> dict:
     return {"t": REQ_SHUTDOWN}
 
 
-def make_cancel(*, doc_id: str) -> dict:
-    return {"t": REQ_CANCEL, "doc_id": doc_id}
-
-
 def is_fatal(code: str) -> bool:
     return code in FATAL_ERRORS

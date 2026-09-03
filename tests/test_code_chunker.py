@@ -169,3 +169,99 @@ class TestChunkCodeDispatch:
         cc = CodeChunker()
         chunks = cc.chunk_code("some content", "test.yaml")
         assert isinstance(chunks, list)
+
+
+class TestChunkOffsets:
+    """Offsets must be real positions in the source, not 0.
+
+    Regression cover for CLAUDE.md 8.7 A4b. CodeChunker used to return only
+    `text_preview`, so `_create_chunks` back-filled start_offset=0 for every
+    chunk. `_span_overlap_ratio` then scored every pair of chunks in a file at
+    1.00 against a 0.7 threshold, and `_deduplicate_redundant` dropped all but
+    the first - so a code file contributed exactly one chunk of context however
+    long it was, with nothing logged.
+    """
+
+    PY_SRC = (
+        "import os\n"
+        "import sys\n"
+        "\n"
+        "CONFIG = {'a': 1}\n"
+        "\n"
+        "def alpha(x):\n"
+        "    return x + 1\n"
+        "\n"
+        "\n"
+        "def beta(y):\n"
+        "    return y * 2\n"
+        "\n"
+        "\n"
+        "class Gamma:\n"
+        "    def method(self):\n"
+        "        return 3\n"
+    )
+
+    JS_SRC = (
+        "const a = 1;\n"
+        "\n"
+        "function first() {\n"
+        "  return 1;\n"
+        "}\n"
+        "\n"
+        "function second() {\n"
+        "  return 2;\n"
+        "}\n"
+    )
+
+    def _assert_well_formed(self, chunks, source):
+        assert chunks, "no chunks produced"
+        for c in chunks:
+            assert "start_offset" in c and "end_offset" in c, f"chunk missing offsets: {c!r}"
+            s, e = c["start_offset"], c["end_offset"]
+            assert 0 <= s <= e <= len(source), f"span ({s}, {e}) outside source of {len(source)}"
+
+    def test_python_chunks_carry_real_offsets(self):
+        chunks = CodeChunker(max_tokens=512).chunk_code(self.PY_SRC, "m.py", prefix="[PY: m.py] ")
+        self._assert_well_formed(chunks, self.PY_SRC)
+        # Not every chunk can start at 0 - that was precisely the defect.
+        assert sum(1 for c in chunks if c["start_offset"] == 0) <= 1
+
+    def test_javascript_chunks_carry_real_offsets(self):
+        chunks = CodeChunker(max_tokens=512).chunk_code(self.JS_SRC, "m.js", prefix="[JS: m.js] ")
+        self._assert_well_formed(chunks, self.JS_SRC)
+        assert sum(1 for c in chunks if c["start_offset"] == 0) <= 1
+
+    def test_javascript_offsets_address_the_chunk_body(self):
+        """The strongest check available: read the span back out of the source."""
+        chunks = CodeChunker(max_tokens=512).chunk_code(self.JS_SRC, "m.js", prefix="")
+        for c in chunks:
+            segment = self.JS_SRC[c["start_offset"] : c["end_offset"]]
+            body = c["text_preview"].lstrip("\n")
+            assert segment == body, f"span does not address its own text: {segment!r} != {body!r}"
+
+    def test_fallback_offsets_advance(self):
+        cc = CodeChunker(max_tokens=40)
+        text = "word " * 200
+        chunks = cc.chunk_code(text, "notes.txt", prefix="[TXT: notes.txt] ")
+        self._assert_well_formed(chunks, text)
+        starts = [c["start_offset"] for c in chunks]
+        assert starts == sorted(starts), "fallback offsets must be monotonic"
+        assert len(set(starts)) == len(starts), "fallback offsets must be distinct"
+
+    def test_chunks_are_not_all_mutually_redundant(self):
+        """The actual A4b regression: spans must not all collapse under dedup."""
+        from app.search.context_builder import _span_overlap_ratio
+
+        chunks = CodeChunker(max_tokens=512).chunk_code(self.PY_SRC, "m.py", prefix="")
+        spans = [(c["start_offset"], c["end_offset"]) for c in chunks]
+        assert len(spans) >= 2, "need at least two chunks for this to mean anything"
+        collapsed = sum(
+            1
+            for i in range(len(spans))
+            for j in range(i + 1, len(spans))
+            if _span_overlap_ratio(spans[i], spans[j]) >= 0.7
+        )
+        assert collapsed == 0, (
+            f"{collapsed} chunk pair(s) still overlap past the 0.7 dedup threshold; "
+            f"code files would collapse to one chunk of context. spans={spans}"
+        )

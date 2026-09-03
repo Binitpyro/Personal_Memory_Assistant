@@ -3,3 +3,9 @@
 
 # Force LF for Rust files to prevent Sonar scanner parsing errors on Windows
 *.rs text eol=lf
+
+# The labelled eval corpus is addressed by character offset. The indexer
+# reads in text mode, so a CRLF checkout would decode to LF and shift every
+# answer_span past the first line - with nothing raising. Pin it.
+tests/eval/corpus_large/** text eol=lf
+tests/eval/queries_large.json text eol=lf

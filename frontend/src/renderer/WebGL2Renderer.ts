@@ -31,6 +31,7 @@ import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 
 import { NavigationController, NODE_STRIDE } from '../interaction/NavigationController';
+import { flyStep, approachEye } from '../interaction/flyCamera';
 import { generateCrystalVariants, CRYSTAL_VARIANTS, type MeshData } from './geometry/icosahedron';
 import { crystalXform, crystalPalette } from './crystalInstance';
 import { generateIcosphereMulti } from './geometry/icosphere';
@@ -241,6 +242,9 @@ export class WebGL2Renderer {
     private rotationX = 0.5;
     private rotationY = 0.5;
     private zoom = 550;
+    private flyLimit = 10000;
+    /** See the WebGPU tier and approachEye. */
+    public smoothCamera = true;
     public focusPosition: [number, number, number] = [0, 0, 0];
     private cameraPosition = new THREE.Vector3();
     private isFirstFrame = true;
@@ -574,6 +578,8 @@ export class WebGL2Renderer {
         this.visibleDirty = true;
         const rootPos = this.nav.getPosition(this.nav.getRootIndex());
         if (rootPos) this.focusPosition = rootPos;
+        // Matches the WebGPU tier: fly bounds scale with the corpus.
+        this.flyLimit = Math.max(1000, this.nav.getRadius(this.nav.getRootIndex()) * 8);
         this.isFirstFrame = true;
     }
 
@@ -587,6 +593,18 @@ export class WebGL2Renderer {
     public handleZoom(delta: number): void {
         const step = Math.max(10, this.zoom * 0.05);
         this.zoom = Math.max(5, this.zoom + (delta > 0 ? step : -step));
+    }
+
+    /** WASD/QE flythrough — see the WebGPU tier and interaction/flyCamera.ts. */
+    public flyBy(forward: number, right: number, up: number): void {
+        this.focusPosition = flyStep(
+            this.focusPosition,
+            this.rotationX,
+            this.rotationY,
+            this.zoom,
+            { forward, right, up },
+            this.flyLimit,
+        ) as [number, number, number];
     }
     public focusOnNode(sourceIndex: number): void {
         const p = this.nav.getPosition(sourceIndex);
@@ -605,7 +623,11 @@ export class WebGL2Renderer {
             this.cameraPosition.set(eyeX, eyeY, eyeZ);
             this.isFirstFrame = false;
         } else {
-            this.cameraPosition.lerp(new THREE.Vector3(eyeX, eyeY, eyeZ), 0.12);
+            const [nx, ny, nz] = approachEye(
+                [this.cameraPosition.x, this.cameraPosition.y, this.cameraPosition.z],
+                [eyeX, eyeY, eyeZ], this.smoothCamera, 0.12,
+            );
+            this.cameraPosition.set(nx, ny, nz);
         }
         this.camera.position.copy(this.cameraPosition);
         this.camera.lookAt(t[0], t[1], t[2]);

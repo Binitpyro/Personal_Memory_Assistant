@@ -1,0 +1,165 @@
+# PROGRAM — the brief for the research loop
+
+Human-edited. This is the equivalent of `program.md` in karpathy/autoresearch:
+the loop reads it to know what it is optimising and what it may not trade away.
+`research/journal.jsonl` is the memory of what has already been tried; read it
+before proposing anything, because a configuration already in there has already
+been paid for.
+
+---
+
+## The objective
+
+**Mean generation token-recall against the labelled answer span, per model arm.**
+Higher is better. Produced by `scripts/eval_chunking.py --gen-models ...`,
+summarised by `scripts/autoresearch.py`.
+
+Recall, not F1, and `tests/eval/metrics.py` carries the reasoning: the system
+prompt orders the model to be "detailed, comprehensive" and to emit
+`[source_index]` citations, so precision's denominator is set by the prompt
+rather than by anything under test. F1 is recorded for comparability with
+published extractive-QA numbers and is not the thing to maximise.
+
+**The detection threshold is ~0.06 answer-recall at three builds.** Measured
+2026-09-03 from 9 runs of a configuration the knob under test could not change:
+sd 0.036 per build, ~0.021 on a 3-build mean. Any delta smaller than that is not
+a result. Screen candidates on the deterministic delivery metric first and spend
+generation only where delivery already moved - a generation-only sweep of a small
+effect will produce a trend that a control run alongside it would have destroyed.
+
+**Always sweep with a control arm.** A model or class the knob cannot affect,
+measured in the same runs. The `max_chunks_small` sweep looked like a clean
+monotonic win on the affected model until the control moved further.
+
+**When delivery is a valid screen, and when it is not.** Delivery coverage is
+deterministic and ~4x cheaper than generation (86 s per run against 315 s), but
+it is only a proxy for knobs that change **how much** text is delivered - not for
+knobs that change **what** the text is. `context_snippet_head_share` changes
+volume alone and delivery predicted generation closely. `chunk_size` also changes
+semantic coherence, and there delivery ranked `3b_local` in the *opposite* order
+from generation. Screen on delivery, confirm on generation, and never skip the
+confirmation for a knob that alters chunk content.
+
+**Two nulls in a row mean the model of the system is wrong. Read, do not sweep.**
+`max_chunks` and `max_per_file` both came back flat because the real ceiling was
+the geometric budget split in `_format_snippets`, which neither knob touches.
+Reading that function found in minutes what more sweeping would never have found.
+
+**Rank on the floor across builds, never the mean.** Three independent builds
+per configuration is the default because chunk ids are assigned in completion
+order by a concurrent pipeline and ties resolve differently per build. CLAUDE.md
+8.7d records one configuration measuring 0.509 and 0.634 on identical settings,
+and a wrong conclusion drawn from a single run. A configuration is worth what its
+worst build is worth.
+
+---
+
+## Rejection gates
+
+A candidate is **discarded**, not penalised. Weighted sums introduce weights
+nobody can justify, which is the 8.7d failure exactly.
+
+1. **External validity.** SciFact nDCG@10 more than one standard deviation below
+   the current best. 8 queries over 24 generated documents will be overfit inside
+   ten iterations and nothing else detects it. *(Corpus materialised 2026-09-03 by
+   `scripts/fetch_beir.py`: 5,183 documents, 300 judged queries, join verified.
+   The gate arms once a baseline nDCG@10 has been recorded; until then treat every
+   internal win as unvalidated.)*
+2. **Latency.** p95 query wall-clock above budget. A configuration that wins by
+   feeding a small model 8k tokens at 3 tok/s is not shippable.
+3. **Correctness.** `ruff check .` repo-wide, plus the targeted test subset.
+   Broken candidates are discarded before they cost an index build.
+
+Diagnostics recorded but **never optimised against**: `char_precision`,
+`chunk_precision`, context tokens, index build time, abstention count.
+
+---
+
+## Constraints that may not be traded away
+
+- **Section 1.3 — license boundary.** No DCC, paid-module, or Creative code in
+  this repo. Ever.
+- **Section 1.4 — privacy defaults.** No configuration may route to a cloud
+  provider by default, phone home, emit telemetry, or require network at first
+  run. A cloud LLM judge is not an option; the labelled spans exist so that
+  scoring is arithmetic.
+- **Section 6 — hardware.** ~4GB VRAM, 250 MB idle ceiling, 1 GB ingestion
+  transient, and the context budget is a binding constraint, not a dial to turn
+  up. More context is not automatically better; that is the whole open question.
+- **Section 4 — pins.** LanceDB 0.30.2, the model pins in `models.lock.json`,
+  and the src-tauri MSRV do not move without sign-off.
+- **No new dependencies.** Section 6's policy wants a measured bottleneck first.
+- **Any new `1/(k + rank)` needs its own k, swept against its own list length.**
+  8.7d: `rrf_k` is 60, tuned for three-signal chunk fusion over a recall window,
+  and reusing it over a 40-item pool spread rank 1 to rank 40 by only 1.64x.
+
+---
+
+## What is known, so the loop does not rediscover it
+
+Read CLAUDE.md 8.7 through 8.7e in full. The short version:
+
+| settled | |
+|---|---|
+| `chunk_size` | 512 -> 2048 chars; delivery coverage 0.569 / 0.645 / 1.000 at `model_class="cloud"` |
+| parent windows | built and shipped; earns its place most at small chunk sizes |
+| BGE query prefix | shipped; identical in the reranker-on arm, kept on three other grounds |
+| reranker | `time_budget_ms` deleted (enforced nothing); RRF fusion at k=10, chosen on the floor |
+| `chunk_markdown` routing (A3) | measured worse twice, precision 0.163 -> 0.100. Needs a corpus where headings carry real signal |
+| `max_chunks_small` / `max_per_file_small` | swept, both flat. Neither binds. Do not retry |
+| `context_snippet_head_share` | **the real ceiling.** 0.34 caps 3 snippets at 71.2% of budget; raising to 0.7 takes gemma2-2b recall 0.317 -> 0.618 with the 7b control flat. Saturating. **Default unchanged pending sign-off** |
+
+**Settled 2026-09-03 (CLAUDE.md 8.7f).** `chunk_size=2048` confirmed on
+generation: gemma4-local 0.563 -> 0.729 across 512/1024/2048, decisive; gemma2-2b
+0.267 -> 0.328, about 3 sd. Every delivery number behind the original 2048
+decision had been measured at `model_class="cloud"`, which the segment section 3
+serves never receives; the eval reports every class now.
+
+**Open and live.** `3b_local` delivered coverage tops out at 0.484 while
+`7b_local` reaches 1.000, and gemma2-2b scores 0.328 answer-recall against
+gemma4-local's 0.729. What bounds it is **not** `max_chunks`: swept 3/5/8, tokens
+flat at ~1,703, coverage non-monotonic. `max_per_file = 1` is the next candidate,
+then `EFFECTIVE_CEILINGS`, which is still a function-local literal.
+
+> **Two knobs named in the original plan are no-ops - do not sweep them.**
+> `settings.context_max_tokens` is read at one site only
+> (`context_builder.py`, the `max_tokens <= 0` fallback); production always
+> passes an explicit budget, so it cannot move any local class.
+> `settings.retrieval_top_k` is only a default argument value and every eval call
+> site passes `-k` explicitly. With the reranker on, `score_multiplier` is also
+> unused: `_apply_relevance_cutoff` switches to an absolute floor once every
+> result carries a `rerank_score`.
+
+---
+
+## Traps that have already cost time
+
+- **Prove a sweep actually varies what it claims, before spending the runs.**
+  Twice in one session a sweep was nearly a structural no-op. `PMA_*` -> settings
+  mapping was checked first and was fine. The class list was not: `eval_chunking`
+  derived it from `--gen-models`, so a delivery-only screening run built only the
+  `"cloud"` class and a sweep of a `3b_local`-only setting produced nine runs with
+  nothing to compare. Fixed, but the habit is the point - one cheap assertion
+  before a long run. A leaderboard cannot tell you the knob did nothing; it will
+  happily rank identical configurations.
+
+- **Thinking models return reasoning in `message.thinking`, not `content`.**
+  `OllamaProvider.chat` reads only `content`. A tight `num_predict` spends the
+  whole budget on reasoning and returns an **empty** answer, which scores as a
+  total miss and reads exactly like "dilution destroys answers". Keep
+  `--gen-max-tokens` generous; `empty` is reported per query for this reason.
+- **`_classify_local_model` guesses from the model *name*.** Every locally
+  imported GGUF here is named `*-local` with no parameter count.
+  `gemma4-local` (7.5B) lands on `7b_local` by fallback, correctly, by luck. A
+  small custom-named model would land on `7b_local`, receive an 8,520-token
+  budget, and be silently truncated. `settings.model_class_overrides` is the fix
+  and it is empty.
+- **Use Ollama's HTTP API, never the CLI.** `ollama list` hung past 120 s on this
+  machine while `/api/tags` answered in 4 ms.
+- **Cold model load is ~61 s.** Generation is model-major for that reason.
+- **`PMA_LANCEDB_MODE=portable`.** `.env` here sets `split_brain`, which a default
+  install never does. `autoresearch.py` sets portable already.
+- **Never `pathlib.write_text` an untracked file in place.** It truncates on
+  open; CLAUDE.md was destroyed that way. Temp file plus `os.replace`.
+- **`D:` is exFAT with no journal.** Interrupted builds leave corrupt directory
+  entries. `--resume` exists because of this.

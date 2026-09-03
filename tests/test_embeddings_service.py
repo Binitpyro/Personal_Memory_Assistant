@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import numpy as np
 import pytest
 
+from app.embeddings import service as service_module
 from app.embeddings.service import EmbeddingService
 
 
@@ -555,3 +556,95 @@ class TestBatchCharBudget:
 
         texts = [("q" * (i + 1)) for i in range(20)]
         assert _length_sorted_batches(texts, 6, char_budget=0) == _length_sorted_batches(texts, 6)
+
+
+class TestQueryInstructionPrefix:
+    """bge-small-en-v1.5 is trained asymmetrically: the query carries an
+    instruction, the passage does not. The invariant worth locking is not the
+    exact string but that the two sides DIFFER - embedding both identically
+    throws the asymmetry away, and prefixing both is just as wrong.
+
+    Mocked at the tokenizer, deliberately, so the real ``embed_texts`` runs and
+    the document assertion has something to be wrong about. A first version of
+    this patched ``embed_texts`` itself and then asserted on its own fake: it
+    passed with the document path prefixed on purpose, i.e. it could not fail
+    for the reason it existed. Same vacuous-assertion trap as CLAUDE.md 8.1c.
+    """
+
+    def _svc(self, monkeypatch, prefix):
+        svc = EmbeddingService()
+        session = MagicMock()
+        # Shape has to follow the batch actually passed in - a fixed shape
+        # broadcasts wrong when embed_texts scatters results back to their rows.
+        session.run = MagicMock(
+            side_effect=lambda _out, inputs: [
+                np.zeros((len(inputs["input_ids"]), 3, 384), dtype=np.float32)
+            ]
+        )
+        svc._session = session
+
+        encoded = MagicMock()
+        encoded.ids = [1, 2, 3]
+        encoded.attention_mask = [1, 1, 1]
+        encoded.type_ids = [0, 0, 0]
+
+        tokenizer = MagicMock()
+        tokenizer.encode_batch = MagicMock(side_effect=lambda texts: [encoded] * len(texts))
+        svc._tokenizer = tokenizer
+
+        monkeypatch.setattr(service_module.settings, "embedding_query_prefix", prefix)
+        return svc, tokenizer
+
+    @staticmethod
+    def _texts(tokenizer):
+        """Every string that actually reached the tokenizer."""
+        return [t for call in tokenizer.encode_batch.call_args_list for t in call.args[0]]
+
+    @pytest.mark.asyncio
+    async def test_query_is_prefixed(self, monkeypatch):
+        svc, tok = self._svc(monkeypatch, "INSTRUCTION: ")
+        await svc.embed_query("what is the cache keyed on")
+        assert self._texts(tok) == ["INSTRUCTION: what is the cache keyed on"]
+
+    @pytest.mark.asyncio
+    async def test_documents_are_not_prefixed(self, monkeypatch):
+        """The half that makes it asymmetric. If the document path ever starts
+        carrying the instruction too, the prefix is just noise added uniformly
+        to every vector in the index and buys nothing."""
+        svc, tok = self._svc(monkeypatch, "INSTRUCTION: ")
+        await svc.embed_texts(["a passage of document text"])
+        assert self._texts(tok) == ["a passage of document text"]
+
+    @pytest.mark.asyncio
+    async def test_the_two_sides_differ(self, monkeypatch):
+        """States the invariant directly rather than by two separate literals."""
+        svc, tok = self._svc(monkeypatch, "INSTRUCTION: ")
+        same_text = "attribute transfer"
+        await svc.embed_query(same_text)
+        await svc.embed_texts([same_text])
+        as_query, as_document = self._texts(tok)
+        assert as_query != as_document, (
+            "identical text must embed differently as a query than as a passage; "
+            "that asymmetry is the entire point of the instruction"
+        )
+        assert as_document == same_text
+
+    @pytest.mark.asyncio
+    async def test_cache_is_keyed_on_the_raw_query(self, monkeypatch):
+        """The prefix is an implementation detail of embed_query.
+
+        Keying the cache on the prefixed string would work but would silently
+        invalidate every entry whenever the instruction changed, for a reason
+        unrelated to the query.
+        """
+        svc, tok = self._svc(monkeypatch, "P: ")
+        await svc.embed_query("same question")
+        await svc.embed_query("same question")
+        assert tok.encode_batch.call_count == 1, "second call should have hit the cache"
+        assert "same question" in svc._query_cache
+
+    @pytest.mark.asyncio
+    async def test_empty_prefix_disables_it(self, monkeypatch):
+        svc, tok = self._svc(monkeypatch, "")
+        await svc.embed_query("plain")
+        assert self._texts(tok) == ["plain"]

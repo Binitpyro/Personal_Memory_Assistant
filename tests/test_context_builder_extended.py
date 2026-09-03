@@ -216,3 +216,99 @@ class TestBuildContext:
         results = [{"file_path": "x.py", "text": "some text", "score": 1.0}]
         result, _ = build_context(results, max_tokens=0)
         assert isinstance(result, str)
+
+
+# ── small-model slot budget ───────────────────────────────────────────────────
+
+
+class TestSmallModelSlotBudget:
+    """`max_chunks` for 3b_local was a function-local literal until 2026-09-03.
+
+    It is a setting now because it, and not `chunk_size`, is what bounds the
+    small model. Measured (CLAUDE.md 8.7f): at the shipped chunk_size=2048 a
+    3b_local context delivers 1,719 tokens against a 2,520 budget, so it runs out
+    of *slots* long before it runs out of budget - and a literal cannot be swept.
+
+    The defaults must keep matching the values they replaced, or the change
+    silently altered production while claiming not to.
+    """
+
+    @staticmethod
+    def _results(n: int) -> list[dict]:
+        # Distinct files: _deduplicate_by_file caps per-file before max_chunks
+        # applies, so same-file rows would measure the wrong limit.
+        return [
+            {"file_path": f"f{i}.py", "text": f"body of file number {i} " * 4, "score": 1.0}
+            for i in range(n)
+        ]
+
+    @staticmethod
+    def _files_in(context: str, n: int) -> int:
+        return sum(f"f{i}.py" in context for i in range(n))
+
+    def test_slot_count_drives_how_many_chunks_survive(self, monkeypatch):
+        from app.config import settings
+
+        results = self._results(6)
+        monkeypatch.setattr(settings, "context_max_chunks_small", 1)
+        one, _ = build_context(results, max_tokens=4000, model_class="3b_local")
+        monkeypatch.setattr(settings, "context_max_chunks_small", 4)
+        four, _ = build_context(results, max_tokens=4000, model_class="3b_local")
+
+        assert self._files_in(one, 6) == 1
+        assert self._files_in(four, 6) == 4
+
+    def test_defaults_match_the_literals_they_replaced(self):
+        from app.config import settings
+
+        assert settings.context_max_chunks_small == 3
+        assert settings.context_max_per_file_small == 1
+
+    def test_large_class_is_unaffected_by_the_small_setting(self, monkeypatch):
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "context_max_chunks_small", 1)
+        ctx, _ = build_context(self._results(6), max_tokens=4000, model_class="7b_local")
+        assert self._files_in(ctx, 6) == 6
+
+
+class TestSnippetHeadShare:
+    """The geometric head allocation is a hard ceiling on budget use.
+
+    Three snippets each taking `share` of what remains reach at most
+    1 - (1 - share)^3 of the budget - 71.2% at the shipped 0.34. For 3b_local,
+    whose max_chunks is 3, that is every snippet, so nearly a third of its
+    context budget is unreachable. Sweeping max_chunks and max_per_file both
+    came back flat because of this (CLAUDE.md 8.7f), which is why it is a
+    setting now rather than a literal.
+    """
+
+    @staticmethod
+    def _long_results(n: int) -> list[dict]:
+        return [
+            {
+                "file_path": f"f{i}.py",
+                "text": f"sentence {i} of a long passage. " * 200,
+                "score": 1.0,
+            }
+            for i in range(n)
+        ]
+
+    def test_raising_the_share_delivers_more_of_the_budget(self, monkeypatch):
+        from app.config import settings
+
+        results = self._long_results(3)
+        monkeypatch.setattr(settings, "context_snippet_head_share", 0.34)
+        _, low = build_context(results, max_tokens=2520, model_class="3b_local")
+        monkeypatch.setattr(settings, "context_snippet_head_share", 0.60)
+        _, high = build_context(results, max_tokens=2520, model_class="3b_local")
+
+        assert high > low, "the head share must actually move delivered tokens"
+        # 1 - 0.66^3 = 0.712. Generous bounds: _truncate_to_tokens and the
+        # per-snippet label both cost tokens, so the cap is approached, not hit.
+        assert low < 0.80 * 2520, "0.34 must leave a large part of the budget unused"
+
+    def test_default_is_unchanged(self):
+        from app.config import settings
+
+        assert settings.context_snippet_head_share == 0.34

@@ -145,12 +145,6 @@ async def get_files_tree(db: DatabaseManager = Depends(get_db)):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
-def importlib_os_sep():
-    import os
-
-    return os.sep
-
-
 @router.get("/visualizer/stream")
 async def stream_visualizer_binary(
     extension: str | None = None, db: DatabaseManager = Depends(get_db)

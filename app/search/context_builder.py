@@ -279,13 +279,31 @@ def _format_snippets(
 
         snippet_id = i + 1
         path = res.get("file_path", "Unknown File")
-        text = res.get("text", "")
+        # `parent_text` is the widened window when parent-window expansion ran
+        # (app/search/retrieval.py:attach_parent_windows); `text` is the child
+        # chunk that actually matched. Prefer the window for the model, and note
+        # that everything ABOVE this point - dedup, the relevance cutoff, the
+        # per-file cap - has already run against the child, which is the point
+        # of small-to-big rather than an oversight.
+        text = res.get("parent_text") or res.get("text", "")
 
         remaining_for_snippets = max(remaining_tokens - used_tokens, 0)
         remaining_count = max(len(deduplicated) - i, 1)
         if i < 3:
             # Reserve more budget for top-ranked chunks while still hard-limited.
-            snippet_budget = max(120, int(remaining_for_snippets * 0.34))
+            #
+            # This decay is a HARD CEILING on how much of the budget can ever be
+            # used, and it binds hardest exactly where there is least room. Three
+            # snippets each taking `share` of what remains can reach at most
+            # 1 - (1 - share)^3 of the budget: 71.2% at 0.34. For 3b_local, whose
+            # max_chunks is 3, every snippet is in this branch, so 29% of its
+            # context budget is unreachable by construction - measured 1,796
+            # tokens delivered against a 2,520 budget, predicted 1,789 (8.7f).
+            # Sweeping max_chunks and max_per_file both came back flat because of
+            # this, not because more evidence was unavailable.
+            snippet_budget = max(
+                120, int(remaining_for_snippets * settings.context_snippet_head_share)
+            )
         else:
             snippet_budget = max(80, int(remaining_for_snippets / remaining_count))
         snippet_budget = min(snippet_budget, remaining_for_snippets)
@@ -415,9 +433,9 @@ def build_context(
     if model_class == "3b_local":
         folder_profiles_text = ""
         graph_paths_text = ""
-        max_per_file = 1
+        max_per_file = settings.context_max_per_file_small
         score_multiplier = 0.4
-        max_chunks = 3
+        max_chunks = settings.context_max_chunks_small
     else:
         max_per_file = 2
         score_multiplier = 0.2

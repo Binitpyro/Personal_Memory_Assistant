@@ -46,6 +46,23 @@ const VARIANTS: Record<ButtonVariant, string> = {
     'disabled:text-text-tertiary disabled:border-rule',
 };
 
+/**
+ * The same clothes, for a control that must be a link.
+ *
+ * A button that calls `navigate()` loses Cmd-click, middle-click and the status
+ * bar, so those become `<Link>` — but a `<Link>` wrapped around a `<Button>`
+ * would nest one interactive element in another. This lets the link wear the
+ * button's appearance directly, which is cheaper than making `Button`
+ * polymorphic for the three call sites that need it.
+ */
+export function buttonClasses({
+  variant = 'secondary',
+  size = 'md',
+  className = '',
+}: Readonly<{ variant?: ButtonVariant; size?: ButtonSize; className?: string }> = {}) {
+  return `${BASE} ${SIZES[size]} ${VARIANTS[variant]} ${className}`;
+}
+
 export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   readonly variant?: ButtonVariant;
   readonly size?: ButtonSize;
@@ -66,9 +83,16 @@ export function Button({
   return (
     <button
       // A loading control is not a target: it already accepted the click.
-      disabled={disabled ?? loading}
+      //
+      // `||`, not `??`. With `??` an explicit `disabled={false}` won the whole
+      // expression and `loading` was ignored, so a control with both props -
+      // the normal shape for a form submit, `disabled={!valid} loading={saving}`
+      // - stayed clickable for the entire request and double-submitted. The
+      // bug was invisible while LibraryPage was the only consumer, because it
+      // never passed `loading`.
+      disabled={disabled || loading}
       aria-busy={loading || undefined}
-      className={`${BASE} ${SIZES[size]} ${VARIANTS[variant]} ${className}`}
+      className={buttonClasses({ variant, size, className })}
       {...rest}
     >
       {loading ? <Loader2 className="w-4 h-4 animate-spin" aria-hidden /> : icon}

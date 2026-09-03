@@ -4,16 +4,14 @@
  * These are language-level tests with no DOM or network dependency.
  */
 import { describe, it, expect } from 'vitest'
+import { formatBytes } from '../utils/treeBuilder'
 
 // ── File size formatter ────────────────────────────────────────────────────
-
-function formatBytes(bytes: number): string {
-  if (bytes === 0) return '0 B'
-  const k = 1024
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB']
-  const i = Math.floor(Math.log(bytes) / Math.log(k))
-  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`
-}
+//
+// Imported, not re-declared. This block used to carry its own copy of
+// formatBytes — a different algorithm from the shipped one, which returned
+// "1.0 KB" where this asserted "1 KB" — so every assertion below passed while
+// testing nothing the app runs.
 
 describe('formatBytes', () => {
   it('returns 0 B for zero bytes', () => {

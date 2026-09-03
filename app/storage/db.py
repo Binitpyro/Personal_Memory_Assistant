@@ -569,12 +569,84 @@ class DatabaseManager:
                     weight REAL DEFAULT 1.0,
                     properties TEXT DEFAULT '{}',
                     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                    PRIMARY KEY (source, target, relation),
-                    FOREIGN KEY (source) REFERENCES kg_nodes(id) ON DELETE CASCADE,
-                    FOREIGN KEY (target) REFERENCES kg_nodes(id) ON DELETE CASCADE
+                    PRIMARY KEY (source, target, relation)
                 )
             """)
+            # kg_edges carried FOREIGN KEY (source|target) REFERENCES kg_nodes(id).
+            # That contradicts the design it belongs to: CodeGraphExtractor emits
+            # `PENDING::<name>` targets on purpose for calls it cannot resolve
+            # within one file, and resolve_pending_graph_edges (called from
+            # app/indexing/service.py) rewrites or deletes them once the whole
+            # run has been indexed. A PENDING:: target is never a kg_nodes.id, so
+            # the constraint rejects exactly the rows the feature depends on.
+            #
+            # insert_kg_edges_bulk already knew this and wrapped its insert in
+            # `PRAGMA foreign_keys = OFF` - but that pragma is **a no-op inside a
+            # transaction**, and the indexer inserts with auto_commit=False from
+            # inside one. So the guard silently did nothing and the insert raised
+            # `FOREIGN KEY constraint failed`, aborting the whole indexing run.
+            #
+            # Never observed until now only because nothing wrote to this table:
+            # the sole producer of kg_nodes/kg_edges was unreachable from the
+            # shipped pipeline (CLAUDE.md 8.7 A4), so every existing index has
+            # zero rows here and this rebuild is a no-op on real data.
+            try:
+                async with conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='kg_edges'"
+                ) as cur:
+                    row = await cur.fetchone()
+                if row and row[0] and "REFERENCES kg_nodes" in row[0]:
+                    logger.info("Migrating kg_edges to drop the PENDING-hostile foreign keys...")
+                    await conn.execute("ALTER TABLE kg_edges RENAME TO kg_edges_old")
+                    await conn.execute("""
+                        CREATE TABLE kg_edges (
+                            source TEXT NOT NULL,
+                            target TEXT NOT NULL,
+                            relation TEXT NOT NULL,
+                            weight REAL DEFAULT 1.0,
+                            properties TEXT DEFAULT '{}',
+                            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                            PRIMARY KEY (source, target, relation)
+                        )
+                    """)
+                    await conn.execute("""
+                        INSERT OR IGNORE INTO kg_edges
+                            (source, target, relation, weight, properties, created_at)
+                        SELECT source, target, relation, weight, properties, created_at
+                        FROM kg_edges_old
+                    """)
+                    await conn.execute("DROP TABLE kg_edges_old")
+                    await conn.commit()
+                    logger.info("kg_edges migration completed successfully.")
+            except Exception as exc:
+                logger.warning("kg_edges schema migration failed: %s", exc)
+
+            # The dropped FOREIGN KEY carried ON DELETE CASCADE, and that half of
+            # it was correct: deleting a node must take its edges with it, or the
+            # graph accumulates edges pointing at nothing every time a file is
+            # re-indexed. The constraint conflated two separate things - refusing
+            # bad INSERTs (wrong here, PENDING:: targets are by design) and
+            # cascading DELETEs (right). A trigger keeps the half that was right.
+            #
+            # Fires on source and target separately rather than with an OR, so
+            # each index can be used.
+            await conn.execute("""
+                CREATE TRIGGER IF NOT EXISTS trg_kg_edges_cascade_source
+                AFTER DELETE ON kg_nodes
+                BEGIN
+                    DELETE FROM kg_edges WHERE source = OLD.id;
+                END
+            """)
+            await conn.execute("""
+                CREATE TRIGGER IF NOT EXISTS trg_kg_edges_cascade_target
+                AFTER DELETE ON kg_nodes
+                BEGIN
+                    DELETE FROM kg_edges WHERE target = OLD.id;
+                END
+            """)
+
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_kg_edges_target ON kg_edges(target)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_kg_edges_source ON kg_edges(source)")
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_kg_edges_relation ON kg_edges(relation)"
             )
@@ -1073,18 +1145,20 @@ class DatabaseManager:
         """
         if not data:
             return
+        # The `PRAGMA foreign_keys = OFF` / `ON` pair that used to wrap this is
+        # gone with the constraint it was working around. It never worked: the
+        # pragma is a no-op inside a transaction and the indexer inserts from
+        # inside one, so it silently protected nothing. Its `finally` was also
+        # unconditionally *enabling* foreign keys, which is not this function's
+        # to decide for whatever caller comes next.
         conn = self._get_conn()
-        await conn.execute("PRAGMA foreign_keys = OFF")
-        try:
-            await conn.executemany(
-                "INSERT INTO kg_edges (source, target, relation, weight, properties) VALUES (?, ?, ?, ?, ?) "
-                "ON CONFLICT(source, target, relation) DO UPDATE SET weight=excluded.weight, properties=excluded.properties",
-                data,
-            )
-            if auto_commit:
-                await self._maybe_commit(conn)
-        finally:
-            await conn.execute("PRAGMA foreign_keys = ON")
+        await conn.executemany(
+            "INSERT INTO kg_edges (source, target, relation, weight, properties) VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(source, target, relation) DO UPDATE SET weight=excluded.weight, properties=excluded.properties",
+            data,
+        )
+        if auto_commit:
+            await self._maybe_commit(conn)
 
     @serialize_write
     async def resolve_pending_graph_edges(self) -> None:

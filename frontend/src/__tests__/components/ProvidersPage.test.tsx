@@ -56,7 +56,6 @@ const editable = {
     default_base_url: 'http://localhost:8000/v1',
     base_url_editable: true,
     api_key_docs_url: '',
-    supported_features: [],
   },
   is_set: true,
   preview: 'sk-...',

@@ -42,6 +42,14 @@ class EvalQuery:
     relevant_files: list[str]
     expected_domains: list[str]
     note: str = ""
+    # Character ranges in the source text that actually answer the question.
+    # Empty for tests/eval/queries.json, which labels files only - the chunk
+    # metrics return 0.0 there and are reported separately for that reason.
+    answer_spans: list[dict[str, Any]] = field(default_factory=list)
+    # Recorded intent, "short" or "long", so a sweep can be read per group:
+    # a long answer straddles chunk boundaries at 512 characters and a short
+    # one does not, and those two are supposed to respond differently.
+    answer_len: str = ""
 
 
 @dataclass
@@ -49,6 +57,26 @@ class QueryResult:
     query: EvalQuery
     results: list[dict[str, Any]]
     ranked: list[str] = field(default_factory=list)
+
+    def chunk_scores(self, k: int) -> dict[str, float]:
+        """Span-level scores. Separate from ``scores`` on purpose.
+
+        The document-level ablations in tests/test_eval_retrieval.py are
+        calibrated against ``scores`` and its exact key set, with measured
+        deltas recorded in their docstrings. Folding two more keys into it
+        would change what ``aggregate`` averages under those tests for no
+        reason. These are read by the chunking work instead.
+        """
+        spans = self.query.answer_spans
+        return {
+            "chunk_precision": metrics.chunk_span_precision_at_k(self.results, spans, k),
+            "answer_coverage": metrics.answer_span_coverage_at_k(self.results, spans, k),
+            # Character-granular. `chunk_precision` counts a chunk as a full hit
+            # if it merely touches the answer, so it cannot see dilution and
+            # cannot be used to judge chunk size. These two can.
+            "char_precision": metrics.char_precision_at_k(self.results, spans, k),
+            "char_iou": metrics.char_iou_at_k(self.results, spans, k),
+        }
 
     def scores(self, k: int) -> dict[str, float]:
         return {
@@ -72,6 +100,8 @@ def load_queries(path: Path = QUERIES_FILE) -> list[EvalQuery]:
             relevant_files=q["relevant_files"],
             expected_domains=q["expected_domains"],
             note=q.get("note", ""),
+            answer_spans=q.get("answer_spans", []),
+            answer_len=q.get("answer_len", ""),
         )
         for q in data["queries"]
     ]
@@ -179,7 +209,9 @@ class EvalIndex:
             return normalized[len(prefix) :].lstrip("/")
         return normalized
 
-    async def retrieve(self, query: str, k: int) -> list[dict[str, Any]]:
+    async def retrieve(
+        self, query: str, k: int, use_reranker: bool = False
+    ) -> list[dict[str, Any]]:
         from app.search import retrieval
 
         if self.db is None or self.embeddings is None or self.lancedb is None:
@@ -207,27 +239,85 @@ class EvalIndex:
             embedding_service=self.embeddings,
             lancedb_client=self.lancedb,
             k=k,
-            use_reranker=False,
+            use_reranker=use_reranker,
         )
         for r in results:
             r["file_path"] = self.relativize(r.get("file_path", ""))
         return results
 
-    async def run(self, queries: list[EvalQuery], k: int) -> list[QueryResult]:
+    async def run(
+        self, queries: list[EvalQuery], k: int, use_reranker: bool = False
+    ) -> list[QueryResult]:
         out: list[QueryResult] = []
         for q in queries:
-            results = await self.retrieve(q.query, k)
+            results = await self.retrieve(q.query, k, use_reranker=use_reranker)
             out.append(QueryResult(query=q, results=results, ranked=metrics.ranked_files(results)))
         return out
 
 
 _METRIC_KEYS = ("recall", "precision", "ndcg", "mrr", "domain_coverage")
+_CHUNK_METRIC_KEYS = (
+    "chunk_precision",
+    "answer_coverage",
+    "char_precision",
+    "char_iou",
+)
+
+
+def aggregate_chunks(
+    run: list[QueryResult], k: int, answer_len: str | None = None
+) -> dict[str, float]:
+    """Mean span-level metrics, optionally restricted to one answer-length group.
+
+    The ``answer_len`` filter is the point of the split: chunk size should move
+    long answers (which straddle boundaries at 512 characters) and leave short
+    ones roughly alone. A sweep that moves both identically is measuring
+    something else, most likely overall recall.
+    """
+    rows = [
+        r.chunk_scores(k)
+        for r in run
+        if r.query.answer_spans and (answer_len is None or r.query.answer_len == answer_len)
+    ]
+    return metrics.summarize(rows, _CHUNK_METRIC_KEYS)
 
 
 def aggregate(run: list[QueryResult], k: int, query_type: str | None = None) -> dict[str, float]:
     """Mean metrics over a run, optionally restricted to one query type."""
     rows = [r.scores(k) for r in run if query_type is None or r.query.type == query_type]
     return metrics.summarize(rows, _METRIC_KEYS)
+
+
+def format_chunk_report(run: list[QueryResult], k: int) -> str:
+    """Span-level table. Returns "" when nothing in the run carries spans, so
+    calling it on the file-labelled corpus prints nothing rather than a column
+    of 0.00 that reads as a failure."""
+    labelled = [r for r in run if r.query.answer_spans]
+    if not labelled:
+        return ""
+
+    lines = [
+        f"{'query':<24} {'answer':<7} {'chunk_prec':>11} {'answer_cov':>11}"
+        f" {'char_prec':>10} {'char_iou':>9}",
+        "-" * 76,
+    ]
+    for r in labelled:
+        s = r.chunk_scores(k)
+        lines.append(
+            f"{r.query.id:<24} {r.query.answer_len or '-':<7} "
+            f"{s['chunk_precision']:>11.3f} {s['answer_coverage']:>11.3f}"
+            f" {s['char_precision']:>10.3f} {s['char_iou']:>9.3f}"
+        )
+    lines.append("-" * 76)
+    for group in ("short", "long", None):
+        agg = aggregate_chunks(run, k, group)
+        label = group or "ALL"
+        lines.append(
+            f"{label:<24} {'':<7} {agg['chunk_precision']:>11.3f}"
+            f" {agg['answer_coverage']:>11.3f} {agg['char_precision']:>10.3f}"
+            f" {agg['char_iou']:>9.3f}"
+        )
+    return "\n".join(lines)
 
 
 def format_report(run: list[QueryResult], k: int) -> str:

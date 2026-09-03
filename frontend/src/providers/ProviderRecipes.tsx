@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { setProviderSettings, setLLMPreferences, getLLMPreferences } from '../api';
 import { invalidateCache } from '../useApi';
 import { CACHE_KEYS } from '../cacheKeys'
+import { Panel } from '../components/ui';
 
 export function ProviderRecipes({
   onRecipeApplied,
@@ -23,7 +24,7 @@ export function ProviderRecipes({
     try {
       // 1. Update routing fallback chain
       await setProviderSettings({ provider: defaultModel.provider, fallback_chain: fallback });
-      
+
       // Fetch latest prefs
       const currentPrefs = await getLLMPreferences();
       // 2. Set default model
@@ -48,6 +49,17 @@ export function ProviderRecipes({
     localStorage.setItem('pma_recipes_dismissed', 'true');
   };
 
+  /**
+   * The three-way colour coding is kept on purpose: these are three options a
+   * user picks between, and the tone carries which is which.
+   *
+   * What changed is that it is now expressed in tokens. `text-amber-500` /
+   * `bg-amber-500/10` were raw palette values authored for the dark theme, and
+   * this panel renders on the themed page rather than over the canvas — so on
+   * Paper the chip washed out the way the consent banners did. `success`,
+   * `warning` and `info` are the measured tokens and map onto the three
+   * recipes without straining the meaning.
+   */
   const recipes = [
     {
       id: 'local',
@@ -55,7 +67,7 @@ export function ProviderRecipes({
       desc: '100% private. Runs entirely on your machine.',
       icon: Shield,
       color: 'text-success',
-      bg: 'bg-surface',
+      bg: 'bg-success/10',
       fallback: ['ollama', 'lmstudio'],
       defaultModel: { provider: 'ollama', model: 'llama3:8b' }
     },
@@ -64,8 +76,8 @@ export function ProviderRecipes({
       title: 'Maximum Quality',
       desc: 'Best available reasoning. Costs money.',
       icon: Star,
-      color: 'text-amber-500',
-      bg: 'bg-amber-500/10',
+      color: 'text-warning',
+      bg: 'bg-warning/10',
       fallback: ['anthropic', 'openai', 'gemini'],
       defaultModel: { provider: 'anthropic', model: 'claude-3-5-sonnet-20240620' }
     },
@@ -74,27 +86,33 @@ export function ProviderRecipes({
       title: 'Fast & Cheap',
       desc: 'Optimized for speed and minimal cost.',
       icon: Zap,
-      color: 'text-accent-blue',
-      bg: 'bg-accent-blue/10',
+      // `accent-blue` is a real alias for `--pma-info`, so it emitted CSS and was
+      // never broken. One name per token, though.
+      color: 'text-info',
+      bg: 'bg-info/10',
       fallback: ['groq', 'gemini', 'openrouter'],
       defaultModel: { provider: 'groq', model: 'llama3-8b-8192' }
     }
   ];
 
   return (
-    <div className="glass rounded-3xl p-5 border border-primary/10 bg-surface mb-2 relative">
-      <button 
-        onClick={dismiss} 
-        className="absolute top-4 right-4 p-1.5 hover:bg-raised rounded-full transition-colors"
+    // Was `glass rounded-3xl border-primary/10` — the retired bridge class, a
+    // radius that renders 10px anyway, and a 10%-alpha brass border that is
+    // effectively invisible. `Panel` is exactly this shape.
+    <Panel className="p-5 mb-2 relative">
+      <button
+        onClick={dismiss}
+        aria-label="Dismiss quick start recipes"
+        className="absolute top-4 right-4 p-1.5 hover:bg-raised rounded-sm transition-colors"
       >
-        <X className="w-4 h-4 text-text-secondary" />
+        <X className="w-4 h-4 text-text-secondary" aria-hidden />
       </button>
-      
+
       <div className="flex items-center gap-2 mb-4">
-        <Rocket className="w-5 h-5 text-primary" />
-        <h3 className="font-bold text-sm">Quick Start Recipes</h3>
+        <Rocket className="w-5 h-5 text-primary" aria-hidden />
+        <h3 className="font-serif text-base font-medium m-0">Quick Start Recipes</h3>
       </div>
-      
+
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
         {recipes.map(r => {
           const Icon = r.icon;
@@ -103,18 +121,24 @@ export function ProviderRecipes({
             <button
               key={r.id}
               disabled={applying !== null}
+              aria-busy={isApplying || undefined}
               onClick={() => handleApply(r.id, r.fallback, r.defaultModel)}
-              className="relative flex flex-col items-start text-left p-4 rounded-2xl border border-primary/10 hover:border-primary/30 hover:bg-surface transition-all group disabled:opacity-50 disabled:cursor-not-allowed"
+              // `--edge` rather than a brass tint: this card IS the control, and
+              // WCAG 1.4.11 wants 3:1 on a boundary that identifies one.
+              className="relative flex flex-col items-start text-left p-4 rounded-md border border-rule hover:border-edge hover:bg-raised transition-colors group disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              <div className={`p-2 rounded-xl ${r.bg} mb-3`}>
-                <Icon className={`w-4 h-4 ${r.color}`} />
+              <div className={`p-2 rounded-sm ${r.bg} mb-3`}>
+                <Icon className={`w-4 h-4 ${r.color}`} aria-hidden />
               </div>
-              <h4 className="font-bold text-sm group-hover:text-primary transition-colors">{r.title}</h4>
+              <h4 className="font-medium text-sm group-hover:text-primary transition-colors">{r.title}</h4>
               <p className="text-[11px] text-text-secondary mt-1">{r.desc}</p>
-              
+
               {isApplying && (
-                <div className="absolute inset-0 bg-surface backdrop-blur-[1px] rounded-2xl flex items-center justify-center">
-                  <Loader2 className="w-5 h-5 text-primary animate-spin" />
+                // No backdrop-blur here: it sat on an opaque `bg-surface`, so it
+                // blurred nothing and cost a compositor layer. Same defect the
+                // raw-palette pass removed from TourOverlay.
+                <div className="absolute inset-0 bg-surface rounded-md flex items-center justify-center">
+                  <Loader2 className="w-5 h-5 text-primary animate-spin" aria-hidden />
                 </div>
               )}
             </button>
@@ -122,10 +146,16 @@ export function ProviderRecipes({
         })}
       </div>
       {applyError && (
-        <div className="mt-3 text-xs font-medium text-danger bg-danger/5 border border-danger/10 px-3 py-2 rounded-lg text-center animate-fade-in">
+        // `danger` aliases `--pma-error`, so the colour was right; `error` is the
+        // canonical name. The 5%-alpha fill is gone — invisible tints are what
+        // `border-rule` and a real edge replaced everywhere else.
+        <div
+          role="alert"
+          className="mt-3 text-xs font-medium text-error bg-surface border border-error px-3 py-2 rounded-sm text-center animate-fade-in"
+        >
           {applyError}
         </div>
       )}
-    </div>
+    </Panel>
   );
 }

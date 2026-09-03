@@ -2,7 +2,7 @@
 
 Reference document for AI-assisted engineering on the frontend.
 
-**Last verified against source: 2026-08-29, commit `3e186e9`, branch `updates`, working tree clean.** Every ratio below was computed this session against the values that actually ship in `frontend/src/index.css`, not carried over from a plan. Anything here that a source read contradicts is stale — re-verify before acting on it.
+**Last verified against source: 2026-08-30, on top of commit `f33c310`, branch `updates`, working tree dirty with the four-page pass, the raw-palette pass and the ProviderRecipes pass (all §8).** Every ratio below was computed on 2026-08-29 against the values that actually ship in `frontend/src/index.css`, not carried over from a plan; the four-page pass introduced no new colour value, so they still hold, but they were **not** re-measured. Anything here that a source read contradicts is stale — re-verify before acting on it. §5 carries a retraction and §8 a status change made on 2026-08-30.
 
 ---
 
@@ -123,7 +123,21 @@ Self-hosted via `@fontsource`, **no CDN** — a Google Fonts `<link>` is a netwo
 | UI chrome | IBM Plex Sans Variable | `@fontsource-variable/ibm-plex-sans` |
 | Shelf marks, paths, figures | IBM Plex Mono | `@fontsource/ibm-plex-mono` (no variable build exists) |
 
-**Ramp, 6 steps, hard 12px floor.** caption 12 / body-sm 13 / body 15 / title 18 / heading 24 / display 30. The app previously shipped **86 arbitrary sub-12px sizes** — `text-[10px]`×59, `text-[9px]`×15, `text-[11px]`×11, `text-[8px]`×1 — all below Tailwind's smallest step and all invisible to the audit's regex.
+**Ramp, 6 steps.** caption 12 / body-sm 13 / body 15 / title 18 / heading 24 / display 30. The app previously shipped **86 arbitrary sub-12px sizes** — `text-[10px]`×59, `text-[9px]`×15, `text-[11px]`×11, `text-[8px]`×1 — all below Tailwind's smallest step and all invisible to the audit's regex.
+
+> **Retracted 2026-08-30 — "hard 12px floor" was never true, and this document was the only place claiming it.** Measured at `f33c310`: **109** arbitrary sub-12px sizes were still live, and 16 of them sat inside the system's own primitives (`LabelSlip` and `Field` in `Surfaces.tsx`, `ShelfMark` and `EmptyState` in `Feedback.tsx`) and in `AppShell.tsx`'s catalogue marks. A rule the system breaks in its own foundation is not a rule.
+>
+> **The real rule, which is what the code has actually been doing:**
+>
+> | Context | Floor |
+> |---|---|
+> | Prose, UI labels, anything set in the sans or serif | **12px**, i.e. the ramp's `caption` step |
+> | Mono metadata — catalogue marks, shelf marks, paths, chunk ids, ruled field labels | **10px** permitted, 9px for a ruled `Field` label |
+> | Anything at all | never below 9px |
+>
+> The 10px mono line is load-bearing: it is what makes a drawer front read as a label slip rather than a nav item, and raising it to 12px would change the shell's proportions. It is also the reason the exception is narrow — IBM Plex Mono at 10px on `--text-tertiary` measures 6.94 on surface and 5.58 on raised, so the small size is paid for with contrast rather than excused.
+>
+> As of this pass **104 remain**, 48 of them on an explicitly `font-mono` element. The one live `text-[8px]` — a `text-text-secondary/60` sub-label in the Providers cascade panel, below even the mono allowance and with an alpha that dropped it under its own measured ratio — is gone. The rest are inventory, not defects, and are not worth churn.
 
 **No font pop-in.** `@fontsource` ships `font-display: swap`, so serif text would render in the fallback and re-flow. `fonts.ts` adds `fonts-ready` on `document.fonts.ready`, **raced against an 800ms timeout** so a face that never decodes cannot leave text hidden forever.
 
@@ -164,16 +178,79 @@ Current state: **0 unmatched utilities**, 526 distinct.
 
 **Done and gate-verified:** foundation and dual themes; the alias sweep (all 22 dead names, 142 dark-authored `white`/`black` sites, `#3d15cb` retired); the guard in both gates; the renderer re-grade; shell and IA; self-hosted fonts; `focus-visible` and `prefers-reduced-motion` where there were zero of each; `aria-` 8 → 28 including live regions for the streaming answer and indexing progress; `SettingsPage.tsx` 1341 → 136 lines plus eight modules.
 
+**Done 2026-08-30 — the four-page pass** (`SetupPage`, `ProvidersPage`, `ExplorerPage`, `DiagnosticsPage`). Both entries below were the top of the "not done" list and are now closed; the paragraph each replaced is kept in place so the claim can be diffed rather than re-derived.
+
+- **Those four pages now have the per-page pass.** What came off them: the last two mesh-glow blobs and the `from-primary to-accent-blue` gradient tile with its `shadow-primary/20` halo (Setup, i.e. screen one); `backdrop-blur` on an opaque header; ~50 `bg-primary/N` tint-as-surface sites; 12 `font-black`; a second accent family in Explorer's sidebar; `confirm()` and `alert()`; and every `glass-button` with an `!important` override.
+- **Two real a11y bugs, found on the way and not previously recorded.** Both cloud-consent blocks (`SetupPage`, `ProvidersPage`) were authored in raw Tailwind palette values — `bg-amber-500/10 border-amber-500/20 text-amber-800`, icon `text-amber-600` — never tokens. On Cabinet that is near-black text on a near-black wash. They now use `warning`, which measures 8.18 on cabinet and 6.82 on paper. Separately, `providers/icons.tsx` carried nine hardcoded hues (indigo, emerald, orange, amber, sky, green, zinc, blue, slate), all authored for the dark theme; `text-amber-400` on Paper's `#F7F3E9` measures about 1.7. The marks now inherit `currentColor` and the glyph alone distinguishes the provider.
+- **Primitive adoption: 11 of 13, up from 3.** Newly consumed: `Panel`, `Button`, `Badge`, `Skeleton`, `LabelSlip`, `Field`, `SpecimenCard`, `EmptyState`, `ErrorState`.
+- **A double-submit bug in `Button` itself, found by adopting it.** The gate read `disabled={disabled ?? loading}`. `??` only falls through on null/undefined, so an explicit `disabled={false}` won and `loading` was discarded — meaning the ordinary form-submit shape, `disabled={!valid} loading={saving}`, stayed **clickable for the whole request**. It affected Save Configuration, Test & Validate, Validate All, Compact now and the Setup API-key save. Now `disabled || loading`, which is what the line's own comment ("a loading control is not a target") always claimed. Invisible until now because `LibraryPage` was the sole consumer and never passed `loading`. Locked by `tests/components/Button.test.tsx`; restoring `??` fails 2 of its 5 tests.
+- **A double-confirmation introduced during this pass, and caught in review.** Moving Explorer's folder removal from `confirm()` to a sonner action-toast changed the contract of the `onDeleteFolder` callback, and `FileTypeTreemap.tsx` — its only other caller — was still running its own `confirm()` first. The treemap path asked twice: a platform dialog, then a toast. The `confirm()` there is gone; the callback owns the confirmation.
+- **Setup's "Update" was a dead control.** It called `setKey('')` and `setSaving(false)`, both already their current values, while the branch it sat in still keyed off `pData.is_set` — so it re-rendered the identical "Ready" view and **a stored API key could not be replaced from onboarding at all**. An `editing` flag now reopens the field, with a Cancel beside Save so the user is not trapped, and the control is hidden entirely when `stored_in === 'env'` (not ours to replace — the rule ProvidersPage already enforces). Three tests in `SetupPage.test.tsx`; dropping the flag from the branch fails two of them.
+- **Copy: the "intelligence" register is retired on these pages, deliberately.** §2 of this document states the purpose as the user *getting their own material back, not conjuring intelligence*, and three strings contradicted it outright. Setup's subtitle was "Your offline-first personal memory assistant. Let's get your intelligence engine connected." and is now "Everything stays on this machine. Point PMA at a model, then at your files."; its "Cloud Intelligence" heading is now "Cloud models"; Providers' H1 was "Intelligence Engines" and is now "Model providers", matching the "Providers" tab in the Settings sub-nav. **Do not restore them.** `SetupPage.test.tsx` asserts the new subtitle verbatim and matches the heading by regex, because the heading now carries a nested catalogue mark. One instance survives out of scope: `pages/settings/LLMPreferences.tsx:85`, "your preferred intelligence provider".
+
+> **On evidence for the three behavioural fixes above** (the `Button` loading gate, the treemap double-confirmation, and Setup's dead "Update"). Each is negative-controlled in the sense §13 of `CLAUDE.md` asks for — the fix was reverted, the test observed to fail, and the fix restored — except the treemap double-confirmation, which has **no test**. It was found by reading the call graph after changing the callback's contract, not by a failing assertion, and `FileTypeTreemap.test.tsx` does not exercise the delete path at all. Treat that one as verified by inspection only.
+
+
 **Not done — do not assume otherwise:**
 
-- **Explorer, Providers, Diagnostics and Setup have no per-page design pass.** They carry the systematic treatment (tokens, radii, shadows, serif headings, contrast, a11y) and nothing more.
-- **Eight of the thirteen primitives in `components/ui/` are not imported anywhere** — `Panel`, `LabelSlip`, `DrawerFront`, `Field`, `SpecimenCard`, `EmptyState`, `ErrorState`, `ShelfMark`. The shelf-mark treatment was implemented inline in `MessageBubble.tsx` rather than by consuming `ShelfMark`.
+- **`DrawerFront` and `ShelfMark` are still imported nowhere.** Not because they are unused ideas — both treatments ship — but because `AppShell.tsx` and `MessageBubble.tsx` hand-roll the markup the primitives were extracted from. Collapsing each caller onto its primitive is a separate, small change on two out-of-scope files.
+- **10 `!important` utilities remain** (was 12; `TourOverlay`'s two went with the raw-palette pass), all on `glass-button`/`glass-card` in files outside these passes: `settings/LLMPreferences.tsx` ×4, `settings/ResetSection.tsx` ×4, `settings/LocalModels.tsx`, `settings/DiagnosticsSection.tsx`, `settings/SplitBrainSection.tsx`, `NotFoundPage.tsx`, `LibraryPage.tsx` and `MessageBubble.tsx:256`. `.glass`, `.glass-card` and `.glass-button` therefore stay defined in `index.css` as the migration bridge.
+**Done 2026-08-30 — the raw-palette pass** (`ModelPicker`, `WebGPUFallback`, `MessageBubble`, `TourOverlay`). The entry this replaces listed these four as surviving instances of the consent-banner bug. Three were; one was not, and that distinction is the useful part.
+
+- **`ModelPicker.tsx:195`** — `bg-yellow-500/20 text-yellow-300` on the "Offline / Cached" chip. Real: #fde047 on Paper's #F1ECDF panel measures about 1.2. Now `Badge tone="warning"` (8.18 cabinet / 6.82 paper).
+- **`MessageBubble.tsx:149`** — `bg-black/80 text-white` on the "Precision match" tooltip. Not a contrast failure; a **theme** failure, a black box in a cream UI. First attempt used `bg-deep`, and measuring killed it: deep against the cabinet page ground is **1.06**, and `border-rule` on deep is 1.69 cabinet / 1.04 paper, so the tooltip would have had no visible edge. No single ground token is distinct in both themes — the same shape of problem §4 records for the focus ring. It uses `bg-surface` + `border-edge` (3.98 / 3.71) + `shadow-md` instead, which is what §4 already says out loud: *elevation is carried by the edge and a directional shadow, never by a lighter fill*. Also 9px → 11px, since a UI label is not mono metadata.
+- **`TourOverlay.tsx`** — `shadow-primary/20` was a coloured glow (§2: out). Also retired: `backdrop-blur-2xl` over an **opaque** `bg-surface`, which blurred nothing; `rounded-3xl`, which renders 10px; and `border-primary/10`, a 10%-alpha brass that is effectively invisible. Its two `glass-button` controls became `Button variant="plate"`.
+
+> **`WebGPUFallback` was the one that was NOT a bug, and mechanically tokenising it would have broken the page.** `renderer/palette.ts` reads no CSS variable and no theme: the vitrine is a fixed dark grade (`skyHorizon` #0A0806) in **both** themes, and the wrapper is a fixed `#02030a`. So every overlay there sits on a dark ground regardless of the user's choice, and `text-white/*` is correct — swapping it for `text-text-primary` would render ink on ink the moment someone picked Paper. The file now says so in a comment, because this is exactly the change a future sweep makes by reflex.
+>
+> What *was* wrong there was the **alpha**, and separately, two branches that are not over the canvas at all:
+>
+> | | before | after |
+> |---|---|---|
+> | `:442` Node # label, 10px | white/40 → **3.70** | white/70 → 9.85 |
+> | `:453` hover kind, 9px | white/40 → **3.69** | white/70 at 10px → 9.87 |
+> | `:431` separator glyph | white/30 → **2.53** | a real 1px rule, so no text rule applies |
+> | tier dots | two `shadow-[0_0_12px_...]` glows, one of them **`rgba(142,72,234)` — violet**, which §2 bans in any role | flat, no glow, no violet |
+> | `checking` branch | `bg-slate-900 border-slate-800 text-slate-400 border-blue-500` | tokens — it renders on the themed page, not the canvas |
+> | `unsupported` branch | `bg-amber-900/30 border-amber-500 text-amber-200` | tokens — same reason; this is the consent-banner bug again |
+>
+> Ratios are composited against the real ground rather than eyeballed. The violet glow and those two branches were **not** in the original list; they were found by reading the file rather than the line numbers.
+
+**Done 2026-08-30 — `ProviderRecipes`, the fifth site the raw-palette sweep missed.** The sweep named four files and there were five. It is worth recording *how* it was missed: the four were found by grepping the pages the design pass had touched, and `ProviderRecipes` is a component mounted **into** one (`ProvidersPage.tsx:429`) rather than a page itself. So it sat inside a surface that had been passed, and was the one panel still reading as pre-system.
+
+- **The three-way colour coding is kept, deliberately.** These are three options a user picks between and the tone carries which is which. What changed is that it is expressed in tokens: `text-amber-500` / `bg-amber-500/10` → `warning`, `bg-surface` → `success/10` so the first chip stops being the odd one out, and `accent-blue` → `info` for one name per token (`accent-blue` is a real alias for `--pma-info`, so it emitted CSS and was never broken).
+- **Measured in both themes**, composited onto the real opaque ancestor, after a reload rather than after a live toggle (see the retraction below):
+
+  | | cabinet | paper |
+  |---|---|---|
+  | icon on chip — Free / Max / Fast | 7.23 · 8.37 · 7.89 | 5.96 · 5.46 · 6.04 |
+  | title on card | 14.87 | 14.95 |
+  | description on card | — | 8.38 |
+
+- **Also retired:** `glass rounded-3xl border-primary/10` → the `Panel` primitive; `backdrop-blur-[1px]` over an **opaque** `bg-surface`, which blurred nothing and cost a compositor layer — the identical defect removed from `TourOverlay`; `rounded-full` on a close button, plus `2xl`/`xl`/`lg` onto the four-page scale; `border-primary/10 hover:border-primary/30` → `border-rule hover:border-edge`, because the card *is* the control (WCAG 1.4.11); and `text-danger bg-danger/5` → `text-error` on a real edge.
+- **First test coverage, 5 tests.** The component had none and it is not decorative: applying a recipe rewrites the fallback chain *and* the default model in two sequential calls, so a partial failure leaves them disagreeing. One test covers exactly that. The icon-only close button had no accessible name; removing the `aria-label` now fails 2 tests.
+
+> **Left by decision, not oversight — do not re-report these.** The `Rocket` icon (rocketship-for-launch is a named cliché) and the three-equal-cards grid both stay: the scope taken was hygiene, and for a 3-option chooser three cards is arguably the honest shape.
+
+**Not done — do not assume otherwise:**
+
+- **`WebGPUFallback`'s visual states were never seen in a browser.** Insights needs a live backend, so the component does not mount without one; everything above rests on computation, source reading and the existing `unsupported`-branch test. The canvas overlays in particular are unverified visually. `ProviderRecipes` *was* seen, in both themes — it is local state plus a static array, so it renders without a backend.
+
+> **Measuring colour in the Browser pane needs one precaution, and getting it wrong has already produced two false bug reports.** `document.timeline.currentTime` does **not advance** there — six samples 400 ms apart all read `0`. Every CSS transition therefore pins at `currentTime: 0 / running` and `getComputedStyle` returns its **start** value, so after any theme switch a transitioning element still reports the *previous* theme's colour, and descendants inherit it — even a freshly created probe with no transition of its own. **Change the theme, reload, then measure.** An empty `el.getAnimations()` is the signal the reading can be trusted. This is not a product bug: on a clean load both themes are correct.
+- **Raw palette values still survive elsewhere**, unaudited: `ModelPicker.tsx:134` `bg-black/60` and `TourOverlay.tsx:105` `bg-black/40` are both **modal scrims**, which is a legitimate use of a translucent black (an occluder is not a themed surface) — left deliberately. `ModelPicker` also still has an emoji button (a refresh button labelled with an emoji) and a `placeholder:text-text-secondary/50`, which is alpha on an already-measured token.
+- **`confirm()` / `alert()` remain in five places** outside this pass — `LibraryPage.tsx:129,290` and `SettingsPage.tsx:57,63,74`. `FileTypeTreemap.tsx` no longer has one (see the double-confirmation entry above); `SearchPage.tsx:110` only mentions them in a comment explaining why it uses sonner instead.
+- **Markup still names 7 radii against 4 token values.** Inside the four pages the scale is now `sm` for inputs and chips, `md` for controls, `xl` for containers, `full` only for real dots. Elsewhere `rounded-2xl` and `rounded-3xl` still appear and still render 10px, so the markup states an intent the tokens do not honour.
+- **`Skeleton`'s radius cannot be overridden from `className`, and that is a cascade fact, not a bug to "fix" by reordering classes.** Tailwind emits `.rounded-full` at byte 24097 of the built sheet and `.rounded-sm` at 24180; equal-specificity rules are decided by **emission order**, not by the order of the class attribute. `Skeleton` hardcodes `rounded-sm`, so a caller passing `rounded-full` for a circular placeholder gets a rounded square and no warning. One such call site existed in this pass and the dead class was removed rather than left in as decoration. The same trap applies to any `h-*` override on `Button`, whose sizes set a fixed height — use `min-h-*`, which is a different property and therefore actually wins.
 - **`files.extract_status` reaches no API.** It is populated in the database (`ocr_pending`, `binary`, `encrypted`, `nocontent`) but a user still cannot tell a skipped file from an indexed one. Surfacing it is a backend prerequisite, not a design choice.
 - **No demand evidence exists for any of this.** `CLAUDE.md` §3 names zero demand validation as the project's most likely failure mode. The cheapest signal remains a 5–8 person moderated test on the current build, needing no new code.
 
 ---
 
 ## 9) Constraints that bite
+
+- **A toast-based confirmation makes a test's trailing async work race jsdom teardown.** `ExplorerPage.test.tsx`'s in-flight-removal test resolved its deferred mutation promise as the **last statement** and returned, so react-query ran `onSuccess` — cache invalidation plus state — after the test finished. Intermittently that surfaced as `ReferenceError: window is not defined` under **Unhandled Errors**, which fails the whole vitest stage *while every test still reports as passed*, so the summary line lies. Resolve inside `await act(async () => ...)` instead. Introduced when the `confirm()` became a sonner action-toast: the old synchronous dialog had no trailing async work to strand.
+
+- **Stop the preview dev server before running `Run-Tests.bat`.** `frontend/playwright.config.ts` sets `webServer.reuseExistingServer: !process.env.CI`, and the batch script does not set `CI` — so Playwright **adopts whatever is already serving port 5173** rather than starting its own. If that borrowed server dies, all four E2E tests fail together with "element(s) not found" on ordinary inputs in files the change never touched, which reads exactly like a global render regression. Seen 2026-08-30: `SCRIPT_EXIT=1`, `[FAIL] Playwright`, while Python, Rust, Miri and vitest all passed; `npx playwright test` with nothing on 5173 then passed 4/4. Check the port before reading the diff for a cause.
 
 - **`h-[560px]` on the Insights hierarchy panel is load-bearing.** `InsightsPage.tsx:120-126` records why: `flex-1` was inert there and an indefinite height chain closed a ResizeObserver feedback loop that multiplied the canvas by DPR every cycle. Any redesign of that panel must keep a definite height.
 - **No inline `<script>` in `index.html`.** `app/main.py` serves a per-request nonce CSP whose only permitted inline script is the token injection. Theme init therefore runs from `main.tsx`; the cost is a possible one-frame flash only when a stored choice disagrees with the OS.

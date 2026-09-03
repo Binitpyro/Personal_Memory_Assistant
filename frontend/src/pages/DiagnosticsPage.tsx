@@ -10,6 +10,8 @@ import {
   type HealthResponse, type StageMetrics, type OcrStatus,
 } from '../api'
 import { CACHE_KEYS } from '../cacheKeys'
+import { Button, Panel, ErrorState } from '../components/ui'
+import { formatDateTime } from '../utils/format'
 
 /**
  * Everything the backend already computes and previously threw away.
@@ -45,7 +47,7 @@ function SubsystemRow({ name, info }: Readonly<{
   }[info.state] ?? { cls: 'text-text-secondary', Icon: MinusCircle, word: info.state }
 
   return (
-    <div className="flex items-start justify-between gap-4 py-2 border-b border-primary/5 last:border-0">
+    <div className="flex items-start justify-between gap-4 py-2 border-b border-rule last:border-0">
       <span className="font-medium text-text-primary">{SUBSYSTEM_LABEL[name] ?? name}</span>
       <div className="flex flex-col items-end gap-0.5 text-right">
         <span className={`text-sm flex items-center gap-1.5 ${tone.cls}`}>
@@ -67,10 +69,11 @@ function Card({ icon: Icon, title, blurb, children }: Readonly<{
   children: React.ReactNode
 }>) {
   return (
-    <div className="glass p-6 rounded-2xl border border-primary/10">
+    <Panel className="p-6">
       <div className="flex items-start gap-4 mb-5">
-        <div className="p-3 bg-primary/10 rounded-xl">
-          <Icon className="w-6 h-6 text-primary" />
+        {/* A recess, not a tinted wash: the chip is cut into the panel. */}
+        <div className="p-3 bg-raised border border-rule rounded-sm">
+          <Icon className="w-5 h-5 text-primary" />
         </div>
         <div>
           <h2 className="font-serif text-lg font-medium text-text-primary">{title}</h2>
@@ -78,7 +81,7 @@ function Card({ icon: Icon, title, blurb, children }: Readonly<{
         </div>
       </div>
       {children}
-    </div>
+    </Panel>
   )
 }
 
@@ -148,7 +151,12 @@ export function DiagnosticsPage() {
       <div className="max-w-3xl mx-auto flex flex-col gap-6">
 
         <div className="flex items-center gap-3">
-          <Link to="/settings" className="p-2 rounded-lg hover:bg-primary/10 transition-colors">
+          {/* Icon-only, so it needs a name: it had none at all. */}
+          <Link
+            to="/settings"
+            aria-label="Back to Settings"
+            className="p-2 rounded-sm hover:bg-surface transition-colors"
+          >
             <ArrowLeft className="w-5 h-5" />
           </Link>
           <div>
@@ -160,39 +168,42 @@ export function DiagnosticsPage() {
         </div>
 
         {signature?.mismatch && (
-          <div className="p-4 rounded-2xl border border-error/30 bg-error/10 text-error flex flex-col gap-2">
-            <span className="font-bold flex items-center gap-2">
-              <AlertTriangle className="w-5 h-5" /> Your search index was built with a different model
-            </span>
-            <p className="text-sm">
-              Stored vectors came from <code className="font-mono">{signature.stored || 'unknown'}</code> but
-              the running model is <code className="font-mono">{signature.current || 'unknown'}</code>.
-              Semantic search is comparing values from two different vector spaces, so results are
-              unreliable until the index is rebuilt.
-            </p>
-            <div className="flex items-center gap-3">
-              <button
-                onClick={handleReembed}
-                disabled={reembedRunning}
-                className="glass-button !bg-danger-fill !text-on-danger px-4 py-2 rounded-lg text-sm font-semibold disabled:opacity-60"
-              >
-                {reembedRunning ? 'Rebuilding…' : 'Rebuild embeddings'}
-              </button>
-              {reembedState === 'error' && (
-                <span className="text-xs">The last rebuild failed — check the backend logs.</span>
-              )}
-              {reembedState === 'done' && (
-                <span className="text-xs">Rebuild finished. Reload to refresh this page.</span>
-              )}
-            </div>
-          </div>
+          // ErrorState already carries role="alert", the mono ERROR label and the
+          // oxblood leading rule, so this stops hand-rolling a tinted `bg-error/10`
+          // box whose text colour was the same hue as its fill.
+          <ErrorState
+            title="Your search index was built with a different model"
+            body={
+              <>
+                Stored vectors came from <code className="font-mono">{signature.stored || 'unknown'}</code> but
+                the running model is <code className="font-mono">{signature.current || 'unknown'}</code>.
+                Semantic search is comparing values from two different vector spaces, so results are
+                unreliable until the index is rebuilt.
+              </>
+            }
+            actions={
+              <>
+                <Button variant="danger" size="sm" onClick={handleReembed} disabled={reembedRunning}>
+                  {reembedRunning ? 'Rebuilding…' : 'Rebuild embeddings'}
+                </Button>
+                {/* One live region rather than two conditional spans: a
+                    region has to be in the DOM BEFORE its content changes for
+                    the change to be announced, so mounting it along with the
+                    message announces nothing. */}
+                <span className="text-xs text-text-secondary self-center" role="status">
+                  {reembedState === 'error' && 'The last rebuild failed — check the backend logs.'}
+                  {reembedState === 'done' && 'Rebuild finished. Reload to refresh this page.'}
+                </span>
+              </>
+            }
+          />
         )}
 
         <Card icon={Activity} title="Subsystems" blurb="Optional components, and why any of them is not running.">
           {subsystems.length === 0
             ? <p className="text-sm text-text-secondary">No subsystem information reported.</p>
             : subsystems.map(([name, info]) => <SubsystemRow key={name} name={name} info={info} />)}
-          <div className="mt-4 pt-3 border-t border-primary/5 flex justify-between text-sm">
+          <div className="mt-4 pt-3 border-t border-rule flex justify-between text-sm">
             <span className="text-text-secondary">Database</span>
             <span className="font-medium">{health?.db ?? '—'}</span>
           </div>
@@ -222,7 +233,7 @@ export function DiagnosticsPage() {
                 </thead>
                 <tbody>
                   {metricRows.map(([stage, m]) => (
-                    <tr key={stage} className="border-t border-primary/5">
+                    <tr key={stage} className="border-t border-rule">
                       <td className="py-2 font-medium">{STAGE_LABEL[stage] ?? stage}</td>
                       <td className="py-2 text-right font-mono">{m.p50}</td>
                       <td className="py-2 text-right font-mono">{m.p95}</td>
@@ -241,17 +252,19 @@ export function DiagnosticsPage() {
           <div className="flex items-center justify-between gap-4">
             <div className="text-sm">
               <div className="text-text-secondary">
-                {compact?.is_running ? 'Running now…' : `Last run: ${compact?.last_run ?? 'never'}`}
+                {compact?.is_running ? 'Running now…' : `Last run: ${compact?.last_run ? formatDateTime(compact.last_run) : 'never'}`}
               </div>
               {compact?.error && <div className="text-error mt-1">{compact.error}</div>}
             </div>
-            <button
+            <Button
+              variant="secondary"
+              size="sm"
               onClick={() => void handleCompact()}
-              disabled={compacting || compact?.is_running}
-              className="glass-button !bg-primary/10 !text-primary px-4 py-2 rounded-lg text-sm font-semibold disabled:opacity-50"
+              disabled={compact?.is_running}
+              loading={compacting}
             >
               Compact now
-            </button>
+            </Button>
           </div>
         </Card>
 
@@ -265,7 +278,7 @@ export function DiagnosticsPage() {
               <dt className="text-text-secondary">Running on</dt>
               <dd className="font-medium font-mono">{ocrStatus.ep ?? '—'}</dd>
               <dt className="text-text-secondary">Installed</dt>
-              <dd className="font-medium">{ocrStatus.installed_at ?? '—'}</dd>
+              <dd className="font-medium">{formatDateTime(ocrStatus.installed_at)}</dd>
               <dt className="text-text-secondary">Pages waiting</dt>
               <dd className="font-medium">{ocrStatus.pages_pending}</dd>
             </dl>

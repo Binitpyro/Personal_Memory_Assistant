@@ -236,8 +236,44 @@ async def rerank(
     results: list[dict[str, Any]],
     top_k: int = 10,
     text_key: str = "text",
-    time_budget_ms: float = 500.0,
 ) -> list[dict[str, Any]]:
+    """Cross-encoder re-ranking. Runs to completion; it has no internal deadline.
+
+    **The deadline lives at the caller**, and it is real:
+    ``_apply_reranker_if_needed`` (``app/search/retrieval.py``) wraps this in
+    ``asyncio.wait_for(..., timeout=5.0)``, and on expiry the answer is returned
+    in RRF order and every result is flagged by ``_mark_degraded``. That is the
+    guard on the interactive path.
+
+    A ``time_budget_ms=500.0`` parameter used to live here and is **removed**.
+    It enforced nothing: elapsed time was measured *after* ``session.run()`` had
+    already returned, so all it could do was log a warning about work that was
+    finished. No caller ever passed it, and at the shipped default it fired on
+    essentially every query - measured 2026-09-01 over
+    ``tests/eval/corpus_large``, 750-940 ms against a 500 ms budget on **100%**
+    of queries, with the model warm. A warning that always fires is not a
+    signal, and a parameter named for a budget it does not keep is worse than
+    no parameter.
+
+    It could not be made to enforce in place, either, which is why this is a
+    deletion rather than a fix. ``session.run()`` is a blocking call into ONNX
+    Runtime on a ``ThreadPoolExecutor`` thread, and a started
+    ``concurrent.futures`` worker cannot be cancelled - the caller's own comment
+    already records that its ``wait_for`` abandons the *await* while the
+    inference runs on to completion. An internal deadline could therefore only
+    ever be checked after the fact, which is exactly what the removed code did.
+    Splitting the batch to check between sub-batches would give a *partial*
+    rerank, and that is worse than useless downstream: ``_apply_relevance_cutoff``
+    (``app/search/context_builder.py``) branches on whether ``rerank_score`` is
+    present on all results or only some, and the some case is explicitly the
+    "mixed scales - not assessable as one ranking" path that drops nothing.
+
+    Cost is bounded *before* the work starts instead, by ``_bounded_candidates``:
+    ``top_k * 4`` and ``settings.reranker_max_batch_chars``. Capping the batch is
+    what actually controls the bill; timing it afterwards never did.
+
+    Per-call latency is still recorded, at debug level, in the log line below.
+    """
     if not results:
         return results
     if top_k <= 0:
@@ -288,17 +324,36 @@ async def rerank(
     for item, score in zip(candidates, scores, strict=False):
         item["rerank_score"] = round(float(score), 6)
 
+    # Fuse the cross-encoder's ordering with the incoming one rather than letting
+    # it replace it. `candidates` arrives in the caller's RRF order, so this is
+    # the same reciprocal-rank fusion the retrieval path already runs, over two
+    # lists instead of three. See settings.reranker_rrf_fusion_weight for the
+    # measurement that motivates it.
+    #
+    # Done here, before the top_k truncation, so every returned item still
+    # carries a rerank_score. Fusing at the caller would let an item with no
+    # score reach the answer window, and _apply_relevance_cutoff
+    # (app/search/context_builder.py) routes partially-scored lists to its
+    # "mixed scales - not assessable as one ranking" branch, which drops nothing.
     ranked = sorted(candidates, key=lambda x: x["rerank_score"], reverse=True)
-    top = ranked[:top_k]
+    weight = settings.reranker_rrf_fusion_weight
+    if weight <= 0:
+        top = ranked[:top_k]
+    else:
+        k_rrf = settings.reranker_fusion_k
+        ce_pos = {id(item): pos for pos, item in enumerate(ranked)}
+        fused = sorted(
+            enumerate(candidates),
+            key=lambda pair: (
+                -(
+                    weight / (k_rrf + pair[0] + 1)
+                    + (1.0 - weight) / (k_rrf + ce_pos[id(pair[1])] + 1)
+                )
+            ),
+        )
+        top = [item for _, item in fused][:top_k]
 
     elapsed_ms = (time.perf_counter() - t0) * 1000
-    if elapsed_ms > time_budget_ms:
-        logger.warning(
-            "Reranker exceeded budget: %.0f ms > %.0f ms budget (%d candidates)",
-            elapsed_ms,
-            time_budget_ms,
-            len(candidates),
-        )
 
     logger.debug(
         "Reranked %d candidates → top-%d (best=%.4f, worst=%.4f) in %.0f ms",

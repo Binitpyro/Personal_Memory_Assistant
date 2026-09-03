@@ -24,11 +24,30 @@ export const COLORS: Record<string, string> = {
   Archives: '#f59e0b', Executables: '#9333ea', Other: '#6b7280',
 }
 
+const BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB'] as const
+
+/**
+ * One decimal below GB, two above, and no trailing `.0` on a whole number —
+ * `toFixed` could not express that last part, and hardcoded `.` as the decimal
+ * separator besides.
+ *
+ * This is the ONLY byte formatter in the frontend. There were four: this one,
+ * `formatSize` in ExplorerPage, a third inside WebGPUFallback, and a fourth in
+ * utils.test.ts which used a different algorithm again and so tested none of
+ * the other three.
+ */
+const BYTE_FORMATS = BYTE_UNITS.map(
+  (_, i) =>
+    new Intl.NumberFormat(undefined, {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: i === 0 ? 0 : i >= 3 ? 2 : 1,
+    }),
+)
+
 export function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), BYTE_UNITS.length - 1)
+  return `${BYTE_FORMATS[i].format(bytes / 1024 ** i)} ${BYTE_UNITS[i]}`
 }
 
 export function lightenColor(hex: string, amount: number): string {

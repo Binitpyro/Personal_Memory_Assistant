@@ -217,3 +217,80 @@ describe('MessageBubble provenance', () => {
     expect(claim.getAttribute('title')).not.toContain('High Confidence');
   });
 });
+
+describe('MessageBubble source body', () => {
+  // Regression cover for the empty-source-panel defect. Every chunk ships
+  // sentence_offsets as the literal string "[]": the offsets are only computed
+  // when PMA_SENTENCE_OFFSETS is set and it defaults to "0", so this is not an
+  // edge case, it is what every source looks like on a default install.
+  const source = (extra: Record<string, unknown> = {}) => ({
+    id: '1',
+    chunk_id: 1,
+    file_path: 'C:/docs/limit.md',
+    score: 0.9,
+    text: 'The database size limit is set at ingest.',
+    _challenge_source: false,
+    ...extra,
+  });
+
+  const answer = (sources: unknown[]): Message => ({
+    id: 'a',
+    role: 'assistant',
+    content: 'An answer.',
+    mode: 'full_rag',
+    sources,
+  } as Message);
+
+  const expand = () => {
+    // The disclosure is the button labelled with the file name.
+    fireEvent.click(screen.getByRole('button', { name: /limit\.md/ }));
+  };
+
+  it('shows the passage when sentence_offsets is the default "[]"', () => {
+    renderWithProviders(
+      <MessageBubble
+        message={answer([source({ sentence_offsets: '[]' })])}
+        onNearMissClick={vi.fn()}
+      />,
+    );
+    expand();
+    // Before the fix this rendered an empty box: "[]" is truthy, so the
+    // highlight branch was taken, mapped over zero offsets, and replaced the
+    // text with an empty fragment.
+    expect(screen.getByText(/The database size limit is set at ingest\./)).toBeDefined();
+  });
+
+  it('shows the passage when sentence_offsets is absent entirely', () => {
+    renderWithProviders(
+      <MessageBubble message={answer([source()])} onNearMissClick={vi.fn()} />,
+    );
+    expand();
+    expect(screen.getByText(/The database size limit is set at ingest\./)).toBeDefined();
+  });
+
+  it('still highlights sentences when real offsets are present', () => {
+    renderWithProviders(
+      <MessageBubble
+        message={answer([source({ sentence_offsets: '[[0,12],[13,40]]' })])}
+        onNearMissClick={vi.fn()}
+      />,
+    );
+    expand();
+    // The highlight path splits the text into spans, so the whole string is no
+    // longer one text node - assert the pieces instead. This is what stops the
+    // fix from being "delete the feature".
+    expect(screen.getByText('The database')).toBeDefined();
+    expect(screen.getAllByText('Precision match').length).toBeGreaterThan(0);
+  });
+
+  it('falls back to the raw passage when the offsets do not parse', () => {
+    renderWithProviders(
+      <MessageBubble
+        message={answer([source({ sentence_offsets: 'not json' })])}
+        onNearMissClick={vi.fn()}
+      />,
+    );
+    expand();
+    expect(screen.getByText(/The database size limit is set at ingest\./)).toBeDefined();
+  });
+});

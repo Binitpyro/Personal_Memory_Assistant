@@ -54,6 +54,7 @@ import { generateCrystalVariants, CRYSTAL_VARIANTS, type MeshData } from './geom
 const commonShaderCode = wgslPalette() + '\n' + rawCommonShaderCode;
 import { generateIcosphereMulti } from './geometry/icosphere';
 import { NavigationController, NODE_STRIDE, NODE_OFF_TYPE_HASH, NO_PARENT } from '../interaction/NavigationController';
+import { flyStep, approachEye } from '../interaction/flyCamera';
 
 /** Grown UBO — matches common.wgsl's CameraUniform (std140). */
 const CAMERA_UNIFORM_SIZE = 192;
@@ -194,6 +195,12 @@ export class WebGPURenderer {
     private rotationX = 0.5;
     private rotationY = 0.5;
     private zoom = 550;
+    private flyLimit = 10000;
+    /**
+     * Glide the camera toward its target, or cut. Set false for
+     * `prefers-reduced-motion` — see approachEye, where the reasoning lives.
+     */
+    public smoothCamera = true;
     public focusPosition: [number, number, number] = [0, 0, 0];
     private cameraPosition: [number, number, number] = [0, 0, 0];
     private isFirstFrame = true;
@@ -783,6 +790,11 @@ export class WebGPURenderer {
         this.depthTex?.destroy();
         this.depthTexCopy?.destroy();
         this.pickTex?.destroy();
+        // setupTextures() recreates pickDepthTex too. It was missing here while
+        // its nine siblings were freed, so every distinct size orphaned one
+        // full-res depth32float - 8.3 MB at 1080p, and a window drag emits
+        // dozens of distinct sizes.
+        this.pickDepthTex?.destroy();
         this.godRaysMask?.destroy();
         this.godRaysBlur?.destroy();
 
@@ -817,6 +829,10 @@ export class WebGPURenderer {
         if (rootPos) this.focusPosition = rootPos;
         const rootRadius = this.nav.getRadius(rootIdx);
         if (rootRadius > 0) this.zoom = Math.max(50, rootRadius * 2.5);
+        // How far flying may take the pivot from the origin. Scaled to the
+        // corpus so a small library is not roamable into empty space, and a
+        // large one is not fenced in.
+        this.flyLimit = Math.max(1000, rootRadius * 8);
         this.isFirstFrame = true;
     }
 
@@ -898,6 +914,23 @@ export class WebGPURenderer {
         this.zoom = Math.max(5, this.zoom + (delta > 0 ? speed : -speed));
     }
 
+    /**
+     * WASD/QE flythrough. Translates the PIVOT along the camera basis — the
+     * eye is derived from it in updateCamera, so the whole rig moves and
+     * orbit, dolly and focusOnNode are unaffected. See interaction/flyCamera.ts
+     * for why the basis lives outside this class.
+     */
+    public flyBy(forward: number, right: number, up: number): void {
+        this.focusPosition = flyStep(
+            this.focusPosition,
+            this.rotationX,
+            this.rotationY,
+            this.zoom,
+            { forward, right, up },
+            this.flyLimit,
+        ) as [number, number, number];
+    }
+
     private updateCamera(): void {
         const aspect = this.canvas.width / this.canvas.height;
         const projection = this.perspective(FOV_Y, aspect, 0.1, 100000);
@@ -910,9 +943,9 @@ export class WebGPURenderer {
             this.cameraPosition = [eyeX, eyeY, eyeZ];
             this.isFirstFrame = false;
         } else {
-            this.cameraPosition[0] += (eyeX - this.cameraPosition[0]) * 0.1;
-            this.cameraPosition[1] += (eyeY - this.cameraPosition[1]) * 0.1;
-            this.cameraPosition[2] += (eyeZ - this.cameraPosition[2]) * 0.1;
+            this.cameraPosition = approachEye(
+                this.cameraPosition, [eyeX, eyeY, eyeZ], this.smoothCamera, 0.1,
+            ) as [number, number, number];
         }
         const view = this.lookAt(this.cameraPosition, t, [0, 1, 0]);
         const vp   = this.multiply(projection, view);

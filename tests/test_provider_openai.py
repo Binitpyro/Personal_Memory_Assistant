@@ -3,12 +3,13 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 
-from app.providers.openai import OpenAIProvider
+from app.providers import create_provider
 
 
 @pytest.mark.asyncio
 async def test_openai_provider_validate_success():
-    provider = OpenAIProvider(
+    provider = create_provider(
+        "openai",
         api_key="sk-testopenaiapikey123",
         base_url="https://api.openai.com/v1",
         default_model="gpt-4o",
@@ -35,8 +36,8 @@ async def test_openai_provider_validate_success():
 
 @pytest.mark.asyncio
 async def test_openai_provider_validate_auth_failure():
-    provider = OpenAIProvider(
-        api_key="sk-invalid", base_url="https://api.openai.com/v1", default_model="gpt-4o"
+    provider = create_provider(
+        "openai", api_key="sk-invalid", base_url="https://api.openai.com/v1", default_model="gpt-4o"
     )
 
     mock_response = httpx.Response(

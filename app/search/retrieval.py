@@ -466,6 +466,13 @@ def _rebalance_after_rerank(results: list[dict[str, Any]], k: int) -> list[dict[
     return [by_id[cid] for cid in order] + tail
 
 
+# Shortest chunk worth a context slot. `context_builder._deduplicate_redundant`
+# uses the same number with the OPPOSITE meaning - below it, keep the chunk and
+# skip span dedup - so they are not the same policy and are deliberately not
+# shared beyond this note.
+_MIN_CANDIDATE_CHARS = 50
+
+
 def _build_candidate_results(
     chunk_ids_ordered: list[int],
     row_map: dict[int, Any],
@@ -480,6 +487,7 @@ def _build_candidate_results(
     ``context_builder._deduplicate_redundant``, after reranking.
     """
     results: list[dict[str, Any]] = []
+    dropped_short = 0
 
     for cid in chunk_ids_ordered:
         if len(results) > 100:
@@ -489,7 +497,13 @@ def _build_candidate_results(
         if not row:
             continue
         text = row[1]
-        if len(text) < 50:
+        if len(text) < _MIN_CANDIDATE_CHARS:
+            # Runs AFTER fusion has ordered the candidates, so this can discard
+            # a chunk RRF ranked first. Kept - a sub-50-character fragment is not
+            # worth a context slot - but counted, because silently dropping the
+            # top-ranked candidate is the kind of thing that should never have
+            # been invisible. Logged once per call rather than per chunk.
+            dropped_short += 1
             continue
 
         file_path = row[2]
@@ -512,6 +526,12 @@ def _build_candidate_results(
                 "file_id": row[9],
                 "score": round(rrf_score, 4),
             }
+        )
+    if dropped_short:
+        logger.debug(
+            "Dropped %d ranked candidate(s) shorter than %d characters.",
+            dropped_short,
+            _MIN_CANDIDATE_CHARS,
         )
     return results
 
@@ -671,6 +691,91 @@ async def hybrid_retrieve(
         _retrieval_cache[cache_key] = final_results
 
     return final_results
+
+
+def _chunk_body(text_preview: str, start: int, end: int) -> str:
+    """The chunk's source text, with the ``[EXT: name]`` prefix removed.
+
+    Every chunker stores ``prefix + source[start:end]``, so the prefix length is
+    recoverable as ``len(preview) - (end - start)`` rather than by re-deriving
+    the prefix format here and risking drift from the one in the indexer.
+
+    Guarded because that identity is exact for the streaming chunker and only
+    near-exact for the syntax-aware one, whose bodies are line-joined and can
+    differ from their span by the trailing newline. A bad value falls back to
+    the whole preview, which costs a duplicated prefix in the window and never
+    corrupts the text.
+    """
+    span = end - start
+    prefix_len = len(text_preview) - span
+    if 0 <= prefix_len <= len(text_preview):
+        return text_preview[prefix_len:]
+    return text_preview
+
+
+async def attach_parent_windows(db: DatabaseManager, results: list[dict[str, Any]]) -> None:
+    """Widen each result's text to a bounded window of its neighbours, in place.
+
+    Small-to-big retrieval: fusion and the cross-encoder both still rank the
+    *child* chunk, so nothing about selection changes. Only the text handed to
+    the model widens, which is what a chunk boundary landing mid-argument costs
+    you.
+
+    Stitched from sibling chunks in SQLite rather than by re-reading the file.
+    Offsets address the *extracted text stream*, not the file's bytes, so for a
+    PDF or a .docx the file could not be sliced by them anyway - and re-reading
+    would break for any document that has since moved or been deleted, which on
+    a personal corpus is normal rather than exceptional.
+
+    Sets ``parent_text``; the child ``text`` is left alone so that dedup,
+    scoring and the citation UI keep pointing at the passage that actually
+    matched.
+    """
+    if not settings.parent_window_enabled or not results:
+        return
+
+    width = max(1, settings.chunk_size * settings.parent_window_multiplier)
+    by_file: dict[Any, list[dict[str, Any]]] = {}
+    for r in results:
+        if r.get("file_id") is not None and r.get("start_offset") is not None:
+            by_file.setdefault(r["file_id"], []).append(r)
+
+    for file_id, group in by_file.items():
+        lo = min(int(r["start_offset"]) for r in group)
+        hi = max(int(r["end_offset"]) for r in group)
+        pad = max(0, (width - (hi - lo)) // 2)
+        try:
+            rows = await db.execute_query(
+                "SELECT zlib_decompress(text_preview), start_offset, end_offset "
+                "FROM chunks WHERE file_id = ? AND end_offset > ? AND start_offset < ? "
+                "ORDER BY start_offset",
+                (file_id, lo - pad, hi + pad),
+            )
+        except Exception as exc:  # pragma: no cover - degradation, not a fault
+            logger.debug("Parent-window expansion skipped for file %s: %s", file_id, exc)
+            continue
+
+        for r in group:
+            centre = (int(r["start_offset"]) + int(r["end_offset"])) // 2
+            w_lo, w_hi = centre - width // 2, centre + width // 2
+            # Walk in offset order and take only the part of each sibling that
+            # the cursor has not already covered. Chunks overlap by
+            # chunk_overlap characters, so concatenating them whole would repeat
+            # that text - which is exactly the redundancy _deduplicate_redundant
+            # exists to keep out of the window.
+            cursor = w_lo
+            parts: list[str] = []
+            for text, s_off, e_off in rows:
+                if text is None or e_off <= cursor or s_off >= w_hi:
+                    continue
+                body = _chunk_body(text, s_off, e_off)
+                take_from = max(0, cursor - s_off)
+                if take_from < len(body):
+                    parts.append(body[take_from:])
+                cursor = e_off
+            stitched = "".join(parts).strip()
+            if len(stitched) > len(r.get("text", "")):
+                r["parent_text"] = stitched
 
 
 async def _apply_reranker_if_needed(
@@ -1145,6 +1250,10 @@ async def full_rag(
     history_turns = len(history) if history else 0
     budget = compute_context_budget(model_class, history_turns)
 
+    # Small-to-big: ranking is done, so widen what the model sees without
+    # touching what was selected.
+    await attach_parent_windows(db, retrieved)
+
     context, context_tokens_used = build_context(
         retrieved,
         max_tokens=budget,
@@ -1516,6 +1625,10 @@ async def stream_rag(
     model_class = llm_client.get_model_class(override_provider, override_model)
     history_turns = len(history) if history else 0
     budget = compute_context_budget(model_class, history_turns)
+
+    # Small-to-big: ranking is done, so widen what the model sees without
+    # touching what was selected.
+    await attach_parent_windows(db, retrieved)
 
     context, context_tokens_used = build_context(
         retrieved,

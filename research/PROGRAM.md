@@ -40,6 +40,15 @@ semantic coherence, and there delivery ranked `3b_local` in the *opposite* order
 from generation. Screen on delivery, confirm on generation, and never skip the
 confirmation for a knob that alters chunk content.
 
+**A null is only null for the configuration it was measured in.** `max_per_file`
+swept flat while the snippet allocation was the binding constraint - everything
+downstream of that ceiling was starved equally, so per-file dedup had nothing to
+change. Re-running it after the allocation was fixed was the right call even
+though the answer held. Journal rows carry `code` (short SHA, `+dirty` marker)
+so a sweep spanning a code change is visible; `--resume` deliberately does NOT
+key on it, because invalidating the journal on every commit would make the loop
+useless rather than rigorous.
+
 **Two nulls in a row mean the model of the system is wrong. Read, do not sweep.**
 `max_chunks` and `max_per_file` both came back flat because the real ceiling was
 the geometric budget split in `_format_snippets`, which neither knob touches.
@@ -106,7 +115,9 @@ Read CLAUDE.md 8.7 through 8.7e in full. The short version:
 | BGE query prefix | shipped; identical in the reranker-on arm, kept on three other grounds |
 | reranker | `time_budget_ms` deleted (enforced nothing); RRF fusion at k=10, chosen on the floor |
 | `chunk_markdown` routing (A3) | measured worse twice, precision 0.163 -> 0.100. Needs a corpus where headings carry real signal |
-| `max_chunks_small` / `max_per_file_small` | swept, both flat. Neither binds. Do not retry |
+| `max_chunks_small` | swept 3/5/8, flat. Does not bind. Do not retry |
+| `max_per_file_small` | swept 1/2/3 TWICE - before and after the head-share fix. 1 is best in both eras (0.398 / 0.822 vs 0.359 / 0.743). Confirmed, do not retry |
+| `context_ceiling_small` | swept 4000/4500/5000. +0.079 at ~1 sd, against silent head-first truncation risk. Deliberately NOT raised |
 | `context_snippet_head_share` | **the real ceiling.** 0.34 caps 3 snippets at 71.2% of budget; raising to 0.7 takes gemma2-2b recall 0.317 -> 0.618 with the 7b control flat. Saturating. **Default unchanged pending sign-off** |
 
 **Settled 2026-09-03 (CLAUDE.md 8.7f).** `chunk_size=2048` confirmed on

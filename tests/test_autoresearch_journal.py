@@ -19,6 +19,7 @@ import json
 import pytest
 
 from scripts.autoresearch import (
+    _code_version,
     _configs,
     _done,
     _generation_produced_nothing,
@@ -214,3 +215,21 @@ def test_skipped_arms_alone_do_not_count_as_failure():
     """A reranker arm skipped for a missing model is not a generation failure."""
     assert _generation_produced_nothing({"reranker_on": {"skipped": "no cross-encoder"}}) is False
     assert _generation_produced_nothing({}) is False
+
+
+def test_code_version_is_recorded_and_marks_a_dirty_tree():
+    """Rows key on config, build and generation arm - not on code. Two rows with
+    identical configs can therefore have measured different software, which has
+    already mattered once: max_per_file swept flat while the snippet allocation
+    was the binding constraint, and that null need not survive the allocation
+    being fixed. Recording the version makes that visible rather than silent."""
+    v = _code_version()
+    assert v and isinstance(v, str)
+    # This repo is a git checkout, so it resolves to a sha, optionally +dirty.
+    assert v == "unknown" or all(c.isalnum() for c in v.removesuffix("+dirty"))
+
+
+def test_code_version_degrades_to_unknown_without_git(monkeypatch):
+    """Provenance is best effort. A missing git must not take the sweep down."""
+    monkeypatch.setattr("shutil.which", lambda _name: None)
+    assert _code_version() == "unknown"

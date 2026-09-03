@@ -34,6 +34,7 @@ import argparse
 import itertools
 import json
 import os
+import shutil
 import subprocess  # nosec B404 - fixed argv, no shell, no user input on the path
 import sys
 import tempfile
@@ -42,6 +43,38 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 EVAL = REPO / "scripts" / "eval_chunking.py"
+
+
+def _code_version() -> str:
+    """Short git HEAD plus a dirty marker, recorded on every journal row.
+
+    The journal keys experiments on config, build and generation arm - not on
+    code. That is deliberate (keying on the commit would invalidate the whole
+    journal on every push) but it means two rows with identical configs can
+    have measured different software. It has already mattered once:
+    `max_per_file` swept flat while the snippet allocation was the binding
+    constraint, and that null does not necessarily survive the allocation being
+    fixed. **A sweep whose rows span a code change is not a comparison.** This
+    makes that visible instead of silent.
+    """
+    git = shutil.which("git")
+    if not git:
+        return "unknown"
+
+    def _git(*argv: str) -> str:
+        proc = subprocess.run(  # nosec B603 - resolved path, fixed argv, shell=False
+            [git, *argv], cwd=str(REPO), capture_output=True, text=True, timeout=10
+        )
+        return proc.stdout.strip() if proc.returncode == 0 else ""
+
+    try:
+        head = _git("rev-parse", "--short", "HEAD")
+        dirty = _git("status", "--porcelain")
+    except Exception:
+        return "unknown"
+    if not head:
+        return "unknown"
+    return head + ("+dirty" if dirty else "")
 
 
 def _parse_sweep(specs: list[str]) -> dict[str, list[str]]:
@@ -344,6 +377,7 @@ def main() -> int:
             "config": config,
             "build": build,
             "gen": args.gen_models,
+            "code": _code_version(),
             "result": result,
         }
         with args.journal.open("a", encoding="utf-8") as fh:

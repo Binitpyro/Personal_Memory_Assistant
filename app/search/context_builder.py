@@ -388,7 +388,10 @@ def compute_context_budget(model_class: str, history_turns: int) -> int:
     EFFECTIVE_CEILINGS = {  # noqa: N806
         "cloud": 100_000,
         "7b_local": 10_000,
-        "3b_local": 4_000,
+        # A setting so it can be swept. The small class is the one that binds:
+        # after the head-share fix it uses 93.5% of its budget (2,357 of 2,520),
+        # so the ceiling, not the allocation, is now what limits it.
+        "3b_local": settings.context_ceiling_small,
     }
     ceiling = EFFECTIVE_CEILINGS.get(model_class, 8000)
 

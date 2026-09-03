@@ -48,7 +48,12 @@ _OPENAI_COMPATIBLE_DEFAULT_MODEL: dict[str, str | None] = {
     "openai_compatible": None,
     "lm_studio": None,
     "groq": "llama-3.3-70b-versatile",
-    "nvidia_nim": "meta/llama-3.3-70b-instruct",
+    # meta/llama-3.3-70b-instruct was RETIRED and returns 410 Gone, so every
+    # NIM user who did not override the model got that instead of an answer.
+    # Verified live 2026-09-03 by probing with a deliberately invalid key:
+    # NVIDIA checks model existence BEFORE auth, so 403 means the model is
+    # live and 410 means it is gone - no valid key needed to tell them apart.
+    "nvidia_nim": "nvidia/llama-3.1-nemotron-70b-instruct",
 }
 
 # LM Studio is a local server and create_provider has never forwarded a key to

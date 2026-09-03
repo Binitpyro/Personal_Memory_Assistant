@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
-import { Brain, Shield, ArrowRight, CheckCircle2, ChevronRight, HardDrive, AlertTriangle, Save, Loader2 } from 'lucide-react'
-import { useNavigate } from 'react-router-dom'
+import { Shield, ArrowRight, CheckCircle2, ChevronRight, HardDrive, AlertTriangle, Save, Library } from 'lucide-react'
+import { Link, useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
 import { useApi, invalidateCache } from '../useApi'
 import {
@@ -8,6 +8,8 @@ import {
     getProviderSettings, setProviderSettings, seedDemo, type ProviderStatus
 } from '../api'
 import { CACHE_KEYS } from '../cacheKeys'
+import { Button, Panel, Skeleton } from '../components/ui'
+import { ProviderIcon } from '../providers/icons'
 
 // Which providers onboarding leads with, and in what order. The list used to
 // carry hardcoded ids AND display names, which drifted from PROVIDER_REGISTRY
@@ -16,17 +18,9 @@ import { CACHE_KEYS } from '../cacheKeys'
 // curation stays local. Everything else is one link away.
 const SETUP_FEATURED_IDS = ['gemini', 'groq', 'nvidia_nim', 'openrouter'] as const
 
-const PROVIDER_ICONS: Record<string, string> = {
-    gemini: '✨',
-    groq: '⚡',
-    nvidia_nim: '🟢',
-    openrouter: '🌐',
-}
-
 interface SetupProvider {
     id: string
     name: string
-    icon: string
 }
 
 function featuredProviders(providers: ProviderStatus[] | null | undefined): SetupProvider[] {
@@ -36,16 +30,28 @@ function featuredProviders(providers: ProviderStatus[] | null | undefined): Setu
         .map(p => ({
             id: p.spec.id,
             name: p.spec.display_name || p.spec.id,
-            icon: PROVIDER_ICONS[p.spec.id] || '🔌',
         }))
 }
 
+/**
+ * A row in the engine list.
+ *
+ * `border-edge` rather than a tinted fill: this row contains a control, and
+ * WCAG 1.4.11 wants 3:1 on a boundary that identifies one. A `bg-primary/10`
+ * wash reads as decoration and measures as nothing.
+ */
 function ApiKeyInput({ provider }: { provider: SetupProvider }) {
     const { data: providers, refetch } = useApi(getProviders, { cacheKey: CACHE_KEYS.providersList })
     const pData = providers?.find(p => p.spec.id === provider.id)
     const [key, setKey] = useState('')
     const [saving, setSaving] = useState(false)
     const [saveError, setSaveError] = useState<string | null>(null)
+    // "Update" used to call `setKey('')` and `setSaving(false)` - both already
+    // their current values - while the branch below still keyed off
+    // `pData.is_set`, so the control did nothing at all and a stored key could
+    // not be replaced from onboarding. This is the flag that actually reopens
+    // the field.
+    const [editing, setEditing] = useState(false)
 
     const handleSave = async () => {
         if (!key) return
@@ -54,6 +60,7 @@ function ApiKeyInput({ provider }: { provider: SetupProvider }) {
         try {
             await setProviderKey(provider.id, key)
             setKey('')
+            setEditing(false)
             await refetch()
             // Storing a cloud key is what creates the consent obligation, so the
             // gate below has to re-evaluate against the new chain.
@@ -66,51 +73,123 @@ function ApiKeyInput({ provider }: { provider: SetupProvider }) {
     }
 
     return (
-        <div className={`p-4 rounded-xl border flex items-center justify-between gap-4 ${pData?.is_set ? 'border-success bg-success/5' : 'border-primary/10 bg-surface'}`}>
+        <div
+            className={`p-4 rounded-md border flex items-center justify-between gap-4 bg-surface ${
+                pData?.is_set ? 'border-success' : 'border-edge'
+            }`}
+        >
             <div className="flex items-center gap-3 w-1/3">
-                <span className="text-xl">{provider.icon}</span>
-                <span className="font-semibold">{provider.name}</span>
+                <ProviderIcon id={provider.id} className="w-4 h-4 shrink-0" />
+                <span className="font-medium truncate">{provider.name}</span>
             </div>
-            
-            {pData?.is_set ? (
+
+            {pData?.is_set && !editing ? (
                 <div className="flex-1 flex justify-end items-center gap-4">
-                    <span className="text-xs font-mono text-success opacity-80 bg-success/10 px-2 py-1 rounded">
-                        {pData.stored_in === 'keyring' ? 'Stored in Keyring' : 'Stored in Env'}
+                    <span className="font-mono text-[11px] text-text-tertiary">
+                        {pData.stored_in === 'keyring' ? 'stored in keyring' : 'stored in env'}
                     </span>
                     <span className="text-success text-sm flex items-center gap-1 font-medium">
                         <CheckCircle2 className="w-4 h-4" /> Ready
                     </span>
-                    <button onClick={() => { setKey(''); setSaving(false) }} className="text-xs text-text-secondary hover:text-primary transition-colors">
-                        Update
-                    </button>
+                    {/* A key held in .env is not ours to replace - the same
+                        rule ProvidersPage enforces by disabling save for it. */}
+                    {pData.stored_in !== 'env' && (
+                        <Button
+                            variant="quiet"
+                            size="sm"
+                            onClick={() => { setKey(''); setSaveError(null); setEditing(true) }}
+                        >
+                            Update
+                        </Button>
+                    )}
                 </div>
             ) : (
                 <div className="flex-1 flex flex-col gap-2">
                     <div className="flex items-center gap-2">
-                        <input 
+                        <input
                             type="password"
-                            placeholder="Enter API Key..."
+                            aria-label={`${provider.name} API key`}
+                            name={`${provider.id}-api-key`}
+                            // An API key is not a login credential: without this
+                            // the browser offers to save it to the password
+                            // manager under the PMA origin.
+                            autoComplete="off"
+                            spellCheck={false}
+                            placeholder="Paste your key, e.g. sk-…"
                             value={key}
                             onChange={e => setKey(e.target.value)}
-                            className="flex-1 bg-background/50 border border-primary/20 rounded-lg px-3 py-1.5 text-sm outline-none focus:border-primary/50 transition-colors"
+                            className="glass-input flex-1 py-1.5 text-sm rounded-sm"
                         />
-                        <button 
-                            onClick={handleSave} 
-                            disabled={saving || !key}
-                            className="glass-button !bg-primary/10 !text-primary hover:!bg-primary/20 px-3 py-1.5 rounded-lg text-sm disabled:opacity-50 flex items-center gap-1"
+                        <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={handleSave}
+                            disabled={!key}
+                            loading={saving}
+                            icon={<Save className="w-4 h-4" />}
                         >
-                            {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
                             Save
-                        </button>
+                        </Button>
+                        {editing && (
+                            <Button
+                                variant="quiet"
+                                size="sm"
+                                onClick={() => { setKey(''); setSaveError(null); setEditing(false) }}
+                            >
+                                Cancel
+                            </Button>
+                        )}
                     </div>
+                    {/* The visible error stays conditional so it costs no
+                        layout when absent; the announcement comes from a
+                        region that is always mounted, because an aria-live
+                        region inserted together with its text announces
+                        nothing. Same shape as LibraryPage's status line. */}
+                    <span className="sr-only" aria-live="polite">{saveError ?? ''}</span>
                     {saveError && (
-                        <div className="text-xs text-danger font-medium animate-fade-in">
+                        <div className="text-xs text-error font-medium animate-fade-in">
                             {saveError}
                         </div>
                     )}
                 </div>
             )}
         </div>
+    )
+}
+
+/**
+ * The step marks.
+ *
+ * Two filled progress bars were the generic move and carried no name. These are
+ * catalogue marks in the same idiom as the nav's label slips, so the user reads
+ * where they are rather than how full a bar is.
+ */
+function StepMarks({ step }: Readonly<{ step: number }>) {
+    const steps = [
+        { n: 1, mark: 'I · ENGINE', name: 'Connect a model' },
+        { n: 2, mark: 'II · FOLDERS', name: 'Give it something to read' },
+    ]
+    return (
+        <ol className="flex gap-8 border-b border-rule pb-3 mb-8 m-0 p-0 list-none">
+            {steps.map(s => (
+                <li key={s.n} aria-current={step === s.n ? 'step' : undefined}>
+                    <div
+                        className={`font-mono text-[10px] tracking-[0.16em] uppercase ${
+                            step >= s.n ? 'text-primary' : 'text-text-tertiary'
+                        }`}
+                    >
+                        {s.mark}
+                    </div>
+                    <div
+                        className={`font-serif text-base leading-tight ${
+                            step >= s.n ? 'text-text-primary' : 'text-text-tertiary'
+                        }`}
+                    >
+                        {s.name}
+                    </div>
+                </li>
+            ))}
+        </ol>
     )
 }
 
@@ -186,9 +265,6 @@ export function SetupPage() {
         }
     }, [refetchProviders])
 
-
-
-
     const handleEnableSplitBrain = async () => {
         setIsEnablingSplitBrain(true)
         setSplitBrainError(null)
@@ -213,41 +289,46 @@ export function SetupPage() {
     const canProceed = (isConnected || hasLocalModels) && isDriveConfigSafe && !requiresRestart && !consentRequired
 
     return (
+        // The blur blobs that used to sit here (two 24rem `blur-[120px]`
+        // `mix-blend-screen` washes) were the last mesh-glow in the app, and
+        // 06_DESIGN_SYSTEM.md lists exactly that as out. The ground is the design.
         <div className="fixed inset-0 bg-background flex flex-col items-center p-6 z-50 overflow-y-auto">
 
-            {/* Background glow effects */}
-            <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-primary/20 blur-[120px] rounded-full mix-blend-screen pointer-events-none" />
-            <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-accent-blue/20 blur-[120px] rounded-full mix-blend-screen pointer-events-none" />
-
-            <div className="my-auto w-full max-w-2xl glass rounded-3xl p-6 sm:p-10 animate-fade-in-up border border-primary/10 shadow-2xl relative z-10 flex flex-col shrink-0">
+            <Panel className="my-auto w-full max-w-2xl p-6 sm:p-10 animate-fade-in-up shadow-lg relative flex flex-col shrink-0">
 
                 {/* Header */}
-                <div className="flex flex-col items-center text-center mb-10">
-                    <div className="w-16 h-16 bg-gradient-to-br from-primary to-accent-blue rounded-2xl flex items-center justify-center mb-6 shadow-lg shadow-primary/20">
-                        <Brain className="w-8 h-8 text-on-plate" />
+                <div className="flex items-center gap-4 mb-8">
+                    {/* Flat brass. This was a `from-primary to-accent-blue` gradient
+                        under a coloured glow, which is two accents and a halo. */}
+                    <div className="w-12 h-12 bg-plate rounded-md flex items-center justify-center shrink-0 shadow-md">
+                        <Library className="w-6 h-6 text-on-plate" />
                     </div>
-                    <h1 className="font-serif text-3xl font-normal text-text-primary tracking-tight">Welcome to PMA</h1>
-                    <p className="text-text-secondary mt-2 max-w-sm">
-                        Your offline-first personal memory assistant. Let&apos;s get your intelligence engine connected.
-                    </p>
+                    <div className="min-w-0">
+                        <div className="font-mono text-[10px] tracking-[0.16em] uppercase text-text-tertiary">
+                            Personal Memory Assistant
+                        </div>
+                        <h1 className="font-serif text-3xl font-normal text-text-primary tracking-tight leading-tight">
+                            Welcome to PMA
+                        </h1>
+                    </div>
                 </div>
 
-                {/* Steps */}
-                <div className="flex items-center gap-4 mb-8 px-8">
-                    <div className={`flex-1 h-1.5 rounded-full ${step >= 1 ? 'bg-primary' : 'bg-primary/20'}`} />
-                    <div className={`flex-1 h-1.5 rounded-full ${step >= 2 ? 'bg-primary' : 'bg-primary/20'}`} />
-                </div>
+                <p className="text-text-secondary max-w-[52ch] mb-8 mt-0">
+                    Everything stays on this machine. Point PMA at a model, then at your files.
+                </p>
+
+                <StepMarks step={step} />
 
                 {/* Step 1: Connect Engine */}
                 {step === 1 && (
                     <div className="flex flex-col gap-4 animate-fade-in-right">
 
                         {isLoading && (!providers || !localModels) && (
-                            <div className="flex flex-col gap-4 animate-pulse">
-                                <div className="h-40 bg-primary/5 rounded-2xl border border-primary/10" />
+                            <div className="flex flex-col gap-4">
+                                <Skeleton className="h-40" />
                                 <div className="grid grid-cols-2 gap-4">
-                                    <div className="h-16 bg-primary/5 rounded-xl border border-primary/10" />
-                                    <div className="h-16 bg-primary/5 rounded-xl border border-primary/10" />
+                                    <Skeleton className="h-16" />
+                                    <Skeleton className="h-16" />
                                 </div>
                             </div>
                         )}
@@ -260,11 +341,11 @@ export function SetupPage() {
                             the real guard, and isDriveConfigSafe already defaults to
                             true while it is absent. */}
                         {!isDriveConfigSafe && driveInfo && !requiresRestart && (
-                            <div className="p-4 rounded-xl border border-warning bg-warning/10 flex flex-col gap-3">
+                            <div className="p-4 rounded-md border border-warning bg-surface flex flex-col gap-3">
                                 <div className="flex items-start gap-3">
                                     <AlertTriangle className="w-5 h-5 text-warning flex-shrink-0 mt-0.5" />
                                     <div>
-                                        <h4 className="font-semibold text-warning flex items-center gap-2">
+                                        <h4 className="font-medium text-warning flex items-center gap-2">
                                             <HardDrive className="w-4 h-4" /> Incompatible Storage Detected
                                         </h4>
                                         <p className="text-sm text-text-secondary mt-1">
@@ -273,15 +354,17 @@ export function SetupPage() {
                                         </p>
                                     </div>
                                 </div>
-                                
-                                <div className="ml-8 border-t border-warning/20 pt-3 mt-1">
-                                    <button 
+
+                                <div className="ml-8 border-t border-rule pt-3 mt-1">
+                                    <span className="sr-only" aria-live="polite">{splitBrainError ?? ''}</span>
+                                    <Button
+                                        variant="secondary"
+                                        size="sm"
                                         onClick={handleEnableSplitBrain}
-                                        disabled={isEnablingSplitBrain}
-                                        className="glass-button !bg-warning/20 !text-warning border border-warning/50 hover:!bg-warning/30 px-4 py-2 text-sm disabled:opacity-50 transition-colors"
+                                        loading={isEnablingSplitBrain}
                                     >
-                                        {isEnablingSplitBrain ? 'Enabling...' : 'Enable Split-Brain Mode'}
-                                    </button>
+                                        Enable Split-Brain Mode
+                                    </Button>
                                     {splitBrainError && (
                                         <p className="text-error text-xs mt-2">{splitBrainError}</p>
                                     )}
@@ -294,10 +377,10 @@ export function SetupPage() {
 
                         {/* Restart Required Banner */}
                         {requiresRestart && (
-                            <div className="p-4 rounded-xl border border-success bg-success/10 flex items-start gap-3 animate-fade-in">
+                            <div className="p-4 rounded-md border border-success bg-surface flex items-start gap-3 animate-fade-in">
                                 <CheckCircle2 className="w-5 h-5 text-success flex-shrink-0 mt-0.5" />
                                 <div>
-                                    <h4 className="font-semibold text-success flex items-center gap-2">
+                                    <h4 className="font-medium text-success flex items-center gap-2">
                                         Split-Brain Mode Enabled
                                     </h4>
                                     <p className="text-sm text-text-secondary mt-1">
@@ -311,7 +394,7 @@ export function SetupPage() {
                         {/* Same reasoning as the warning above: `driveInfo?.is_portable_fs`
                             already requires the data to have arrived. */}
                         {isDriveConfigSafe && driveInfo?.is_portable_fs && (
-                            <div className="p-3 rounded-xl border border-success bg-success/5 flex items-center gap-3">
+                            <div className="p-3 rounded-md border border-success bg-surface flex items-center gap-3">
                                 <CheckCircle2 className="w-4 h-4 text-success flex-shrink-0" />
                                 <p className="text-sm text-success font-medium">
                                     Split-Brain mode active — portable drive ({driveInfo.fs_type}) is safe.
@@ -321,11 +404,18 @@ export function SetupPage() {
 
                         {(!isLoading || providers) && (
                             <>
-                                <div className={`p-5 rounded-2xl border transition-all duration-300 ${isConnected ? 'border-success bg-success/5' : 'border-primary/10 bg-surface'}`}>
+                                <div
+                                    className={`p-5 rounded-xl border bg-surface ${
+                                        isConnected ? 'border-success' : 'border-rule'
+                                    }`}
+                                >
                                     <div className="flex items-center justify-between mb-4">
                                         <div>
-                                            <h3 className="font-bold text-lg flex items-center gap-2">
-                                                Cloud Intelligence <span className="text-xs ml-2 bg-primary/10 text-primary px-2 py-0.5 rounded-full">Secure Keyring</span>
+                                            <h3 className="font-serif text-lg font-medium flex items-center gap-3">
+                                                Cloud models
+                                                <span className="font-mono text-[10px] tracking-[0.16em] uppercase text-text-tertiary">
+                                                    secure keyring
+                                                </span>
                                             </h3>
                                             <p className="text-sm text-text-secondary mt-1">Provide API keys for your preferred cloud models.</p>
                                         </div>
@@ -336,9 +426,14 @@ export function SetupPage() {
                                     </div>
 
                                     {consentRequired && (
-                                        <div className="mt-4 p-3 bg-amber-500/10 border border-amber-500/20 rounded-xl text-xs text-amber-800 flex flex-col gap-2.5">
+                                        // Was `bg-amber-500/10 border-amber-500/20 text-amber-800`
+                                        // with an `text-amber-600` icon: raw palette values, not
+                                        // tokens, so on the dark theme this was near-black text on
+                                        // a near-black wash. `warning` is the measured token and
+                                        // reads 8.18 on cabinet, 6.82 on paper.
+                                        <div className="mt-4 p-3 bg-surface border border-warning rounded-md text-xs text-text-primary flex flex-col gap-2.5">
                                             <div className="flex items-start gap-2">
-                                                <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                                                <AlertTriangle className="w-4 h-4 text-warning shrink-0 mt-0.5" />
                                                 <span>
                                                     <strong>Privacy Notice:</strong>{' '}
                                                     {routingSettings?.cloud_privacy_notice ||
@@ -351,7 +446,7 @@ export function SetupPage() {
                                                     checked={!!routingSettings?.cloud_privacy_consent}
                                                     disabled={savingConsent}
                                                     onChange={e => void handleConsent(e.target.checked)}
-                                                    className="rounded border-amber-500/40"
+                                                    className="rounded-xs border-edge"
                                                 />
                                                 <span className="font-medium">I understand and consent to cloud data processing</span>
                                             </label>
@@ -360,32 +455,37 @@ export function SetupPage() {
 
                                     <p className="mt-3 text-xs text-text-secondary">
                                         Using something else?{' '}
-                                        <button
-                                            onClick={() => { completeSetup(); navigate('/settings/providers') }}
-                                            className="underline hover:text-primary transition-colors"
+                                        <Link
+                                            to="/settings/providers"
+                                            onClick={completeSetup}
+                                            className="text-primary underline underline-offset-4 hover:text-primary-light transition-colors"
                                         >
                                             See all providers
-                                        </button>
+                                        </Link>
                                     </p>
                                 </div>
 
                                 <div className="flex items-center gap-4 my-2">
-                                    <div className="flex-1 h-px bg-primary/10" />
-                                    <span className="text-xs text-text-secondary font-medium uppercase tracking-wider">or auto-detected locals</span>
-                                    <div className="flex-1 h-px bg-primary/10" />
+                                    <div className="flex-1 h-px bg-rule" />
+                                    <span className="font-mono text-[10px] tracking-[0.16em] uppercase text-text-tertiary">or auto-detected locals</span>
+                                    <div className="flex-1 h-px bg-rule" />
                                 </div>
 
                                 <div className="grid grid-cols-2 gap-4">
-                                    <div className={`p-4 rounded-xl border ${localModels?.ollama.detected ? 'border-success bg-success/5' : 'border-primary/10 bg-surface'}`}>
-                                        <h4 className="font-semibold mb-1 flex items-center gap-2">🦙 Ollama</h4>
+                                    <div className={`p-4 rounded-md border bg-surface ${localModels?.ollama.detected ? 'border-success' : 'border-rule'}`}>
+                                        <h4 className="font-medium mb-1 flex items-center gap-2">
+                                            <ProviderIcon id="ollama" className="w-4 h-4" /> Ollama
+                                        </h4>
                                         {localModels?.ollama.detected ? (
                                             <span className="text-success text-sm flex items-center gap-1"><CheckCircle2 className="w-4 h-4" /> Detected</span>
                                         ) : (
                                             <span className="text-text-secondary text-sm">Not detected on port 11434</span>
                                         )}
                                     </div>
-                                    <div className={`p-4 rounded-xl border ${localModels?.lm_studio.detected ? 'border-success bg-success/5' : 'border-primary/10 bg-surface'}`}>
-                                        <h4 className="font-semibold mb-1 flex items-center gap-2">🖥️ LM Studio</h4>
+                                    <div className={`p-4 rounded-md border bg-surface ${localModels?.lm_studio.detected ? 'border-success' : 'border-rule'}`}>
+                                        <h4 className="font-medium mb-1 flex items-center gap-2">
+                                            <ProviderIcon id="lm_studio" className="w-4 h-4" /> LM Studio
+                                        </h4>
                                         {localModels?.lm_studio.detected ? (
                                             <span className="text-success text-sm flex items-center gap-1"><CheckCircle2 className="w-4 h-4" /> Detected</span>
                                         ) : (
@@ -397,62 +497,66 @@ export function SetupPage() {
                         )}
 
                         <div className="mt-8 flex justify-end">
-                            <button
+                            {/* The ready state used to add `animate-pulse ring-2 ring-primary
+                                ring-offset-2`, i.e. a pulsing halo on an enabled button. The
+                                button going from disabled to enabled already says it. */}
+                            <Button
+                                variant="plate"
                                 onClick={() => setStep(2)}
                                 disabled={!canProceed}
-                                className={`glass-button !bg-plate !text-on-plate hover:opacity-90 gap-2 px-8 py-3 disabled:opacity-50 disabled:cursor-not-allowed transition-all ${
-                                    canProceed && isConnected ? 'animate-pulse ring-2 ring-primary ring-offset-2 ring-offset-background' : ''
-                                }`}
                             >
-                                Continue <ArrowRight className="w-5 h-5" />
-                            </button>
+                                Continue <ArrowRight className="w-4 h-4" />
+                            </Button>
                         </div>
                     </div>
                 )}
 
                 {/* Step 2: Complete */}
                 {step === 2 && (
-                    <div className="flex flex-col gap-6 animate-fade-in-right text-center items-center">
+                    <div className="flex flex-col gap-6 animate-fade-in-right items-start">
 
-                        <div className="w-16 h-16 bg-success/10 rounded-full flex items-center justify-center text-success mb-2">
-                            <Shield className="w-8 h-8" />
+                        <div className="w-12 h-12 bg-surface border border-edge rounded-md flex items-center justify-center text-success">
+                            <Shield className="w-6 h-6" />
                         </div>
 
-                        <h3 className="font-bold text-2xl">Engine Assigned</h3>
-                        <p className="text-text-secondary max-w-sm">
-                            Your memory assistant is now intelligent — but it has nothing to remember yet.
-                            Give it something to read.
-                        </p>
+                        <div>
+                            <h3 className="font-serif text-2xl font-normal">Model connected</h3>
+                            <p className="text-text-secondary max-w-[52ch] mt-2 mb-0">
+                                PMA can read now, but it has nothing to read yet. Give it a folder,
+                                or start with the demo corpus.
+                            </p>
+                        </div>
 
                         {/* Setup used to end here with an empty index, on a screen whose
                             only action was "Go to Library". Both buttons now finish setup
                             AND leave; the demo is the bounded option, and indexing a real
                             folder is handed to Library, which already owns that flow and
                             its error states. */}
-                        <div className="mt-6 flex flex-col sm:flex-row gap-4 w-full">
-                            <button
+                        <div className="mt-2 flex flex-col sm:flex-row gap-4 w-full">
+                            <Button
+                                variant="plate"
+                                className="flex-1"
                                 onClick={() => void handleTryDemo()}
-                                disabled={seeding}
-                                className="flex-1 glass-button !bg-plate !text-on-plate justify-center py-4 text-lg font-semibold hover:shadow-lg transition-all disabled:opacity-60"
+                                loading={seeding}
                             >
-                                {seeding ? <Loader2 className="w-5 h-5 animate-spin" /> : null}
                                 Try the demo corpus
-                            </button>
-                            <button
+                            </Button>
+                            <Button
+                                variant="secondary"
+                                className="flex-1"
                                 onClick={() => {
                                     completeSetup()
                                     navigate('/')
                                 }}
-                                className="flex-1 glass-button justify-center py-4 text-lg font-semibold hover:shadow-lg transition-all"
                             >
                                 Index my first folder
-                                <ChevronRight className="w-5 h-5 ml-1" />
-                            </button>
+                                <ChevronRight className="w-4 h-4" />
+                            </Button>
                         </div>
                     </div>
                 )}
 
-            </div>
+            </Panel>
         </div>
     )
 }

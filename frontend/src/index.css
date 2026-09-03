@@ -391,6 +391,22 @@ aside.glass {
    provider has been rendering as a square. */
 .clip-triangle { clip-path: polygon(50% 0%, 100% 100%, 0% 100%); }
 
+/* ── Native <dialog> ──────────────────────────────────────────────────────
+   The model picker uses showModal(), so the platform supplies the focus trap,
+   Escape and the inert background that a fixed overlay div had to hand-roll.
+   The dim is ::backdrop, which no utility class can reach — it is a
+   pseudo-element on the top layer, not a child of the dialog.
+   ───────────────────────────────────────────────────────────────────────── */
+dialog::backdrop {
+  background: rgba(0, 0, 0, .6);
+  backdrop-filter: blur(4px);
+}
+
+/* The UA stylesheet sets `display: block` on an open dialog, which would beat
+   a `flex` utility on the same element. The flex column lives on the inner
+   wrapper instead; this only restores the centring margins the reset drops. */
+dialog[open] { margin: auto; }
+
 /* ── Reduced motion ───────────────────────────────────────────────────────
    There were zero `prefers-reduced-motion` rules in the entire frontend.
    ───────────────────────────────────────────────────────────────────────── */

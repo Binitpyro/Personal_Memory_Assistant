@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { screen, fireEvent, waitFor } from '@testing-library/react';
+import { screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { ExplorerPage } from '../../pages/ExplorerPage';
 import { renderWithProviders } from '../test-utils';
 import { removeFolderIndex } from '../../api';
@@ -54,8 +54,6 @@ describe('ExplorerPage Component', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     state.loading = false;
-    vi.spyOn(window, 'confirm').mockReturnValue(true);
-    vi.spyOn(window, 'alert').mockImplementation(() => {});
   });
 
   it('renders ExplorerPage and labels the root with its full path', () => {
@@ -87,14 +85,26 @@ describe('ExplorerPage Component', () => {
     expect(screen.getAllByText('file1.txt').length).toBeGreaterThan(0);
   });
 
+  it('asks before removing, and does not remove until the action is taken', async () => {
+    // Confirmation is a sonner action-toast now, not `confirm()`. The old test
+    // stubbed `window.confirm` to true, which meant it never covered the
+    // "user declined" half at all.
+    renderWithProviders(<ExplorerPage />);
+
+    fireEvent.click(screen.getAllByRole('button', { name: /delete the index for/i })[0]);
+
+    await screen.findByText('Remove the index for this folder?');
+    expect(removeFolderIndex).not.toHaveBeenCalled();
+  });
+
   it('removes the folder using the real root path', async () => {
     // fullPath used to be built from the group key as if it were a name, so the
     // request carried "test" (or "test/C:/projects") and the LIKE prefix on
     // files.path matched nothing -- while the UI still reported success.
     renderWithProviders(<ExplorerPage />);
 
-    const del = screen.getAllByTitle('Delete this folder index')[0];
-    fireEvent.click(del);
+    fireEvent.click(screen.getAllByRole('button', { name: /delete the index for/i })[0]);
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove' }));
 
     // Awaited now that the delete goes through useMutation: `mutate` schedules
     // the mutationFn rather than entering it synchronously the way the old bare
@@ -112,14 +122,25 @@ describe('ExplorerPage Component', () => {
 
     renderWithProviders(<ExplorerPage />);
 
-    const del = screen.getAllByTitle('Delete this folder index')[0];
+    const del = screen.getAllByRole('button', { name: /delete the index for/i })[0];
     fireEvent.click(del);
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove' }));
     await waitFor(() => expect(removeFolderIndex).toHaveBeenCalledTimes(1));
 
+    // Second attempt while the first is still in flight: the guard is in
+    // `handleDeleteFolder`, so the toast must not even be raised again.
     fireEvent.click(del);
     expect(removeFolderIndex).toHaveBeenCalledTimes(1);
 
-    resolveDelete({ message: 'ok', chunks_removed: 0 });
+    // Awaited inside `act`, not fired and forgotten. Resolving as the last
+    // statement let react-query run onSuccess - which invalidates caches and
+    // sets state - AFTER the test returned, racing jsdom teardown. That
+    // surfaced as a flaky `ReferenceError: window is not defined` in the
+    // "Unhandled Errors" section, which fails the whole vitest stage while
+    // every test still reports as passed.
+    await act(async () => {
+      resolveDelete({ message: 'ok', chunks_removed: 0 });
+    });
   });
   it('keeps the tree on screen while a background refetch is in flight', () => {
     // useApi reports `isLoading || isFetching`, so this goes true on every
@@ -131,7 +152,7 @@ describe('ExplorerPage Component', () => {
     renderWithProviders(<ExplorerPage />);
 
     expect(
-      screen.getAllByTitle('Delete this folder index').length,
+      screen.getAllByRole('button', { name: /delete the index for/i }).length,
       'the rendered tree was replaced by a spinner during a refetch',
     ).toBeGreaterThan(0);
   });

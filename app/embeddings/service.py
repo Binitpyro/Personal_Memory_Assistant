@@ -564,7 +564,12 @@ class EmbeddingService:
                 )
                 return hit_values
 
-        embeddings = await self.embed_texts([query])
+        # The instruction goes on here and nowhere else: embed_texts is the
+        # document path and must stay unprefixed for the asymmetry to mean
+        # anything. Cached under the RAW query text above, so the prefix is an
+        # implementation detail of this method rather than something every
+        # caller has to remember.
+        embeddings = await self.embed_texts([settings.embedding_query_prefix + query])
         raw_emb = embeddings[0]
         cached = np.asarray(raw_emb, dtype=np.float32)
 

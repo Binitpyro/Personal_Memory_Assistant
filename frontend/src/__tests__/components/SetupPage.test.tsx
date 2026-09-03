@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { screen } from '@testing-library/react';
+import { screen, fireEvent } from '@testing-library/react';
 import { SetupPage } from '../../pages/SetupPage';
 import { renderWithProviders } from '../test-utils';
 
@@ -76,8 +76,16 @@ describe('SetupPage Component', () => {
     renderWithProviders(<SetupPage />);
 
     expect(screen.getByText('Welcome to PMA')).toBeDefined();
-    expect(screen.getByText("Your offline-first personal memory assistant. Let's get your intelligence engine connected.")).toBeDefined();
-    expect(screen.getByText('Cloud Intelligence')).toBeDefined();
+    // Copy changed with the Specimen Cabinet pass. "Let's get your intelligence
+    // engine connected" contradicted the system's own stated purpose - the user
+    // is getting their own material back, not conjuring intelligence - so both
+    // this line and the "Cloud Intelligence" heading lost the word.
+    expect(
+      screen.getByText('Everything stays on this machine. Point PMA at a model, then at your files.'),
+    ).toBeDefined();
+    // Regex, not an exact string: the heading now carries a "secure keyring"
+    // catalogue mark in a nested span, so the h3's textContent is both.
+    expect(screen.getByText(/Cloud models/)).toBeDefined();
   });
 
   it('keeps the storage warning visible while a background refetch is in flight', () => {
@@ -158,5 +166,57 @@ describe('SetupPage Component', () => {
     renderWithProviders(<SetupPage />);
 
     expect(screen.queryByText(/I understand and consent to cloud data processing/)).toBeNull();
+  });
+});
+
+/**
+ * Replacing a key that is already stored.
+ *
+ * "Update" called `setKey('')` and `setSaving(false)` - both already their
+ * current values - while the branch it sat in still keyed off `pData.is_set`.
+ * So it re-rendered the identical "Ready" view and a stored key could not be
+ * replaced from onboarding at all. Negative control: drop the `editing` flag
+ * from the branch condition and the first test here fails.
+ */
+describe('SetupPage stored-key replacement', () => {
+  beforeEach(() => {
+    state.driveInfo = {
+      is_portable_fs: false,
+      lancedb_mode: 'local',
+      mount_path: '/mock/path',
+      free_bytes: 100000000,
+    };
+    state.loading = false;
+    state.routingSettings = undefined;
+    state.providers = [geminiConnected];
+  });
+
+  it('reopens the key field when Update is clicked', () => {
+    renderWithProviders(<SetupPage />);
+
+    expect(screen.queryByLabelText('Google Gemini API key')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: /update/i }));
+
+    expect(screen.getByLabelText('Google Gemini API key')).toBeDefined();
+  });
+
+  it('offers a way back out once the field is reopened', () => {
+    renderWithProviders(<SetupPage />);
+    fireEvent.click(screen.getByRole('button', { name: /update/i }));
+
+    fireEvent.click(screen.getByRole('button', { name: /cancel/i }));
+
+    expect(screen.queryByLabelText('Google Gemini API key')).toBeNull();
+  });
+
+  it('does not offer Update for a key held in .env', () => {
+    // Not ours to replace - the same rule ProvidersPage enforces by disabling
+    // save when stored_in is 'env'.
+    state.providers = [{ ...geminiConnected, stored_in: 'env' }];
+
+    renderWithProviders(<SetupPage />);
+
+    expect(screen.queryByRole('button', { name: /update/i })).toBeNull();
   });
 });

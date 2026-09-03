@@ -15,6 +15,8 @@
  * flash, because the CSS already resolves them without JS.
  */
 
+import { useEffect, useState } from 'react';
+
 export type Theme = 'cabinet' | 'paper';
 
 const STORAGE_KEY = 'pma_theme';
@@ -67,4 +69,43 @@ export function clearTheme(): void {
 export function initTheme(): void {
   const stored = getStoredTheme();
   if (stored) document.documentElement.setAttribute('data-theme', stored);
+}
+
+/**
+ * The live theme, for code that cannot read a CSS variable — canvas charts,
+ * mainly, which are handed literal colours rather than inheriting them.
+ *
+ * Both sources have to be watched. `setTheme` writes `data-theme` on <html>,
+ * but `initTheme` deliberately leaves that attribute OFF when the user has
+ * never chosen one, so the CSS `prefers-color-scheme` branch keeps following
+ * the OS live. A hook watching only one source is wrong half the time: it
+ * misses the toggle for a user with no stored choice, and misses an OS change
+ * for a user who has one.
+ */
+export function useTheme(): Theme {
+  const [theme, setLive] = useState<Theme>(resolveTheme);
+
+  useEffect(() => {
+    const sync = () => setLive(resolveTheme());
+
+    const observer = new MutationObserver(sync);
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ['data-theme'],
+    });
+
+    const mq =
+      typeof matchMedia === 'function' ? matchMedia('(prefers-color-scheme: light)') : null;
+    mq?.addEventListener('change', sync);
+
+    // The attribute can change between the first render and this effect.
+    sync();
+
+    return () => {
+      observer.disconnect();
+      mq?.removeEventListener('change', sync);
+    };
+  }, []);
+
+  return theme;
 }

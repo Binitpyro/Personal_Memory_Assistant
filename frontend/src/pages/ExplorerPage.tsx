@@ -1,17 +1,22 @@
-import { useState, useMemo } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { FolderTree, File, Folder, ChevronRight, ChevronDown, Loader2, LayoutGrid, List, Trash2, Search, Download, Bot, ScanText } from 'lucide-react'
+import { useState, useMemo, useCallback } from 'react'
+import { Link, useSearchParams } from 'react-router-dom'
+import { File, Folder, ChevronRight, ChevronDown, Loader2, LayoutGrid, List, Trash2, Search, Download, Bot, ScanText } from 'lucide-react'
+import { toast } from 'sonner'
 import { useApi } from '../useApi'
 import { getFileTree, removeFolderIndex, getOcrStatus, forceOcr, type FileEntry, type FileTree } from '../api'
+import { formatBytes } from '../utils/treeBuilder'
 import { FileTypeTreemap } from '../components/FileTypeTreemap'
 import { CACHE_KEYS } from '../cacheKeys'
 import { useOptimisticMutation } from '../useOptimisticMutation'
+import {
+  Badge, Button, buttonClasses, EmptyState, Field, LabelSlip, Panel, SkeletonText, SpecimenCard,
+} from '../components/ui'
 
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
+
+
+/** The three-letter shelf mark a file carries in the sidebar lists. */
+function typeMark(type: string): string {
+  return type.replace('.', '').slice(0, 3).toUpperCase() || '??'
 }
 
 interface TreeNode {
@@ -39,12 +44,14 @@ function FolderNode({ node, depth, onSelect, selectedPath, onDeleteFolder, delet
 
   const isDeleting = deletingPath === node.fullPath
 
+  // The confirmation itself now lives in the page's `handleDeleteFolder`, as a
+  // sonner action-toast. `confirm()` blocks the event loop and draws a platform
+  // dialog that belongs to no theme; SearchPage.tsx and DiagnosticsPage.tsx
+  // already document that trade and use the toast.
   const handleDelete = (e: React.MouseEvent) => {
     e.stopPropagation()
     if (isDeleting) return
-    if (confirm(`Are you sure you want to remove the index for this folder and all its contents?\n\nPath: ${node.fullPath}`)) {
-      onDeleteFolder(node.fullPath)
-    }
+    onDeleteFolder(node.fullPath)
   }
 
   const sortedFiles = useMemo(() => [...node.files].sort((a, b) => b.size - a.size), [node.files]);
@@ -53,28 +60,36 @@ function FolderNode({ node, depth, onSelect, selectedPath, onDeleteFolder, delet
 
   return (
     <div className="select-none">
-      <div
-        role="button"
-        tabIndex={0}
-        className={`group flex items-center gap-2 w-full px-2 py-1 rounded-lg transition-colors cursor-pointer text-left ${open ? 'bg-raised' : 'hover:bg-raised'}`}
-        onClick={() => setOpen(!open)}
-        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(!open); } }}
-      >
-        <div className="w-4 h-4 flex items-center justify-center text-text-secondary">
-          {(node.children.size > 0 || node.files.length > 0) && (
-            open ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />
-          )}
-        </div>
-        <Folder className="w-4 h-4 text-primary shrink-0" />
-        <span className="text-sm font-medium truncate flex-1" title={node.fullPath}>{node.name}</span>
+      {/* Two SIBLING buttons, not a button inside a role="button" div. The
+          delete control was nested inside the disclosure, which is invalid in
+          both directions: a click on it also toggled the folder, and AT saw one
+          control containing another. */}
+      <div className={`group flex items-center gap-2 w-full px-2 py-1 rounded-sm transition-colors ${open ? 'bg-surface' : 'hover:bg-surface'}`}>
+        <button
+          type="button"
+          aria-expanded={open}
+          onClick={() => setOpen(!open)}
+          className="flex items-center gap-2 min-w-0 flex-1 text-left cursor-pointer"
+        >
+          <span className="w-4 h-4 flex items-center justify-center text-text-secondary shrink-0">
+            {(node.children.size > 0 || node.files.length > 0) && (
+              open ? <ChevronDown className="w-3.5 h-3.5" aria-hidden /> : <ChevronRight className="w-3.5 h-3.5" aria-hidden />
+            )}
+          </span>
+          <Folder className="w-4 h-4 text-primary shrink-0" aria-hidden />
+          <span className="text-sm font-medium truncate" title={node.fullPath}>{node.name}</span>
+        </button>
 
         <button
+          type="button"
           onClick={handleDelete}
           disabled={isDeleting}
-          className="opacity-0 group-hover:opacity-100 p-1 hover:bg-error/20 hover:text-error rounded transition-all mr-2 disabled:opacity-50 disabled:cursor-not-allowed"
-          title="Delete this folder index"
+          className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 p-1 text-text-secondary hover:text-error rounded-xs transition-[opacity,color] disabled:opacity-50 disabled:cursor-not-allowed mr-2"
+          aria-label={`Delete the index for ${node.name}`}
         >
-          {isDeleting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+          {isDeleting
+            ? <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden />
+            : <Trash2 className="w-3.5 h-3.5" aria-hidden />}
         </button>
       </div>
 
@@ -102,21 +117,22 @@ function FolderNode({ node, depth, onSelect, selectedPath, onDeleteFolder, delet
                 return (
                   <button
                     key={f.path}
+                    type="button"
+                    style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 28px' }}
                     onClick={() => onSelect(f)}
-                    className={`flex items-center gap-2 w-full px-6 py-1 rounded-lg text-left text-sm transition-colors cursor-pointer ${isSelected ? 'bg-primary/20 text-primary-light' : 'hover:bg-raised text-text-secondary'
+                    className={`flex items-center gap-2 w-full px-6 py-1 rounded-sm text-left text-sm transition-colors cursor-pointer ${isSelected ? 'bg-surface text-primary' : 'hover:bg-surface text-text-secondary'
                       }`}
                   >
-                    <File className="w-3.5 h-3.5 shrink-0 opacity-60" />
+                    <File className="w-3.5 h-3.5 shrink-0 text-text-tertiary" />
                     <span className="truncate flex-1">{fileName}</span>
-                    <span className="text-[10px] opacity-40 tabular-nums">{formatSize(f.size)}</span>
+                    <span className="font-mono text-[10px] text-text-tertiary tabular-nums">{formatBytes(f.size)}</span>
                   </button>
                 )
               })
             }
 
             {remainingFiles > 0 && (
-              <div className="px-6 py-2 text-[10px] italic text-text-secondary opacity-50 flex items-center gap-2">
-                <span className="w-1 h-1 rounded-full bg-text-secondary"></span>
+              <div className="px-6 py-2 font-mono text-[10px] text-text-tertiary">
                 {remainingFiles} more files in this folder
               </div>
             )}
@@ -127,17 +143,89 @@ function FolderNode({ node, depth, onSelect, selectedPath, onDeleteFolder, delet
   )
 }
 
+/**
+ * One clickable row in the Largest / Cold lists.
+ *
+ * `LabelSlip` is the same mono-mark-over-name pairing the nav's drawer fronts
+ * use, so a file in the sidebar and a drawer in the rail read as the same
+ * catalogue. This replaces a tinted `bg-primary/10` chip per row.
+ */
+function FileRow({ file, extent, onSelect }: Readonly<{
+  file: FileEntry
+  extent: string
+  onSelect: (f: FileEntry) => void
+}>) {
+  return (
+    <button
+      onClick={() => onSelect(file)}
+      className="w-full text-left group px-2 py-1.5 rounded-sm hover:bg-surface transition-colors cursor-pointer"
+      title={file.path}
+    >
+      <LabelSlip
+        mark={typeMark(file.type)}
+        name={file.path.split(/[\\/]/).pop() ?? file.path}
+        extent={extent}
+      />
+    </button>
+  )
+}
+
+/** A sidebar list. Header is a plain serif line; the section's position is its category. */
+function SidebarList({ title, files, extentOf, onSelect }: Readonly<{
+  title: string
+  files: FileEntry[]
+  extentOf: (f: FileEntry) => string
+  onSelect: (f: FileEntry) => void
+}>) {
+  return (
+    <Panel className="flex-1 min-h-0 flex flex-col p-4">
+      <h3 className="font-serif text-base font-medium text-text-primary mb-3 shrink-0 border-b border-rule pb-2">
+        {title}
+      </h3>
+      <div className="space-y-0.5 overflow-y-auto custom-scrollbar pr-2 flex-1">
+        {files.map(f => (
+          <FileRow key={f.path} file={f} extent={extentOf(f)} onSelect={onSelect} />
+        ))}
+      </div>
+    </Panel>
+  )
+}
+
 /* ── Main Explorer Page ─────────────────────────────────── */
 
 export function ExplorerPage() {
   const { data: tree, loading } = useApi(getFileTree, { cacheKey: CACHE_KEYS.fileTree })
   const [selectedFile, setSelectedFile] = useState<FileEntry | null>(null)
-  const [viewMode, setViewMode] = useState<'tree' | 'treemap'>('tree')
-  const [activeExtension, setActiveExtension] = useState<string | null>(null)
-  const [searchQuery, setSearchQuery] = useState('')
+  // Filters, the view mode and the active extension live in the URL, so a
+  // particular view of the corpus is linkable and survives a reload. They were
+  // useState, which made every one of them unreachable except by re-clicking.
+  const [searchParams, setSearchParams] = useSearchParams()
+  const viewMode: 'tree' | 'treemap' = searchParams.get('view') === 'treemap' ? 'treemap' : 'tree'
+  const activeExtension = searchParams.get('ext')
+  const searchQuery = searchParams.get('q') ?? ''
+
+  // `replace` so typing in the filter box does not push one history entry per
+  // keystroke; the view toggle is a real navigation and pushes.
+  const setParam = useCallback(
+    (key: string, value: string | null, replace = true) => {
+      setSearchParams(
+        prev => {
+          const next = new URLSearchParams(prev)
+          if (value === null || value === '') next.delete(key)
+          else next.set(key, value)
+          return next
+        },
+        { replace },
+      )
+    },
+    [setSearchParams],
+  )
+
+  const setViewMode = useCallback((v: 'tree' | 'treemap') => setParam('view', v === 'tree' ? null : v, false), [setParam])
+  const setActiveExtension = useCallback((ext: string | null) => setParam('ext', ext), [setParam])
+  const setSearchQuery = useCallback((q: string) => setParam('q', q), [setParam])
   const [ocrBusy, setOcrBusy] = useState<string | null>(null)
   const [ocrMessage, setOcrMessage] = useState('')
-  const navigate = useNavigate()
 
   const { data: ocr } = useApi(getOcrStatus, { cacheKey: CACHE_KEYS.ocrStatus })
   const ocrReady = !!ocr?.installed && !!ocr?.enabled
@@ -203,7 +291,9 @@ export function ExplorerPage() {
       if (selectedFile?.path.startsWith(path)) setSelectedFile(null)
     },
     onError: (e) => {
-      alert(`Failed to delete folder index: ${e instanceof Error ? e.message : 'Unknown error'}`)
+      toast.error(
+        e instanceof Error ? e.message : 'Could not remove the folder index.',
+      )
     },
   })
 
@@ -211,7 +301,17 @@ export function ExplorerPage() {
   // delete affordance, and useMutation does not dedupe concurrent calls.
   const handleDeleteFolder = (path: string) => {
     if (deleteFolder.isPending) return
-    deleteFolder.mutate(path)
+    toast('Remove the index for this folder?', {
+      description: `${path} — the files on disk are untouched. Only PMA's index of them is removed.`,
+      action: {
+        label: 'Remove',
+        onClick: () => {
+          if (deleteFolder.isPending) return
+          deleteFolder.mutate(path)
+        },
+      },
+      cancel: { label: 'Cancel', onClick: () => {} },
+    })
   }
   const deletingPath = deleteFolder.isPending ? deleteFolder.variables : null
 
@@ -309,17 +409,27 @@ export function ExplorerPage() {
     // alt-tabbing back replaced the whole explorer with a spinner. Only show it
     // when there is genuinely nothing to display yet.
     if (loading && !tree) {
+      // A skeleton in the shape of the tree, rather than a centred spinner: it
+      // says what is coming instead of only that something is.
       return (
-        <div className="flex-1 flex items-center justify-center">
-          <Loader2 className="w-12 h-12 text-primary animate-spin" />
+        <div className="flex-1 p-4">
+          <SkeletonText lines={12} />
         </div>
       )
     }
 
     if (isEmptyTree) {
       return (
-        <div className="flex-1 flex items-center justify-center text-text-secondary text-lg">
-          No indexed data. Go to Library to add folders.
+        <div className="flex-1 p-6 overflow-y-auto">
+          <EmptyState
+            title="Nothing is indexed yet"
+            body="Explorer shows what PMA has already read. Add a folder in Library and it will appear here."
+            actions={
+              <Link className={buttonClasses({ variant: 'plate' })} to="/library">
+                Go to Library
+              </Link>
+            }
+          />
         </div>
       )
     }
@@ -359,56 +469,70 @@ export function ExplorerPage() {
   return (
     <div className="flex flex-col h-full p-6 animate-fade-in-up overflow-hidden">
       {/* Header */}
-      <div className="flex items-center justify-between mb-6 shrink-0">
-        <div>
-          <h1 className="font-serif text-2xl font-normal flex items-center gap-3 text-text-primary">
-            <FolderTree className="w-7 h-7 text-primary" />
+      <div className="flex items-start justify-between gap-6 mb-6 shrink-0">
+        <div className="min-w-0">
+          <div className="font-mono text-[10px] tracking-[0.16em] uppercase text-text-tertiary">
+            III · EXPL
+          </div>
+          <h1 className="font-serif text-2xl font-normal text-text-primary leading-tight">
             Explorer
           </h1>
-          <p className="text-text-secondary mt-1 text-sm flex items-center gap-2">
+          <p className="text-text-secondary mt-1 text-sm flex items-center gap-3">
             Browse indexed data
             {tree && (
-              <span className="text-xs text-primary font-bold bg-primary/10 px-2 py-0.5 rounded-full">
-                {tree.total_files} files • {formatSize(tree.total_size)}
-              </span>
+              <Badge mono>
+                {tree.total_files} files · {formatBytes(tree.total_size)}
+              </Badge>
             )}
           </p>
         </div>
 
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-3 shrink-0">
           <div className="relative">
-            <Search className="w-4 h-4 text-text-secondary absolute left-3 top-1/2 -translate-y-1/2 opacity-50" />
+            <Search className="w-4 h-4 text-text-tertiary absolute left-3 top-1/2 -translate-y-1/2" aria-hidden />
             <input
-              type="text"
+              type="search"
+              spellCheck={false}
+              autoComplete="off"
               aria-label="Filter indexed files by path or name"
-              placeholder="Filter files..."
+              placeholder="e.g. report.pdf…"
               value={searchQuery}
               onChange={e => setSearchQuery(e.target.value)}
-              className="pl-9 pr-4 py-2 bg-raised rounded-xl border border-rule text-sm text-text-primary placeholder:text-text-secondary focus:outline-none focus:ring-2 focus:ring-primary/40 shadow-inner w-56"
+              className="glass-input pl-9 pr-4 py-2 text-sm rounded-sm w-56"
             />
           </div>
-          <button
+
+          <Button
+            variant="secondary"
             onClick={handleExportCSV}
             aria-label="Export file list to CSV format"
-            className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold text-text-secondary hover:text-text-primary hover:bg-raised border border-rule transition-all shadow-sm"
+            icon={<Download className="w-4 h-4" />}
           >
-            <Download className="w-4 h-4" /> CSV
-          </button>
+            CSV
+          </Button>
 
-          <div className="flex bg-raised p-1 rounded-xl border border-rule shadow-inner ml-2">
+          {/* Two views of one thing, so a bordered segmented group rather than
+              two buttons - the same idiom as the theme switch in the rail. */}
+          <div className="inline-flex border border-edge rounded-sm overflow-hidden" role="group" aria-label="View mode">
             <button
+              type="button"
               onClick={() => setViewMode('tree')}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${viewMode === 'tree' ? 'bg-plate text-on-plate shadow-lg' : 'text-text-secondary hover:text-text-primary'
-                }`}
+              aria-pressed={viewMode === 'tree'}
+              className={`flex items-center gap-2 h-10 px-4 font-mono text-[11px] tracking-[0.12em] uppercase transition-colors ${
+                viewMode === 'tree' ? 'bg-plate text-on-plate' : 'text-text-secondary hover:bg-surface'
+              }`}
             >
-              <List className="w-4 h-4" /> TREE
+              <List className="w-4 h-4" /> Tree
             </button>
             <button
+              type="button"
               onClick={() => setViewMode('treemap')}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${viewMode === 'treemap' ? 'bg-plate text-on-plate shadow-lg' : 'text-text-secondary hover:text-text-primary'
-                }`}
+              aria-pressed={viewMode === 'treemap'}
+              className={`flex items-center gap-2 h-10 px-4 font-mono text-[11px] tracking-[0.12em] uppercase border-l border-edge transition-colors ${
+                viewMode === 'treemap' ? 'bg-plate text-on-plate' : 'text-text-secondary hover:bg-surface'
+              }`}
             >
-              <LayoutGrid className="w-4 h-4" /> TREEMAP
+              <LayoutGrid className="w-4 h-4" /> Treemap
             </button>
           </div>
         </div>
@@ -416,145 +540,102 @@ export function ExplorerPage() {
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 flex-1 min-h-0">
         {/* Main View Area */}
-        <div className="glass-card lg:col-span-8 flex flex-col overflow-hidden p-0">
+        <Panel className="lg:col-span-8 flex flex-col overflow-hidden">
           {renderMainContent()}
-        </div>
+        </Panel>
 
         {/* Sidebar */}
         <div className="lg:col-span-4 flex flex-col gap-4 overflow-hidden h-full">
           {/* Active Filter Tile */}
           {activeExtension && (
-            <div className="glass rounded-2xl flex items-center justify-between p-4 shrink-0">
-              <div className="flex items-center gap-4">
-                <div className="bg-plate p-2 rounded-xl shadow-lg">
-                  <LayoutGrid className="w-5 h-5 text-on-plate" />
+            <Panel className="flex items-center justify-between gap-3 p-4 shrink-0">
+              <div className="min-w-0">
+                <div className="font-mono text-[10px] tracking-[0.16em] uppercase text-text-tertiary">
+                  Active filter
                 </div>
-                <div className="flex flex-col">
-                  <span className="text-[10px] uppercase font-bold text-primary tracking-widest leading-tight">Active Filter</span>
-                  <span className="text-xl font-black text-text-primary uppercase leading-none">{activeExtension}</span>
-                </div>
+                <div className="font-serif text-xl leading-tight truncate">{activeExtension}</div>
               </div>
-              <button
-                onClick={() => setActiveExtension(null)}
-                className="text-[10px] font-black bg-raised text-primary hover:bg-surface px-3 py-2 rounded-lg transition-all border border-primary/10"
-              >
-                CLEAR
-              </button>
-            </div>
+              <Button variant="quiet" size="sm" onClick={() => setActiveExtension(null)}>
+                Clear
+              </Button>
+            </Panel>
           )}
 
           {/* Selection Detail Tile */}
-          <div className="glass-card shrink-0 p-4">
-            {selectedFile ? (
-              <div className="space-y-3">
-                <div className="flex items-center gap-3 border-b border-rule pb-2">
-                  <div className="bg-primary/10 p-2 rounded-xl border border-primary/20 shrink-0">
-                    <File className="w-5 h-5 text-primary" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <h3 className="font-bold text-sm text-text-primary truncate">{selectedFile.path.split(/[\\/]/).pop()}</h3>
-                    <p className="text-[9px] text-primary uppercase font-black tracking-widest">{selectedFile.type.replace('.', '')}</p>
-                  </div>
+          {selectedFile ? (
+            // SpecimenCard + Field is what these primitives were extracted for:
+            // a mounted specimen with its ruled label in fixed positions, so the
+            // eye reads down a column. Fields carry exactly what `FileEntry`
+            // exposes - path, size, type, usage_count - and nothing invented.
+            <SpecimenCard
+              className="shrink-0"
+              name={selectedFile.path.split(/[\\/]/).pop() ?? selectedFile.path}
+              kind={typeMark(selectedFile.type)}
+            >
+              <Field label="Size">{formatBytes(selectedFile.size)}</Field>
+              <Field label="Usage">{selectedFile.usage_count ?? 0}</Field>
+              <div className="border-t border-rule pt-2 mt-0">
+                <div className="font-mono text-[9px] tracking-[0.14em] uppercase text-text-tertiary mb-1">Path</div>
+                <div className="font-mono text-[10px] text-text-secondary break-all leading-snug">
+                  {selectedFile.path}
                 </div>
-                <dl className="grid grid-cols-2 gap-3">
-                  <div className="col-span-2">
-                    <dt className="text-[9px] font-black text-text-secondary uppercase tracking-widest mb-1">Path</dt>
-                    <dd className="text-[10px] text-text-primary bg-raised p-2 rounded-lg break-all font-mono border border-rule leading-tight">{selectedFile.path}</dd>
-                  </div>
-                  <div>
-                    <dt className="text-[9px] font-black text-text-secondary uppercase tracking-widest">Size</dt>
-                    <dd className="text-sm font-black text-primary">{formatSize(selectedFile.size)}</dd>
-                  </div>
-                  <div>
-                    <dt className="text-[9px] font-black text-text-secondary uppercase tracking-widest">Usage</dt>
-                    <dd className="text-sm font-black text-text-primary">{selectedFile.usage_count ?? 0}</dd>
-                  </div>
-                </dl>
-                <button
-                  onClick={() => navigate('/search', { state: { query: `Summarize or explain this file: ${selectedFile.path}` } })}
-                  className="w-full mt-2 flex items-center justify-center gap-2 py-2.5 bg-primary/10 hover:bg-primary/20 text-primary rounded-xl text-sm font-bold transition-all border border-primary/20"
+              </div>
+
+              <div className="flex flex-col gap-2 mt-4">
+                <Link
+                  to="/search"
+                  state={{ query: `Summarize or explain this file: ${selectedFile.path}` }}
+                  className={buttonClasses({ variant: 'secondary', size: 'sm', className: 'w-full' })}
                 >
-                  <Bot className="w-4 h-4" />
-                  Ask AI about this file
-                </button>
+                  <Bot className="w-4 h-4" aria-hidden />
+                  Ask about this file
+                </Link>
                 {/* The detection gate only spots *missing* text, never wrong
                     text. This is the manual override for a PDF whose text
                     layer extracts but is scrambled or mis-mapped. */}
                 {ocrReady && selectedFile.type.toLowerCase() === '.pdf' && (
-                  <button
+                  <Button
+                    variant="quiet"
+                    size="sm"
+                    className="w-full"
                     onClick={() => handleForceOcr(selectedFile.path)}
-                    disabled={ocrBusy === selectedFile.path}
-                    className="w-full mt-2 flex items-center justify-center gap-2 py-2.5 bg-primary/5 hover:bg-primary/15 text-primary rounded-xl text-sm font-bold transition-all border border-primary/20 disabled:opacity-50"
+                    loading={ocrBusy === selectedFile.path}
+                    icon={<ScanText className="w-4 h-4" />}
                   >
-                    {ocrBusy === selectedFile.path
-                      ? <Loader2 className="w-4 h-4 animate-spin" />
-                      : <ScanText className="w-4 h-4" />}
                     Force OCR
-                  </button>
+                  </Button>
                 )}
                 {ocrMessage && (
-                  <p className="mt-2 text-[10px] text-center text-text-secondary">{ocrMessage}</p>
+                  <p className="font-mono text-[10px] text-text-tertiary m-0">{ocrMessage}</p>
                 )}
               </div>
-            ) : (
-              // opacity-30 put this text at roughly a third of its measured
-              // ratio. The tertiary token already means "quiet" and stays legible.
+            </SpecimenCard>
+          ) : (
+            // opacity-30 put this text at roughly a third of its measured
+            // ratio. The tertiary token already means "quiet" and stays legible.
+            <Panel className="shrink-0 p-4">
               <div className="text-center py-4">
                 <File className="w-8 h-8 mx-auto mb-1 text-text-tertiary" aria-hidden />
-                <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-text-tertiary">No Selection</p>
+                <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-text-tertiary m-0">No Selection</p>
               </div>
-            )}
-          </div>
+            </Panel>
+          )}
 
-          {/* Sidebar Tile: Largest Data */}
-          <div className="glass-card flex-1 min-h-0 flex flex-col p-4">
-            <h3 className="text-[10px] font-black uppercase tracking-[0.25em] text-text-secondary mb-3 flex items-center gap-2 shrink-0">
-              <div className="w-1 h-3 bg-primary rounded-full"></div> Largest Data
-            </h3>
-            <div className="space-y-1.5 overflow-y-auto custom-scrollbar pr-2 flex-1">
-              {largestFiles.map(f => (
-                <button
-                  key={f.path}
-                  onClick={() => setSelectedFile(f)}
-                  className="w-full text-left group flex items-center gap-3 p-2 rounded-xl bg-raised hover:bg-primary/10 cursor-pointer transition-all border border-rule hover:border-primary/20"
-                >
-                  <div className="bg-surface px-1.5 py-1 rounded-lg border border-edge shrink-0 text-center min-w-[32px]">
-                    <span className="text-[9px] font-black text-primary uppercase">{f.type.replace('.', '').slice(0, 3) || '??'}</span>
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="text-[11px] font-bold text-text-primary truncate">{f.path.split(/[\\/]/).pop()}</div>
-                    <div className="text-[9px] text-text-secondary font-bold uppercase tracking-tight">{formatSize(f.size)}</div>
-                  </div>
-                  <ChevronRight className="w-3.5 h-3.5 text-text-secondary/20 group-hover:text-primary transition-all" />
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Sidebar Tile: Cold Files */}
-          <div className="glass-card flex-1 min-h-0 flex flex-col p-4">
-            <h3 className="text-[10px] font-black uppercase tracking-[0.25em] text-text-secondary mb-3 flex items-center gap-2 shrink-0">
-              <div className="w-1 h-3 bg-accent rounded-full"></div> Cold Files
-            </h3>
-            <div className="space-y-1.5 overflow-y-auto custom-scrollbar pr-2 flex-1">
-              {coldFiles.map(f => (
-                <button
-                  key={f.path}
-                  onClick={() => setSelectedFile(f)}
-                  className="w-full text-left group flex items-center gap-3 p-2 rounded-xl bg-raised hover:bg-accent/10 cursor-pointer transition-all border border-rule hover:border-accent/20"
-                >
-                  <div className="bg-surface px-1.5 py-1 rounded-lg border border-edge shrink-0 text-center min-w-[32px]">
-                    <span className="text-[9px] font-black text-accent uppercase">{f.type.replace('.', '').slice(0, 3) || '??'}</span>
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="text-[11px] font-bold text-text-primary truncate">{f.path.split(/[\\/]/).pop()}</div>
-                    <div className="text-[9px] text-text-secondary font-bold">{f.usage_count || 0} hits</div>
-                  </div>
-                  <ChevronRight className="w-3.5 h-3.5 text-text-secondary/20 group-hover:text-accent transition-all" />
-                </button>
-              ))}
-            </div>
-          </div>
+          {/* One accent for the page. These two lists used to be brass and
+              `accent` respectively, which put two accent families on one
+              column; rank is carried by the heading, not by a second hue. */}
+          <SidebarList
+            title="Largest data"
+            files={largestFiles}
+            extentOf={f => formatBytes(f.size)}
+            onSelect={setSelectedFile}
+          />
+          <SidebarList
+            title="Cold files"
+            files={coldFiles}
+            extentOf={f => `${f.usage_count || 0} hits`}
+            onSelect={setSelectedFile}
+          />
         </div>
       </div>
     </div>

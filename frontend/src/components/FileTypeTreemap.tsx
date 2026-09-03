@@ -1,4 +1,7 @@
 import { useMemo, useCallback, useRef, useState, useEffect } from 'react'
+import { useTheme } from '../theme'
+import { AccessibleTree, type A11yNode } from './AccessibleTree'
+import { ShortcutOverlay } from './ShortcutOverlay'
 import { ChevronLeft, Home, File, Folder, Layers, Trash2 } from 'lucide-react'
 import ReactEChartsCore from 'echarts-for-react/lib/core'
 import * as echarts from 'echarts/core'
@@ -15,6 +18,37 @@ import {
 } from '../utils/treeBuilder'
 
 echarts.use([EChartsTreemap, TooltipComponent, VisualMapComponent, CanvasRenderer])
+
+/**
+ * ECharts paints to a canvas, so it cannot inherit a CSS variable — every
+ * colour has to be handed over as a literal. This chart previously hardcoded
+ * about twenty light-theme values (#ffffff grounds, #3d15cb labels), which
+ * meant that in Cabinet — the DEFAULT theme — it rendered a near-white chart
+ * inside a dark panel.
+ *
+ * Read at option-build time rather than at module scope: a module-level read
+ * would snapshot whichever theme happened to be active on first import and
+ * never update.
+ */
+function readTokens() {
+  const cs = getComputedStyle(document.documentElement)
+  const v = (name: string, fallback: string) => cs.getPropertyValue(name).trim() || fallback
+  return {
+    surface: v('--pma-surface', '#1C1815'),
+    raised: v('--pma-raised', '#302A23'),
+    bg: v('--pma-bg', '#14110E'),
+    rule: v('--pma-rule', '#3E362D'),
+    edge: v('--pma-edge', '#85765B'),
+    text: v('--pma-text', '#F2EBDD'),
+    text2: v('--pma-text-2', '#C4B79F'),
+    accent: v('--pma-accent', '#C4A26B'),
+    plate: v('--pma-plate', '#B08D57'),
+  }
+}
+
+function prefersReducedMotion() {
+  return typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches
+}
 
 export interface FileTypeTreemapProps {
   readonly allFiles: Record<string, FileEntry[]>
@@ -49,9 +83,9 @@ const Breadcrumb: React.FC<BreadcrumbProps> = ({ navPath, onBreadcrumbClick }) =
         <div key={itemKey} className="flex items-center shrink-0">
           <button
             onClick={() => onBreadcrumbClick(i)}
-            className={`flex items-center gap-1.5 px-2 py-1 rounded-lg text-[11px] font-medium transition-all hover:bg-raised ${isLast ? 'text-primary bg-primary/10' : 'text-text-secondary hover:text-text-primary'}`}
+            className={`flex items-center gap-1.5 px-2 py-1 rounded-lg text-[11px] font-medium transition-colors hover:bg-raised ${isLast ? 'text-primary bg-primary/10' : 'text-text-secondary hover:text-text-primary'}`}
           >
-            <Icon className="w-3 h-3" />
+            <Icon className="w-3 h-3" aria-hidden />
             <span className="max-w-[120px] truncate">{seg.name}</span>
           </button>
           {!isLast && <span className="text-text-secondary/20 mx-0.5">/</span>}
@@ -64,6 +98,7 @@ const Breadcrumb: React.FC<BreadcrumbProps> = ({ navPath, onBreadcrumbClick }) =
 export function FileTypeTreemap({ allFiles, activeFilter, onFilterChange, onFileSelect, onDeleteFolder, initialMode = 'folder' }: FileTypeTreemapProps) {
   const chartRef = useRef<ReactEChartsCore>(null)
   const [groupMode, setGroupMode] = useState<'folder' | 'type'>(initialMode)
+  const theme = useTheme()
 
   // Dynamic Root Label
   const rootLabel = useMemo(() => {
@@ -129,29 +164,154 @@ export function FileTypeTreemap({ allFiles, activeFilter, onFilterChange, onFile
     setNavPath(prev => prev.slice(0, index + 1))
   }, [navPath, handleHome])
 
+  // No confirm() here any more. `onDeleteFolder` is ExplorerPage's
+  // `handleDeleteFolder` — its only caller — and that now raises the sonner
+  // action-toast itself, so asking here as well made the treemap path confirm
+  // twice: a platform dialog, then a toast.
+  /**
+   * The children of whatever level the treemap is currently zoomed into.
+   *
+   * Walked from `treeData` by `navPath` rather than asked of ECharts: the
+   * chart's zoom root is internal state with no read accessor, and the two are
+   * kept in step by `navPath` already — the breadcrumb depends on it.
+   */
+  const currentLevel = useMemo<any[]>(() => {
+    let level: any[] = groupMode === 'type' ? treeData : (treeData[0]?.children ?? [])
+    for (let i = 1; i < navPath.length; i++) {
+      const next = level.find(n => n.name === navPath[i].name)
+      if (!next?.children?.length) return level
+      level = next.children
+    }
+    return level
+  }, [treeData, navPath, groupMode])
+
+  const [cursor, setCursor] = useState(0)
+  const [announcement, setAnnouncement] = useState('')
+  const [shortcutsOpen, setShortcutsOpen] = useState(false)
+
+  // Descending a level invalidates any previous position.
+  useEffect(() => { setCursor(0) }, [navPath.length, groupMode])
+
+  const cursorNode = currentLevel[Math.min(cursor, Math.max(0, currentLevel.length - 1))]
+
+  // Mirror the cursor into the chart with the same highlight action the filter
+  // sync already uses, so a sighted keyboard user can see where they are.
+  useEffect(() => {
+    if (!cursorNode) return
+    const instance = chartRef.current?.getEchartsInstance()
+    if (!instance) return
+    instance.dispatchAction({ type: 'downplay', seriesIndex: 0 })
+    instance.dispatchAction({ type: 'highlight', seriesIndex: 0, name: cursorNode.name })
+  }, [cursorNode])
+
+  /** What a screen reader hears for one node, with its place in the level. */
+  const describeAt = useCallback((node: any, at: number, total: number) => {
+    if (!node) return ''
+    const kind = node.children?.length ? 'folder' : 'file'
+    const size = node.realSize !== undefined ? `, ${formatBytes(node.realSize)}` : ''
+    return `${node.name}, ${kind}${size}, ${at + 1} of ${total}`
+  }, [])
+
+  const enterNode = useCallback((node: any) => {
+    if (!node) return
+    // `navPath` is the source of truth for where we are; the chart dispatch is
+    // the visual echo of it. Advancing state only when the chart instance
+    // happens to exist would make the model depend on the view being ready.
+    const instance = chartRef.current?.getEchartsInstance()
+    if (node.children?.length) {
+      instance?.dispatchAction({ type: 'treemapRootToNode', targetNode: node.name })
+      setNavPath(prev => [...prev, { name: node.name, fullPath: node.fullPath ?? null }])
+      setAnnouncement(`Entered ${node.name}, ${node.children.length} items`)
+    } else if (node.fileData && onFileSelect) {
+      onFileSelect(node.fileData)
+      setAnnouncement(`Selected ${node.name}`)
+    }
+  }, [onFileSelect])
+
+  const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLElement>) => {
+    if (e.key === '?' || e.key === 'F1') {
+      e.preventDefault()
+      setShortcutsOpen(true)
+      return
+    }
+    if (!currentLevel.length) return
+
+    switch (e.key) {
+      case 'ArrowDown':
+      case 'ArrowRight': {
+        e.preventDefault()
+        const next = Math.min(cursor + 1, currentLevel.length - 1)
+        if (next === cursor) { setAnnouncement('Last item'); return }
+        setCursor(next)
+        setAnnouncement(describeAt(currentLevel[next], next, currentLevel.length))
+        return
+      }
+      case 'ArrowUp':
+      case 'ArrowLeft': {
+        e.preventDefault()
+        const next = Math.max(cursor - 1, 0)
+        if (next === cursor) { setAnnouncement('First item'); return }
+        setCursor(next)
+        setAnnouncement(describeAt(currentLevel[next], next, currentLevel.length))
+        return
+      }
+      case 'Enter':
+        e.preventDefault()
+        enterNode(cursorNode)
+        return
+      case 'Backspace':
+        e.preventDefault()
+        handleBack()
+        setAnnouncement('Up one level')
+        return
+      case 'Home':
+        e.preventDefault()
+        handleHome()
+        setAnnouncement('Back to root')
+        return
+      default:
+        return
+    }
+  }, [currentLevel, cursor, cursorNode, describeAt, enterNode, handleBack, handleHome])
+
+  // Only the current level is materialised. The treemap shows one level at a
+  // time, so a deeper mirror would describe something not on screen.
+  const a11yNodes = useMemo<A11yNode[]>(() => currentLevel.map((n, i) => ({
+    id: String(i),
+    name: n.name,
+    isFolder: !!n.children?.length,
+    expanded: n.children?.length ? false : undefined,
+    detail: n.realSize !== undefined ? formatBytes(n.realSize) : undefined,
+  })), [currentLevel])
+
   const handleDeleteCurrent = useCallback(() => {
     const current = navPath.at(-1)
-    if (onDeleteFolder && current?.fullPath && confirm(`Remove index for all files in "${current.name}"?\n\nPath: ${current.fullPath}`)) {
+    if (onDeleteFolder && current?.fullPath) {
       onDeleteFolder(current.fullPath)
     }
   }, [onDeleteFolder, navPath])
 
-  const option = useMemo(() => ({
+  const option = useMemo(() => {
+    const t = readTokens()
+    const reduced = prefersReducedMotion()
+    return {
     backgroundColor: 'transparent',
     tooltip: {
-      backgroundColor: 'rgba(255, 255, 255, 0.95)',
-      borderColor: 'rgba(149, 159, 147, 0.2)',
-      textStyle: { color: '#1e293b' },
-      extraCssText: 'box-shadow: 0 10px 30px rgba(0,0,0,0.1); border-radius: 12px; backdrop-filter: blur(8px);',
+      backgroundColor: t.surface,
+      borderColor: t.edge,
+      textStyle: { color: t.text },
+      extraCssText: 'box-shadow: 0 10px 30px rgba(0,0,0,0.35); border-radius: 12px;',
       formatter: (info: any) => {
         const size = info.data?.realSize ?? info.value
         const pct = totalSize > 0 ? ((size / totalSize) * 100).toFixed(1) : '0.0'
         const escapeHtml = (u: string) => u.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll("\"", "&quot;").replaceAll("'", "&#039;");
-        return `<div style="font-weight:700;margin-bottom:4px;color:#3d15cb">${escapeHtml(info.name)}</div>Size: <b>${formatBytes(size)}</b> (${pct}%)`
+        return `<div style="font-weight:700;margin-bottom:4px;color:${t.accent}">${escapeHtml(info.name)}</div>Size: <b>${formatBytes(size)}</b> (${pct}%)`
       }
     },
-    animation: true,
-    animationDurationUpdate: 450,
+    // ECharts drives its own animation loop, which the CSS reduced-motion
+    // block in index.css cannot reach.
+    animation: !reduced,
+    animationDurationUpdate: reduced ? 0 : 450,
     animationEasing: 'cubicInOut' as const,
     series: [{
       type: 'treemap',
@@ -163,36 +323,36 @@ export function FileTypeTreemap({ allFiles, activeFilter, onFilterChange, onFile
       breadcrumb: { show: false },
       leafDepth: undefined,
       visibleMinSize: 10,
-      label: { show: true, formatter: '{b}', color: '#1e293b', fontSize: 10 },
+      label: { show: true, formatter: '{b}', color: t.text, fontSize: 10 },
       upperLabel: {
         show: true,
         height: 22,
-        color: '#3d15cb',
+        color: t.accent,
         fontSize: 11,
         fontWeight: 'bold',
-        backgroundColor: 'rgba(255,255,255,0.7)',
+        backgroundColor: t.bg,
         formatter: (params: any) => {
           const size = params.data?.realSize
           return size == null ? ` ${params.name}` : `\u{1F4C1} ${params.name} (${formatBytes(size)})`
         }
       },
-      itemStyle: { borderColor: '#f1f5e0', borderWidth: 1, gapWidth: 1 },
+      itemStyle: { borderColor: t.rule, borderWidth: 1, gapWidth: 1 },
       levels: [
         {
-          itemStyle: { color: '#f8fbf0', borderColor: '#3d15cb', borderWidth: 3, gapWidth: 3 },
-          upperLabel: { show: true, height: 26, backgroundColor: 'rgba(255,255,255,0.8)', color: '#3d15cb', fontWeight: 'bold', fontSize: 12 }
+          itemStyle: { color: t.bg, borderColor: t.plate, borderWidth: 3, gapWidth: 3 },
+          upperLabel: { show: true, height: 26, backgroundColor: t.bg, color: t.accent, fontWeight: 'bold', fontSize: 12 }
         },
         {
-          itemStyle: { color: '#fdfdfd', borderColor: '#3d15cb', borderWidth: 3, gapWidth: 3 },
-          upperLabel: { show: true, height: 24, backgroundColor: 'rgba(255,255,255,0.7)', color: '#3d15cb', fontWeight: 'bold', fontSize: 11 }
+          itemStyle: { color: t.surface, borderColor: t.plate, borderWidth: 3, gapWidth: 3 },
+          upperLabel: { show: true, height: 24, backgroundColor: t.surface, color: t.accent, fontWeight: 'bold', fontSize: 11 }
         },
         {
-          itemStyle: { color: '#ffffff', borderColor: '#9984d4', borderWidth: 2, gapWidth: 2 },
+          itemStyle: { color: t.surface, borderColor: t.edge, borderWidth: 2, gapWidth: 2 },
           upperLabel: {
             show: true,
             height: 22,
-            backgroundColor: 'rgba(255,255,255,0.6)',
-            color: '#3d15cb',
+            backgroundColor: t.surface,
+            color: t.accent,
             fontWeight: 'bold',
             fontSize: 10,
             formatter: (params: any) => {
@@ -203,16 +363,17 @@ export function FileTypeTreemap({ allFiles, activeFilter, onFilterChange, onFile
           }
         },
         {
-          itemStyle: { color: '#ffffff', borderColor: '#9984d4', borderWidth: 1.5, gapWidth: 1.5 },
-          upperLabel: { show: true, height: 20, backgroundColor: 'rgba(255,255,255,0.5)', color: '#3d15cb', fontSize: 10 }
+          itemStyle: { color: t.raised, borderColor: t.edge, borderWidth: 1.5, gapWidth: 1.5 },
+          upperLabel: { show: true, height: 20, backgroundColor: t.raised, color: t.accent, fontSize: 10 }
         },
         {
-          itemStyle: { borderColor: 'rgba(149,159,147,0.2)', borderWidth: 1, gapWidth: 0 },
-          label: { show: true, position: 'inside', fontSize: 9, color: '#1e293b', formatter: (p: any) => p.value > 800 ? p.name : '' }
+          itemStyle: { borderColor: t.rule, borderWidth: 1, gapWidth: 0 },
+          label: { show: true, position: 'inside', fontSize: 9, color: t.text2, formatter: (p: any) => p.value > 800 ? p.name : '' }
         }
       ]
     }]
-  }), [treeData, totalSize, activeFilter])
+    }
+  }, [treeData, totalSize, activeFilter, theme])
 
   const onEvents = useMemo(() => ({
     click: (params: any) => {
@@ -239,33 +400,58 @@ export function FileTypeTreemap({ allFiles, activeFilter, onFilterChange, onFile
     if (activeFilter) chartRef.current?.getEchartsInstance().dispatchAction({ type: 'highlight', seriesIndex: 0, name: activeFilter });
   }, [activeFilter, treeData]);
 
+
   return (
     <div className="flex-1 flex flex-col min-h-0">
       <div className="flex flex-col gap-3 glass p-3 rounded-2xl border border-edge shadow-inner mb-4 shrink-0">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <button onClick={handleBack} disabled={navPath.length <= 1} className="flex items-center gap-1 px-3 py-1.5 bg-raised hover:bg-primary/10 border border-rule rounded-xl text-xs font-bold transition-all disabled:opacity-20 text-text-primary"><ChevronLeft className="w-4 h-4" /> BACK</button>
-            <button onClick={handleHome} className="flex items-center gap-1 px-3 py-1.5 bg-raised hover:bg-primary/10 border border-rule rounded-xl text-xs font-bold transition-all text-text-primary"><Home className="w-4 h-4" /> HOME</button>
+            <button onClick={handleBack} disabled={navPath.length <= 1} className="flex items-center gap-1 px-3 py-1.5 bg-raised hover:bg-primary/10 border border-rule rounded-xl text-xs font-bold transition-colors disabled:opacity-20 text-text-primary"><ChevronLeft className="w-4 h-4" aria-hidden /> BACK</button>
+            <button onClick={handleHome} className="flex items-center gap-1 px-3 py-1.5 bg-raised hover:bg-primary/10 border border-rule rounded-xl text-xs font-bold transition-colors text-text-primary"><Home className="w-4 h-4" aria-hidden /> HOME</button>
           </div>
           <div className="flex items-center gap-3">
             {onDeleteFolder && navPath.length > 1 && navPath.at(-1)?.fullPath && (
-              <button onClick={handleDeleteCurrent} className="flex items-center gap-1 px-3 py-1.5 bg-error/10 hover:bg-error/20 border border-error/20 text-error rounded-xl text-[10px] font-bold transition-all"><Trash2 className="w-3.5 h-3.5" /> DELETE FOLDER INDEX</button>
+              <button onClick={handleDeleteCurrent} className="flex items-center gap-1 px-3 py-1.5 bg-error/10 hover:bg-error/20 border border-error/20 text-error rounded-xl text-[10px] font-bold transition-colors"><Trash2 className="w-3.5 h-3.5" aria-hidden /> DELETE FOLDER INDEX</button>
             )}
             <div className="flex items-center bg-raised p-1 rounded-xl border border-rule">
-              <button onClick={() => { setGroupMode('folder'); handleHome() }} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-bold transition-all ${groupMode === 'folder' ? 'bg-plate text-on-plate shadow-lg' : 'text-text-secondary hover:text-text-primary'}`}><Folder className="w-3.5 h-3.5" /> BY FOLDERS</button>
-              <button onClick={() => { setGroupMode('type'); handleHome() }} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-bold transition-all ${groupMode === 'type' ? 'bg-plate text-on-plate shadow-lg' : 'text-text-secondary hover:text-text-primary'}`}><Layers className="w-3.5 h-3.5" /> BY FILE TYPE</button>
+              <button onClick={() => { setGroupMode('folder'); handleHome() }} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-bold transition-colors ${groupMode === 'folder' ? 'bg-plate text-on-plate shadow-lg' : 'text-text-secondary hover:text-text-primary'}`}><Folder className="w-3.5 h-3.5" aria-hidden /> BY FOLDERS</button>
+              <button onClick={() => { setGroupMode('type'); handleHome() }} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-bold transition-colors ${groupMode === 'type' ? 'bg-plate text-on-plate shadow-lg' : 'text-text-secondary hover:text-text-primary'}`}><Layers className="w-3.5 h-3.5" aria-hidden /> BY FILE TYPE</button>
             </div>
           </div>
         </div>
         <Breadcrumb navPath={navPath} onBreadcrumbClick={handleBreadcrumbClick} />
       </div>
-      <div className="flex-1 relative rounded-2xl overflow-hidden border border-edge shadow-xl bg-surface group">
-        <div className="absolute top-12 right-4 z-10 pointer-events-none opacity-0 group-hover:opacity-60 transition-opacity text-[10px] font-bold text-text-primary uppercase bg-surface border border-edge px-3 py-1.5 rounded-full shadow-sm">Right-click: Back • Scroll: Zoom • Drag: Pan</div>
+      <div
+        className="flex-1 relative rounded-2xl overflow-hidden border border-edge shadow-xl bg-surface group focus-visible:outline-2 focus-visible:outline-offset-[-2px]"
+        role="application"
+        tabIndex={0}
+        aria-label="File treemap"
+        aria-describedby="treemap-keyhint"
+        onKeyDown={handleKeyDown}
+      >
+        <AccessibleTree
+          label="Treemap level"
+          nodes={a11yNodes}
+          selectedId={String(Math.min(cursor, Math.max(0, currentLevel.length - 1)))}
+          onSelect={id => setCursor(Number(id))}
+          onActivate={id => enterNode(currentLevel[Number(id)])}
+          onUnhandledKey={handleKeyDown}
+        />
+        <span className="sr-only" aria-live="polite">{announcement}</span>
+        {/* Was `opacity-0 group-hover:opacity-60`: the only statement of how
+            to drive the chart, revealed only on mouse hover. */}
+        <div id="treemap-keyhint" className="absolute top-12 right-4 z-10 pointer-events-none opacity-70 text-[10px] font-bold text-text-primary uppercase bg-surface border border-edge px-3 py-1.5 rounded-full shadow-sm">↑↓ browse · Enter open · ⌫ back · ? keys</div>
         {buildError ? (
           <div className="flex items-center justify-center h-full text-text-secondary font-medium">{buildError}</div>
         ) : (
           <ReactEChartsCore ref={chartRef} echarts={echarts} option={option} style={{ height: '100%', width: '100%' }} onEvents={onEvents} />
         )}
+        <ShortcutOverlay
+          open={shortcutsOpen}
+          onClose={() => setShortcutsOpen(false)}
+          groups={['outliner']}
+          title="Treemap keyboard reference"
+        />
       </div>
     </div>
   )

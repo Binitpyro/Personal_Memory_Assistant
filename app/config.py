@@ -102,6 +102,21 @@ class Settings(BaseSettings):
     # this only narrows batches that would otherwise be wide. 0 disables it and
     # restores fixed-size batching. See CLAUDE.md section 6.
     embedding_batch_char_budget: int = 10240
+    # Instruction prepended to QUERIES only, never to documents.
+    #
+    # bge-small-en-v1.5 is trained asymmetrically for short-query -> passage
+    # retrieval: the query carries an instruction, the passage does not. PMA
+    # embedded both sides identically, which throws away the asymmetry the model
+    # was trained with. This is the exact string from the model card - it is not
+    # a prompt to tune, it is what the encoder saw during training.
+    #
+    # Documents are NOT re-embedded by this. Only the query side changes, so the
+    # LanceDB chunk and summary indexes stay valid; what does go stale is the
+    # persistent semantic query cache, which stores query vectors - handled by
+    # versioning the cache scope rather than deleting rows.
+    #
+    # Set to "" to disable and embed queries exactly like documents.
+    embedding_query_prefix: str = "Represent this sentence for searching relevant passages: "
     embedding_allow_download: bool = True
     embedding_allow_unpinned: bool = False
 
@@ -112,6 +127,79 @@ class Settings(BaseSettings):
     # len(batch) * longest_sequence. Capping candidate *count* alone leaves that
     # product unbounded on the interactive query path.
     reranker_max_batch_chars: int = 60_000
+
+    # How much of the ORIGINAL (RRF) order survives reranking. 0.0 reproduces the
+    # old behaviour, where the cross-encoder's ordering simply replaced RRF's.
+    #
+    # It replaced it for a long time, and that cost answers. The cross-encoder is
+    # net-positive - measured over tests/eval/corpus_large it promotes the
+    # answer-bearing chunk on 6 of 8 queries, sometimes hugely (rank 25 -> 2) -
+    # but it occasionally demotes one, and a demotion across the k boundary costs
+    # that query its entire answer while the promotions inside the window buy
+    # nothing. Coverage is a threshold metric, so it only ever sees the tail.
+    #
+    # Measured through the real pipeline at chunk_size=512, k=10, **three
+    # independent index builds per arm** - single builds are not usable here, see
+    # section 8.4a: chunk ids are assigned in completion order by a concurrent
+    # pipeline, so ties resolve differently per build:
+    #
+    #   weight  answer coverage            document nDCG
+    #   0.0     0.509 [0.509 0.509 0.509]  0.985
+    #   0.5     0.634 [0.634 0.634 0.634]  0.985
+    #
+    # +25% coverage, and document ranking is untouched - the lone 0.95 appears
+    # once in each arm, which is the tie-resolution noise, not a cost.
+    #
+    # Do not read an offline simulation of this as a substitute. Fusing the two
+    # orderings outside the pipeline predicted 0.684, because it omitted
+    # `_rebalance_after_rerank`, which re-applies domain allocation to the answer
+    # window afterwards and determines much of the final composition. The number
+    # that counts is the one above, taken end to end.
+    #
+    # At the shipped chunk_size=2048 every arm reaches coverage 1.000 - larger
+    # chunks put the answer chunk high enough that a demotion no longer crosses
+    # the k boundary - so this costs nothing there and is insurance for the
+    # small-chunk regime a large heterogeneous corpus forces you back into.
+    reranker_rrf_fusion_weight: float = 0.5
+    # The `k` in `1/(k + rank)` for the reranker fusion above. Deliberately NOT
+    # `rrf_k`, which is 60 and tuned for the three-signal chunk fusion.
+    #
+    # Reusing 60 here was the first thing tried and it is the wrong scale: over
+    # the ~40-candidate pool the cross-encoder sees, k=60 spreads rank 1 to rank
+    # 40 by only **1.64x** (0.01639 -> 0.01000), so position barely signals and
+    # the fusion is decided by near-ties. That is the same defect section 8.4a
+    # records for the summary leg, where k=60 across a 5-element list gave a 6%
+    # spread and turned a ranked signal into a near-binary flag.
+    #
+    #   k     rank1     rank40    ratio
+    #   0     1.00000   0.02500   40.00x
+    #   5     0.16667   0.02222    7.50x
+    #   10    0.09091   0.02000    4.55x
+    #   20    0.04762   0.01667    2.86x
+    #   60    0.01639   0.01000    1.64x
+    #
+    # Swept on the instrument. k=10 is chosen for its FLOOR, not its mean.
+    # chunk_size=512, weight 0.5, answer coverage per independent build:
+    #
+    #   k=10  0.634 0.634 0.634 0.684 0.634 0.634   mean 0.640, min 0.634
+    #   k=60  0.634 0.759 0.759 0.684 0.634 0.509   mean 0.663, min 0.509
+    #
+    # k=60 has the higher mean and is still the wrong choice: its floor of 0.509
+    # is exactly the pure-cross-encoder number, i.e. on that build the fusion
+    # bought nothing. k=10 never drops below 0.634, which is +25% on pure
+    # cross-encoder, every time.
+    #
+    # (Neither is strictly deterministic - an earlier note here claiming k=10 was
+    # is corrected: a later build returned 0.684. What differs is the spread.
+    # Chunk ids are assigned in completion order by a concurrent pipeline, so the
+    # candidate set itself shifts per build; that is upstream of this setting.)
+    #
+    # The mechanism is section 8.4a's, exactly. At 1.64x spread over 40
+    # candidates the fused scores are mostly ties, so tie-resolution - i.e. build
+    # order - decides, and the signal "stopped breaking ties and became a
+    # near-binary flag". A sharper k gives position real weight, so the fusion
+    # decides on ranks instead of on luck.
+    reranker_fusion_k: int = 10
 
     # The persistent semantic cache is scanned exhaustively on every query (it
     # has no vector index) and used to grow without bound. At 1,536 bytes per
@@ -128,8 +216,77 @@ class Settings(BaseSettings):
     # hatch. Example: {"llama3.1:8b": "cloud"}.
     model_class_overrides: dict[str, str] = {}
 
-    chunk_size: int = 512
-    chunk_overlap: int = 50
+    # Characters, not tokens - and that mismatch is why this was four times too
+    # small. The embedder truncates at 512 **tokens**
+    # (app/embeddings/service.py), and at the measured ~4.8 chars/token on real
+    # chunk text a 512-character chunk is ~110 tokens: 21% of the window the
+    # model actually holds. Chunks were a fifth of the size they could be.
+    #
+    # Swept on tests/eval/corpus_large with span-level ground truth, k=10,
+    # reporting precision AND coverage because section 8.4a records a
+    # configuration that improved recall while wrecking the ranking:
+    #
+    #   chars  tokens  chunks | prec/cov (rerank off) | prec/cov (rerank on)
+    #     512     110     589 |   0.113 / 0.648       |   0.100 / 0.509
+    #    1024     216     285 |   0.088 / 0.625       |   0.088 / 0.672
+    #    1536     322     190 |   0.125 / 0.784       |   0.113 / 0.655
+    #    2048     425     140 |   0.150 / 0.911       |   0.163 / 1.000
+    #
+    # 2048 wins on every span metric in both arms, and document nDCG with the
+    # reranker off goes 0.875 -> 1.000. The one metric that moves the wrong way
+    # is document nDCG with the reranker on, 1.000 -> 0.938, which was saturated
+    # anyway.
+    #
+    # Precision was expected to FALL as chunks grew - more non-answer text per
+    # chunk - and it does not; it rises with coverage. At 512 the answer-bearing
+    # chunk frequently was not retrieved at all, so the window filled with
+    # fragments of the right document. A 2048-character chunk is a coherent
+    # passage that both contains the answer and ranks for it.
+    #
+    # Also settles 8.7 A6: CodeChunker computes max_chars as max_tokens * 4 =
+    # 2048, so the two chunkers finally agree on size instead of differing 4x.
+    #
+    # Caveat, and it matters: 8 queries over one generated corpus. Treat this as
+    # a configuration comparison, not an absolute. Re-sweep on a real corpus
+    # before treating 2048 as settled.
+    #
+    # CONFIRMED 2026-09-03 on generation quality, which is what the sweep above
+    # could not see (section 8.7f). Answer token-recall against the labelled
+    # spans, 3 independent builds per arm, reranker on, floor / mean:
+    #
+    #   chars | gemma2-2b (3b_local) | gemma4-local (7b_local)
+    #     512 |    0.216 / 0.267     |     0.532 / 0.563
+    #    1024 |    0.268 / 0.322     |     0.616 / 0.646
+    #    2048 |    0.291 / 0.328     |     0.676 / 0.729
+    #
+    # Monotonic on both models, on floor AND mean. 2048 holds.
+    #
+    # Two things that sweep found which the delivery numbers above cannot show.
+    # First, DELIVERED COVERAGE IS ANTI-CORRELATED WITH GENERATION FOR
+    # 3b_local: coverage ranks 512 best (0.484 vs 0.359 at 2048) and generation
+    # ranks it worst. Do not use delivery as a cheap stand-in for an answer.
+    # Second, 3b_local delivers only 1,719 tokens against a 2,520 budget. That
+    # looked like a max_chunks limit and IS NOT: sweeping context_max_chunks_small
+    # over 3/5/8 leaves delivered tokens flat at ~1,703 (8.7f). What bounds the 3B
+    # is still open; max_per_file is the next candidate.
+    chunk_size: int = 2048
+    # Held at ~10% of chunk_size, which is what the sweep above used.
+    chunk_overlap: int = 204
+    # Ceiling on the whole-text buffer used by the syntax-aware chunkers.
+    #
+    # Code and markdown are chunked from the *whole* file rather than streamed:
+    # an AST needs the complete source, and chunk_markdown needs to see every
+    # heading. That buffering is the one thing in ingestion that could scale
+    # with a document rather than with a tunable, which is exactly what the
+    # section 6 boundedness invariant forbids. Capping it keeps peak a function
+    # of (this value x index_concurrency) and nothing about the corpus; a file
+    # over the cap degrades to the streaming chunker rather than being buffered.
+    #
+    # 1 MB is generous against reality: measured over this repo's own 186
+    # .py/.ts/.tsx/.rs sources, median 4,911 bytes, p95 33,039, max 93,488, and
+    # zero above 1 MB. At index_concurrency=16 the worst case is ~16 MB against
+    # a 250 MB idle ceiling.
+    chunk_buffer_max_chars: int = 1_000_000
     max_file_size_mb: int = 50
     supported_extensions: str = (
         ".txt,.md,.pdf,.docx,.csv,.json,.py,.js,.ts,.java,.c,.cpp,.rs,.go,.rb,.html,.css,.xml"
@@ -224,7 +381,6 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.5-flash-lite"
     gemini_max_output_tokens: int = 4096
-    gemini_timeout: float = 90.0
 
     openai_api_key: str = ""
     openai_base_url: str = ""
@@ -243,7 +399,6 @@ class Settings(BaseSettings):
 
     ollama_url: str = "http://localhost:11434"
     ollama_model: str = "llama3"
-    ollama_timeout: float = 60.0
 
     @model_validator(mode="after")
     def normalize_ollama_url(self):
@@ -316,6 +471,59 @@ class Settings(BaseSettings):
     rrf_score_scale: int = 1000
     retrieval_top_k: int = 15
     context_max_tokens: int = 8000  # Balanced for reliability and depth
+
+    # Slot budget for the 3b_local context class in build_context. These were
+    # function-local literals until 2026-09-03; they are settings now because
+    # they, not chunk_size, are what bounds the segment section 3 exists to
+    # serve, and a literal cannot be swept.
+    #
+    # Measured (section 8.7f): at the shipped chunk_size=2048 a 3b_local
+    # context delivers 1,719 tokens against a 2,520 budget, and delivered
+    # coverage never exceeds 0.484 at any chunk size while 7b_local reaches
+    # 1.000. gemma2-2b scores 0.328 answer-recall against gemma4-local's 0.729.
+    #
+    # Swept 3/5/8 and it DOES NOT BIND: delivered tokens stay flat at ~1,703 and
+    # coverage is non-monotonic. Kept as a setting because the sweep is what
+    # showed that, and the next candidate (max_per_file) needed the same
+    # treatment. Do not assume raising it helps.
+    #
+    # Defaults are exactly the values that were hardcoded, so this change on
+    # its own alters nothing. Sweep them before moving them.
+    context_max_chunks_small: int = 3
+    context_max_per_file_small: int = 1
+
+    # Share of the REMAINING snippet budget each of the first three snippets
+    # may take in _format_snippets. Geometric, so three snippets reach at most
+    # 1 - (1 - share)^3 of the budget: 0.712 at the shipped 0.34.
+    #
+    # That is the binding constraint on 3b_local, whose max_chunks is 3 - every
+    # snippet lands in the head branch, so 29% of its budget is unreachable no
+    # matter what else is tuned. Predicted 1,789 tokens, measured 1,796 (8.7f).
+    # Raising it trades depth on the top-ranked chunk for reach across the
+    # rest; that trade is unmeasured, which is why the default is unchanged.
+    context_snippet_head_share: float = 0.34
+
+    # ── Parent-window expansion (small-to-big retrieval) ─────────────────────
+    # Retrieve on the precise child chunk, then hand the LLM the surrounding
+    # window stitched from that file's neighbouring chunks. Ranking still runs
+    # on children, so precision is unaffected; only what reaches the model
+    # widens.
+    #
+    # CLAUDE.md section 5 claimed this shipped for FULL_RAG for a long time and
+    # it did not exist at all (retracted 2026-09-01). It exists now.
+    #
+    # Honest about the evidence: on tests/eval/corpus_large at chunk_size=2048
+    # there is almost nothing for it to recover - answer coverage is already
+    # 0.911 reranker-off and 1.000 reranker-on. It is built for the case that
+    # fixture cannot represent, a large heterogeneous corpus where precision
+    # pressure forces chunk_size back down and answers start straddling again.
+    # Measure before assuming it helps at any given chunk size.
+    parent_window_enabled: bool = True
+    # Window width as a multiple of chunk_size, centred on the child chunk.
+    # 3x at the shipped 2048 is ~6k characters, which _format_snippets' per-
+    # snippet token budget will usually truncate - that truncation is the hard
+    # ceiling, this is only how much is offered to it.
+    parent_window_multiplier: int = 3
     # Hard ceiling on one /api/query/stream response. The keepalive frame proves
     # the connection is alive, not that the model is making progress, and
     # Request.is_disconnected() only resolves when the ASGI server delivers the

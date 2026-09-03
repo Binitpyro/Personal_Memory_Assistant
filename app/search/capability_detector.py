@@ -8,13 +8,10 @@ logger = logging.getLogger(__name__)
 
 
 class CapabilityDetector:
-    _instance = None
+    # Class-level, so every instance already shares it. The module-level
+    # ``capability_detector`` below is the singleton; a __new__ override on top
+    # of that bought nothing.
     _capability_cache: dict[str, bool] = {}  # noqa: RUF012
-
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
 
     async def detect_capabilities(self, llm_client: "LLMClient") -> bool:
         """

@@ -80,6 +80,24 @@ vi.mock('../renderer/WebGPURenderer', () => {
       async loadData() {}
       render() {}
       resize() {}
+      flyBy() {}
+      markDirty() {}
+      smoothCamera = true;
     }
   };
 });
+
+// jsdom implements <dialog> as an inert element: showModal/close are absent, so
+// any component using the native modal throws on mount. Two components rely on
+// it now (ModelPicker, ShortcutOverlay), so the shim lives here rather than in
+// each test file. It records state only — there is no layout or top layer to
+// emulate, and the close EVENT is what the components actually listen to.
+if (typeof HTMLDialogElement !== 'undefined') {
+  HTMLDialogElement.prototype.showModal = function showModal(this: HTMLDialogElement) {
+    this.open = true;
+  };
+  HTMLDialogElement.prototype.close = function close(this: HTMLDialogElement) {
+    this.open = false;
+    this.dispatchEvent(new Event('close'));
+  };
+}

@@ -285,10 +285,15 @@ class TestSnippetHeadShare:
 
     @staticmethod
     def _long_results(n: int) -> list[dict]:
+        # Each snippet must be LONGER than any per-snippet budget under test, or
+        # the share never binds and the assertions pass no matter what. The first
+        # version of this used *200 (~1.5k tokens), which is under the budget at
+        # every share swept, and the leak test could not fail. Caught by its own
+        # negative control.
         return [
             {
                 "file_path": f"f{i}.py",
-                "text": f"sentence {i} of a long passage. " * 200,
+                "text": f"sentence {i} of a long passage. " * 4000,
                 "score": 1.0,
             }
             for i in range(n)
@@ -298,9 +303,9 @@ class TestSnippetHeadShare:
         from app.config import settings
 
         results = self._long_results(3)
-        monkeypatch.setattr(settings, "context_snippet_head_share", 0.34)
+        monkeypatch.setattr(settings, "context_snippet_head_share_small", 0.34)
         _, low = build_context(results, max_tokens=2520, model_class="3b_local")
-        monkeypatch.setattr(settings, "context_snippet_head_share", 0.60)
+        monkeypatch.setattr(settings, "context_snippet_head_share_small", 0.60)
         _, high = build_context(results, max_tokens=2520, model_class="3b_local")
 
         assert high > low, "the head share must actually move delivered tokens"
@@ -308,7 +313,44 @@ class TestSnippetHeadShare:
         # per-snippet label both cost tokens, so the cap is approached, not hit.
         assert low < 0.80 * 2520, "0.34 must leave a large part of the budget unused"
 
-    def test_default_is_unchanged(self):
+    @staticmethod
+    def _files_delivered(context: str, n: int) -> int:
+        return sum(f"f{i}.py" in context for i in range(n))
+
+    def test_a_large_share_starves_the_tail_for_the_large_classes(self, monkeypatch):
+        """Token TOTAL is not the discriminator - _format_snippets always fills
+        the budget. What changes is how many snippets survive to be in it.
+        Measured: 15/15 at 0.34 and 0.5, 6/15 at 0.7, 4/15 at 0.8. That cliff is
+        why the small class has its own setting (CLAUDE.md 8.7f)."""
         from app.config import settings
 
+        results = self._long_results(15)
+        monkeypatch.setattr(settings, "context_snippet_head_share", 0.34)
+        wide, _ = build_context(results, max_tokens=8520, model_class="7b_local")
+        monkeypatch.setattr(settings, "context_snippet_head_share", 0.8)
+        narrow, _ = build_context(results, max_tokens=8520, model_class="7b_local")
+
+        assert self._files_delivered(wide, 15) == 15
+        assert self._files_delivered(narrow, 15) < 6
+
+    def test_the_small_share_does_not_leak_into_the_large_classes(self, monkeypatch):
+        """The whole point of splitting the setting. A single global 0.7 cut
+        7b_local to 6 surviving snippets and put it one step from a 0.28 recall
+        collapse, while buying the 3B +0.098 (CLAUDE.md 8.7f)."""
+        from app.config import settings
+
+        results = self._long_results(15)
+        monkeypatch.setattr(settings, "context_snippet_head_share", 0.34)
+        monkeypatch.setattr(settings, "context_snippet_head_share_small", 0.9)
+        ctx, _ = build_context(results, max_tokens=8520, model_class="7b_local")
+
+        assert self._files_delivered(ctx, 15) == 15, "the small-class share must not reach 7b_local"
+
+    def test_defaults_are_the_swept_optima(self):
+        """Per class, and they differ for a structural reason: 3b_local has three
+        slots so nothing can be starved, while 7b_local has fifteen and loses the
+        tail. Pinned so neither constant drifts without redoing the sweep."""
+        from app.config import settings
+
+        assert settings.context_snippet_head_share_small == 0.7
         assert settings.context_snippet_head_share == 0.34

@@ -18,7 +18,14 @@ import json
 
 import pytest
 
-from scripts.autoresearch import _configs, _done, _key, _leaderboard, _parse_sweep
+from scripts.autoresearch import (
+    _configs,
+    _done,
+    _generation_produced_nothing,
+    _key,
+    _leaderboard,
+    _parse_sweep,
+)
 
 
 def test_parse_sweep_expands_values():
@@ -159,3 +166,51 @@ def test_done_keeps_delivery_and_generation_rows_apart(tmp_path):
     done = _done(journal)
     assert _key(cfg, 0, "") in done
     assert _key(cfg, 0, "gemma2-2b") not in done, "a screening run must not satisfy a gen run"
+
+
+def test_generation_model_order_does_not_change_identity():
+    """The arms are independent, so their CLI order carries no meaning. It did
+    carry identity once, and --resume re-ran nine completed experiments."""
+    cfg = {"PMA_CHUNK_SIZE": "2048"}
+    assert _key(cfg, 0, "gemma2-2b,gemma4-local") == _key(cfg, 0, "gemma4-local,gemma2-2b")
+    assert _key(cfg, 0, " gemma2-2b , gemma4-local ") == _key(cfg, 0, "gemma4-local,gemma2-2b")
+    assert _key(cfg, 0, "") != _key(cfg, 0, "gemma2-2b")
+
+
+def test_failed_runs_are_retried_on_resume(tmp_path):
+    """A crashed build is what --resume is for. Counting it as done leaves the
+    arm one build short forever, and silently: the leaderboard drops failed rows
+    and just reports a smaller n."""
+    journal = tmp_path / "journal.jsonl"
+    cfg = {"PMA_CHUNK_SIZE": "2048"}
+    journal.write_text(
+        json.dumps({"config": cfg, "build": 0, "gen": "", "result": {"failed": True, "rc": -1}})
+        + "\n"
+        + json.dumps({"config": cfg, "build": 1, "gen": "", "result": {"failed": False}})
+        + "\n",
+        encoding="utf-8",
+    )
+    done = _done(journal)
+    assert _key(cfg, 1, "") in done, "a successful build must count as done"
+    assert _key(cfg, 0, "") not in done, "a failed build must be retried"
+
+
+def _arm(recall):
+    return {
+        "reranker_on": {"generation": {"gemma2-2b": {"model_class": "3b_local", "recall": recall}}}
+    }
+
+
+def test_all_errored_generation_is_not_a_successful_run():
+    """Ollama died mid-sweep and three builds "succeeded" in 69s each with 8
+    errors per model. eval_chunking correctly refused to call that recall 0.0,
+    but the runner still journalled it done and --resume would skip it forever."""
+    assert _generation_produced_nothing(_arm(None)) is True
+    assert _generation_produced_nothing(_arm(0.0)) is False, "a real 0.0 is a result, not a failure"
+    assert _generation_produced_nothing(_arm(0.42)) is False
+
+
+def test_skipped_arms_alone_do_not_count_as_failure():
+    """A reranker arm skipped for a missing model is not a generation failure."""
+    assert _generation_produced_nothing({"reranker_on": {"skipped": "no cross-encoder"}}) is False
+    assert _generation_produced_nothing({}) is False

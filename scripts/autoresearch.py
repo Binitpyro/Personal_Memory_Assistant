@@ -78,13 +78,28 @@ def _key(config: dict[str, str], build: int, gen: str = "") -> str:
     run of the SAME config measure different things. Without it, --resume would
     see the cheap run and skip the expensive one, and the leaderboard would
     average the two together.
+
+    The model list is normalised because it arrives as a raw CLI string: passing
+    the same two models in the other order produced a different key, so --resume
+    re-ran nine completed experiments. Order carries no meaning here - the arms
+    are independent - so it must not carry identity either.
     """
-    return json.dumps({"config": config, "build": build, "gen": gen}, sort_keys=True)
+    models = ",".join(sorted(m.strip() for m in gen.split(",") if m.strip()))
+    return json.dumps({"config": config, "build": build, "gen": models}, sort_keys=True)
 
 
 def _done(journal: Path) -> set[str]:
-    """Keys already recorded. Malformed trailing lines are ignored, not fatal:
-    a killed run can leave a half-written line and that must not block a resume."""
+    """Keys already recorded and SUCCESSFUL. Two exclusions, both deliberate.
+
+    Malformed trailing lines are ignored rather than fatal: a killed run can
+    leave a half-written line and that must not block a resume.
+
+    Failed rows do not count as done. A crashed build is exactly the thing
+    --resume exists to pick up, and counting it would leave an arm permanently
+    one build short - silently, because the leaderboard drops failed rows too and
+    simply reports a smaller n. Hit twice on this machine with
+    rc=3221225477 (access violation), which section 13 records as intermittent.
+    """
     if not journal.exists():
         return set()
     seen = set()
@@ -92,6 +107,8 @@ def _done(journal: Path) -> set[str]:
         try:
             row = json.loads(line)
         except json.JSONDecodeError:
+            continue
+        if row.get("result", {}).get("failed"):
             continue
         seen.add(_key(row["config"], row["build"], row.get("gen", "")))
     return seen
@@ -148,7 +165,30 @@ def _summarise(payload: dict) -> dict:
     return out
 
 
-def _run_one(config: dict[str, str], k: int, gen_models: str, gen_max_tokens: int) -> dict:
+def _generation_produced_nothing(summary: dict) -> bool:
+    """True when a requested generation arm scored nothing at all.
+
+    Separated out so the rule is testable without a subprocess. `eval_chunking`
+    never reports a provider failure as recall 0.0 - it records `errors` and
+    leaves recall None - so this is the only place that can tell a run with no
+    answers apart from a run with bad answers, and they must not be journalled
+    the same way.
+    """
+    arms = [a for a in summary.values() if "skipped" not in a]
+    if not arms:
+        return False
+    return not any(
+        g.get("recall") is not None for arm in arms for g in arm.get("generation", {}).values()
+    )
+
+
+def _run_one(
+    config: dict[str, str],
+    k: int,
+    gen_models: str,
+    gen_max_tokens: int,
+    gen_provider: str = "ollama",
+) -> dict:
     env = os.environ.copy()
     env.update(config)
     # Section 6: .env on this machine sets split_brain, which a default install
@@ -170,7 +210,7 @@ def _run_one(config: dict[str, str], k: int, gen_models: str, gen_max_tokens: in
             str(gen_max_tokens),
         ]
         if gen_models:
-            argv += ["--gen-models", gen_models]
+            argv += ["--gen-models", gen_models, "--gen-provider", gen_provider]
         started = time.perf_counter()
         proc = subprocess.run(  # nosec B603 - fixed argv, shell=False
             argv, cwd=str(REPO), env=env, capture_output=True, text=True
@@ -184,11 +224,29 @@ def _run_one(config: dict[str, str], k: int, gen_models: str, gen_max_tokens: in
                 "stderr_tail": proc.stderr[-2000:],
             }
         payload = json.loads(out_json.read_text(encoding="utf-8"))
+
+    summary = _summarise(payload)
+
+    # A generation arm that was ASKED FOR and produced nothing is a failed run,
+    # not a successful one with a gap. eval_chunking is careful never to report a
+    # provider failure as recall 0.0 - it records `errors` and leaves recall
+    # None - but without this the runner still journalled the row as ok, and
+    # --resume would skip it forever. Hit for real: Ollama died mid-sweep, three
+    # builds "succeeded" in 69 s each with 8 errors per model.
+    if gen_models and _generation_produced_nothing(summary):
+        return {
+            "failed": True,
+            "returncode": 0,
+            "seconds": elapsed,
+            "reason": "generation requested but every query errored (provider down?)",
+            "summary": summary,
+        }
+
     return {
         "failed": False,
         "seconds": elapsed,
         "provenance": payload.get("provenance", {}),
-        "summary": _summarise(payload),
+        "summary": summary,
     }
 
 
@@ -206,14 +264,20 @@ def _leaderboard(journal: Path) -> str:
         except json.JSONDecodeError:
             continue
 
-    grouped: dict[str, list[dict]] = {}
+    # Grouped by (config, generation arm), not config alone. A delivery-only
+    # screening run and a generation run of the same config are different
+    # experiments - grouping them together reported n=6 for a 3-build arm and
+    # printed "(no generation arm)" for a config that had one, because the
+    # delivery rows outnumbered it.
+    grouped: dict[tuple[str, str], list[dict]] = {}
     for row in rows:
         if row.get("result", {}).get("failed"):
             continue
-        grouped.setdefault(json.dumps(row["config"], sort_keys=True), []).append(row)
+        models = ",".join(sorted(m for m in row.get("gen", "").split(",") if m))
+        grouped.setdefault((json.dumps(row["config"], sort_keys=True), models), []).append(row)
 
     lines = [f"{'config':<34} {'n':>2} {'model':<20} {'recall min':>11} {'mean':>7}", "-" * 80]
-    for cfg, group in sorted(grouped.items()):
+    for (cfg, _models), group in sorted(grouped.items()):
         tags: dict[str, list[float]] = {}
         for row in group:
             for arm in row["result"]["summary"].values():
@@ -246,6 +310,7 @@ def main() -> int:
     p.add_argument("-k", type=int, default=10)
     p.add_argument("--gen-models", default="", help="passed through to eval_chunking.py")
     p.add_argument("--gen-max-tokens", type=int, default=4096)
+    p.add_argument("--gen-provider", default="ollama")
     p.add_argument("--journal", type=Path, default=REPO / "research" / "journal.jsonl")
     p.add_argument(
         "--resume", action="store_true", help="skip config/build pairs already journalled"
@@ -273,7 +338,7 @@ def main() -> int:
     for i, (config, build) in enumerate(todo, 1):
         label = ", ".join(f"{k}={v}" for k, v in sorted(config.items())) or "(defaults)"
         print(f"[{i}/{len(todo)}] {label} build {build} ...", flush=True)
-        result = _run_one(config, args.k, args.gen_models, args.gen_max_tokens)
+        result = _run_one(config, args.k, args.gen_models, args.gen_max_tokens, args.gen_provider)
         row = {
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "config": config,

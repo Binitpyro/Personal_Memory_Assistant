@@ -60,7 +60,7 @@ QUERIES = DEFAULT_QUERIES
 _ABSTENTION = "don't have enough information"
 
 
-def _provenance(k: int, gen_models: list[str], gen_max_tokens: int) -> dict:
+def _provenance(k: int, gen_models: list[str], gen_max_tokens: int, gen_provider: str) -> dict:
     """Stamp what produced the numbers.
 
     Mirrors scripts/eval_retrieval.py. A retrieval measurement without the
@@ -92,8 +92,9 @@ def _provenance(k: int, gen_models: list[str], gen_max_tokens: int) -> dict:
             "parent_window_multiplier": settings.parent_window_multiplier,
         },
         "generation": {
+            "provider": gen_provider,
             "models": gen_models,
-            "model_classes": _classes_for(gen_models),
+            "model_classes": _classes_for(gen_models, gen_provider),
             "max_tokens": gen_max_tokens,
             "temperature": 0.0,
             "ollama_url": settings.ollama_url,
@@ -191,17 +192,56 @@ def _format_delivery(delivery: dict) -> str:
     return "\n".join(lines)
 
 
-def _classes_for(model_tags: list[str]) -> dict[str, str]:
+def _classes_for(model_tags: list[str], provider: str = "ollama") -> dict[str, str]:
     """Map each model tag onto the context class production would give it.
 
-    Uses `_classify_local_model` rather than reimplementing the rule. It is
-    private, but it is also the single source of truth both production call
-    sites reach through `get_model_class`, and a second copy of a heuristic is
-    how an evaluation quietly stops measuring the product.
-    """
-    from app.search.llm_client import _classify_local_model
+    Goes through `LLMClient.get_model_class`, which is what both production call
+    sites use, rather than reimplementing the rule - a second copy of a heuristic
+    is how an evaluation quietly stops measuring the product.
 
-    return {tag: _classify_local_model(tag) for tag in model_tags}
+    The provider matters and an earlier version ignored it. `get_model_class`
+    parses a parameter count from the *name* only for local providers; for a
+    cloud one it returns "cloud" outright. Passing a NIM tag such as
+    `nvidia/llama-3.1-nemotron-70b-instruct` through the local rule would find
+    "70b" and hand a cloud model a `7b_local`-shaped context - an 8,520 token
+    budget instead of 98,520, which is not a configuration that can occur.
+    """
+    from app.search.llm_client import LLMClient
+
+    client = LLMClient()
+    return {tag: client.get_model_class(provider, tag) for tag in model_tags}
+
+
+def _make_provider(provider_id: str, tag: str, timeout: float):
+    """Build a provider for the generation arm.
+
+    Deliberately NOT through `LLMClient._resolve_provider_by_id`. That path
+    enforces `llm.cloud_privacy_consent`, which guards the PRODUCT: it exists so
+    a user's indexed documents cannot reach a cloud endpoint without an explicit
+    opt-in. This is a measurement script over
+    `tests/eval/corpus_large`, which `scripts/generate_eval_corpus.py` generates
+    from templates - fictional prose containing nothing personal. Flipping the
+    persisted consent flag to run an experiment would change the app's privacy
+    state as a side effect of a measurement, which is worse than not using it.
+
+    Cloud keys come from the same keyring entry the app writes, so no key is
+    stored in the repo, in a fixture, or on a command line.
+    """
+    from app.providers import create_provider
+
+    if provider_id in ("ollama", "lm_studio"):
+        base = settings.ollama_url if provider_id == "ollama" else settings.lm_studio_url
+        return create_provider(provider_id, base_url=base, default_model=tag, timeout=timeout)
+
+    import keyring
+
+    api_key = keyring.get_password("pma_backend", provider_id)
+    if not api_key:
+        raise RuntimeError(
+            f"no API key in the keyring for {provider_id!r}. "
+            "Add it through the app's provider settings; this script never stores one."
+        )
+    return create_provider(provider_id, api_key=api_key, default_model=tag, timeout=timeout)
 
 
 async def _generation_scores(
@@ -209,6 +249,7 @@ async def _generation_scores(
     queries,
     model_tags: list[str],
     max_tokens: int,
+    provider_id: str = "ollama",
 ) -> dict:
     """Score the answer the model writes from the delivered context.
 
@@ -247,11 +288,10 @@ async def _generation_scores(
     """
     import time
 
-    from app.providers import create_provider
     from app.search.llm_client import LLMClient
 
     client = LLMClient()
-    classes = _classes_for(model_tags)
+    classes = _classes_for(model_tags, provider_id)
     out: dict = {}
 
     for tag in model_tags:
@@ -262,9 +302,7 @@ async def _generation_scores(
             print(f"--- generation {tag}: SKIPPED, no context for class {cls} ---")
             continue
 
-        provider = create_provider(
-            "ollama", base_url=settings.ollama_url, default_model=tag, timeout=600.0
-        )
+        provider = _make_provider(provider_id, tag, timeout=600.0)
         per_query: dict = {}
         try:
             for q in queries:
@@ -345,7 +383,13 @@ def _format_generation(generation: dict) -> str:
     return "\n".join(lines)
 
 
-async def _run(k: int, json_out: Path | None, gen_models: list[str], gen_max_tokens: int) -> int:
+async def _run(
+    k: int,
+    json_out: Path | None,
+    gen_models: list[str],
+    gen_max_tokens: int,
+    gen_provider: str = "ollama",
+) -> int:
     queries = harness.load_queries(QUERIES)
     index = await harness.EvalIndex(corpus_dir=CORPUS).build()
 
@@ -359,10 +403,16 @@ async def _run(k: int, json_out: Path | None, gen_models: list[str], gen_max_tok
     # 3b_local-only setting came back with nothing to compare. Delivery is cheap
     # (retrieval runs once and every class is assembled from the same results),
     # so there is no reason to make it conditional.
-    extra = sorted(({"3b_local", "7b_local"} | set(_classes_for(gen_models).values())) - {"cloud"})
+    extra = sorted(
+        ({"3b_local", "7b_local"} | set(_classes_for(gen_models, gen_provider).values()))
+        - {"cloud"}
+    )
     model_classes = ("cloud", *extra)
 
-    payload: dict = {"provenance": _provenance(k, gen_models, gen_max_tokens), "arms": {}}
+    payload: dict = {
+        "provenance": _provenance(k, gen_models, gen_max_tokens, gen_provider),
+        "arms": {},
+    }
     try:
         chunk_total = 0
         if index.db is not None:
@@ -403,7 +453,9 @@ async def _run(k: int, json_out: Path | None, gen_models: list[str], gen_max_tok
             # nobody asked is exactly the kind of scope this project rejects.
             generation: dict = {}
             if gen_models and use_reranker:
-                generation = await _generation_scores(contexts, queries, gen_models, gen_max_tokens)
+                generation = await _generation_scores(
+                    contexts, queries, gen_models, gen_max_tokens, gen_provider
+                )
                 print(_format_generation(generation))
                 print()
 
@@ -490,6 +542,15 @@ def main() -> int:
             "that and scored as a total miss."
         ),
     )
+    p.add_argument(
+        "--gen-provider",
+        default="ollama",
+        help=(
+            "provider for the generation arm (default ollama). A cloud id such as "
+            "nvidia_nim reads its key from the app keyring and is scored as "
+            "model_class=cloud, which is a different context shape entirely."
+        ),
+    )
     args = p.parse_args()
 
     # Module-level because _delivery_scores and _generation_scores resolve
@@ -500,7 +561,9 @@ def main() -> int:
     QUERIES = args.queries
 
     gen_models = [m.strip() for m in args.gen_models.split(",") if m.strip()]
-    return asyncio.run(_run(args.k, args.json_out, gen_models, args.gen_max_tokens))
+    return asyncio.run(
+        _run(args.k, args.json_out, gen_models, args.gen_max_tokens, args.gen_provider)
+    )
 
 
 if __name__ == "__main__":

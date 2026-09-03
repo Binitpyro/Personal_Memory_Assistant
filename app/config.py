@@ -501,7 +501,34 @@ class Settings(BaseSettings):
     # matter what else is tuned. Predicted 1,789 tokens, measured 1,796 (8.7f).
     # Raising it trades depth on the top-ranked chunk for reach across the
     # rest; that trade is unmeasured, which is why the default is unchanged.
+    # Share of the REMAINING snippet budget each of the first three snippets may
+    # take in _format_snippets. Geometric, so three snippets reach at most
+    # 1 - (1 - share)^3 of the budget.
+    #
+    # TWO settings because the two classes have different optima and the reason
+    # is structural, not empirical. 3b_local's max_chunks is 3, so every snippet
+    # is in the head branch and there is no tail to starve - a larger share is
+    # strictly more evidence. 7b_local and cloud get 15 slots, and a large share
+    # starves snippets 4-15 outright.
+    #
+    # Swept 0.34/0.5/0.7/0.8, three builds each, answer-recall:
+    #
+    #   share | gemma2-2b (3b) | gemma4-local (7b) | 7b snippets that fit
+    #    0.34 |     0.317      |      0.706        |  15 of 15
+    #    0.50 |     0.520      |      0.718        |  15 of 15
+    #    0.70 |     0.618      |      0.708        |   6 of 15
+    #    0.80 |     0.581      |      0.428        |   4 of 15
+    #
+    # The 7b column is flat to 0.7 and then falls off a cliff: -0.28, about 4.7x
+    # the measured 0.06 detection threshold. It survived 0.7 only because this
+    # corpus ranks well enough that the answer was inside the six surviving
+    # snippets; a corpus that ranks worse would not be so lucky. A single global
+    # 0.7 would therefore have been one step from a collapse it could not see.
+    #
+    # So: the small class takes its measured optimum, and the large classes keep
+    # the value that provably loses no snippets.
     context_snippet_head_share: float = 0.34
+    context_snippet_head_share_small: float = 0.7
 
     # ── Parent-window expansion (small-to-big retrieval) ─────────────────────
     # Retrieve on the precise child chunk, then hand the LLM the surrounding

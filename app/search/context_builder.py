@@ -269,7 +269,10 @@ def _deduplicate_by_file(
 def _format_snippets(
     deduplicated: list[dict[str, Any]],
     remaining_tokens: int,
+    head_share: float | None = None,
 ) -> list[str]:
+    if head_share is None:
+        head_share = settings.context_snippet_head_share
     context_parts: list[str] = []
     used_tokens = 0
 
@@ -301,9 +304,7 @@ def _format_snippets(
             # tokens delivered against a 2,520 budget, predicted 1,789 (8.7f).
             # Sweeping max_chunks and max_per_file both came back flat because of
             # this, not because more evidence was unavailable.
-            snippet_budget = max(
-                120, int(remaining_for_snippets * settings.context_snippet_head_share)
-            )
+            snippet_budget = max(120, int(remaining_for_snippets * head_share))
         else:
             snippet_budget = max(80, int(remaining_for_snippets / remaining_count))
         snippet_budget = min(snippet_budget, remaining_for_snippets)
@@ -436,10 +437,12 @@ def build_context(
         max_per_file = settings.context_max_per_file_small
         score_multiplier = 0.4
         max_chunks = settings.context_max_chunks_small
+        head_share = settings.context_snippet_head_share_small
     else:
         max_per_file = 2
         score_multiplier = 0.2
         max_chunks = 15
+        head_share = settings.context_snippet_head_share
 
     context_parts: list[str] = []
     used_tokens = 0
@@ -472,7 +475,9 @@ def build_context(
             # Keep only top max_chunks
             deduplicated = deduplicated[:max_chunks]
 
-            snippet_parts = _format_snippets(deduplicated, max(0, max_tokens - used_tokens))
+            snippet_parts = _format_snippets(
+                deduplicated, max(0, max_tokens - used_tokens), head_share
+            )
             context_parts.extend(snippet_parts)
 
     final_context = _compress_text("\n".join(context_parts))

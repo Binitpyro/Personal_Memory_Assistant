@@ -233,3 +233,13 @@ def test_code_version_degrades_to_unknown_without_git(monkeypatch):
     """Provenance is best effort. A missing git must not take the sweep down."""
     monkeypatch.setattr("shutil.which", lambda _name: None)
     assert _code_version() == "unknown"
+
+
+def test_corpus_is_part_of_experiment_identity():
+    """A sweep against a different corpus is a different experiment. Without this
+    the resume key would let a corpus_large row satisfy a corpus_squad one, and
+    the leaderboard would average results from two different fixtures."""
+    cfg = {"PMA_CHUNK_SIZE": "2048"}
+    assert _key(cfg, 0, "", "tests/eval/corpus_squad") != _key(cfg, 0, "", "")
+    assert _key(cfg, 0, "", "a") != _key(cfg, 0, "", "b")
+    assert _key(cfg, 0, "", "a") == _key(cfg, 0, "", "a")

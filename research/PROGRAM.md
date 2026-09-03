@@ -118,6 +118,9 @@ Read CLAUDE.md 8.7 through 8.7e in full. The short version:
 | `max_chunks_small` | swept 3/5/8, flat. Does not bind. Do not retry |
 | `max_per_file_small` | swept 1/2/3 TWICE - before and after the head-share fix. 1 is best in both eras (0.398 / 0.822 vs 0.359 / 0.743). Confirmed, do not retry |
 | `context_ceiling_small` | swept 4000/4500/5000. +0.079 at ~1 sd, against silent head-first truncation risk. Deliberately NOT raised |
+| `parent_window_multiplier` | swept 3/5/7. +0.080 then plateau, ~1 sd, and costs 7b_local 14% more tokens for nothing. Not changed |
+| `reranker_rrf_fusion_weight` | swept 0.0/0.5/1.0. 3b coverage moves 0.02. Ranking is NOT the small class's constraint |
+| `context_max_chunks_small` | re-swept post-fix. Still null - the head share starves the tail now, the allocation ceiling did before |
 | `context_snippet_head_share` | **the real ceiling.** 0.34 caps 3 snippets at 71.2% of budget; raising to 0.7 takes gemma2-2b recall 0.317 -> 0.618 with the 7b control flat. Saturating. **Default unchanged pending sign-off** |
 
 **Settled 2026-09-03 (CLAUDE.md 8.7f).** `chunk_size=2048` confirmed on
@@ -142,6 +145,25 @@ then `EFFECTIVE_CEILINGS`, which is still a function-local literal.
 > result carries a `rerank_score`.
 
 ---
+
+## The fixture is exhausted - read this before sweeping anything else
+
+Six of eight queries deliver the whole answer to `3b_local`. `geometry_cache`
+(0.525) is starved of material; `turbulence` (0.059) has its answer at rank 4-10
+where only the 15-slot class sees it. Both are single-query failures, so fixing
+either moves the mean by ~0.12 against a delivery noise floor of sd 0.07-0.12.
+
+Four knobs have now been swept against it and all four are null at ~1 sd. That is
+not four failures, it is one result: **the tuning headroom on this corpus is
+gone.** `head_share` and `max_chunks` are antagonistic - at 0.7 the first three
+snippets take 97.3% of the budget, so more slots get ~80 tokens each - and with a
+2,520 token budget *fewer and fuller* beats *more and thinner*, because an answer
+span only counts if it arrives whole.
+
+**The next real gain is a bigger or external corpus, not another knob.** SciFact
+is materialised (5,183 docs, 300 queries, baseline nDCG@10 0.70) but scores
+document ranking only, so it cannot judge delivery. A larger span-labelled corpus
+from `scripts/generate_eval_corpus.py` would.
 
 ## Traps that have already cost time
 

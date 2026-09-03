@@ -13,6 +13,11 @@ class ProviderSpec:
     models_endpoint: str
     api_key_pattern: str | None  # regex sanity check
     api_key_docs_url: str
+    # Whether GETting models_endpoint actually exercises the API key.
+    # Almost everywhere it does, and validate() can stop there. NVIDIA serves
+    # its catalogue publicly, so for that provider a 200 proves only that the
+    # internet works - see the comment on the nvidia_nim spec below.
+    models_endpoint_authenticates: bool = True
 
 
 DEFAULT_CHAIN_ORDER: tuple[str, ...] = (
@@ -94,6 +99,14 @@ PROVIDER_REGISTRY: dict[str, ProviderSpec] = {
         models_endpoint="/models",
         api_key_pattern=r"^nvapi-[A-Za-z0-9_-]{20,}$",
         api_key_docs_url="https://build.nvidia.com/settings/api-keys",
+        # https://integrate.api.nvidia.com/v1/models is PUBLIC. Measured
+        # 2026-09-03: it returns 200 and 82 models with no Authorization
+        # header at all, so validation that stops there reports ok=True for a
+        # fabricated key exactly as for a real one, and the user only finds
+        # out when a query returns 403 from /chat/completions. Alone among
+        # the cloud providers here - anthropic, gemini, groq and openai all
+        # return 401/403 unauthenticated.
+        models_endpoint_authenticates=False,
     ),
     "ollama": ProviderSpec(
         id="ollama",

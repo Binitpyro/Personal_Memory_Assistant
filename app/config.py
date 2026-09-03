@@ -530,6 +530,27 @@ class Settings(BaseSettings):
     context_snippet_head_share: float = 0.34
     context_snippet_head_share_small: float = 0.7
 
+    # Effective context ceiling for the 3b_local class, before
+    # compute_context_budget subtracts the system prompt, output reserve and
+    # query overhead. 4,000 -> a 2,520 token budget.
+    #
+    # A setting because after the head-share fix the small class uses 93.5% of
+    # that budget, so this is what now limits it - but raising it is NOT free.
+    # gemma2-2b truncates its prompt at a measured 4,099 tokens, head first,
+    # silently, and head-first truncation costs the system instructions before
+    # it costs evidence. At 4,000 the worst-case prompt is ~3,000 tokens; 5,000
+    # would reach ~4,000, still inside that model's cap but with little margin,
+    # and the class is a guess from the model NAME - another 3B may have a
+    # smaller window.
+    #
+    # SWEPT 2026-09-03, three builds each, and the answer is NO. 3b_local
+    # delivered coverage 0.743 / 0.783 / 0.822 at 4000 / 4500 / 5000 - so
+    # +0.079 at best against sd 0.069-0.119, about 1 sd, not significant. The
+    # risk is not symmetric with it. Kept as a setting because the sweep is
+    # what showed that; do not raise the default without knowing the deployed
+    # model's real context length.
+    context_ceiling_small: int = 4000
+
     # ── Parent-window expansion (small-to-big retrieval) ─────────────────────
     # Retrieve on the precise child chunk, then hand the LLM the surrounding
     # window stitched from that file's neighbouring chunks. Ranking still runs

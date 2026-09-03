@@ -146,7 +146,7 @@ then `EFFECTIVE_CEILINGS`, which is still a function-local literal.
 
 ---
 
-## The fixture is exhausted - read this before sweeping anything else
+## corpus_squad lifted the fixture limit - read this before sweeping anything else
 
 Six of eight queries deliver the whole answer to `3b_local`. `geometry_cache`
 (0.525) is starved of material; `turbulence` (0.059) has its answer at rank 4-10
@@ -160,10 +160,22 @@ snippets take 97.3% of the budget, so more slots get ~80 tokens each - and with 
 2,520 token budget *fewer and fuller* beats *more and thinner*, because an answer
 span only counts if it arrives whole.
 
-**The next real gain is a bigger or external corpus, not another knob.** SciFact
-is materialised (5,183 docs, 300 queries, baseline nDCG@10 0.70) but scores
-document ranking only, so it cannot judge delivery. A larger span-labelled corpus
-from `scripts/generate_eval_corpus.py` would.
+**That was true of `corpus_large`, and it was fixed the same day.**
+`scripts/fetch_squad_corpus.py` builds a span-labelled corpus from SQuAD - 48 real
+Wikipedia articles of ~33k characters, 899 chunks, 100 queries, every span
+verified to slice back to its answer text (6,361 candidates, 0 mismatches).
+
+**The delivery noise floor drops from sd 0.069-0.137 to sd 0.0053-0.0096** - a
+7-14x cut, so effects about 7x smaller become decidable. Sweep against
+`--corpus tests/eval/corpus_squad --queries tests/eval/queries_squad.json`.
+
+**Re-run the nulls there.** `context_ceiling_small`, `parent_window_multiplier`
+and `max_per_file_small` were all ~1 sd on the old fixture and would be many sigma
+on this one. Those nulls were a property of the fixture, not of the knobs.
+
+**Keep all three corpora, they measure different things.** `corpus_squad` for
+power (short answers only), `corpus_large` for long-answer delivery, SciFact for
+externally comparable document ranking.
 
 ## Traps that have already cost time
 

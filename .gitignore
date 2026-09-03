@@ -302,3 +302,16 @@ graphify-out/
 # research/journal.jsonl is deliberately NOT ignored - it is the evidence record
 # for every experiment the loop has run, and the reason a later session does not
 # repeat work. research/PROGRAM.md and EDITABLE.md are tracked for the same reason.
+
+# Text materialised from a PERSONAL corpus by scripts/materialize_corpus.py.
+# Real coursework, notes and documents - it must never enter git, and the
+# ignore is added BEFORE the directory is ever written so there is no window in
+# which it could be staged by accident. The labelled query file that goes with
+# it is derived from that same private content and is ignored for the same reason.
+/tests/eval/corpus_college/
+/tests/eval/queries_college.json
+
+# SQuAD-derived corpus from scripts/fetch_squad_corpus.py. Reproducible from the
+# provenance recorded in the queries file, so it does not belong in git.
+/tests/eval/corpus_squad/
+/tests/eval/queries_squad.json

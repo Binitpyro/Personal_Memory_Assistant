@@ -104,7 +104,7 @@ def _configs(sweep: dict[str, list[str]]) -> list[dict[str, str]]:
     ]
 
 
-def _key(config: dict[str, str], build: int, gen: str = "") -> str:
+def _key(config: dict[str, str], build: int, gen: str = "", corpus: str = "") -> str:
     """Identity of one experiment, for --resume.
 
     `gen` is part of it because a delivery-only screening run and a generation
@@ -118,7 +118,10 @@ def _key(config: dict[str, str], build: int, gen: str = "") -> str:
     are independent - so it must not carry identity either.
     """
     models = ",".join(sorted(m.strip() for m in gen.split(",") if m.strip()))
-    return json.dumps({"config": config, "build": build, "gen": models}, sort_keys=True)
+    return json.dumps(
+        {"config": config, "build": build, "gen": models, "corpus": corpus},
+        sort_keys=True,
+    )
 
 
 def _done(journal: Path) -> set[str]:
@@ -143,7 +146,7 @@ def _done(journal: Path) -> set[str]:
             continue
         if row.get("result", {}).get("failed"):
             continue
-        seen.add(_key(row["config"], row["build"], row.get("gen", "")))
+        seen.add(_key(row["config"], row["build"], row.get("gen", ""), row.get("corpus", "")))
     return seen
 
 
@@ -221,6 +224,8 @@ def _run_one(
     gen_models: str,
     gen_max_tokens: int,
     gen_provider: str = "ollama",
+    corpus: str = "",
+    queries: str = "",
 ) -> dict:
     env = os.environ.copy()
     env.update(config)
@@ -244,6 +249,10 @@ def _run_one(
         ]
         if gen_models:
             argv += ["--gen-models", gen_models, "--gen-provider", gen_provider]
+        if corpus:
+            argv += ["--corpus", corpus]
+        if queries:
+            argv += ["--queries", queries]
         started = time.perf_counter()
         proc = subprocess.run(  # nosec B603 - fixed argv, shell=False
             argv, cwd=str(REPO), env=env, capture_output=True, text=True
@@ -344,6 +353,16 @@ def main() -> int:
     p.add_argument("--gen-models", default="", help="passed through to eval_chunking.py")
     p.add_argument("--gen-max-tokens", type=int, default=4096)
     p.add_argument("--gen-provider", default="ollama")
+    p.add_argument(
+        "--corpus",
+        default="",
+        help=(
+            "corpus directory to sweep against (default: eval_chunking's own, "
+            "tests/eval/corpus_large). Recorded on the row and part of the resume "
+            "key, so two corpora can share a journal without conflating."
+        ),
+    )
+    p.add_argument("--queries", default="", help="labelled queries JSON for --corpus")
     p.add_argument("--journal", type=Path, default=REPO / "research" / "journal.jsonl")
     p.add_argument(
         "--resume", action="store_true", help="skip config/build pairs already journalled"
@@ -363,7 +382,7 @@ def main() -> int:
     configs = _configs(_parse_sweep(args.sweep))
     done = _done(args.journal) if args.resume else set()
     planned = [(c, b) for c in configs for b in range(args.builds)]
-    todo = [(c, b) for c, b in planned if _key(c, b, args.gen_models) not in done]
+    todo = [(c, b) for c, b in planned if _key(c, b, args.gen_models, args.corpus) not in done]
     print(
         f"{len(configs)} config(s) x {args.builds} build(s) = {len(planned)}; {len(todo)} to run\n"
     )
@@ -371,12 +390,21 @@ def main() -> int:
     for i, (config, build) in enumerate(todo, 1):
         label = ", ".join(f"{k}={v}" for k, v in sorted(config.items())) or "(defaults)"
         print(f"[{i}/{len(todo)}] {label} build {build} ...", flush=True)
-        result = _run_one(config, args.k, args.gen_models, args.gen_max_tokens, args.gen_provider)
+        result = _run_one(
+            config,
+            args.k,
+            args.gen_models,
+            args.gen_max_tokens,
+            args.gen_provider,
+            args.corpus,
+            args.queries,
+        )
         row = {
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "config": config,
             "build": build,
             "gen": args.gen_models,
+            "corpus": args.corpus,
             "code": _code_version(),
             "result": result,
         }

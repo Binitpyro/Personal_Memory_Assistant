@@ -233,14 +233,24 @@ def _make_provider(provider_id: str, tag: str, timeout: float):
         base = settings.ollama_url if provider_id == "ollama" else settings.lm_studio_url
         return create_provider(provider_id, base_url=base, default_model=tag, timeout=timeout)
 
+    # Same precedence as LLMClient._resolve_provider_by_id: the environment
+    # (settings) first, keyring second. They can disagree - measured 2026-09-03,
+    # when the keyring held a stale key that returned 403 while .env held a
+    # working one - and reading only the keyring would have scored a live model
+    # as unreachable.
     import keyring
 
-    api_key = keyring.get_password("pma_backend", provider_id)
+    api_key = (getattr(settings, f"{provider_id}_api_key", "") or "").strip()
+    source = "env"
+    if not api_key:
+        api_key = keyring.get_password("pma_backend", provider_id) or ""
+        source = "keyring"
     if not api_key:
         raise RuntimeError(
-            f"no API key in the keyring for {provider_id!r}. "
+            f"no API key for {provider_id!r} in settings or keyring. "
             "Add it through the app's provider settings; this script never stores one."
         )
+    print(f"--- generation provider {provider_id}: key from {source} ---")
     return create_provider(provider_id, api_key=api_key, default_model=tag, timeout=timeout)
 
 

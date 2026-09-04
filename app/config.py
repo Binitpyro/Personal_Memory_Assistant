@@ -490,7 +490,35 @@ class Settings(BaseSettings):
     # Defaults are exactly the values that were hardcoded, so this change on
     # its own alters nothing. Sweep them before moving them.
     context_max_chunks_small: int = 3
-    context_max_per_file_small: int = 1
+    # RAISED 1 -> 2 on 2026-09-03, and it is the first knob in this block that
+    # moved. Everything above was swept on corpus_large, whose delivery sd is
+    # 0.069-0.137, so nothing smaller than ~0.12 was decidable there and every
+    # sweep came back null. corpus_squad (100 queries over 48 real Wikipedia
+    # articles, section 8.7g) has sd 0.0043-0.0078, and the same knob is
+    # decisive on it. Three builds per arm, reranker on:
+    #
+    #   value | 3b coverage | sd     | 3b tokens | 7b_local (control)
+    #   ------+-------------+--------+-----------+-------------------
+    #     1   | 0.8417      | 0.0043 |   1,481   | 0.9126
+    #     2   | 0.9043      | 0.0058 |   1,697   | 0.9093
+    #     3   | 0.9058      | 0.0078 |   1,764   | 0.9092
+    #
+    # +0.063, and the per-value ranges do not overlap at all - 1's best build is
+    # 0.8467, 2's worst is 0.8976. It SATURATES at 2 (2->3 buys +0.0016, well
+    # inside noise), so there is no case for 3. The 7b_local control does not
+    # read this setting and stays flat within 0.0034, which is what confines the
+    # change to the class it is for.
+    #
+    # What it buys: 3b_local goes 0.842 -> 0.904 against cloud's 0.909, i.e. the
+    # small class stops being the one that loses answers. Section 8.7g measured
+    # that gap at ~7 sd and attributed it to delivery rather than retrieval
+    # (document nDCG is 0.957); this closes most of it.
+    #
+    # It is a corpus-shape bet, stated rather than hidden: allowing 2 chunks per
+    # file helps when the answer needs two passages of ONE document, and costs
+    # file diversity when it needs one passage each from three. SQuAD answers sit
+    # inside a single article, so this fixture is biased toward the first case.
+    context_max_per_file_small: int = 2
 
     # Share of the REMAINING snippet budget each of the first three snippets
     # may take in _format_snippets. Geometric, so three snippets reach at most

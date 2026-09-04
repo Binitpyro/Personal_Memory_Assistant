@@ -173,6 +173,32 @@ verified to slice back to its answer text (6,361 candidates, 0 mismatches).
 and `max_per_file_small` were all ~1 sd on the old fixture and would be many sigma
 on this one. Those nulls were a property of the fixture, not of the knobs.
 
+**One is done and it confirmed the whole argument.** `max_per_file_small` 1 -> 2
+measured +0.079 at ~1 sd on `corpus_large` and was recorded as a null; on
+`corpus_squad` it measures **+0.063 with completely disjoint per-value ranges**
+(1's best build 0.8467, 2's worst 0.8976), saturating at 2, with the `7b_local`
+control flat within 0.0034. **Shipped** - `3b_local` delivered coverage
+0.842 -> 0.904 against cloud's 0.909.
+
+Two remain, and they are not equally worth the runs:
+
+- **`parent_window_multiplier` 3/5/7 - run this one.** It was declined purely on
+  significance (+0.080 then plateau, ~1 sd, and it cost `7b_local` 14% more
+  tokens for nothing). Better power can genuinely flip that. It also has to be
+  re-run rather than merely re-scored, because it was swept at
+  `max_per_file_small = 1` and that default has since changed - both knobs move
+  how much material reaches the small class, so the old rows are not a
+  comparison against shipped code. `_code_version` on each row is what makes
+  that checkable.
+- **`context_ceiling_small` 4000/4500/5000 - measure if convenient, but the
+  decision probably does not move.** It was declined on an asymmetric-risk
+  argument, not a significance one: overrunning a model's real window truncates
+  **head first and silently**, costing the system instructions before it costs
+  evidence, and `3b_local` is assigned by parsing the model NAME, so headroom
+  measured on gemma2-2b is not headroom for anything else landing in that class.
+  Better statistics do not answer that; deriving the budget from the provider's
+  reported `context_length` does, and that is the real fix.
+
 **Keep all three corpora, they measure different things.** `corpus_squad` for
 power (short answers only), `corpus_large` for long-answer delivery, SciFact for
 externally comparable document ranking.

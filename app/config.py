@@ -269,13 +269,37 @@ class Settings(BaseSettings):
     # looked like a max_chunks limit and IS NOT: sweeping context_max_chunks_small
     # over 3/5/8 leaves delivered tokens flat at ~1,703 (8.7f). What bounds the 3B
     # is still open; max_per_file is the next candidate.
-    # CHANGED TO 1024 on 2026-09-04, by instruction, against the table above.
-    # Recording the trade rather than quietly restating the evidence: 2048 won
-    # that sweep monotonically on both models, so this gives up ~0.006 recall on
-    # gemma2-2b and ~0.083 on gemma4-local at the measured means. What it buys is
-    # precision - at 2048 char_precision is 0.024, i.e. 97.6% of what the model
-    # reads is not the answer, and section 8.7e left that flagged and unresolved.
-    # Whether the trade is net positive is measured below, not asserted here.
+    # CHANGED TO 1024 on 2026-09-04. Instructed first, then MEASURED, and the
+    # measurement went against the table above and against my own prediction.
+    # corpus_squad, 100 queries over 48 real Wikipedia articles, 3 builds per
+    # arm, reranker on, both arms running the separator cascade:
+    #
+    #   model          1024 builds            2048 builds            delta
+    #   gemma2-2b      .8803 .8917 .8629      .8307 .8123 .8153      +0.0589
+    #   gemma4-local   .8933 .9368 .9097      .8376 .8316 .8275      +0.0810
+    #
+    # ~7 sigma on both, and the per-arm ranges are DISJOINT - 1024's worst build
+    # beats 2048's best, on both models. gemma2-2b is the clean arm: zero empty
+    # answers at either size, so recall and recall_answered agree exactly.
+    #
+    # gemma4-local needs one caveat and survives it: 13 empty answers at 2048
+    # against 0 at 1024 inflate its raw delta, and excluding them it is +0.0433,
+    # still over the 0.038 threshold. Those empties are NOT only a measurement
+    # artifact - a thinking model given more context spends its whole
+    # num_predict budget reasoning and returns no content, so 13% of queries
+    # would fail in production. Abstentions move the same way, 8 -> 15.
+    #
+    # Everything else agrees: doc nDCG .9872 vs .9686, 3b delivered coverage
+    # .9652 vs .9370, and 3b receives 1,162 tokens against 1,702 - **32% less
+    # text, better answers**, which is section 8.7e's precision argument paying
+    # off (at 2048, 97.6% of what the model read was not the answer).
+    #
+    # WHAT THIS DOES NOT SETTLE: whether 1024 beats 2048 without the cascade.
+    # Both arms ran with it, and 1024 splits twice as often, so better
+    # boundaries plausibly help it more - the boundary fix may have MOVED the
+    # optimum rather than 8.7f having been wrong. That is confounded with the
+    # corpus change (SQuAD's 1-5 word answers vs corpus_large's long spans) and
+    # separating them needs runs nobody has done.
     #
     # One cost that the chunk_size sweep never showed, found 2026-09-04: the
     # sentence-boundary lookback is an ABSOLUTE character count, so the fraction

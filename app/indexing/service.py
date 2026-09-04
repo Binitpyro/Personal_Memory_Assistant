@@ -953,10 +953,16 @@ class IndexingService:
                 ft_summary = ""
                 meta = None
 
-                # Code and markdown are chunked from the whole file: an AST
-                # needs the complete source and chunk_markdown needs to see
-                # every heading, so neither can work off a stream. Everything
-                # else keeps streaming.
+                # CODE ONLY is chunked from the whole file, because an AST needs
+                # the complete source and cannot work off a stream. Everything
+                # else - markdown included - keeps streaming.
+                #
+                # This comment used to say "code AND markdown", which was false
+                # and had been false since the routing landed: markdown is not in
+                # `_WHOLE_TEXT_EXTENSIONS`, so it never buffers and never reaches
+                # `_create_chunks`. Section-aware markdown chunking was built,
+                # measured worse twice and reverted (CLAUDE.md 8.7b, A3); only
+                # the comments were left describing the version that lost.
                 #
                 # `buffered_chars` against settings.chunk_buffer_max_chars is
                 # what keeps the section 6 boundedness invariant true - peak
@@ -1060,11 +1066,14 @@ class IndexingService:
                             )
 
                     if buffering:
-                        # The syntax-aware path. _create_chunks routes on the
-                        # extension: CodeChunker for source, chunk_markdown for
-                        # markdown. This is the call CLAUDE.md 8.7 A2/A3 found
-                        # had no production caller at all, and A4's kg_nodes /
-                        # kg_edges ride out on the chunks it returns.
+                        # The syntax-aware path, and in production it is reached
+                        # ONLY for code - `_WHOLE_TEXT_EXTENSIONS` is exactly
+                        # `_CODE_EXTENSIONS`, so `_create_chunks` always lands on
+                        # its CodeChunker branch from here. Its markdown and
+                        # .txt branches are reachable from tests only.
+                        # This is the call CLAUDE.md 8.7 A2/A3 found had no
+                        # production caller at all, and A4's kg_nodes / kg_edges
+                        # ride out on the chunks it returns.
                         final_chunks = self._create_chunks("".join(buffered), file_path=str(path))
                         buffered.clear()
                     else:
@@ -1997,15 +2006,24 @@ class IndexingService:
         ext = Path(file_path).suffix.lower() if file_path else ""
         if RUST_CORE_AVAILABLE and ext in (".txt", ".md", ".markdown", ".log"):
             try:
-                # Markdown goes to the SECTION-aware chunker. `chunk_markdown`
-                # splits on `^#{1,3}\s` and emits a whole section as one chunk
-                # when it fits, falling back to the sliding window only for
-                # oversized sections - so a chunk is a heading's worth of one
-                # subject rather than 512 characters that happen to be adjacent.
-                # It had no caller at all before this: the routing here sent .md
-                # to create_chunks, which is the generic window (CLAUDE.md 8.7
-                # A3). .txt/.log have no section structure to exploit and stay
-                # on the window.
+                # NOT REACHED IN PRODUCTION - tests only. Both branches below
+                # need this function to be called with a .md/.txt/.log path, and
+                # the only production caller is the buffering branch of
+                # `_extract_and_chunk`, which is gated on
+                # `_WHOLE_TEXT_EXTENSIONS = _CODE_EXTENSIONS`. Prose streams
+                # through StreamChunker instead and never arrives here.
+                #
+                # Kept rather than deleted because `chunk_markdown` is exercised
+                # by tests/test_chunker.py and is the thing A3 would re-route if
+                # a corpus is ever found where section boundaries carry more
+                # signal than they do here - it was measured worse twice
+                # (CLAUDE.md 8.7b) and is open by choice, not by oversight.
+                #
+                # What it does when a test calls it: splits on `^#{1,3}\s`, emits
+                # a whole section as one chunk when it fits, merges adjacent
+                # sections up to the budget, and falls back to the sliding window
+                # for oversized ones. .txt/.log have no section structure to
+                # exploit and take the plain window.
                 if ext in (".md", ".markdown"):
                     chunks = rust_core.chunk_markdown(
                         text, self.chunk_size, self.chunk_overlap, prefix

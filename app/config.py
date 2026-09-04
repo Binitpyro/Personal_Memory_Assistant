@@ -269,9 +269,52 @@ class Settings(BaseSettings):
     # looked like a max_chunks limit and IS NOT: sweeping context_max_chunks_small
     # over 3/5/8 leaves delivered tokens flat at ~1,703 (8.7f). What bounds the 3B
     # is still open; max_per_file is the next candidate.
-    chunk_size: int = 2048
+    # CHANGED TO 1024 on 2026-09-04, by instruction, against the table above.
+    # Recording the trade rather than quietly restating the evidence: 2048 won
+    # that sweep monotonically on both models, so this gives up ~0.006 recall on
+    # gemma2-2b and ~0.083 on gemma4-local at the measured means. What it buys is
+    # precision - at 2048 char_precision is 0.024, i.e. 97.6% of what the model
+    # reads is not the answer, and section 8.7e left that flagged and unresolved.
+    # Whether the trade is net positive is measured below, not asserted here.
+    #
+    # One cost that the chunk_size sweep never showed, found 2026-09-04: the
+    # sentence-boundary lookback is an ABSOLUTE character count, so the fraction
+    # of chunk boundaries that fall mid-sentence is ~40% on real prose at EVERY
+    # chunk size (39.8% at 512, 39.4% at 1024, 40.5% at 2048, corpus_squad).
+    # Halving chunk_size therefore doubles the number of broken sentences,
+    # 345 -> 696, because it doubles how often you split. That is why
+    # `chunk_boundary_lookback_share` below is part of this change and not a
+    # separate one.
+    chunk_size: int = 1024
     # Held at ~10% of chunk_size, which is what the sweep above used.
-    chunk_overlap: int = 204
+    chunk_overlap: int = 102
+    # How far back from the target split point to hunt for a sentence or
+    # paragraph end, as a fraction of chunk_size. `StreamChunker._find_boundary`
+    # hardcoded 100 characters from 23399ca (2026-05-03) until this became a
+    # setting.
+    #
+    # A fraction rather than an absolute, even though the measurement says
+    # absolute characters are what drive the hit rate: a fraction cannot exceed
+    # chunk_size, and it bounds size variance relative to the chunk instead of
+    # letting a big lookback shrink a small chunk arbitrarily.
+    #
+    # Swept on corpus_squad at chunk_size=1024, overlap=102:
+    #
+    #   lookback | %chunk | hard cut | mean size | sd
+    #      100   |   9.8% |   39.4%  |    996    | 31.4   <- the old constant
+    #      160   |  15.6% |   20.1%  |    967    | 48.4
+    #      224   |  21.9% |    9.0%  |    939    | 62.4
+    #      256   |  25.0% |    6.1%  |    928    | 69.1   <- ships
+    #      320   |  31.2% |    3.3%  |    903    | 87.3
+    #
+    # 0.25 cuts mid-sentence splits 6.5x for a 9% smaller mean chunk. Past it the
+    # returns fall off and size variance keeps climbing, and chunk size tracking
+    # text structure instead of the budget is exactly the defect that sank
+    # `chunk_markdown`'s first attempt (8.7b).
+    #
+    # It holds at the old chunk size too - 0.25 of 2048 is 512, which measured
+    # 1.2% hard cuts - so this is not a 1024-specific patch.
+    chunk_boundary_lookback_share: float = 0.25
     # Ceiling on the whole-text buffer used by the syntax-aware chunkers.
     #
     # Code and markdown are chunked from the *whole* file rather than streamed:

@@ -414,11 +414,74 @@ _WHOLE_TEXT_EXTENSIONS = _CODE_EXTENSIONS
 
 
 class StreamChunker:
-    """Helper to process a stream of text fragments into properly sized chunks."""
+    """Helper to process a stream of text fragments into properly sized chunks.
+
+    The split-point search is a separator cascade modelled on LangChain's
+    ``RecursiveCharacterTextSplitter`` (langchain_text_splitters 1.1.2,
+    ``character.py::_split_text``), read as a reference and reimplemented rather
+    than depended on - section 6's dependency policy wants a measured bottleneck
+    before a library, and this is one function.
+
+    **One deliberate divergence, and it is the reason this is not a port.**
+    LangChain chooses ONE separator for the entire document - the first rung its
+    ``re.search`` finds anywhere - and then ``_merge_splits`` packs pieces up to
+    the budget. Every boundary therefore lands on that separator even when doing
+    so badly under-fills a chunk: with 600-character paragraphs against a 1024
+    budget only one paragraph fits, so chunks run at 59% and chunk size tracks
+    document structure instead of the budget. **That is precisely the failure
+    CLAUDE.md 8.7b measured and rejected for ``chunk_markdown``** - chunk
+    precision 0.163 -> 0.100 when section boundaries drove the size.
+
+    Searching only ``[pos - lookback, pos]`` avoids it for free: the lookback IS
+    a minimum-fill floor, 75% of the budget at the shipped share of 0.25. A
+    structural boundary wins when one is conveniently placed, and a weaker
+    boundary is accepted rather than shrinking the chunk.
+    """
+
+    # Priority ladder for `_find_boundary`, highest first. The top and bottom
+    # rungs are LangChain's defaults; the sentence and clause rungs between them
+    # are this codebase's, kept because prose splits better on a sentence end
+    # than on an arbitrary space.
+    #
+    # The bottom rungs are what this list was missing, and they are not
+    # cosmetic. Measured on tests/eval/corpus_squad, chunk_size=1024,
+    # lookback=256:
+    #
+    #      7 rungs (before)   blind cuts 6.13%   MID-WORD 3.67%  (70 chunks)
+    #     11 rungs (now)      blind cuts 0.63%   MID-WORD 0.00%  (0)
+    #
+    # With no word rung a failed search cuts at `pos`, which lands INSIDE A WORD
+    # and hands the embedder a split token. LangChain's ladder ends with a space
+    # and then the empty string for exactly this reason.
+    #
+    # No Markdown rung on purpose. Heading-first chunking was built, measured
+    # worse twice and reverted (8.7b, A3); adding it here needs its own
+    # evidence, not a reference implementation's say-so.
+    _SEPARATORS: tuple[str, ...] = (
+        "\n\n",
+        "\n",
+        ". ",
+        "! ",
+        "? ",
+        ".\n",
+        "!\n",
+        "?\n",
+        "; ",
+        ", ",
+        " ",
+    )
 
     def __init__(self, chunk_size: int, chunk_overlap: int, prefix: str):
         self.chunk_size = chunk_size if chunk_size > 0 else 500
         self.chunk_overlap = min(max(0, chunk_overlap), self.chunk_size - 1)
+        # Scaled off chunk_size rather than the 100-character literal this
+        # used to carry. That constant left ~40% of boundaries on real prose
+        # falling mid-sentence at EVERY chunk size, because 100 characters is
+        # often less than one sentence of Wikipedia-grade text. See
+        # settings.chunk_boundary_lookback_share.
+        self.boundary_lookback = max(
+            1, int(self.chunk_size * settings.chunk_boundary_lookback_share)
+        )
         self.prefix = prefix
         self.buffer = ""
         self.total_offset = 0
@@ -441,7 +504,7 @@ class StreamChunker:
             # Find a good split point in the current window
             raw_end = self.chunk_size
             # Use simple sentence snapping for streaming
-            end = self._find_boundary(self.buffer, raw_end)
+            end = self._find_boundary(self.buffer, raw_end, self.boundary_lookback)
 
             chunk_text = self.buffer[:end]
             preview = self.prefix + chunk_text
@@ -493,14 +556,30 @@ class StreamChunker:
         return chunks
 
     @staticmethod
-    def _find_boundary(text: str, pos: int) -> int:
-        # Simplified boundary finding for streaming
-        search_start = max(0, pos - 100)
-        region = text[search_start:pos]
-        for delim in ["\n\n", ". ", "! ", "? ", ".\n", "!\n", "?\n"]:
-            idx = region.rfind(delim)
+    def _find_boundary(text: str, pos: int, lookback: int = 100) -> int:
+        """Back up from `pos` to the nearest sentence or paragraph end.
+
+        Returns `pos` UNCHANGED when the window holds no boundary, which is a
+        blind mid-sentence cut. That is not a rare case on real prose: at the
+        100-character literal this used to hardcode, it returned unchanged for
+        ~40% of splits on `tests/eval/corpus_squad`, and the rate barely moves
+        with chunk_size (39.8% at 512, 39.4% at 1024, 40.5% at 2048) because
+        the window is absolute while a sentence is ~100 characters. Callers
+        pass `chunk_size * settings.chunk_boundary_lookback_share`; the
+        default only keeps the old two-argument signature working.
+
+        Rungs are tried by TYPE in priority order and the LAST occurrence of the
+        winning type is taken, so a paragraph break beats a sentence end sitting
+        closer to `pos`. See `_SEPARATORS` for the ladder and its provenance.
+        """
+        floor = max(0, pos - lookback)
+        for delim in StreamChunker._SEPARATORS:
+            # rfind over a range rather than slicing: same answer, no copy, and
+            # a match must fit entirely inside [floor, pos), so the boundary
+            # returned can never exceed pos.
+            idx = text.rfind(delim, floor, pos)
             if idx != -1:
-                return search_start + idx + len(delim)
+                return idx + len(delim)
         return pos
 
 
@@ -529,7 +608,13 @@ class IndexingService:
         # Read here rather than at import time: the eval harness mutates the
         # global settings object.
         self._embed_flush_threshold = max(1, settings.embedding_batch_size * 4)
-        self.code_chunker = CodeChunker(max_tokens=512)
+        # Derived, not 512. `CodeChunker` computes max_chars = max_tokens * 4,
+        # so a literal 512 pinned code chunks at 2048 characters regardless of
+        # chunk_size. CLAUDE.md 8.7 A6 recorded the two chunkers disagreeing 4x
+        # as a defect and treated chunk_size=2048 as the thing that settled it -
+        # which made the agreement a coincidence of one value rather than a
+        # rule. At chunk_size=1024 the literal would reopen it at 2x.
+        self.code_chunker = CodeChunker(max_tokens=max(1, self.chunk_size // 4))
         # File ids whose summary changed during the current run. Flushed to the
         # LanceDB summary index once the pipeline drains - re-embedding only what
         # this run touched, rather than the whole corpus.

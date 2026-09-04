@@ -46,10 +46,35 @@ QUERIES = Path("tests/eval/queries_large.json")
 # every time the setting is swept, which is backwards: the sweep is the
 # experiment, the corpus is the apparatus.
 #
-# 512 is the reference because it is the size the corpus was built and labelled
+# 512 was the reference because it is the size the corpus was built and labelled
 # against, and the size the short/long answer contrast was designed for.
-REFERENCE_CHUNK_SIZE = 512
-REFERENCE_CHUNK_OVERLAP = 50
+#
+# RECALIBRATED to 384 on 2026-09-04, and the reason matters more than the number:
+# `StreamChunker` gained a separator cascade with a word rung and a lookback
+# scaled off chunk_size, so boundaries now land on sentence and paragraph ends
+# instead of arbitrary offsets. The labelled answer spans are themselves
+# sentence-aligned, so they stopped being shredded - at 512 the long answers went
+# from straddling 3 chunks to 2:
+#
+#     curl_noise      672 chars   3 chunks -> 2
+#     advection       687 chars   3 chunks -> 2
+#     geometry_cache  637 chars   3 chunks -> 3
+#     colour_ingest   638 chars   3 chunks -> 3
+#
+# **That is the chunker improving, not the fixture breaking**, which is exactly
+# why this constant is separate from `settings.chunk_size`. But a fixture whose
+# long answers span 2 chunks while its short answers span up to 2 has lost the
+# contrast the sweep reads, so the apparatus is recalibrated to where the
+# contract still holds cleanly:
+#
+#     ref 512   short [1,1,2,2]   long [2,2,3,3]   OVERLAP
+#     ref 384   short [1,1,2,2]   long [3,3,3,4]   clean
+#     ref 256   short [1,1,1,2]   long [3,4,4,4]   clean
+#
+# 384 is the largest of those, so it keeps the reference as close to the labelled
+# size as the contrast allows.
+REFERENCE_CHUNK_SIZE = 384
+REFERENCE_CHUNK_OVERLAP = 38
 MIN_CHUNKS_PER_LABELLED_FILE = 15
 
 # At the shipped size a document must still be several chunks, or chunk-level

@@ -222,3 +222,95 @@ def test_chunk_markdown_span_matches_the_text_it_stores():
         assert len(c["text_preview"]) - span == len(prefix), (
             f"span {span} disagrees with stored text {c['text_preview']!r}"
         )
+
+
+class TestBoundaryLookback:
+    """The sentence-snap window is a setting now, not a 100-character literal.
+
+    Why it needed to move (measured 2026-09-04 on tests/eval/corpus_squad, 48
+    real Wikipedia articles): `_find_boundary` returns `pos` unchanged when no
+    sentence or paragraph end sits inside the window, which is a blind
+    mid-sentence cut. At 100 characters that happened on ~40% of splits, and
+    -- the part that made it invisible -- the rate is flat across chunk_size
+    (39.8% at 512, 39.4% at 1024, 40.5% at 2048) because the window is absolute
+    while a sentence is ~100 characters. Halving chunk_size does not improve the
+    rate, it doubles the number of cuts, because it doubles how often you split.
+
+    `tests/eval/corpus_large` cannot show any of this: templated prose with
+    frequent blank lines cuts blind only 8.6% of the time.
+    """
+
+    @staticmethod
+    def _prose(n: int) -> str:
+        # Sentences longer than the old 100-char window, with no blank lines,
+        # which is the case the literal could not handle.
+        return " ".join(
+            f"Sentence number {i} runs on at some length so that the terminator "
+            f"lands well beyond a hundred characters from any arbitrary offset "
+            f"chosen inside it by the chunker."
+            for i in range(n)
+        )
+
+    def test_a_wider_window_reaches_a_stronger_rung(self):
+        """The window decides WHICH rung of the ladder is reachable.
+
+        This asserted `narrow == 1024` - a blind cut - until the word rung
+        landed, and then failed, which is the ladder working: 20 characters
+        cannot span one of these sentences but always contains a space. The
+        claim worth pinning is not "narrow cuts blind", it is that a wider
+        window buys a structurally stronger boundary.
+        """
+        text = self._prose(40)
+        narrow = StreamChunker._find_boundary(text, 1024, 20)
+        wide = StreamChunker._find_boundary(text, 1024, 256)
+
+        assert text[narrow - 1] == " ", "narrow window should still land on a word break"
+        assert text[narrow - 2 : narrow] != ". ", "20 chars cannot reach a sentence end here"
+        assert text[wide - 2 : wide] == ". ", "256 chars should reach a sentence end"
+        assert wide < narrow, "the stronger rung sits further back"
+
+    def test_no_split_ever_lands_inside_a_word(self):
+        """The bottom rung's whole job. 70 chunks on corpus_squad did this."""
+        text = "x" * 300 + " " + "y" * 300  # no sentence or line break anywhere
+        pos = 400
+        b = StreamChunker._find_boundary(text, pos, 256)
+        assert b < pos, "expected the space rung to fire"
+        assert text[b - 1] == " "
+        assert not (text[b - 1 : b].strip() and text[b : b + 1].strip())
+
+    def test_the_setting_reaches_the_chunker(self, monkeypatch):
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "chunk_boundary_lookback_share", 0.25)
+        assert StreamChunker(1024, 102, "").boundary_lookback == 256
+        monkeypatch.setattr(settings, "chunk_boundary_lookback_share", 0.5)
+        assert StreamChunker(1024, 102, "").boundary_lookback == 512
+
+    def test_it_never_degenerates_to_zero(self, monkeypatch):
+        """A zero lookback would make `region` empty and every split blind."""
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "chunk_boundary_lookback_share", 0.0)
+        assert StreamChunker(1024, 102, "").boundary_lookback == 1
+
+    def test_wider_lookback_cuts_mid_sentence_endings(self, monkeypatch):
+        """The end-to-end claim, on the real chunker rather than the helper."""
+        from app.config import settings
+
+        text = self._prose(400)
+
+        def ends_mid_sentence(share: float) -> float:
+            monkeypatch.setattr(settings, "chunk_boundary_lookback_share", share)
+            ch = StreamChunker(1024, 102, "")
+            chunks = ch.process(text) + ch.finalize()
+            bad = sum(1 for c in chunks if not c["text_preview"].rstrip().endswith("."))
+            return bad / len(chunks)
+
+        narrow = ends_mid_sentence(100 / 1024)
+        wide = ends_mid_sentence(0.25)
+        # Bounds, not exact rates: the narrow figure tracks this fixture's
+        # sentence length (measured 0.49 here) and a tight threshold would be
+        # brittle without testing anything more. The claim is the GAP.
+        assert wide < 0.05, f"expected 0.25 to snap nearly always, got {wide:.2f}"
+        assert narrow > 0.3, f"expected the old constant to cut blind often, got {narrow:.2f}"
+        assert narrow > wide * 5, f"narrow={narrow:.2f} wide={wide:.2f}"

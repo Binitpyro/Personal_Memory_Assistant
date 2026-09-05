@@ -123,6 +123,26 @@ class OllamaProvider:
         validation_cache.set(self.spec.id, self.base_url, self.api_key, result)
         return result
 
+    def _chat_payload(
+        self,
+        messages: list[dict[str, Any]],
+        model_name: str,
+        temperature: float,
+        max_tokens: int,
+        *,
+        stream: bool,
+        think: bool | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "model": model_name,
+            "messages": messages,
+            "stream": stream,
+            "options": {"temperature": temperature, "num_predict": max_tokens},
+        }
+        if think is not None:
+            payload["think"] = think
+        return payload
+
     async def chat(
         self,
         messages: list[dict[str, Any]],
@@ -131,21 +151,72 @@ class OllamaProvider:
         temperature: float = 0.2,
         max_tokens: int = 4096,
     ) -> str:
+        """Ask the model and return its answer text.
+
+        **A thinking model can spend the whole `num_predict` budget reasoning and
+        return an EMPTY `content`.** Ollama puts the reasoning in a separate
+        `message.thinking` field, which this provider does not use and the UI
+        never shows, so before 2026-09-04 the user simply got a blank answer with
+        no error to explain it. Measured on this machine: 13 of 100 eval queries
+        on `gemma4-local` at chunk_size=2048 (CLAUDE.md 8.7h).
+
+        Reproduced directly - a 6,000-character RAG prompt at `num_predict=256`
+        returns `content=''`, `thinking=1113 chars`, `done_reason='length'`,
+        while the identical request with `think: false` returns 1,271 characters
+        of real answer inside the same budget.
+
+        So the recovery is one retry with thinking off. Deliberately a RECOVERY
+        and not a blanket `think: false`: reasoning measured fine at the shipped
+        chunk_size=1024 (zero empties, 0.9133 answer-recall), and turning it off
+        everywhere would change behaviour that currently works on the strength of
+        no evidence at all. This path only fires where the answer is already lost.
+
+        `think` is safe to send to models that do not support it - verified
+        against `gemma2-2b`, which accepts it and answers normally.
+        """
         client = self._get_client()
         url = f"{self.base_url}/api/chat"
         model_name = model or self.default_model
 
-        payload = {
-            "model": model_name,
-            "messages": messages,
-            "stream": False,
-            "options": {"temperature": temperature, "num_predict": max_tokens},
-        }
-
-        resp = await client.post(url, json=payload)
+        resp = await client.post(
+            url,
+            json=self._chat_payload(messages, model_name, temperature, max_tokens, stream=False),
+        )
         resp.raise_for_status()
         data = resp.json()
-        return str(data["message"]["content"])
+        content = str(data.get("message", {}).get("content") or "")
+        if content:
+            return content
+
+        # Only retry the diagnosable case. An empty answer with no reasoning
+        # behind it is the model's own choice and repeating the call would just
+        # cost another round trip to get the same nothing.
+        thinking = str(data.get("message", {}).get("thinking") or "")
+        if not thinking:
+            logger.warning(
+                "Ollama model %s returned empty content (done_reason=%s) and no reasoning; "
+                "not retrying.",
+                model_name,
+                data.get("done_reason"),
+            )
+            return ""
+
+        logger.warning(
+            "Ollama model %s spent its %d-token budget reasoning (%d chars of thinking, "
+            "done_reason=%s) and returned no answer. Retrying once with think=false.",
+            model_name,
+            max_tokens,
+            len(thinking),
+            data.get("done_reason"),
+        )
+        retry = await client.post(
+            url,
+            json=self._chat_payload(
+                messages, model_name, temperature, max_tokens, stream=False, think=False
+            ),
+        )
+        retry.raise_for_status()
+        return str(retry.json().get("message", {}).get("content") or "")
 
     async def stream(
         self,
@@ -155,29 +226,61 @@ class OllamaProvider:
         temperature: float = 0.2,
         max_tokens: int = 4096,
     ) -> AsyncGenerator[str, None]:
+        """Stream the model's answer.
+
+        Carries the same thinking-model failure `chat` documents: reasoning
+        arrives as `message.thinking` and is not answer text, so a model that
+        exhausts its budget reasoning streams nothing at all and the user watches
+        an empty response complete successfully. Recovered the same way - if the
+        stream produced no content and reasoning was seen, replay it once with
+        `think: false`.
+        """
         client = self._get_client()
         url = f"{self.base_url}/api/chat"
         model_name = model or self.default_model
 
-        payload = {
-            "model": model_name,
-            "messages": messages,
-            "stream": True,
-            "options": {"temperature": temperature, "num_predict": max_tokens},
-        }
+        async def _once(think: bool | None) -> AsyncGenerator[tuple[str, bool], None]:
+            """Yield (text, is_thinking) for one pass over the stream."""
+            payload = self._chat_payload(
+                messages, model_name, temperature, max_tokens, stream=True, think=think
+            )
+            async with client.stream("POST", url, json=payload) as resp:
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    if not line:
+                        continue
+                    try:
+                        parsed = json.loads(line)
+                        msg = parsed.get("message", {})
+                        content = msg.get("content")
+                        if content:
+                            yield content, False
+                        elif msg.get("thinking"):
+                            # Not yielded to the caller - it is reasoning, not an
+                            # answer - but recorded so the retry can be gated on
+                            # having actually seen some.
+                            yield "", True
+                        if parsed.get("done", False):
+                            break
+                    except Exception as e:
+                        logger.debug("Failed to parse Ollama stream chunk: %s", e)
+                        continue
 
-        async with client.stream("POST", url, json=payload) as resp:
-            resp.raise_for_status()
-            async for line in resp.aiter_lines():
-                if not line:
-                    continue
-                try:
-                    parsed = json.loads(line)
-                    content = parsed.get("message", {}).get("content")
-                    if content:
-                        yield content
-                    if parsed.get("done", False):
-                        break
-                except Exception as e:
-                    logger.debug("Failed to parse Ollama stream chunk: %s", e)
-                    continue
+        produced = thought = False
+        async for text, is_thinking in _once(None):
+            if is_thinking:
+                thought = True
+                continue
+            produced = True
+            yield text
+
+        if produced or not thought:
+            return
+
+        logger.warning(
+            "Ollama model %s streamed only reasoning and no answer. Replaying with think=false.",
+            model_name,
+        )
+        async for text, is_thinking in _once(False):
+            if not is_thinking:
+                yield text

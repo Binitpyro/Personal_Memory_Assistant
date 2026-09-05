@@ -31,8 +31,32 @@ Object.defineProperty(globalThis, 'localStorage', { value: localStorageMock });
 Object.defineProperty(globalThis, 'sessionStorage', { value: localStorageMock });
 
 // Clean up DOM after each test manually since globals are disabled in Vitest config
-afterEach(() => {
+afterEach(async () => {
+  // Gate read BEFORE cleanup(), because cleanup is what removes the container.
+  // Present only when the test mounted a <Toaster/>, which is the only way to
+  // reach the leak below - 7 of 214 tests, so the wait costs ~1.75s, not ~53s.
+  const mountedToaster = document.querySelector('[data-sonner-toaster]') !== null;
+
   cleanup();
+
+  // sonner's `deleteToast` schedules `removeToast` TIME_BEFORE_UNMOUNT (200ms)
+  // later for the exit animation and NEVER clears it on unmount
+  // (node_modules/sonner/dist/index.mjs:567-577). If jsdom is torn down inside
+  // that window the callback runs against a dead environment and throws
+  // `ReferenceError: window is not defined` out of React's
+  // `resolveUpdatePriority`. Vitest reports that in "Unhandled Errors" and exits
+  // NON-ZERO even though every test passed - which is exactly how it presented:
+  // 29 files / 214 tests green, `Errors 1 error`, stage FAIL.
+  //
+  // Draining is the fix rather than `toast.dismiss()`, which routes through the
+  // same `deleteToast` and would schedule another one.
+  //
+  // Same class as the react-query race already documented at the foot of
+  // ExplorerPage.test.tsx, different source. It is load-dependent: the file
+  // passes in isolation and only fails in the full suite.
+  if (mountedToaster) {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
 });
 
 // Mock @tauri-apps APIs

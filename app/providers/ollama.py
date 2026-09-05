@@ -36,17 +36,112 @@ def _reported_context_length(item: dict[str, Any]) -> int:
     value is inside `details` - so this costs no extra request. Verified against
     `/api/show` for all six models above: identical every time.
 
-    **This number is the model's declared window, NOT a budget.** CLAUDE.md 8.7f
-    measured `gemma2-2b` truncating at ~4,099 tokens, head-first and silently,
-    while declaring 8,192 - so the declared window can be 2x what the model
-    actually honours. Nothing in the context-budget path reads this, and the
-    design review that added it rejected making it a budget source for exactly
-    that reason. It is display and diagnostics only.
+    **This number is the model's declared window, NOT a budget**, and nothing in
+    the context-budget path reads it. Display and diagnostics only.
+
+    The reason that separation matters turned out to be different from the one
+    written here first. This docstring originally cited CLAUDE.md 8.7f's ~4,099
+    truncation on `gemma2-2b` as proof that a declared window can be 2x what a
+    model honours. **That reading is retracted** - see `_required_num_ctx`: the
+    4,096 cliff is Ollama's own default `num_ctx`, reproduced identically on
+    `gemma4-local` with its 131,072-token window, so it was never a property of
+    the model or of this number.
+
+    What survives is the narrower and still sufficient point: the declared window
+    says what the model was trained for, not what this machine can serve. Section
+    6 targets ~4GB VRAM, and a 262,144-token window is a fact about the 12B, not
+    about the hardware underneath it.
     """
     raw = (item.get("details") or {}).get("context_length")
     if isinstance(raw, int) and raw > 0:
         return raw
     return _FALLBACK_CONTEXT_LENGTH
+
+
+# Ollama's own default context window. Measured on this machine 2026-09-04, not
+# recalled: a prompt of ~4,000 tokens is ingested whole (prompt_eval_count 4015)
+# and ~4,200 collapses to 2051 - so the cliff is 4096, and past it Ollama
+# discards roughly HALF the prompt rather than just the overflow.
+_OLLAMA_DEFAULT_NUM_CTX = 4096
+
+# Chars per token. Deliberately low: CLAUDE.md section 6 measured 5.09 for this
+# corpus, so dividing by 4 OVER-estimates the token count. Over-estimating costs
+# a slightly larger KV cache; under-estimating silently loses context, which is
+# the bug this exists to prevent.
+_CHARS_PER_TOKEN = 4
+
+# Room for the chat template, role markers and any tool preamble Ollama wraps
+# around the messages - `prompt_eval_count` ran ~15 tokens above the raw content
+# in every measurement above.
+_NUM_CTX_HEADROOM = 256
+
+
+def _required_num_ctx(messages: list[dict[str, Any]], max_tokens: int) -> int:
+    """How large Ollama's context window must be for this request.
+
+    **PMA never set `num_ctx`, and Ollama's default silently discarded most of a
+    long prompt.** Measured against a live server on 2026-09-04 with
+    `gemma4-local`, whose declared window is 131,072:
+
+        ~6,000-token prompt, num_ctx unset   -> prompt_eval_count = 2051
+        ~6,000-token prompt, num_ctx=16384   -> prompt_eval_count = 6015
+
+    So `compute_context_budget` would hand `7b_local` an 8,520-token budget,
+    `build_context` would fill it, and Ollama would throw most of it away before
+    the model saw a word of it. The class with the LARGEST budget was the one
+    losing the most.
+
+    **This retracts a claim.** CLAUDE.md 8.7f recorded `gemma2-2b` truncating at
+    ~4,099 tokens "head first" and read that as a property of the model. It is
+    not: `gemma4-local` behaves identically despite a 131,072-token declared
+    window, because the limit belongs to the *server default*, not the model.
+
+    Sized to the request rather than maxed out, because `num_ctx` sizes the KV
+    cache and section 6 targets a ~4GB VRAM machine. Left unset below the default
+    so short prompts allocate exactly what they do today.
+
+    Not clamped to the model's declared window: every chat model here declares at
+    least 8,192 and PMA's largest local ceiling is 10,000, so the clamp cannot
+    bind. Revisit if a ceiling ever exceeds a declared window.
+    """
+    chars = sum(len(str(m.get("content") or "")) for m in messages)
+    return chars // _CHARS_PER_TOKEN + max_tokens + _NUM_CTX_HEADROOM
+
+
+def _family(item: dict[str, Any]) -> str:
+    """Whether this model can read an image, from Ollama rather than its name.
+
+    `/api/tags` reports a `capabilities` list per model, in the response
+    `list_models` already fetches - so this is authoritative and costs nothing.
+
+    It replaces `looks_like_vision_model`, a substring match over a fragment list
+    that includes `"gemma4"`. Measured against the live server on 2026-09-04, that
+    heuristic was **wrong in the dangerous direction** on two of six models here:
+
+        glm-ocr            vision,completion,tools      guessed vision   correct
+        gemma4-local       completion,tools,thinking    guessed vision   FALSE POSITIVE
+        gemma4-12B-local   completion,tools,thinking    guessed vision   FALSE POSITIVE
+        gemma2-2b          completion                   guessed chat     correct
+        qwen-coder-local   completion                   guessed chat     correct
+        nomic-embed-text   embedding                    guessed chat     correct
+
+    `looks_like_vision_model`'s own docstring names why a false positive is the
+    costly one: "silently running OCR through a text-only model produces
+    confident hallucinated page text that lands in the search index". The OCR
+    Tier 3 picker (`app/ocr/api.py`) is built from this, so both Gemma 4 models
+    were being offered as vision models for page images they cannot read.
+
+    The heuristic stays as the fallback for an older server that reports no
+    capabilities at all, and remains the only option for providers that expose
+    nothing equivalent - LM Studio goes through `openai_compat`, which has no
+    such field.
+    """
+    from app.providers.vision import looks_like_vision_model
+
+    caps = item.get("capabilities")
+    if isinstance(caps, list) and caps:
+        return "vision" if "vision" in caps else "chat"
+    return "vision" if looks_like_vision_model(str(item.get("name") or "")) else "chat"
 
 
 class OllamaProvider:
@@ -83,8 +178,6 @@ class OllamaProvider:
         resp.raise_for_status()
         data = resp.json()
 
-        from app.providers.vision import looks_like_vision_model
-
         models = []
         for item in data.get("models", []):
             name = item.get("name")
@@ -97,7 +190,7 @@ class OllamaProvider:
                         "id": name,
                         "context_length": _reported_context_length(item),
                         "pricing_hint": 0.0,
-                        "family": "vision" if looks_like_vision_model(name) else "chat",
+                        "family": _family(item),
                     }
                 )
         return cast(list[ModelInfo], models)
@@ -169,11 +262,15 @@ class OllamaProvider:
         stream: bool,
         think: bool | None = None,
     ) -> dict[str, Any]:
+        options: dict[str, Any] = {"temperature": temperature, "num_predict": max_tokens}
+        num_ctx = _required_num_ctx(messages, max_tokens)
+        if num_ctx > _OLLAMA_DEFAULT_NUM_CTX:
+            options["num_ctx"] = num_ctx
         payload: dict[str, Any] = {
             "model": model_name,
             "messages": messages,
             "stream": stream,
-            "options": {"temperature": temperature, "num_predict": max_tokens},
+            "options": options,
         }
         if think is not None:
             payload["think"] = think

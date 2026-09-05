@@ -21,6 +21,7 @@ import httpx
 import pytest
 
 from app.providers import create_provider
+from app.providers.ollama import _OLLAMA_DEFAULT_NUM_CTX, _required_num_ctx
 
 _URL = "http://localhost:11434/api/chat"
 _MSG = [{"role": "user", "content": "why?"}]
@@ -179,3 +180,74 @@ class TestStreamRecoversFromReasoningOnlyReplies:
         assert got == []
         assert stream.call_count == 1
         await provider.close()
+
+
+class TestNumCtxIsSetSoOllamaStopsDiscardingContext:
+    """PMA assembled a context budget and Ollama threw most of it away.
+
+    `_chat_payload` never sent `num_ctx`, so every request ran at Ollama's
+    server default. Measured live 2026-09-04 against `gemma4-local`, whose
+    DECLARED window is 131,072:
+
+        ~4,000-token prompt, num_ctx unset -> prompt_eval_count 4015  (whole)
+        ~4,200-token prompt, num_ctx unset -> prompt_eval_count 2051  (cliff)
+        ~8,000-token prompt, num_ctx unset -> prompt_eval_count 2051
+        ~8,000-token prompt, num_ctx set   -> prompt_eval_count 8022
+
+    The cliff is 4096 and past it Ollama discards roughly HALF the prompt, not
+    just the overflow. `compute_context_budget` gives `7b_local` ~8,520 tokens,
+    so the class with the largest budget was losing the most - about 3.9x.
+
+    This also retracts CLAUDE.md 8.7f's reading of the ~4,099 cap as a property
+    of `gemma2-2b`: `gemma4-local` does the same with a 131,072 window, so the
+    limit is the server default, not the model.
+    """
+
+    def test_a_short_prompt_does_not_set_it(self):
+        """Below the default, behaviour must be byte-identical to before."""
+        provider = _provider()
+        payload = provider._chat_payload(
+            [{"role": "user", "content": "hi"}], "m", 0.2, 256, stream=False
+        )
+        assert "num_ctx" not in payload["options"]
+        assert payload["options"] == {"temperature": 0.2, "num_predict": 256}
+
+    def test_a_long_prompt_sets_it_above_the_default(self):
+        provider = _provider()
+        # ~8,000 tokens of content, the size 7b_local is actually given.
+        payload = provider._chat_payload(
+            [{"role": "user", "content": "token " * 8000}], "m", 0.2, 256, stream=False
+        )
+        assert payload["options"]["num_ctx"] > _OLLAMA_DEFAULT_NUM_CTX
+
+    def test_it_covers_the_prompt_and_the_reply(self):
+        """num_ctx has to hold BOTH, or generation truncates instead."""
+        msgs = [{"role": "user", "content": "x" * 40000}]  # ~10,000 tokens
+        need = _required_num_ctx(msgs, max_tokens=4096)
+        assert need >= 10000 + 4096
+
+    def test_the_estimate_over_counts_rather_than_under(self):
+        """4 chars/token against a corpus measured at 5.09 (CLAUDE.md 6).
+        Over-estimating costs KV cache; under-estimating silently loses context."""
+        msgs = [{"role": "user", "content": "x" * 5090}]  # ~1,000 real tokens
+        assert _required_num_ctx(msgs, max_tokens=0) > 1000
+
+    def test_every_message_counts_not_just_the_last(self):
+        """A chat history is part of the prompt Ollama has to hold."""
+        one = _required_num_ctx([{"role": "user", "content": "x" * 20000}], 0)
+        many = _required_num_ctx([{"role": "user", "content": "x" * 20000}] * 3, 0)
+        assert many > one
+
+    def test_a_missing_or_null_content_does_not_raise(self):
+        assert _required_num_ctx([{"role": "user"}], 0) > 0
+        assert _required_num_ctx([{"role": "user", "content": None}], 0) > 0
+
+    def test_the_streaming_path_sets_it_too(self):
+        """The bug was in the shared payload builder, so both paths inherit the
+        fix - pinned because a future refactor could split them."""
+        provider = _provider()
+        payload = provider._chat_payload(
+            [{"role": "user", "content": "token " * 8000}], "m", 0.2, 256, stream=True
+        )
+        assert payload["stream"] is True
+        assert payload["options"]["num_ctx"] > _OLLAMA_DEFAULT_NUM_CTX

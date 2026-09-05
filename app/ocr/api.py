@@ -107,7 +107,6 @@ async def list_vlm_models():
     from app.providers.registry import PROVIDER_REGISTRY
     from app.providers.vision import (
         SUGGESTED_VISION_MODELS,
-        looks_like_vision_model,
         supports_vision_messages,
     )
 
@@ -141,8 +140,16 @@ async def list_vlm_models():
             finally:
                 await provider.close()
             entry["reachable"] = True
+            # Reads the family the provider already decided rather than
+            # re-running a name heuristic on the id. Ollama derives that from
+            # the `capabilities` it reports, so this picker stops offering
+            # text-only models for page images - it was offering both Gemma 4
+            # models, which report `completion,tools,thinking` and no vision.
+            # Providers with nothing equivalent (LM Studio via openai_compat)
+            # still fall back to the heuristic inside their own list_models, so
+            # this is one derivation instead of two that could disagree.
             entry["models"] = [
-                {"id": m["id"], "vision": looks_like_vision_model(str(m["id"]))} for m in models
+                {"id": m["id"], "vision": m.get("family") == "vision"} for m in models
             ]
             any_vision = any_vision or any(m["vision"] for m in entry["models"])
         except Exception as exc:

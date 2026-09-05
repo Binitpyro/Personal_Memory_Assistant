@@ -1,28 +1,37 @@
-"""The two changes a design review approved out of a larger, rejected proposal.
+"""Provider metadata that PMA was guessing instead of reading.
 
-CLAUDE.md 8.7f proposed deriving the context budget from the provider's reported
-window, deleting `EFFECTIVE_CEILINGS` and the name heuristic together. **That was
-rejected on measured evidence**: Ollama reports `context_length: 8192` for
-`gemma2-2b`, which 8.7f measured truncating at ~4,099 tokens - the declared
-window is 2x what the model honours, so trusting it would have reproduced the
-same silent truncation with more confidence behind it.
+Three changes, all the same shape: Ollama already reports the answer in the
+`/api/tags` response `list_models` fetches, and PMA was inferring it from the
+model name instead.
 
-What survived is smaller and cannot regress a budget:
+  D1  the declared context window, instead of a hardcoded 8192 for every model
+      (display and diagnostics only - it is not a budget)
+  D3  a warning when a model lands in the large context class purely because
+      nothing in its name parsed
+  --  `family` from reported `capabilities` instead of a substring match, which
+      was calling two text-only models "vision" and offering them to OCR
 
-  D1  report the model's real declared window instead of a hardcoded 8192,
-      for display and diagnostics only
-  D3  say so when a model gets the large context class purely because nothing
-      in its name parsed
+They came out of a design review that REJECTED a larger proposal - deriving the
+context budget from the declared window - because `model_class` also selects a
+delivery shape that a window size cannot inform, and collapsing the two would
+have invalidated the 8.7f-8.7h measurements.
 
-These are deterministic and hit no network (CLAUDE.md section 11). The live
-values they encode were verified against a running Ollama separately.
+> **One premise of that review was itself wrong, and is retracted.** It rested
+> partly on 8.7f reading `gemma2-2b`'s ~4,099-token truncation as a property of
+> the model. It is not: the 4,096 cliff is Ollama's default `num_ctx`, and
+> `gemma4-local` hits it identically with a 131,072-token window. See
+> `_required_num_ctx` and TestNumCtxIsSetSoOllamaStopsDiscardingContext. The
+> review's conclusion still stands on its other two objections.
+
+Deterministic, no network (CLAUDE.md section 11). The live values encoded here
+were verified against a running Ollama separately.
 """
 
 import logging
 
 import pytest
 
-from app.providers.ollama import _FALLBACK_CONTEXT_LENGTH, _reported_context_length
+from app.providers.ollama import _FALLBACK_CONTEXT_LENGTH, _family, _reported_context_length
 from app.search import llm_client
 from app.search.llm_client import _classify_local_model
 
@@ -121,3 +130,65 @@ class TestUnparsedModelNameIsAnnounced:
         assert _classify_local_model("qwen2.5:7b") == "7b_local"
         assert _classify_local_model("") == "7b_local"
         assert _classify_local_model(None) == "7b_local"
+
+
+class TestFamilyComesFromReportedCapabilities:
+    """`looks_like_vision_model` lists "gemma4" as a vision fragment, and it is
+    wrong in the DANGEROUS direction for two of this machine's six models.
+
+    Its own docstring names the asymmetry: "silently running OCR through a
+    text-only model produces confident hallucinated page text that lands in the
+    search index." Measured live 2026-09-04:
+
+        glm-ocr            vision,completion,tools      guess vision   correct
+        gemma4-local       completion,tools,thinking    guess vision   FALSE POS
+        gemma4-12B-local   completion,tools,thinking    guess vision   FALSE POS
+    """
+
+    def test_reported_capabilities_beat_the_name(self):
+        """The regression under test: the name says vision, the server says no."""
+        assert (
+            _family(
+                {"name": "gemma4-local:latest", "capabilities": ["completion", "tools", "thinking"]}
+            )
+            == "chat"
+        )
+        assert (
+            _family({"name": "gemma4-12B-local:latest", "capabilities": ["completion", "tools"]})
+            == "chat"
+        )
+
+    def test_a_real_vision_model_is_still_found(self):
+        """The fix must not trade false positives for false negatives."""
+        assert (
+            _family({"name": "glm-ocr:latest", "capabilities": ["vision", "completion"]})
+            == "vision"
+        )
+        # A vision model whose NAME gives nothing away is the case only the
+        # reported capabilities can catch.
+        assert _family({"name": "my-custom-import:latest", "capabilities": ["vision"]}) == "vision"
+
+    @pytest.mark.parametrize(
+        "item",
+        [
+            {"name": "llava:7b"},
+            {"name": "llava:7b", "capabilities": []},
+            {"name": "llava:7b", "capabilities": None},
+            {"name": "llava:7b", "capabilities": "vision"},  # str, not list
+        ],
+        ids=["absent", "empty", "null", "wrong-type"],
+    )
+    def test_it_falls_back_to_the_heuristic_when_nothing_is_reported(self, item):
+        """An older Ollama reports no capabilities, and LM Studio never will."""
+        assert _family(item) == "vision"
+
+    def test_the_fallback_is_still_only_a_guess(self):
+        """Pins that the fallback is the OLD behaviour, warts included - a
+        model named `gemma4-*` with no reported capabilities is still guessed
+        vision. That is the heuristic's problem, and the fix is to report
+        capabilities, not to keep patching the fragment list."""
+        assert _family({"name": "gemma4-local:latest"}) == "vision"
+
+    def test_a_name_with_no_capabilities_and_no_match_is_chat(self):
+        assert _family({"name": "qwen-coder-local:latest"}) == "chat"
+        assert _family({}) == "chat"

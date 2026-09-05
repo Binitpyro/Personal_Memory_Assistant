@@ -299,9 +299,9 @@ graphify-out/
 /tests/eval/corpus_scifact/
 /tests/eval/queries_scifact.json
 
-# research/journal.jsonl is deliberately NOT ignored - it is the evidence record
-# for every experiment the loop has run, and the reason a later session does not
-# repeat work. research/PROGRAM.md and EDITABLE.md are tracked for the same reason.
+# research/PROGRAM.md and EDITABLE.md are tracked - they are design documents.
+# The journals are NOT: see the block at the foot of this file. This comment used
+# to say the opposite and was left stale when they were untracked on 2026-09-05.
 
 # Text materialised from a PERSONAL corpus by scripts/materialize_corpus.py.
 # Real coursework, notes and documents - it must never enter git, and the

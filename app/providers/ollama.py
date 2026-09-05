@@ -12,6 +12,42 @@ from app.providers.registry import spec_of
 
 logger = logging.getLogger(__name__)
 
+# Used only when Ollama does not report a window for a model. Ollama has carried
+# `details.context_length` in /api/tags for a long time, but an older server or a
+# hand-built manifest may omit it, and a listing that drops the model entirely
+# would be worse than one carrying a conservative number.
+_FALLBACK_CONTEXT_LENGTH = 8192
+
+
+def _reported_context_length(item: dict[str, Any]) -> int:
+    """The model's real context window, as Ollama reports it.
+
+    This was the literal 8192 for **every** model until 2026-09-04, which is
+    wrong for most of them and is rendered to the user at
+    `frontend/src/pages/ProvidersPage.tsx:700` as "N ctx" - so someone picking a
+    model for long documents was shown 8,192 for a 131,072-token model. Measured
+    on this machine:
+
+        gemma4-local       131072      qwen-coder-local     32768
+        gemma4-12B-local   262144      gemma2-2b             8192
+        glm-ocr            131072      nomic-embed-text      2048
+
+    Read from the `/api/tags` response that `list_models` already fetches - the
+    value is inside `details` - so this costs no extra request. Verified against
+    `/api/show` for all six models above: identical every time.
+
+    **This number is the model's declared window, NOT a budget.** CLAUDE.md 8.7f
+    measured `gemma2-2b` truncating at ~4,099 tokens, head-first and silently,
+    while declaring 8,192 - so the declared window can be 2x what the model
+    actually honours. Nothing in the context-budget path reads this, and the
+    design review that added it rejected making it a budget source for exactly
+    that reason. It is display and diagnostics only.
+    """
+    raw = (item.get("details") or {}).get("context_length")
+    if isinstance(raw, int) and raw > 0:
+        return raw
+    return _FALLBACK_CONTEXT_LENGTH
+
 
 class OllamaProvider:
     def __init__(
@@ -59,7 +95,7 @@ class OllamaProvider:
                 models.append(
                     {
                         "id": name,
-                        "context_length": 8192,
+                        "context_length": _reported_context_length(item),
                         "pricing_hint": 0.0,
                         "family": "vision" if looks_like_vision_model(name) else "chat",
                     }

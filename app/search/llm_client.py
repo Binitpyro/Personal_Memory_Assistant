@@ -108,6 +108,42 @@ def _parse_param_billions(model: str | None) -> float | None:
     return min(float(m) for m in matches)
 
 
+# Model names already warned about. `get_model_class` runs on EVERY query
+# (`retrieval.py:1249`, `:1627`), so an ungated warning would be one line per
+# question asked.
+_UNPARSED_MODEL_NAMES: set[str] = set()
+
+
+def _warn_unparsed_model_name(name: str) -> None:
+    """Say so when a model gets the large budget only because nothing matched.
+
+    The fallback below is silent, and CLAUDE.md 8.7f records what that costs: a
+    model whose name carries no parameter count lands on `7b_local`, is handed an
+    8,520-token budget, and if it is actually small its prompt is truncated
+    **head-first** - so the system prompt goes before any evidence does, and the
+    answer degrades with nothing in the logs to explain it. Every model in this
+    developer's own library is a custom `*-local` import with no digits, so this
+    path is the normal one here rather than an edge case.
+
+    Warning rather than guessing smaller: demoting an unknown model to
+    `3b_local` would halve the context of every correctly-sized model that just
+    happens to be named without a size, which is a real regression traded for a
+    hypothetical one. Make it visible, let `model_class_overrides` fix it.
+    """
+    if name in _UNPARSED_MODEL_NAMES:
+        return
+    _UNPARSED_MODEL_NAMES.add(name)
+    logger.warning(
+        "Model %r has no parameter count in its name, so it defaults to the "
+        "'7b_local' context class (a ~8,520 token budget). If it is smaller than "
+        "%.0fB its prompt will be truncated head-first and silently - set "
+        'PMA_MODEL_CLASS_OVERRIDES=\'{"%s": "3b_local"}\' to correct it.',
+        name,
+        _SMALL_MODEL_BILLIONS,
+        name,
+    )
+
+
 def _classify_local_model(model: str | None) -> str:
     """Map a local model name onto a context-budget class.
 
@@ -137,6 +173,7 @@ def _classify_local_model(model: str | None) -> str:
         # "mini"/"small" are the only naming conventions worth trusting blind.
         if "mini" in name or "small" in name:
             return "3b_local"
+        _warn_unparsed_model_name(name)
         return "7b_local"
     return "3b_local" if billions < _SMALL_MODEL_BILLIONS else "7b_local"
 

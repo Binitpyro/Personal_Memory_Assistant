@@ -315,3 +315,12 @@ graphify-out/
 # provenance recorded in the queries file, so it does not belong in git.
 /tests/eval/corpus_squad/
 /tests/eval/queries_squad.json
+/Claude outputs
+
+# Autoresearch journals. Machine-generated sweep results, append-only, ~1.8 KB
+# per row and growing with every experiment - section 13's "reports land in the
+# repo root ... do not commit these" applies to them as much as to coverage.xml.
+# They stay ON DISK: `scripts/autoresearch.py --resume` reads them to skip work
+# already done, and they are the per-build numbers behind the measured claims in
+# CLAUDE.md. Untracked, not deleted.
+research/journal*.jsonl

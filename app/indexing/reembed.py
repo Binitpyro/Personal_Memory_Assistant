@@ -17,6 +17,10 @@ from typing import Any
 
 import numpy as np
 
+from app.config import settings
+from app.indexing.summarizer import summary_embedding_text
+from app.project_constants import chunk_embedding_text
+
 logger = logging.getLogger(__name__)
 
 _BATCH_SIZE = 5000
@@ -66,7 +70,13 @@ async def _reembed_chunks(db, emb, lance, batch_size: int) -> tuple[int, int]:
 
         ids_int = [r[0] for r in rows]
         ids_str = [str(r[0]) for r in rows]
-        texts = [_decompress(r[1]) for r in rows]
+        # Must match the ingest-time form (service.py `_process_embed_stream_batch`).
+        # r[2] is f.path; no offsets are selected here, which is exactly why the
+        # strip is path-based rather than length-based.
+        texts = [
+            chunk_embedding_text(_decompress(r[1]), str(r[2]), settings.embed_chunk_prefix)
+            for r in rows
+        ]
 
         embeddings_list = await emb.embed_texts(texts)
         embeddings_np = [np.array(e, dtype=np.float32) for e in embeddings_list]
@@ -130,7 +140,12 @@ async def _rebuild_summaries(db, emb, lance, batch_size: int) -> int:
         if not rows:
             break
 
-        embs = await emb.embed_texts([str(r[3]) for r in rows])
+        # De-scaffolded, matching service.py `_generate_summaries`. These two
+        # loops HAD drifted: this one embedded the raw display string, so every
+        # user-initiated rebuild silently replaced each summary vector with the
+        # form summary_embedding_text measured as noise (recall 0.972 -> 0.819).
+        # The module docstring above names this exact failure mode.
+        embs = await emb.embed_texts([summary_embedding_text(r[1], str(r[3])) for r in rows])
         await lance.add_summaries_batch(
             [
                 {

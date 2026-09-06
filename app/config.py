@@ -117,6 +117,20 @@ class Settings(BaseSettings):
     #
     # Set to "" to disable and embed queries exactly like documents.
     embedding_query_prefix: str = "Represent this sentence for searching relevant passages: "
+    # The document-side mirror of the block above, and the case it says does not
+    # arise: documents ARE re-embedded by this. `text_preview` is stored as
+    # `[EXT: name] ` + body, and that tag is identical for every chunk of a file
+    # and differs only by filename across the corpus - so it is a constant the
+    # encoder spends attention on and cosine similarity partly ranks by. The
+    # same argument, measured, is why summary_embedding_text exists
+    # (recall 0.972 -> 0.819 when the summary scaffold was embedded verbatim).
+    #
+    # Whether that transfers to a chunk is UNMEASURED and is the point of the
+    # sweep: the summary scaffold dominates a ~300-character string, while this
+    # is ~15 characters of 1024, roughly 15x weaker. Default True keeps existing
+    # behaviour byte for byte; flipping it invalidates every stored chunk vector
+    # and is announced through the embedding_model_signature mismatch banner.
+    embed_chunk_prefix: bool = True
     embedding_allow_download: bool = True
     embedding_allow_unpinned: bool = False
 

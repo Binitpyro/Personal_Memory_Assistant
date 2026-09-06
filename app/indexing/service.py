@@ -28,6 +28,7 @@ from app.indexing.summarizer import generate_deep_summary, summary_embedding_tex
 from app.project_constants import (
     TEXT_EXTENSIONS,
     build_context_prefix,
+    chunk_embedding_text,
 )
 from app.scanner.scanner import scan_folder as fast_scan
 from app.storage.db import DatabaseManager
@@ -1317,7 +1318,12 @@ class IndexingService:
     async def _process_embed_stream_batch(
         self, batch_items: list[dict[str, Any]], update_progress: bool = True
     ):
-        texts = [item["chunk"]["text_preview"] for item in batch_items]
+        texts = [
+            chunk_embedding_text(
+                item["chunk"]["text_preview"], str(item["path"]), settings.embed_chunk_prefix
+            )
+            for item in batch_items
+        ]
         if not texts:
             return
 

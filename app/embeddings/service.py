@@ -20,6 +20,22 @@ class EmbeddingUnavailableError(RuntimeError):
     pass
 
 
+def _compose_signature(repo_id: str, revision: str, rel_key: str, keep_prefix: bool) -> str:
+    """The marker that says which convention the stored vectors were built under.
+
+    Model identity alone is not enough: `check_model_signature` (app/main.py) is
+    the only thing that tells a user their LanceDB vectors are stale, and a change
+    to WHAT text gets embedded leaves the model identity byte-identical. Without
+    the suffix the mismatch banner never fires and the index degrades silently.
+
+    Appended only when the flag is off, so every existing default install keeps
+    the signature it already stored and nobody is shown a mismatch for a setting
+    they never touched.
+    """
+    sig = f"{repo_id}@{revision}:{rel_key}"
+    return sig if keep_prefix else f"{sig}:noprefix"
+
+
 def _get_models_lock_data() -> dict[str, Any]:
     """Pinned model manifest. Kept as a module-level name because tests patch
     ``app.embeddings.service._get_models_lock_data`` directly."""
@@ -270,7 +286,9 @@ class EmbeddingService:
 
         rev_str = revision or "local"
         r_id = repo_id or self.model_name
-        self.model_signature = f"{r_id}@{rev_str}:{rel_key}"
+        self.model_signature = _compose_signature(
+            r_id, rev_str, rel_key, settings.embed_chunk_prefix
+        )
 
     def load_model(self) -> None:
         """Loads the embedding model using ONNX Runtime (blocking)."""

@@ -199,3 +199,19 @@ def build_context_prefix(file_path: str) -> str:
     """The ``[EXT: name] `` tag every chunker prepends to ``text_preview``."""
     p = Path(file_path)
     return f"[{p.suffix.lstrip('.').upper() or 'file'}: {p.name}] "
+
+
+def chunk_embedding_text(text_preview: str, file_path: str, keep_prefix: bool) -> str:
+    """What the embedder sees, which is not what storage holds.
+
+    Mirrors ``summarizer.summary_embedding_text`` one layer down: the stored
+    string is for display, FTS and offset arithmetic; this is for the vector.
+    Storage is never rewritten, so FTS keeps its filename tokens and every
+    ``start_offset``/``end_offset`` stays valid.
+
+    ``keep_prefix`` is a parameter rather than a settings read so this module
+    keeps importing nothing but the standard library.
+    """
+    if keep_prefix:
+        return text_preview
+    return text_preview.removeprefix(build_context_prefix(file_path))

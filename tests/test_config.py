@@ -1,6 +1,7 @@
 import pytest
 
 from app.config import Settings
+from app.project_constants import build_context_prefix, chunk_embedding_text
 
 
 class TestOllamaUrlNormalization:
@@ -105,3 +106,31 @@ class TestOcrSettings:
     def test_tunables_are_clamped(self, monkeypatch, env, value, expected):
         monkeypatch.setenv(env, value)
         assert getattr(Settings(), env.removeprefix("PMA_").lower()) == expected
+
+
+class TestChunkEmbeddingText:
+    """What the embedder sees is not what storage holds. CLAUDE.md D1.
+
+    The stored `text_preview` keeps its `[EXT: name] ` tag for display, FTS
+    filename tokens and the offset arithmetic in `_chunk_body`; only the vector
+    is built from the body.
+    """
+
+    PATH = "/corpus/notes.md"
+    BODY = "curl noise is divergence free by construction."
+
+    def test_identity_when_the_prefix_is_kept(self):
+        preview = build_context_prefix(self.PATH) + self.BODY
+        assert chunk_embedding_text(preview, self.PATH, True) == preview
+
+    def test_strips_exactly_the_prefix_when_off(self):
+        preview = build_context_prefix(self.PATH) + self.BODY
+        assert chunk_embedding_text(preview, self.PATH, False) == self.BODY
+
+    def test_identity_when_the_preview_does_not_carry_its_prefix(self):
+        """An OCR or code chunk whose stored form differs must not be truncated
+        by a blind slice - removeprefix is a no-op, len(prefix) would not be."""
+        assert chunk_embedding_text(self.BODY, self.PATH, False) == self.BODY
+
+    def test_default_preserves_todays_behaviour(self):
+        assert Settings().embed_chunk_prefix is True

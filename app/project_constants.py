@@ -183,3 +183,19 @@ KEY_NAMES = {
     "docker-compose.yml",
 }
 KEY_EXTS = {".sln", ".csproj", UNITY_SCENE_EXT}
+
+
+# Chunk text conventions
+#
+# `text_preview` as stored is `build_context_prefix(path) + body`. That prefix is
+# for display and FTS: it is identical for every chunk of a file and differs only
+# by filename across the corpus, so it carries no ranking signal - the same
+# argument summarizer.summary_embedding_text records for the summary leg.
+#
+# It lives here rather than in app/indexing/ because app/search/retrieval.py has
+# to strip it and must not import the indexer; app/indexing/service.py's own lazy
+# imports exist to keep that edge out of the module graph.
+def build_context_prefix(file_path: str) -> str:
+    """The ``[EXT: name] `` tag every chunker prepends to ``text_preview``."""
+    p = Path(file_path)
+    return f"[{p.suffix.lstrip('.').upper() or 'file'}: {p.name}] "

@@ -27,6 +27,7 @@ from app.indexing.folder_profiler import (
 from app.indexing.summarizer import generate_deep_summary, summary_embedding_text
 from app.project_constants import (
     TEXT_EXTENSIONS,
+    build_context_prefix,
 )
 from app.scanner.scanner import scan_folder as fast_scan
 from app.storage.db import DatabaseManager
@@ -2055,5 +2056,4 @@ class IndexingService:
 
     @staticmethod
     def _build_context_prefix(file_path: str) -> str:
-        p = Path(file_path)
-        return f"[{p.suffix.lstrip('.').upper() or 'file'}: {p.name}] "
+        return build_context_prefix(file_path)

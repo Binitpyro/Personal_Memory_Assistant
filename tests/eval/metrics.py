@@ -476,3 +476,34 @@ def answer_token_f1(generated: str, reference: str) -> float:
     precision = overlap / n_gen
     recall = overlap / n_ref
     return 2 * precision * recall / (precision + recall)
+
+
+def boundary_margin(chunks: Sequence[dict], span: dict) -> int | None:
+    """Chars between an answer span and the nearest edge of its chunk.
+
+    The population a boundary-sensitive knob (``chunk_overlap``) can act on at
+    all. Whole-corpus means cannot see such a knob: measured 2026-09-06, 19 of
+    corpus_squad's 100 answers sit within 102 chars of an edge, so an effect of
+    0.08 on those shows as 0.015 on the mean - below the ~0.017 delivery
+    threshold. Stratify on this before concluding a null.
+
+    Replaces the straddle test the design review asked for, which is unrunnable:
+    at ``chunk_overlap=0`` **0 of 100** SQuAD answers cross a boundary, because
+    the median answer is 20 chars against a 1024-char chunk whose split now snaps
+    to a sentence end. Counting boundary CROSSINGS finds nothing; measuring
+    DISTANCE to the boundary finds the population.
+
+    ``chunks`` are dicts carrying ``start_offset``/``end_offset`` (what
+    ``StreamChunker`` emits); ``span`` carries ``start``/``end``. Returns None
+    when no chunk contains the span. Measure at overlap 0 - overlap duplicates
+    text into the neighbour and inflates any crossing count mechanically.
+    """
+    touching = [
+        c for c in chunks if c["start_offset"] < span["end"] and c["end_offset"] > span["start"]
+    ]
+    if not touching:
+        return None
+    c = touching[0]
+    # int() rather than a cast: the dicts are untyped, and _result_span above
+    # converts for the same reason.
+    return min(int(span["start"]) - int(c["start_offset"]), int(c["end_offset"]) - int(span["end"]))

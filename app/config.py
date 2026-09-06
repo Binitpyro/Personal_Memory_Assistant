@@ -324,7 +324,44 @@ class Settings(BaseSettings):
     # `chunk_boundary_lookback_share` below is part of this change and not a
     # separate one.
     chunk_size: int = 1024
-    # Held at ~10% of chunk_size, which is what the sweep above used.
+    # SWEPT 2026-09-06 and DELIBERATELY UNCHANGED. This used to read "held at
+    # ~10% of chunk_size, which is what the sweep above used" - i.e. it was a
+    # passenger on the chunk_size sweep and had never been measured on its own.
+    # It has been now: {0, 51, 102, 205} x 3 builds on corpus_squad, delivery
+    # stage, reranker on (research/d2_delivery/).
+    #
+    #  overlap | chunks | doc nDCG | doc recall | retr cov | delivered cov (n=100)
+    #     0    |  1764  |  0.9860  |   1.000    |  0.9800  |  0.9521 +-.0059
+    #    51    |  1860  |  0.9794  |   0.990    |  0.9733  |  0.9600 +-.0000
+    #   102    |  1965  |  0.9900  |   1.000    |  0.9782  |  0.9619 +-.0029  <- ships
+    #   205    |  2241  |  0.9792  |   0.993    |  0.9767  |  0.9560 +-.0028
+    #
+    # Three things, and only the first is decided.
+    #
+    # 1. Overlap does not change RETRIEVAL. nDCG, recall and retrieval-stage
+    #    coverage are flat across a 4x range. What it changes is chunk COUNT,
+    #    hence embedding compute, SQLite/LanceDB rows and index size: +11.4% at
+    #    102 over 0, +27% at 205. That is a cost knob, not a quality knob.
+    # 2. Quality at 0 vs 102 is NOT DECIDABLE here: +0.0098 against corpus_squad's
+    #    ~0.017 delivery threshold. Do not read the ordering above as a result.
+    # 3. On the 19 queries overlap can actually reach - answer within 102 chars of
+    #    a chunk edge, classified in research/d2_delivery/margins.json - MORE
+    #    overlap measured WORSE, monotonically: 0.9415 / 0.9298 / 0.9298 / 0.8947.
+    #    Mechanism, predicted before the run: adjacent chunks share at most
+    #    205/1024 = 0.20 of their span against _deduplicate_redundant's 0.7
+    #    threshold, so overlapping neighbours NEVER dedup - they spend two context
+    #    slots delivering one passage of new text.
+    #
+    # Kept at 102 anyway, and the reason is a gap rather than a preference. Every
+    # number above comes from corpus_squad, whose answers are 1-5 words: 0 of 100
+    # straddle a chunk boundary at overlap=0, which is why the straddle analysis
+    # had to be replaced by margin stratification. Overlap's actual job is
+    # protecting LONG answers, and the only fixture with those (corpus_large,
+    # 4 of 8 straddling) has delivery sd 0.069-0.137 and cannot resolve it.
+    # So "cheaper and no worse" is established for cost and UNESTABLISHED for the
+    # case the knob exists to serve. Lowering a shipped default on an
+    # undecidable measurement is the 8.4a failure mode. The saving is real and
+    # available whenever a long-answer fixture with power exists.
     chunk_overlap: int = 102
     # How far back from the target split point to hunt for a sentence or
     # paragraph end, as a fraction of chunk_size. `StreamChunker._find_boundary`

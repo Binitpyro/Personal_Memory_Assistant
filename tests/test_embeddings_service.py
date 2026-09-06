@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 from app.embeddings import service as service_module
-from app.embeddings.service import EmbeddingService
+from app.embeddings.service import EmbeddingService, _compose_signature
 
 
 class TestEmbeddingServiceInit:
@@ -648,3 +648,23 @@ class TestQueryInstructionPrefix:
         svc, tok = self._svc(monkeypatch, "")
         await svc.embed_query("plain")
         assert self._texts(tok) == ["plain"]
+
+
+class TestSignatureComposition:
+    """`check_model_signature` (app/main.py) is the ONLY thing that tells a user
+    their stored vectors are stale, and it compares this string. A change to what
+    text gets embedded leaves model identity byte-identical, so the convention has
+    to ride along or the index degrades with no banner and no log."""
+
+    def test_default_is_byte_identical_to_the_legacy_format(self):
+        """An existing install must not be shown a mismatch for a setting nobody
+        touched - that would offer a destructive rebuild it does not need."""
+        assert _compose_signature(
+            "Xenova/bge-small-en-v1.5", "abc123", "onnx/model.onnx", True
+        ) == ("Xenova/bge-small-en-v1.5@abc123:onnx/model.onnx")
+
+    def test_stripping_the_prefix_changes_the_signature(self):
+        kept = _compose_signature("r", "rev", "k", True)
+        stripped = _compose_signature("r", "rev", "k", False)
+        assert stripped != kept
+        assert stripped == f"{kept}:noprefix"

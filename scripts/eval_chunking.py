@@ -78,6 +78,8 @@ def _provenance(k: int, gen_models: list[str], gen_max_tokens: int, gen_provider
         "settings": {
             "chunk_size": settings.chunk_size,
             "chunk_overlap": settings.chunk_overlap,
+            "chunk_boundary_lookback_share": settings.chunk_boundary_lookback_share,
+            "embed_chunk_prefix": settings.embed_chunk_prefix,
             "embedding_model": settings.embedding_model,
             "embedding_batch_size": settings.embedding_batch_size,
             "embedding_batch_char_budget": settings.embedding_batch_char_budget,

@@ -324,3 +324,4 @@ graphify-out/
 # already done, and they are the per-build numbers behind the measured claims in
 # CLAUDE.md. Untracked, not deleted.
 research/journal*.jsonl
+/research

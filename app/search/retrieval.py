@@ -18,6 +18,7 @@ from app.project_constants import (
     FUSION_VERSION,
     RAG_CACHE_MAX_SIZE,
     RETRIEVAL_CACHE_MAX_SIZE,
+    build_context_prefix,
     determine_query_intent,
 )
 from app.search.context_builder import (
@@ -515,7 +516,7 @@ def _build_candidate_results(
         results.append(
             {
                 "chunk_id": cid,
-                "text": text,
+                "text": _chunk_body(text, row[5], row[6], file_path),
                 "file_path": file_path,
                 "folder_tag": row[3],
                 "modified_at": row[4],
@@ -693,19 +694,33 @@ async def hybrid_retrieve(
     return final_results
 
 
-def _chunk_body(text_preview: str, start: int, end: int) -> str:
+def _chunk_body(
+    text_preview: str,
+    start: int | None = None,
+    end: int | None = None,
+    file_path: str = "",
+) -> str:
     """The chunk's source text, with the ``[EXT: name]`` prefix removed.
 
-    Every chunker stores ``prefix + source[start:end]``, so the prefix length is
-    recoverable as ``len(preview) - (end - start)`` rather than by re-deriving
-    the prefix format here and risking drift from the one in the indexer.
+    Every chunker stores ``build_context_prefix(path) + source[start:end]``, so
+    with the path in hand the strip is exact and needs no offsets - which is what
+    lets the graph leg and the re-embed loop use it, neither of which selects
+    them.
 
-    Guarded because that identity is exact for the streaming chunker and only
-    near-exact for the syntax-aware one, whose bodies are line-joined and can
-    differ from their span by the trailing newline. A bad value falls back to
-    the whole preview, which costs a duplicated prefix in the window and never
-    corrupts the text.
+    The length identity ``len(preview) - (end - start)`` stays as the fallback for
+    callers that have offsets but no path. It is deliberately no longer primary:
+    it is exact for the streaming chunker and only near-exact for the syntax-aware
+    one, whose bodies are line-joined and can differ from their span by a trailing
+    newline. That was tolerable while a bad value only cost a duplicated prefix
+    inside a parent window; this text is now what gets ranked and displayed, where
+    an off-by-one would silently eat the first character of every code chunk.
     """
+    if file_path:
+        prefix = build_context_prefix(file_path)
+        if text_preview.startswith(prefix):
+            return text_preview[len(prefix) :]
+    if start is None or end is None:
+        return text_preview
     span = end - start
     prefix_len = len(text_preview) - span
     if 0 <= prefix_len <= len(text_preview):
@@ -741,6 +756,7 @@ async def attach_parent_windows(db: DatabaseManager, results: list[dict[str, Any
             by_file.setdefault(r["file_id"], []).append(r)
 
     for file_id, group in by_file.items():
+        path = str(group[0].get("file_path") or "")
         lo = min(int(r["start_offset"]) for r in group)
         hi = max(int(r["end_offset"]) for r in group)
         pad = max(0, (width - (hi - lo)) // 2)
@@ -768,7 +784,7 @@ async def attach_parent_windows(db: DatabaseManager, results: list[dict[str, Any
             for text, s_off, e_off in rows:
                 if text is None or e_off <= cursor or s_off >= w_hi:
                     continue
-                body = _chunk_body(text, s_off, e_off)
+                body = _chunk_body(text, s_off, e_off, path)
                 take_from = max(0, cursor - s_off)
                 if take_from < len(body):
                     parts.append(body[take_from:])
@@ -1051,7 +1067,7 @@ async def _execute_graph_plan(
         results.append(
             {
                 "chunk_id": row[0],
-                "text": row[1],
+                "text": _chunk_body(row[1], file_path=row[2]),
                 "file_path": row[2],
                 "folder_tag": row[3],
                 "modified_at": row[4],

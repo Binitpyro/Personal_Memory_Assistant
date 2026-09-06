@@ -474,3 +474,107 @@ class TestRerankerRrfFusion:
         cands = [{"text": f"c{i}", "chunk_id": i} for i in range(4)]
         out = await rerank("q", cands, top_k=2, text_key="text")
         assert all("rerank_score" in r for r in out)
+
+
+class TestChunkPrefixConvention:
+    """One text convention below storage. CLAUDE.md D4.
+
+    `text_preview` is stored as `[EXT: name] ` + body. That prefix used to reach
+    the cross-encoder and the citation panel while `attach_parent_windows`
+    stripped it from the delivered window - so the text that got RANKED and the
+    text that got READ differed, per chunk, decided by a length comparison that
+    the prefix itself biased.
+    """
+
+    PREFIX = "[MD: notes.md] "
+    PATH = "/corpus/notes.md"
+
+    def _row(self, body, start=0):
+        """A chunks row in the shape _build_candidate_results consumes."""
+        preview = self.PREFIX + body
+        return (
+            7,
+            preview,
+            self.PATH,
+            "docs",
+            1700000000,
+            start,
+            start + len(body),
+            "[]",
+            "py_v1",
+            3,
+        )
+
+    def test_candidate_text_carries_no_prefix(self):
+        body = "the quick brown fox jumps over the lazy dog, repeatedly and at length."
+        out = retrieval._build_candidate_results([7], {7: self._row(body)}, {7: 1.0})
+        assert out[0]["text"] == body
+        assert self.PREFIX not in out[0]["text"]
+        # The panel still names the file; the tag in the body was a duplicate.
+        assert out[0]["file_path"] == self.PATH
+
+    def test_length_floor_still_measures_the_stored_preview(self):
+        """The 50-char floor must keep reading `text_preview`, not the body.
+
+        Moving it onto the stripped body would silently change WHICH chunks are
+        dropped, which would confound every retrieval measurement this change is
+        supposed to leave alone.
+        """
+        body = "x" * 40  # 40 < 50, but 40 + len(PREFIX) == 55 >= 50
+        assert len(self.PREFIX + body) >= retrieval._MIN_CANDIDATE_CHARS
+        out = retrieval._build_candidate_results([7], {7: self._row(body)}, {7: 1.0})
+        assert len(out) == 1, "a chunk kept before this change must still be kept"
+        assert out[0]["text"] == body
+
+    def test_exact_strip_beats_length_arithmetic_when_they_disagree(self):
+        """CodeChunker bodies are line-joined, so `end - start` can be off by the
+        trailing newline. The path-based strip must win; the arithmetic must not
+        be allowed to eat a real character."""
+        body = "def f():" + chr(10) + "    return 1"
+        preview = self.PREFIX + body
+        # span claims one MORE char than the body holds - arithmetic alone would
+        # strip len(PREFIX) - 1 and leave a stray "]", or worse.
+        assert retrieval._chunk_body(preview, 0, len(body) + 1, self.PATH) == body
+        # ...and with no path, the documented fallback still applies unchanged.
+        assert retrieval._chunk_body(preview, 0, len(body)) == body
+
+    def test_chunk_body_is_identity_when_the_prefix_is_absent(self):
+        assert retrieval._chunk_body("no tag here", file_path=self.PATH) == "no tag here"
+
+    @pytest.mark.asyncio
+    async def test_graph_leg_results_carry_no_prefix(self, monkeypatch):
+        """The graph leg builds its own result dicts from its own SELECT, which
+        returns f.path and no offsets - a separately revertable call site."""
+        body = "cache lookups are memoised per process."
+
+        async def _seeds(*a, **k):
+            return [{"chunk_id": 7, "score": 2.0}]
+
+        monkeypatch.setattr(retrieval, "hybrid_retrieve", _seeds)
+
+        class FakeDB:
+            async def bfs_from_chunks(self, ids, max_depth, limit):
+                return [8]
+
+            async def get_relational_paths(self, ids, max_depth, limit):
+                return ["a -> b"]
+
+            async def execute_query(self, sql, params):
+                return [
+                    (
+                        8,
+                        TestChunkPrefixConvention.PREFIX + body,
+                        "/corpus/notes.md",
+                        "docs",
+                        1700000000,
+                        3,
+                    )
+                ]
+
+        plan = MagicMock()
+        plan.original_query = "connection between a and b"
+        results, _ctx = await retrieval._execute_graph_plan(
+            plan, FakeDB(), MagicMock(), MagicMock(), k=5
+        )
+        assert results is not None
+        assert results[0]["text"] == body

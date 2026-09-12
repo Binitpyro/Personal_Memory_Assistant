@@ -5,9 +5,37 @@ import zlib
 
 from fastapi import Response
 
+from app.config import settings
 from app.storage.db import DatabaseManager
 
 logger = logging.getLogger(__name__)
+
+# Appended verbatim to BOTH visualizer queries. `id` is the stable insertion
+# order and is the primary key, so the ordering is total and index-backed. Both
+# endpoints must use this exact clause: the meta sidecar joins to the binary
+# buffer by hash_tree_path(path), and a LIMIT without a deterministic ORDER BY
+# lets SQLite hand the two calls different subsets, which silently drops nodes
+# from the join rather than failing.
+_ORDER_AND_LIMIT = " ORDER BY id LIMIT ?"
+
+
+def _warn_if_truncated(row_count: int, which: str) -> None:
+    """Say so in the log when the cap bound the result.
+
+    Deliberately a log line rather than a field in the response: the meta body
+    is a hash-keyed map the frontend reads by lookup, and adding a sibling key
+    of a different shape to it would change a typed contract for a condition
+    that needs a corpus of settings.visualizer_max_nodes files to reach. The
+    operator needs to know; the renderer does not have anything useful to do
+    about it.
+    """
+    if row_count >= settings.visualizer_max_nodes:
+        logger.warning(
+            "Visualizer %s hit the %d-node cap (settings.visualizer_max_nodes); "
+            "the view is showing a bounded prefix of the corpus, not all of it.",
+            which,
+            settings.visualizer_max_nodes,
+        )
 
 
 try:
@@ -83,14 +111,20 @@ async def _stream_visualizer_binary_impl(extension: str | None, db: DatabaseMana
     Implementation of the binary stream for the WebGPU visualizer.
     """
     query = "SELECT id, path, type, size FROM files"
-    params = []
+    params: list = []
     if extension:
         clean_ext = extension.lower() if extension.startswith(".") else f".{extension.lower()}"
         query += " WHERE type = ?"
         params.append(clean_ext)
+    # Same ORDER BY and same limit as get_visualizer_meta_impl - see
+    # settings.visualizer_max_nodes. The sidecar joins to this buffer by
+    # hash_tree_path(path), so the two calls must agree on which rows exist.
+    query += _ORDER_AND_LIMIT
+    params.append(settings.visualizer_max_nodes)
 
     try:
         rows = await db.execute_query(query, tuple(params))
+        _warn_if_truncated(len(rows), "binary stream")
 
         if _RUST_AVAILABLE and hasattr(rust_core, "get_spatial_binary"):
             file_tuples = [
@@ -122,13 +156,18 @@ async def get_visualizer_meta_impl(extension: str | None, db: DatabaseManager) -
         return {}
 
     query = "SELECT path, type, size, usage_count FROM files"
-    params = []
+    params: list = []
     if extension:
         clean_ext = extension.lower() if extension.startswith(".") else f".{extension.lower()}"
         query += " WHERE type = ?"
         params.append(clean_ext)
+    # Must match _stream_visualizer_binary_impl exactly - the join below is by
+    # hash_tree_path(path), so a different row set here silently drops nodes.
+    query += _ORDER_AND_LIMIT
+    params.append(settings.visualizer_max_nodes)
 
     rows = await db.execute_query(query, tuple(params))
+    _warn_if_truncated(len(rows), "meta")
     meta: dict[int, dict] = {}
     folders: dict[str, dict] = {}
 

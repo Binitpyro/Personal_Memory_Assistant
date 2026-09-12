@@ -755,6 +755,21 @@ class Settings(BaseSettings):
     watcher_enabled: bool = False
     watcher_interval_seconds: int = 300
 
+    # ── 3D visualizer ────────────────────────────────────────────────────────
+    # Row ceiling for BOTH visualizer queries. They used to select the whole
+    # `files` table with no LIMIT: the binary stream materialises 32 bytes per
+    # node, but the meta sidecar builds a Python dict per file *plus* one per
+    # ancestor folder, which is the expensive half and scales with the corpus
+    # rather than with any tunable.
+    #
+    # The two endpoints MUST apply the same ORDER BY and the same limit. The
+    # sidecar joins to the buffer by hash_tree_path(path), so if the two calls
+    # disagree about which rows they returned the join silently drops nodes.
+    #
+    # Unmeasured: chosen as a generous ceiling that keeps the response bounded,
+    # not from a profile. Profile before treating it as a tuned value.
+    visualizer_max_nodes: int = 200_000
+
     dev_mode: bool = False  # Set to True for verbose dev logs and debug endpoints
     log_level: str = "INFO"
 

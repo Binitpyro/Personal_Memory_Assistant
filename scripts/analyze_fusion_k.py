@@ -83,6 +83,37 @@ QUERIES = REPO / "tests" / "eval" / "queries_squad.json"
 # threshold is a null no matter which arm happens to top it.
 DEFAULT_THRESHOLD = 0.025
 
+# Per-leg sweep grid. rrf_k_summary and rrf_summary_weight are confounded by
+# construction: config.py:566-571 records that the weight was cut 0.3 -> 0.05
+# BECAUSE k=60 could not differentiate the leg's short list, so sweeping one
+# without the other measures the wrong thing. Both are pure arithmetic inside
+# _compute_rrf_scores, so the whole 2-D grid re-scores offline from one index
+# build, exactly like the global-k grid.
+LEG_K_GRID: tuple[int, ...] = (1, 3, 5, 10, 30, 60)
+LEG_W_GRID: tuple[float, ...] = (0.05, 0.15, 0.3, 0.6)
+
+
+def _arms(leg_sweep: bool, base_k: int) -> list[tuple[str, dict[str, Any]]]:
+    """(label, settings overrides) per arm. One code path for both modes."""
+    if not leg_sweep:
+        return [(str(k), {"rrf_k": k}) for k in K_GRID]
+    arms: list[tuple[str, dict[str, Any]]] = []
+    for w in LEG_W_GRID:
+        for k in LEG_K_GRID:
+            arms.append(
+                (
+                    f"ks{k}_w{w}",
+                    {
+                        "rrf_k": base_k,
+                        "rrf_k_fts": base_k,
+                        "rrf_k_semantic": base_k,
+                        "rrf_k_summary": k,
+                        "rrf_summary_weight": w,
+                    },
+                )
+            )
+    return arms
+
 
 # ---------------------------------------------------------------------------
 # Statistics. stdlib only - section 6's dependency policy wants a measured
@@ -253,7 +284,11 @@ async def _chunk_maps(db: Any) -> tuple[dict[int, str], dict[int, str]]:
 
 
 async def _one_build(
-    build: int, keyword_mode: str, corpus: Path, queries_files: Sequence[Path]
+    build: int,
+    keyword_mode: str,
+    corpus: Path,
+    queries_files: Sequence[Path],
+    arms: Sequence[tuple[str, dict[str, Any]]],
 ) -> list[dict[str, Any]]:
     from app.config import settings
     from app.search import retrieval
@@ -287,7 +322,8 @@ async def _one_build(
 
         planner = QueryPlanner()
 
-    original_k = settings.rrf_k
+    touched = sorted({key for _, overrides in arms for key in overrides})
+    original = {key: getattr(settings, key) for key in touched}
     rows: list[dict[str, Any]] = []
     try:
         path_map, tag_map = await _chunk_maps(db)
@@ -311,11 +347,12 @@ async def _one_build(
             overlap = len(set(fts_ids[:SCORE_AT]) & set(sem_ids[:SCORE_AT]))
 
             per_k: dict[str, dict[str, float]] = {}
-            for k_rrf in K_GRID:
-                # The real fusion, at this k. settings is a plain pydantic
+            for label, overrides in arms:
+                # The real fusion, at this arm. settings is a plain pydantic
                 # model with no validate_assignment, and harness.build()
                 # already mutates it the same way.
-                settings.rrf_k = k_rrf
+                for key, value in overrides.items():
+                    setattr(settings, key, value)
                 fused = retrieval._compute_rrf_scores(fts, sem, summary, RECALL_K)
                 ids = [int(cid) for cid, _ in fused if int(cid) in path_map]
                 # Production also balances across domains before the reranker
@@ -336,9 +373,9 @@ async def _one_build(
                     scored[f"recall{suffix}"] = metrics.recall_at_k(
                         ranked, q.relevant_files, SCORE_AT
                     )
-                per_k[str(k_rrf)] = scored
+                per_k[label] = scored
 
-            best = max(K_GRID, key=lambda kk: per_k[str(kk)]["ndcg"])
+            best = max(arms, key=lambda a: per_k[a[0]]["ndcg"])[0]
             rows.append(
                 {
                     "build": build,
@@ -353,32 +390,38 @@ async def _one_build(
                 }
             )
     finally:
-        settings.rrf_k = original_k
+        for key, value in original.items():
+            setattr(settings, key, value)
         await idx.close()
     return rows
 
 
-def _summarise(rows: list[dict[str, Any]]) -> dict[str, Any]:
+def _summarise(rows: list[dict[str, Any]], labels: Sequence[str]) -> dict[str, Any]:
     """Global k curve, the mechanism correlation, and how often tau is undefined."""
     curve: dict[str, dict[str, float]] = {}
-    for k_rrf in K_GRID:
+    for k_rrf in labels:
         entry: dict[str, float] = {}
         for suffix in ("", "_bal"):
             key_n, key_r = f"ndcg{suffix}", f"recall{suffix}"
-            if key_n not in rows[0]["per_k"][str(k_rrf)]:
+            if key_n not in rows[0]["per_k"][k_rrf]:
                 continue
-            entry[f"ndcg_mean{suffix}"] = statistics.fmean(
-                [r["per_k"][str(k_rrf)][key_n] for r in rows]
-            )
+            entry[f"ndcg_mean{suffix}"] = statistics.fmean([r["per_k"][k_rrf][key_n] for r in rows])
             entry[f"recall_mean{suffix}"] = statistics.fmean(
-                [r["per_k"][str(k_rrf)][key_r] for r in rows]
+                [r["per_k"][k_rrf][key_r] for r in rows]
             )
-        curve[str(k_rrf)] = entry
+        curve[k_rrf] = entry
 
     defined = [r for r in rows if r["tau"] is not None]
     taus = [float(r["tau"]) for r in defined]
-    opt = [float(r["optimal_k"]) for r in defined]
-    rho = _spearman(opt, taus) if len(defined) >= 3 else None
+    # The mechanism correlation only means anything when the arms ARE k
+    # values. Under --leg-sweep an arm is a (k_summary, weight) pair with no
+    # position on a single numeric axis, so Spearman against tau is not
+    # defined - skipped rather than coerced into a number.
+    try:
+        opt = [float(r["optimal_k"]) for r in defined]
+    except ValueError:
+        opt = []
+    rho = _spearman(opt, taus) if opt and len(defined) >= 3 else None
 
     return {
         "n_rows": len(rows),
@@ -388,8 +431,9 @@ def _summarise(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "tau_mean": statistics.fmean(taus) if taus else None,
         "tau_stdev": statistics.stdev(taus) if len(taus) > 1 else None,
         "spearman_optimal_k_vs_tau": rho,
+        "spearman_applicable": bool(opt),
         "optimal_k_distribution": {
-            str(k_rrf): sum(1 for r in rows if r["optimal_k"] == k_rrf) for k_rrf in K_GRID
+            lab: sum(1 for r in rows if r["optimal_k"] == lab) for lab in labels
         },
         "global_k_curve": curve,
     }
@@ -399,17 +443,19 @@ def _fmt(value: float | None) -> str:
     return "None" if value is None else f"{value:.4f}"
 
 
-def _report(summary: dict[str, Any], threshold: float, corpus_name: str) -> str:
+def _report(
+    summary: dict[str, Any], threshold: float, corpus_name: str, labels: Sequence[str]
+) -> str:
     lines = [
         "",
         f"Global k curve on {corpus_name} (mean over all queries and builds)",
         f"{'k':>5} {'nDCG@10':>9} {'recall@10':>10} {'nDCG bal':>9} {'rec bal':>9}",
         "-" * 48,
     ]
-    has_bal = "ndcg_mean_bal" in summary["global_k_curve"][str(K_GRID[0])]
-    for k_rrf in K_GRID:
-        c = summary["global_k_curve"][str(k_rrf)]
-        mark = "  <- shipped" if k_rrf == 60 else ""
+    has_bal = "ndcg_mean_bal" in summary["global_k_curve"][labels[0]]
+    for k_rrf in labels:
+        c = summary["global_k_curve"][k_rrf]
+        mark = "  <- shipped" if k_rrf in ("60", "ks60_w0.05") else ""
         bal = f" {c['ndcg_mean_bal']:>9.4f} {c['recall_mean_bal']:>9.4f}" if has_bal else ""
         lines.append(f"{k_rrf:>5} {c['ndcg_mean']:>9.4f} {c['recall_mean']:>10.4f}{bal}{mark}")
 
@@ -418,7 +464,7 @@ def _report(summary: dict[str, Any], threshold: float, corpus_name: str) -> str:
     # null, and reading its best arm as a winner is how a knob gets "tuned" on
     # noise.
     key = "ndcg_mean_bal" if has_bal else "ndcg_mean"
-    ndcgs = [summary["global_k_curve"][str(k)][key] for k in K_GRID]
+    ndcgs = [summary["global_k_curve"][lab][key] for lab in labels]
     span = max(ndcgs) - min(ndcgs)
     verdict = "NULL - under the threshold" if span < threshold else "above threshold"
     lines += [
@@ -443,18 +489,22 @@ def _report(summary: dict[str, Any], threshold: float, corpus_name: str) -> str:
         f"  mean FTS/semantic overlap@10  {summary['mean_overlap_at_10']:.2f} of 10",
         f"  tau mean                      {_fmt(summary['tau_mean'])}",
         f"  tau stdev                     {_fmt(summary['tau_stdev'])}",
-        f"  Spearman(optimal k, tau)      {_fmt(summary['spearman_optimal_k_vs_tau'])}"
-        "   <- paper predicts monotone",
+        "  Spearman(optimal k, tau)      "
+        + (
+            f"{_fmt(summary['spearman_optimal_k_vs_tau'])}   <- paper predicts monotone"
+            if summary.get("spearman_applicable", True)
+            else "n/a - arms are not single k values"
+        ),
         "",
         "  optimal-k distribution:",
     ]
     dist = summary["optimal_k_distribution"]
-    for k_rrf in K_GRID:
-        lines.append(f"    k={k_rrf:<4} {dist[str(k_rrf)]:>4}")
+    for k_rrf in labels:
+        lines.append(f"    {k_rrf:<12} {dist[k_rrf]:>4}")
 
     # Two ways this correlation lies, both hit on the first corpus_squad run.
     total = max(1, summary["n_rows"])
-    edges = (str(K_GRID[0]), str(K_GRID[-1]))
+    edges = (labels[0], labels[-1])
     at_edge = max(dist[e] for e in edges)
     if at_edge / total > 0.5:
         lines.append(
@@ -488,6 +538,8 @@ async def _main_async(args: argparse.Namespace) -> int:
 
     # Compose once, not per build: the corpus content is identical across
     # builds and only the index is rebuilt.
+    arms = _arms(args.leg_sweep, args.base_k)
+    labels = [label for label, _ in arms]
     workdir = Path(tempfile.mkdtemp(prefix="pma_fusion_corpus_"))
     label = "+".join(c.name.replace("corpus_", "") for c in corpora)
     try:
@@ -502,20 +554,22 @@ async def _main_async(args: argparse.Namespace) -> int:
         all_rows: list[dict[str, Any]] = []
         for build in range(args.builds):
             print(f"[build {build + 1}/{args.builds}] indexing {label} ...")
-            rows = await _one_build(build, args.keywords, root, queries_files)
+            rows = await _one_build(build, args.keywords, root, queries_files, arms)
             all_rows.extend(rows)
             print(f"[build {build + 1}/{args.builds}] {len(rows)} queries scored")
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
-    summary = _summarise(all_rows)
-    print(_report(summary, args.threshold, label))
+    summary = _summarise(all_rows, labels)
+    print(_report(summary, args.threshold, label, labels))
 
     if args.json_out:
         out = Path(args.json_out)
         out.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            "k_grid": list(K_GRID),
+            "arms": labels,
+            "leg_sweep": args.leg_sweep,
+            "base_k": args.base_k if args.leg_sweep else None,
             "recall_k": RECALL_K,
             "score_at": SCORE_AT,
             "builds": args.builds,
@@ -571,6 +625,20 @@ def main() -> int:
         help="detection threshold for this corpus (CLAUDE.md 8.3)",
     )
     p.add_argument("--json-out", default="", help="write the full per-query rows here")
+    p.add_argument(
+        "--leg-sweep",
+        action="store_true",
+        help=(
+            "sweep rrf_k_summary x rrf_summary_weight at a fixed global k "
+            "(--base-k) instead of sweeping global k"
+        ),
+    )
+    p.add_argument(
+        "--base-k",
+        type=int,
+        default=5,
+        help="global k held on the FTS and semantic legs during --leg-sweep (default 5)",
+    )
     p.add_argument(
         "--self-check",
         action="store_true",

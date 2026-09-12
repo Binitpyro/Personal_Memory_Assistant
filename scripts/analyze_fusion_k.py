@@ -46,8 +46,10 @@ import argparse
 import asyncio
 import json
 import math
+import shutil
 import statistics
 import sys
+import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -204,27 +206,69 @@ def _self_check() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def _chunk_to_path(db: Any) -> dict[int, str]:
-    """chunk id -> file path, fetched once and reused for every k and query.
+def _compose_corpus(corpora: Sequence[Path], dest: Path) -> dict[str, int]:
+    """Copy several corpora's domain directories into one root.
+
+    The point is to kill saturation. corpus_squad is 48 documents with one
+    relevant answer each, so recall@10 is 1.0000 at every k and no fusion knob
+    can move it (measured: whole-k-curve range 0.0079 against a 0.025
+    threshold). The same 100 queries against thousands of competing documents
+    from other registers stop being trivial, which is the condition CLAUDE.md
+    8.3 and Research_Paper_1 both actually care about.
+
+    Labels transfer untouched because every fixture already namespaces its
+    `relevant_files` by a domain directory and the five in use are disjoint -
+    docs, notes, research, squad, scifact. `EvalIndex.relativize` strips the
+    corpus root, so `scifact/x.txt` stays `scifact/x.txt`.
+
+    Composed into a temp dir on purpose: this is ~9 MB of duplicated fixture
+    and committing it would put a second copy of SciFact in the repo.
+    """
+    counts: dict[str, int] = {}
+    for corpus in corpora:
+        for domain in sorted(p for p in corpus.iterdir() if p.is_dir()):
+            target = dest / domain.name
+            if target.exists():
+                raise SystemExit(
+                    f"domain {domain.name!r} appears in two corpora; labels would collide"
+                )
+            shutil.copytree(domain, target)
+            counts[domain.name] = sum(1 for _ in target.rglob("*") if _.is_file())
+    return counts
+
+
+async def _chunk_maps(db: Any) -> tuple[dict[int, str], dict[int, str]]:
+    """chunk id -> (file path, folder_tag), fetched once for every k and query.
 
     Cheaper than production's per-query hydration (retrieval.py:657-666) and
-    equivalent for scoring: only the path is needed to rank documents.
+    equivalent for scoring: the path ranks documents, the tag feeds domain
+    allocation. Production reads both off the same join.
     """
     rows = await db.execute_query(
-        "SELECT c.id, f.path FROM chunks c JOIN files f ON c.file_id = f.id", ()
+        "SELECT c.id, f.path, f.folder_tag FROM chunks c JOIN files f ON c.file_id = f.id", ()
     )
-    return {int(r[0]): str(r[1]) for r in rows}
+    paths = {int(r[0]): str(r[1]) for r in rows}
+    tags = {int(r[0]): str(r[2] or "") for r in rows}
+    return paths, tags
 
 
 async def _one_build(
-    build: int, keyword_mode: str, corpus: Path, queries_file: Path
+    build: int, keyword_mode: str, corpus: Path, queries_files: Sequence[Path]
 ) -> list[dict[str, Any]]:
     from app.config import settings
     from app.search import retrieval
     from tests.eval import metrics
     from tests.eval.harness import EvalIndex, load_queries
 
-    queries = load_queries(queries_file)
+    queries = []
+    seen_ids: set[str] = set()
+    for qf in queries_files:
+        for q in load_queries(qf):
+            if q.id in seen_ids:
+                raise SystemExit(f"duplicate query id {q.id!r} across query files")
+            seen_ids.add(q.id)
+            queries.append(q)
+
     idx = EvalIndex(corpus_dir=corpus)
     await idx.build()
 
@@ -246,7 +290,7 @@ async def _one_build(
     original_k = settings.rrf_k
     rows: list[dict[str, Any]] = []
     try:
-        path_map = await _chunk_to_path(db)
+        path_map, tag_map = await _chunk_maps(db)
         for q in queries:
             keywords = planner.plan(q.query).keywords if planner is not None else None
 
@@ -273,16 +317,26 @@ async def _one_build(
                 # already mutates it the same way.
                 settings.rrf_k = k_rrf
                 fused = retrieval._compute_rrf_scores(fts, sem, summary, RECALL_K)
-                ordered = [
-                    {"file_path": idx.relativize(path_map.get(int(cid), ""))}
-                    for cid, _ in fused
-                    if int(cid) in path_map
-                ]
-                ranked = metrics.ranked_files(ordered)
-                per_k[str(k_rrf)] = {
-                    "ndcg": metrics.ndcg_at_k(ranked, q.relevant_files, SCORE_AT),
-                    "recall": metrics.recall_at_k(ranked, q.relevant_files, SCORE_AT),
-                }
+                ids = [int(cid) for cid, _ in fused if int(cid) in path_map]
+                # Production also balances across domains before the reranker
+                # (retrieval.py:670-674). It is a no-op on a single-domain
+                # corpus, which is why SciFact and SQuAD did not need it - but
+                # on a composed corpus one domain has 5183 documents and
+                # another has 8, which is the exact case _allocate_by_domain
+                # exists for. Measuring only the unbalanced ranking there would
+                # report a number production never computes.
+                balanced = retrieval._allocate_by_domain(ids, tag_map, RECALL_K)
+
+                scored: dict[str, float] = {}
+                for suffix, chunk_ids in (("", ids), ("_bal", balanced)):
+                    ranked = metrics.ranked_files(
+                        [{"file_path": idx.relativize(path_map[c])} for c in chunk_ids]
+                    )
+                    scored[f"ndcg{suffix}"] = metrics.ndcg_at_k(ranked, q.relevant_files, SCORE_AT)
+                    scored[f"recall{suffix}"] = metrics.recall_at_k(
+                        ranked, q.relevant_files, SCORE_AT
+                    )
+                per_k[str(k_rrf)] = scored
 
             best = max(K_GRID, key=lambda kk: per_k[str(kk)]["ndcg"])
             rows.append(
@@ -308,12 +362,18 @@ def _summarise(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Global k curve, the mechanism correlation, and how often tau is undefined."""
     curve: dict[str, dict[str, float]] = {}
     for k_rrf in K_GRID:
-        ndcgs = [r["per_k"][str(k_rrf)]["ndcg"] for r in rows]
-        recalls = [r["per_k"][str(k_rrf)]["recall"] for r in rows]
-        curve[str(k_rrf)] = {
-            "ndcg_mean": statistics.fmean(ndcgs),
-            "recall_mean": statistics.fmean(recalls),
-        }
+        entry: dict[str, float] = {}
+        for suffix in ("", "_bal"):
+            key_n, key_r = f"ndcg{suffix}", f"recall{suffix}"
+            if key_n not in rows[0]["per_k"][str(k_rrf)]:
+                continue
+            entry[f"ndcg_mean{suffix}"] = statistics.fmean(
+                [r["per_k"][str(k_rrf)][key_n] for r in rows]
+            )
+            entry[f"recall_mean{suffix}"] = statistics.fmean(
+                [r["per_k"][str(k_rrf)][key_r] for r in rows]
+            )
+        curve[str(k_rrf)] = entry
 
     defined = [r for r in rows if r["tau"] is not None]
     taus = [float(r["tau"]) for r in defined]
@@ -343,19 +403,22 @@ def _report(summary: dict[str, Any], threshold: float, corpus_name: str) -> str:
     lines = [
         "",
         f"Global k curve on {corpus_name} (mean over all queries and builds)",
-        f"{'k':>5} {'nDCG@10':>9} {'recall@10':>10}",
-        "-" * 26,
+        f"{'k':>5} {'nDCG@10':>9} {'recall@10':>10} {'nDCG bal':>9} {'rec bal':>9}",
+        "-" * 48,
     ]
+    has_bal = "ndcg_mean_bal" in summary["global_k_curve"][str(K_GRID[0])]
     for k_rrf in K_GRID:
         c = summary["global_k_curve"][str(k_rrf)]
         mark = "  <- shipped" if k_rrf == 60 else ""
-        lines.append(f"{k_rrf:>5} {c['ndcg_mean']:>9.4f} {c['recall_mean']:>10.4f}{mark}")
+        bal = f" {c['ndcg_mean_bal']:>9.4f} {c['recall_mean_bal']:>9.4f}" if has_bal else ""
+        lines.append(f"{k_rrf:>5} {c['ndcg_mean']:>9.4f} {c['recall_mean']:>10.4f}{bal}{mark}")
 
     # State the verdict rather than leaving the subtraction to the reader. A
     # curve whose entire range sits under the corpus's detection threshold is a
     # null, and reading its best arm as a winner is how a knob gets "tuned" on
     # noise.
-    ndcgs = [summary["global_k_curve"][str(k)]["ndcg_mean"] for k in K_GRID]
+    key = "ndcg_mean_bal" if has_bal else "ndcg_mean"
+    ndcgs = [summary["global_k_curve"][str(k)][key] for k in K_GRID]
     span = max(ndcgs) - min(ndcgs)
     verdict = "NULL - under the threshold" if span < threshold else "above threshold"
     lines += [
@@ -418,17 +481,35 @@ def _report(summary: dict[str, Any], threshold: float, corpus_name: str) -> str:
 
 
 async def _main_async(args: argparse.Namespace) -> int:
-    corpus = Path(args.corpus) if args.corpus else CORPUS
-    queries_file = Path(args.queries) if args.queries else QUERIES
-    all_rows: list[dict[str, Any]] = []
-    for build in range(args.builds):
-        print(f"[build {build + 1}/{args.builds}] indexing {corpus.name} ...")
-        rows = await _one_build(build, args.keywords, corpus, queries_file)
-        all_rows.extend(rows)
-        print(f"[build {build + 1}/{args.builds}] {len(rows)} queries scored")
+    corpora = [Path(c) for c in args.corpus] or [CORPUS]
+    queries_files = [Path(q) for q in args.queries] or [QUERIES]
+    if len(corpora) != len(queries_files):
+        raise SystemExit("--corpus and --queries must be given the same number of times")
+
+    # Compose once, not per build: the corpus content is identical across
+    # builds and only the index is rebuilt.
+    workdir = Path(tempfile.mkdtemp(prefix="pma_fusion_corpus_"))
+    label = "+".join(c.name.replace("corpus_", "") for c in corpora)
+    try:
+        if len(corpora) == 1:
+            root = corpora[0]
+        else:
+            counts = _compose_corpus(corpora, workdir)
+            root = workdir
+            total = sum(counts.values())
+            print(f"composed {len(counts)} domains, {total} files: {counts}")
+
+        all_rows: list[dict[str, Any]] = []
+        for build in range(args.builds):
+            print(f"[build {build + 1}/{args.builds}] indexing {label} ...")
+            rows = await _one_build(build, args.keywords, root, queries_files)
+            all_rows.extend(rows)
+            print(f"[build {build + 1}/{args.builds}] {len(rows)} queries scored")
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
     summary = _summarise(all_rows)
-    print(_report(summary, args.threshold, corpus.name))
+    print(_report(summary, args.threshold, label))
 
     if args.json_out:
         out = Path(args.json_out)
@@ -439,8 +520,8 @@ async def _main_async(args: argparse.Namespace) -> int:
             "score_at": SCORE_AT,
             "builds": args.builds,
             "keyword_mode": args.keywords,
-            "corpus": corpus.name,
-            "queries": queries_file.name,
+            "corpus": [c.name for c in corpora],
+            "queries": [q.name for q in queries_files],
             "threshold": args.threshold,
             "summary": summary,
             "rows": all_rows,
@@ -468,8 +549,21 @@ def main() -> int:
             "production, which passes QueryPlan.keywords"
         ),
     )
-    p.add_argument("--corpus", default="", help=f"corpus dir (default {CORPUS.name})")
-    p.add_argument("--queries", default="", help=f"labelled queries JSON (default {QUERIES.name})")
+    p.add_argument(
+        "--corpus",
+        action="append",
+        default=[],
+        help=(
+            f"corpus dir (default {CORPUS.name}). Repeat with a matching --queries "
+            "to compose several corpora into one heterogeneous index"
+        ),
+    )
+    p.add_argument(
+        "--queries",
+        action="append",
+        default=[],
+        help=f"labelled queries JSON (default {QUERIES.name}); pairs with --corpus",
+    )
     p.add_argument(
         "--threshold",
         type=float,

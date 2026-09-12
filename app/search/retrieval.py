@@ -755,21 +755,39 @@ async def attach_parent_windows(db: DatabaseManager, results: list[dict[str, Any
         if r.get("file_id") is not None and r.get("start_offset") is not None:
             by_file.setdefault(r["file_id"], []).append(r)
 
+    # One query for every file in the result set, not one per file. The
+    # per-file ranges are OR-ed rather than collapsed to `file_id IN (...)`
+    # so each file still fetches only the siblings its own window needs -
+    # the same row set the per-file queries returned, in a single round trip.
+    clauses: list[str] = []
+    params: list[Any] = []
     for file_id, group in by_file.items():
-        path = str(group[0].get("file_path") or "")
         lo = min(int(r["start_offset"]) for r in group)
         hi = max(int(r["end_offset"]) for r in group)
         pad = max(0, (width - (hi - lo)) // 2)
-        try:
-            rows = await db.execute_query(
-                "SELECT zlib_decompress(text_preview), start_offset, end_offset "
-                "FROM chunks WHERE file_id = ? AND end_offset > ? AND start_offset < ? "
-                "ORDER BY start_offset",
-                (file_id, lo - pad, hi + pad),
-            )
-        except Exception as exc:  # pragma: no cover - degradation, not a fault
-            logger.debug("Parent-window expansion skipped for file %s: %s", file_id, exc)
-            continue
+        clauses.append("(file_id = ? AND end_offset > ? AND start_offset < ?)")
+        params.extend((file_id, lo - pad, hi + pad))
+
+    try:
+        batched = await db.execute_query(
+            # Every clause is the same fixed literal and every value is bound;
+            # the only thing interpolated is how MANY clauses there are.
+            "SELECT file_id, zlib_decompress(text_preview), start_offset, end_offset "  # nosec B608 # noqa: S608
+            f"FROM chunks WHERE {' OR '.join(clauses)} "
+            "ORDER BY file_id, start_offset",
+            tuple(params),
+        )
+    except Exception as exc:  # pragma: no cover - degradation, not a fault
+        logger.debug("Parent-window expansion skipped: %s", exc)
+        return
+
+    rows_by_file: dict[Any, list[tuple[Any, ...]]] = {}
+    for row in batched:
+        rows_by_file.setdefault(row[0], []).append((row[1], row[2], row[3]))
+
+    for file_id, group in by_file.items():
+        path = str(group[0].get("file_path") or "")
+        rows = rows_by_file.get(file_id, [])
 
         for r in group:
             centre = (int(r["start_offset"]) + int(r["end_offset"])) // 2

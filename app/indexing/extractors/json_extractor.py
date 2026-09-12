@@ -5,6 +5,11 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# Matches the block size `IndexingService._extract_plain_text_stream` reads with.
+# The exact size is not load-bearing; that no single fragment is the size of the
+# whole document is.
+_READ_BLOCK_CHARS = 128 * 1024
+
 
 class JsonExtractor:
     def can_handle(self, path: Path) -> bool:
@@ -15,9 +20,20 @@ class JsonExtractor:
         try:
             # P10-3: Only attempt to parse if file is small. Truncated large JSON is invalid.
             if path.stat().st_size > 500_000:
+                # Yielded in fixed blocks rather than as one read(max_file_size).
+                # StreamChunker holds a whole fragment in its buffer, so a
+                # fragment the size of the document made peak memory a function
+                # of the largest file in the corpus rather than of the tunables -
+                # which is what CLAUDE.md section 6's boundedness invariant
+                # forbids. The concatenation is unchanged, so `extract` is too.
                 with open(path, encoding="utf-8-sig", errors="replace") as f:
-                    chunk = f.read(max_file_size)
-                    yield chunk
+                    remaining = max_file_size
+                    while remaining > 0:
+                        block = f.read(min(_READ_BLOCK_CHARS, remaining))
+                        if not block:
+                            break
+                        remaining -= len(block)
+                        yield block
                 return
 
             with open(path, encoding="utf-8-sig", errors="replace") as f:

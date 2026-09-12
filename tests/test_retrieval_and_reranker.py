@@ -329,9 +329,23 @@ class TestParentWindows:
         rows = self._chunks()
 
         class FakeDB:
+            """Emulates the single batched query.
+
+            `attach_parent_windows` OR-s one `(file_id, lo, hi)` triple per file
+            into ONE statement, so `params` arrives flat in groups of three and
+            the SELECT leads with `file_id` to let the caller regroup the rows.
+            """
+
+            def __init__(self):
+                self.calls = 0
+
             async def execute_query(self, sql, params):
-                _fid, lo, hi = params
-                return [r for r in rows if r[2] > lo and r[1] < hi]
+                self.calls += 1
+                out = []
+                for i in range(0, len(params), 3):
+                    fid, lo, hi = params[i], params[i + 1], params[i + 2]
+                    out.extend((fid, r[0], r[1], r[2]) for r in rows if r[2] > lo and r[1] < hi)
+                return out
 
         return FakeDB()
 
@@ -394,6 +408,30 @@ class TestParentWindows:
         before = results[0]["text"]
         await retrieval.attach_parent_windows(self._db(), results)
         assert results[0]["text"] == before
+
+    @pytest.mark.asyncio
+    async def test_one_query_for_many_files(self, monkeypatch):
+        """Expansion used to issue one SELECT per distinct file, awaited serially
+        on the interactive query path.
+
+        Locks the batched form: N files cost one round trip, not N. Reverting to
+        the per-file loop makes `calls` equal the file count and fails here.
+        """
+        monkeypatch.setattr(retrieval.settings, "parent_window_enabled", True)
+        monkeypatch.setattr(retrieval.settings, "chunk_size", self.CHUNK)
+        monkeypatch.setattr(retrieval.settings, "parent_window_multiplier", 3)
+
+        results = []
+        for fid in range(5):
+            r = self._result(3)
+            r["file_id"] = fid
+            results.append(r)
+
+        db = self._db()
+        await retrieval.attach_parent_windows(db, results)
+
+        assert db.calls == 1, "one batched query, not one per file"
+        assert all("parent_text" in r for r in results), "every file must still expand"
 
 
 class TestRerankerRrfFusion:

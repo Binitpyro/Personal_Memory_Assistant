@@ -76,10 +76,15 @@ def test_stream_chunker_pathological_input_no_hang():
     assert len(chunks) > 0
 
 
-def test_stream_chunker_loop_guard_trigger(caplog):
-    """
-    Force trigger the infinite loop guard using a custom pathological string subclass
-    and verify that it logs the guard error and terminates without hanging.
+def test_stream_chunker_lying_len_terminates_without_the_loop_guard(caplog):
+    """A pathological `str` subclass whose `__len__` lies used to stall
+    `process` until the infinite-loop guard fired and forced an exit.
+
+    The read cursor removed that failure mode rather than catching it: `_pos`
+    advances by at least one character per iteration whatever `__len__` claims,
+    so the loop terminates on its own condition. Asserting the guard stays
+    SILENT is the negative control - reinstating the buffer re-slicing makes it
+    fire again and fails this test.
     """
 
     class PathologicalString(str):
@@ -96,9 +101,13 @@ def test_stream_chunker_loop_guard_trigger(caplog):
     chunker.buffer = PathologicalString("a" * 100)
 
     with caplog.at_level(logging.ERROR):
-        _ = chunker.process("")
+        chunks = chunker.process("")
 
-    assert any("Infinite loop guard triggered" in record.message for record in caplog.records)
+    assert isinstance(chunks, list)
+    assert chunker._pos > 0, "the read cursor must advance on adversarial input"
+    assert not any(
+        "Infinite loop guard triggered" in record.message for record in caplog.records
+    ), "the cursor should terminate this input without needing the guard"
 
 
 def test_sentence_offsets_gating(monkeypatch):

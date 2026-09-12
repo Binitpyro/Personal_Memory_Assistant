@@ -473,6 +473,14 @@ class StreamChunker:
         " ",
     )
 
+    # How far the read cursor may run ahead of the buffer start before the
+    # consumed prefix is dropped. Compaction is the only string copy left in
+    # `process`, and it is taken only once the cursor has passed half the
+    # buffer, so each copy discards at least as much as it moves and the total
+    # across a fragment is O(n) - not O(n) per emitted chunk, which is what
+    # re-slicing the buffer on every iteration used to cost.
+    _COMPACT_MIN_CHARS = 1 << 16
+
     def __init__(self, chunk_size: int, chunk_overlap: int, prefix: str):
         self.chunk_size = chunk_size if chunk_size > 0 else 500
         self.chunk_overlap = min(max(0, chunk_overlap), self.chunk_size - 1)
@@ -487,33 +495,43 @@ class StreamChunker:
         self.prefix = prefix
         self.buffer = ""
         self.total_offset = 0
+        # Read cursor into `buffer`. The unconsumed text is always
+        # `buffer[_pos:]` - nothing may read `buffer` from index 0 and assume it
+        # is the head of the stream.
+        self._pos = 0
 
     def process(self, text_fragment: str) -> list[dict[str, Any]]:
         self.buffer += text_fragment
         chunks = []
 
-        max_iters = len(self.buffer) + 2
+        max_iters = (len(self.buffer) - self._pos) + 2
         iters = 0
-        while len(self.buffer) > self.chunk_size:
+        while (len(self.buffer) - self._pos) > self.chunk_size:
             iters += 1
             if iters > max_iters:
                 logger.error(
                     "Infinite loop guard triggered in StreamChunker.process! Forcing exit."
                 )
                 break
-            prev_len = len(self.buffer)
+            prev_pos = self._pos
 
-            # Find a good split point in the current window
-            raw_end = self.chunk_size
+            # Find a good split point in the current window. The lookback is
+            # clamped to the window so the search can never reach back behind
+            # the cursor into text already emitted - with the shipped share
+            # (0.25) it never could, but the share is a setting.
+            raw_end = self._pos + self.chunk_size
             # Use simple sentence snapping for streaming
-            end = self._find_boundary(self.buffer, raw_end, self.boundary_lookback)
+            end = self._find_boundary(
+                self.buffer, raw_end, min(self.boundary_lookback, self.chunk_size)
+            )
 
-            chunk_text = self.buffer[:end]
+            chunk_len = end - self._pos
+            chunk_text = self.buffer[self._pos : end]
             preview = self.prefix + chunk_text
             chunks.append(
                 {
                     "start_offset": self.total_offset,
-                    "end_offset": self.total_offset + end,
+                    "end_offset": self.total_offset + chunk_len,
                     "text_preview": preview,
                     "sentence_offsets": "[]"
                     if os.environ.get("PMA_SENTENCE_OFFSETS", "0") == "0"
@@ -523,30 +541,41 @@ class StreamChunker:
             )
 
             # Advance
-            overlap_start = max(0, end - self.chunk_overlap)
+            overlap_start = max(0, chunk_len - self.chunk_overlap)
             if overlap_start <= 0:
                 overlap_start = 1
-            self.buffer = self.buffer[overlap_start:]
+            self._pos += overlap_start
             self.total_offset += overlap_start
 
-            if len(self.buffer) >= prev_len:
-                # Force shrink buffer to guarantee progress and break infinite loops
-                self.buffer = self.buffer[1:]
+            if self._pos <= prev_pos:
+                # Unreachable - `overlap_start` is >= 1 by construction directly
+                # above, so the cursor is strictly monotonic. Kept as the same
+                # belt-and-braces the string-slicing version carried, where a
+                # zero-width advance genuinely could stall.
+                self._pos = prev_pos + 1
                 self.total_offset += 1
-                if len(self.buffer) == 0:
+                if self._pos >= len(self.buffer):
                     break
+
+            # Drop the consumed prefix once it is both large and the majority of
+            # the buffer, so a single huge fragment cannot keep a fully-consumed
+            # head resident for the length of the run.
+            if self._pos >= self._COMPACT_MIN_CHARS and self._pos * 2 >= len(self.buffer):
+                self.buffer = self.buffer[self._pos :]
+                self._pos = 0
 
         return chunks
 
     def finalize(self) -> list[dict[str, Any]]:
         """Process any remaining text in the buffer."""
         chunks = []
-        if self.buffer.strip():
-            preview = self.prefix + self.buffer
+        remainder = self.buffer[self._pos :]
+        if remainder.strip():
+            preview = self.prefix + remainder
             chunks.append(
                 {
                     "start_offset": self.total_offset,
-                    "end_offset": self.total_offset + len(self.buffer),
+                    "end_offset": self.total_offset + len(remainder),
                     "text_preview": preview,
                     "sentence_offsets": "[]"
                     if os.environ.get("PMA_SENTENCE_OFFSETS", "0") == "0"
@@ -555,6 +584,7 @@ class StreamChunker:
                 }
             )
         self.buffer = ""
+        self._pos = 0
         return chunks
 
     @staticmethod

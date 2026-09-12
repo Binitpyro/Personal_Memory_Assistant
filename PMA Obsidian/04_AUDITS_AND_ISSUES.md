@@ -18737,3 +18737,50 @@ Every creative AI tool knows your scene. PMA knows your career.
 That's what the post-v1 creative module is. That's what makes it not a competitor to Claude's Blender connector or Autodesk Assistant or the Houdini AI Assistant. It's the layer underneath all of them that none of them can build because they're stateless by design.
 
 PMA is stateful by design. That's the moat. Build from there.
+
+---
+
+# Tech debt moved out of PERFORMANCE_BOTTLENECKS_AND_ROADMAP.md (2026-09-12)
+
+These three items were section 6 of the performance roadmap. They are
+correctness/ops debt rather than performance work, so they were moved here when
+that document was rewritten against measured evidence at commit `8cc4d37`.
+Nothing was dropped; the wording below is the original, with one stale deadline
+removed as noted.
+
+## TD-1 - Token handoff contract (keyring env bypass)
+
+`app/main.py:_init_local_access_token` only reaches `keyring.get_password` when
+`X_LOCAL_ACCESS_TOKEN` is unset in the process environment. Because launchers
+(`StartPMA.bat` and Tauri `lib.rs`) set the environment variable on spawn,
+keyring is never written during app launch. Keyring is only populated during
+bare `uvicorn` / `python app/main.py` launches.
+
+*Planned fix:* move `keyring.set_password` and `os.environ["X_LOCAL_ACCESS_TOKEN"]`
+out of the `if not token:` branch so keyring stays authoritative across all
+execution modes.
+
+**Status: still accurate, re-verified 2026-09-12 at `8cc4d37`.** `app/main.py:63`
+is `if not token:`, and it wraps both the `keyring.set_password` call at `:68`
+and the `os.environ` assignment at `:72`. So a launcher-set token means keyring
+is never written, exactly as described.
+
+## TD-2 - Database path naming alignment (`PMA_DB_PATH`)
+
+Core uses `data/pma_metadata.db` via `config.py`. To prevent naming collisions
+with sidecars (e.g. Zeni), sidecars use isolated names (e.g. `ZENI_DB_PATH`).
+
+**Status: not re-verified in this pass.** Recorded as carried over, not as
+confirmed.
+
+## TD-3 - Sidecar retrieval vs Core RAG integration
+
+Core exposes `POST /api/query` and `POST /api/query/stream`. Sidecars such as
+the Creative Module leverage a dedicated passthrough (`POST /api/llm/chat`) and
+private FTS5 stores for specialised domain performance. Unified retrieval
+routing remains unscheduled.
+
+**Status: not re-verified in this pass.** The original text scheduled this
+"post-Aug 17" against the XPRIZE submission deadline; that framing was dropped
+because the submission was withdrawn (CLAUDE.md section 8.6). The technical
+content is unchanged.

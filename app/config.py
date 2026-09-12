@@ -586,6 +586,39 @@ class Settings(BaseSettings):
     # push into the fused candidate list.
     summary_expand_chunks_per_file: int = 5
     rrf_k: int = 60
+    # Per-leg overrides for the RRF denominator. None means "use rrf_k", so the
+    # shipped ranking is bit-identical until one is set deliberately and
+    # PMA_RRF_K still moves all three legs at once.
+    #
+    # They exist because the three legs do NOT hand RRF lists of the same
+    # length, and the denominator's discrimination depends on that length. Both
+    # chunk legs fetch 2 * recall_k (retrieval.py:217 and :241), so at
+    # recall_k=50 each is 100 long - measured fts_len = sem_len = 100. The
+    # summary leg instead ranks *files* via the caller's k (15) and gives every
+    # chunk of a file its file's rank, so it is 75 entries carrying at most 15
+    # DISTINCT ranks.
+    #
+    # First-to-last reward ratio (k + n) / (k + 1):
+    #     k=60   FTS/semantic 2.62x     summary 1.23x
+    #     k=5    FTS/semantic 17.5x     summary 3.33x
+    #
+    # config.py:570 already recorded the k=60 case for a 5-element list ("rrf_k
+    # = 60 barely differentiates"), and the fix applied there was to shrink the
+    # weight to 0.05 rather than to correct the denominator. Sweep k and weight
+    # together - they are confounded by construction.
+    #
+    # UNMEASURED as per-leg values. See CLAUDE.md 8.3a for the global-k
+    # measurement; nothing yet establishes that splitting them helps.
+    #
+    # No FUSION_VERSION bump accompanies these: defaulting to None keeps the
+    # shipped ranking bit-identical, and settings are read once at process
+    # start, so a per-leg k cannot change under a live in-process cache. The
+    # persistent LanceDB query_cache is the one that does NOT key on fusion at
+    # all (retrieval.py:990) - clear it after changing any fusion setting, the
+    # same as for rrf_k itself.
+    rrf_k_fts: int | None = None
+    rrf_k_semantic: int | None = None
+    rrf_k_summary: int | None = None
     rrf_score_scale: int = 1000
     retrieval_top_k: int = 15
     context_max_tokens: int = 8000  # Balanced for reliability and depth

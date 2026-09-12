@@ -161,7 +161,7 @@ wastes a session.
   ran in the wrong place besides — before the reranker, where it could drop a
   chunk the reranker would have promoted (`retrieval.py:484-488`).
 - **Retrieval candidate building is capped** at 100 (`retrieval.py:494`), behind
-  a 500-entry LRU cache, with all four legs (FTS, embedding, semantic, summary)
+  a 500-entry LRU cache, with all three legs (FTS, semantic, summary)
   running concurrently.
 - **Reranker batches are bounded by padded footprint, not count**
   (`reranker.py:211-229`). Padding is batch-longest, so cost scales with

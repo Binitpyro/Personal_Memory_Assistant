@@ -283,22 +283,34 @@ def _compute_rrf_scores(
     the candidate pool.
     """
     scores: dict[str, float] = {}
-    k_rrf = settings.rrf_k
+    # Three different quantities are called "k" around this function and they
+    # are NOT interchangeable:
+    #   * k_fts / k_sem / k_sum below - the RRF *denominator*, per leg.
+    #   * the `k` parameter of this function - a result TRUNCATION window,
+    #     used only at the `[:k]` on the return. It receives recall_k.
+    #   * the caller's `k` in hybrid_retrieve - retrieval_top_k (15), which
+    #     sizes the summary leg's file fetch.
+    # CLAUDE.md 8.3 records that importing one k into another's scale has
+    # already been done twice. Do not collapse them.
+    k_default = settings.rrf_k
+    k_fts = settings.rrf_k_fts if settings.rrf_k_fts is not None else k_default
+    k_sem = settings.rrf_k_semantic if settings.rrf_k_semantic is not None else k_default
+    k_sum = settings.rrf_k_summary if settings.rrf_k_summary is not None else k_default
     fts_w = settings.rrf_fts_weight
     sem_w = settings.rrf_semantic_weight
     sum_w = settings.rrf_summary_weight
     for rank, res in enumerate(fts_results):
-        scores[res["id"]] = fts_w * (1.0 / (k_rrf + rank + 1))
+        scores[res["id"]] = fts_w * (1.0 / (k_fts + rank + 1))
     for rank, res in enumerate(semantic_results):
         chunk_id = res["id"]
-        scores[chunk_id] = scores.get(chunk_id, 0.0) + sem_w * (1.0 / (k_rrf + rank + 1))
+        scores[chunk_id] = scores.get(chunk_id, 0.0) + sem_w * (1.0 / (k_sem + rank + 1))
     if summary_results and sum_w > 0:
         for res in summary_results:
             chunk_id = res["id"]
             # Every chunk of the file ranked r enters at rank r, so the whole
             # document is promoted or demoted as a unit.
             rank = res.get("rank", 0)
-            scores[chunk_id] = scores.get(chunk_id, 0.0) + sum_w * (1.0 / (k_rrf + rank + 1))
+            scores[chunk_id] = scores.get(chunk_id, 0.0) + sum_w * (1.0 / (k_sum + rank + 1))
     # Tie-break on chunk id, not on dict insertion order.
     #
     # The summary leg gives every chunk of a file the *same* contribution (see

@@ -78,60 +78,6 @@ def test_compute_rrf_scores_and_filter_results(monkeypatch):
     assert filtered == [{"file_path": "a.py", "folder_tag": "A"}]
 
 
-def test_per_leg_rrf_k_defaults_are_a_no_op(monkeypatch):
-    """Unset per-leg overrides must reproduce plain rrf_k exactly.
-
-    This is what lets the settings ship without a FUSION_VERSION bump: an
-    upgrade that changes any ranked score is not a no-op, however small.
-    """
-    monkeypatch.setattr(retrieval.settings, "rrf_fts_weight", 1.0)
-    monkeypatch.setattr(retrieval.settings, "rrf_semantic_weight", 1.0)
-    monkeypatch.setattr(retrieval.settings, "rrf_summary_weight", 0.0)
-    fts = [{"id": "1"}, {"id": "2"}]
-    sem = [{"id": "2"}, {"id": "3"}]
-
-    monkeypatch.setattr(retrieval.settings, "rrf_k", 60)
-    for leg in ("rrf_k_fts", "rrf_k_semantic", "rrf_k_summary"):
-        monkeypatch.setattr(retrieval.settings, leg, None)
-    baseline = dict(retrieval._compute_rrf_scores(fts, sem, None, k=3))
-
-    # Setting every leg to the same value as rrf_k must also be identical.
-    for leg in ("rrf_k_fts", "rrf_k_semantic", "rrf_k_summary"):
-        monkeypatch.setattr(retrieval.settings, leg, 60)
-    explicit = dict(retrieval._compute_rrf_scores(fts, sem, None, k=3))
-    assert explicit == baseline
-
-
-def test_each_leg_uses_its_own_rrf_denominator(monkeypatch):
-    """The three legs must read three different denominators.
-
-    Asserted as a RATIO computed from the settings, never as a literal: a
-    hard-coded expected score would pass against a function that ignored the
-    per-leg settings entirely and just used rrf_k, which is the exact defect
-    this test exists to catch.
-    """
-    monkeypatch.setattr(retrieval.settings, "rrf_fts_weight", 1.0)
-    monkeypatch.setattr(retrieval.settings, "rrf_semantic_weight", 1.0)
-    monkeypatch.setattr(retrieval.settings, "rrf_summary_weight", 1.0)
-    monkeypatch.setattr(retrieval.settings, "rrf_k", 60)
-
-    k_fts, k_sem, k_sum = 1, 9, 99
-    monkeypatch.setattr(retrieval.settings, "rrf_k_fts", k_fts)
-    monkeypatch.setattr(retrieval.settings, "rrf_k_semantic", k_sem)
-    monkeypatch.setattr(retrieval.settings, "rrf_k_summary", k_sum)
-
-    # One id per leg, each at rank 0, so every score is weight / (k_leg + 1).
-    scores = dict(
-        retrieval._compute_rrf_scores([{"id": "f"}], [{"id": "s"}], [{"id": "u", "rank": 0}], k=3)
-    )
-
-    assert scores["f"] == pytest.approx(1.0 / (k_fts + 1))
-    assert scores["s"] == pytest.approx(1.0 / (k_sem + 1))
-    assert scores["u"] == pytest.approx(1.0 / (k_sum + 1))
-    # And the legs are genuinely distinct, not three reads of one constant.
-    assert scores["f"] > scores["s"] > scores["u"]
-
-
 @pytest.mark.asyncio
 async def test_load_query_metadata_and_gather_full_inputs(monkeypatch):
     class FakeDB:

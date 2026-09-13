@@ -6,6 +6,10 @@ import re
 import sys
 from unittest.mock import AsyncMock, MagicMock
 
+# Eval corpora are data. corpus_qtype holds a snapshot of this repo's own Python,
+# test_*.py and conftest.py included, which pytest would otherwise collect.
+collect_ignore_glob = ["eval/corpus_*"]
+
 if not hasattr(ctypes, "windll"):
     ctypes.windll = MagicMock()
 if not hasattr(ctypes, "get_last_error"):

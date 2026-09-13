@@ -315,6 +315,11 @@ graphify-out/
 # provenance recorded in the queries file, so it does not belong in git.
 /tests/eval/corpus_squad/
 /tests/eval/queries_squad.json
+
+# Query-type fixture from scripts/build_query_type_fixture.py: deterministic from
+# the git SHA and seed recorded in its queries file, and a second copy of the code.
+/tests/eval/corpus_qtype/
+/tests/eval/queries_qtype.json
 /Claude outputs
 
 # Autoresearch journals. Machine-generated sweep results, append-only, ~1.8 KB

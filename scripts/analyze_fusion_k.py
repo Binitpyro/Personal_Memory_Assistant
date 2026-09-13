@@ -455,7 +455,13 @@ def _report(
     has_bal = "ndcg_mean_bal" in summary["global_k_curve"][labels[0]]
     for k_rrf in labels:
         c = summary["global_k_curve"][k_rrf]
-        mark = "  <- shipped" if k_rrf in ("60", "ks60_w0.05") else ""
+        # ks60_w0.05 is NOT shipped under --leg-sweep: the chunk legs sit at
+        # --base-k there, while production runs k=60 on every leg. It is the
+        # control for the per-leg question, and labelling it "shipped" once
+        # misread a whole sweep.
+        mark = (
+            "  <- shipped" if k_rrf == "60" else ("  <- control" if k_rrf == "ks60_w0.05" else "")
+        )
         bal = f" {c['ndcg_mean_bal']:>9.4f} {c['recall_mean_bal']:>9.4f}" if has_bal else ""
         lines.append(f"{k_rrf:>5} {c['ndcg_mean']:>9.4f} {c['recall_mean']:>10.4f}{bal}{mark}")
 
@@ -466,11 +472,26 @@ def _report(
     key = "ndcg_mean_bal" if has_bal else "ndcg_mean"
     ndcgs = [summary["global_k_curve"][lab][key] for lab in labels]
     span = max(ndcgs) - min(ndcgs)
-    verdict = "NULL - under the threshold" if span < threshold else "above threshold"
-    lines += [
-        "-" * 26,
-        f"  range {span:.4f} vs threshold {threshold:.4f}  ->  {verdict}",
-    ]
+    lines.append("-" * 26)
+    if "ks60_w0.05" in labels:
+        # A range measures damage as readily as improvement, and in a sweep
+        # whose control sits near the top it is almost entirely damage: the
+        # first --leg-sweep run printed "range 0.1239 -> above threshold"
+        # when no arm beat the control at all. Ask the question that matters.
+        curve = summary["global_k_curve"]
+        control = curve["ks60_w0.05"][key]
+        best_lab = max(labels, key=lambda lab: curve[lab][key])
+        gain = curve[best_lab][key] - control
+        verdict = (
+            "NULL - no arm beats the control" if gain < threshold else "an arm beats the control"
+        )
+        lines.append(
+            f"  best {best_lab} vs control {gain:+.4f} (threshold {threshold:.4f})  ->  {verdict}"
+        )
+        lines.append(f"  range {span:.4f} is spread across arms - damage counts, not gain")
+    else:
+        verdict = "NULL - under the threshold" if span < threshold else "above threshold"
+        lines.append(f"  range {span:.4f} vs threshold {threshold:.4f}  ->  {verdict}")
     best_ndcg = max(ndcgs)
     if best_ndcg > 0.95:
         lines.append(

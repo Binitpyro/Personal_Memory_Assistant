@@ -50,6 +50,7 @@ import shutil
 import statistics
 import sys
 import tempfile
+import zlib
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -198,7 +199,41 @@ def _self_check() -> None:
     # A tie in x against a monotone y must not score a perfect 1.0.
     s = _spearman([1.0, 1.0, 2.0, 3.0], [1.0, 2.0, 3.0, 4.0])
     assert s is not None and 0.8 < s < 1.0, s
-    print("self-check OK: _kendall_tau, _spearman, _rank_with_ties")
+
+    # _winners: a flat curve has no optimum, and must not read as the grid floor.
+    def per_k(best: dict[int, float]) -> dict[str, dict[str, float]]:
+        return {str(k): {"ndcg": best.get(k, 0.5)} for k in K_GRID}
+
+    assert _winners(per_k({}), "ndcg") == list(K_GRID)
+    assert _winners(per_k({150: 1.0}), "ndcg") == [150]
+    assert _winners(per_k({3: 1.0, 5: 1.0}), "ndcg") == [3, 5]
+
+    # _class_analysis: two classes wanting opposite k. A per-class k must win
+    # held-out, and each class must be assigned its own k.
+    def rows_for(cls: str, best_k: int, n: int = 40) -> list[dict[str, Any]]:
+        return [
+            {
+                "build": 0,
+                "query_id": f"{cls}-{i}",
+                "type": cls,
+                "tau": None,
+                "per_k": per_k({best_k: 1.0}),
+            }
+            for i in range(n)
+        ]
+
+    opposite = rows_for("code_identifier", 0) + rows_for("navigation", 150)
+    ca = _class_analysis(opposite)
+    macro = ca["per_build"][0]["class_macro"]
+    assert macro["n_held_out"] == len(opposite), macro["n_held_out"]  # every row tested once
+    assert abs(macro["gain"] - 0.25) < 1e-9, macro["gain"]
+    assert macro["selected_k"] == {"code_identifier": 0, "navigation": 150}, macro["selected_k"]
+    assert ca["verdict"].startswith("PASS"), ca["verdict"]
+    # Negative control: two classes wanting the SAME k - nothing to adapt to.
+    same = _class_analysis(rows_for("code_identifier", 5) + rows_for("navigation", 5))
+    assert same["per_build"][0]["class_macro"]["gain"] == 0.0
+    assert same["verdict"].startswith("FAIL"), same["verdict"]
+    print("self-check OK: _kendall_tau, _spearman, _rank_with_ties, _winners, _class_analysis")
 
 
 # ---------------------------------------------------------------------------
@@ -338,17 +373,20 @@ async def _one_build(
                     )
                 per_k[str(k_rrf)] = scored
 
-            best = max(K_GRID, key=lambda kk: per_k[str(kk)]["ndcg"])
+            # No optimal k is stored: it is derived from per_k by _winners, which
+            # keeps ties as ties. An argmax stored here once reported k=0 for
+            # every flat curve (CLAUDE.md 8.3a retraction).
             rows.append(
                 {
                     "build": build,
                     "query_id": q.id,
+                    "type": q.type,
+                    "note": q.note,
                     "tau": tau,
                     "overlap_at_10": overlap,
                     "fts_len": len(fts_ids),
                     "sem_len": len(sem_ids),
                     "summary_len": len(summary),
-                    "optimal_k": best,
                     "per_k": per_k,
                 }
             )
@@ -356,6 +394,210 @@ async def _one_build(
         settings.rrf_k = original_k
         await idx.close()
     return rows
+
+
+def _metric_key(rows: Sequence[dict[str, Any]]) -> str:
+    """Domain-balanced nDCG when the rows carry it - it is what production ranks."""
+    return "ndcg_bal" if "ndcg_bal" in rows[0]["per_k"][str(K_GRID[0])] else "ndcg"
+
+
+def _winners(per_k: dict[str, dict[str, float]], key: str) -> list[int]:
+    """Every k that reaches the row's best score, ascending.
+
+    A flat curve returns the whole grid. Picking one element instead is what
+    produced "optimal k pinned at the floor for 1066/1236 rows": max() returns
+    the first maximum of an ascending grid, so indifference read as k=0.
+    """
+    top = max(per_k[str(k)][key] for k in K_GRID)
+    return [k for k in K_GRID if per_k[str(k)][key] == top]
+
+
+# Query class for the pre-registered test (CLAUDE.md 8.3a). squad and scifact
+# are both semantic-prose; the tests/eval/corpus types are not taxonomy classes.
+_CLASS_OF_TYPE = {
+    "squad": "semantic_prose",
+    "scifact": "semantic_prose",
+    "code_identifier": "code_identifier",
+    "navigation": "navigation",
+    "structured_lookup": "structured_lookup",
+}
+DECISION_CLASSES = ("code_identifier", "navigation", "structured_lookup", "semantic_prose")
+CV_FOLDS = 5
+PASS_MIN_GAIN = 0.025
+PASS_MIN_K = 20
+
+
+def _source(row: dict[str, Any]) -> str:
+    """Fixture a query came from, by id prefix (squad-, scifact-, qtcode-, ...)."""
+    qid = str(row["query_id"])
+    return qid.split("-", 1)[0] if "-" in qid else "other"
+
+
+def _query_class(row: dict[str, Any]) -> str:
+    # Rows written before `type` was recorded fall back to their id prefix.
+    return _CLASS_OF_TYPE.get(str(row.get("type") or _source(row)), "other")
+
+
+def _fold(row: dict[str, Any]) -> int:
+    # By query id, so a query sits in the same fold in every build.
+    return zlib.crc32(str(row["query_id"]).encode()) % CV_FOLDS
+
+
+def _mean_at(rows: Sequence[dict[str, Any]], k: int, key: str) -> float:
+    return statistics.fmean(r["per_k"][str(k)][key] for r in rows)
+
+
+def _best_k(rows: Sequence[dict[str, Any]], key: str, group_of: Any, macro: bool) -> int:
+    """Fixed k maximising the micro mean, or the mean of per-group means.
+
+    Ties go to the smallest k, which is conservative for the PASS rule's
+    "some class wants k >= 20" clause.
+    """
+
+    def objective(k: int) -> float:
+        if not macro:
+            return _mean_at(rows, k, key)
+        groups: dict[str, list[dict[str, Any]]] = {}
+        for r in rows:
+            groups.setdefault(group_of(r), []).append(r)
+        return statistics.fmean(_mean_at(g, k, key) for g in groups.values())
+
+    return max(K_GRID, key=objective)
+
+
+def _cv_conditional(
+    rows: Sequence[dict[str, Any]], key: str, group_of: Any, macro: bool
+) -> dict[str, Any]:
+    """Held-out score of a per-group k against one fixed k, for ONE build.
+
+    Each fold picks a k per group, and one global k, on the other folds, and
+    both are scored on the held-out fold. The global k is chosen by the same
+    objective (micro or macro) it is scored on, so the per-group arm gets no
+    free advantage from unequal group sizes. Groups unseen in training fall
+    back to the global k.
+    """
+    # (group, (per-group k, global k, k=60)) per held-out row.
+    held: list[tuple[str, tuple[float, float, float]]] = []
+    for f in range(CV_FOLDS):
+        train = [r for r in rows if _fold(r) != f]
+        test = [r for r in rows if _fold(r) == f]
+        if not train or not test:
+            continue
+        global_k = _best_k(train, key, group_of, macro)
+        by_group: dict[str, list[dict[str, Any]]] = {}
+        for r in train:
+            by_group.setdefault(group_of(r), []).append(r)
+        pick = {g: _best_k(rs, key, group_of, False) for g, rs in by_group.items()}
+        for r in test:
+            g = group_of(r)
+            held.append(
+                (
+                    g,
+                    (
+                        r["per_k"][str(pick.get(g, global_k))][key],
+                        r["per_k"][str(global_k)][key],
+                        r["per_k"]["60"][key],
+                    ),
+                )
+            )
+
+    def score(idx: int) -> float:
+        if not macro:
+            return statistics.fmean(h[1][idx] for h in held)
+        groups = sorted({h[0] for h in held})
+        return statistics.fmean(
+            statistics.fmean(h[1][idx] for h in held if h[0] == g) for g in groups
+        )
+
+    by_group_all: dict[str, list[dict[str, Any]]] = {}
+    for r in rows:
+        by_group_all.setdefault(group_of(r), []).append(r)
+    return {
+        "n_held_out": len(held),
+        "adaptive": score(0),
+        "global_fixed": score(1),
+        "k60": score(2),
+        "gain": score(0) - score(1),
+        # The k each group would ship with: chosen on all of this build's rows.
+        # The folds above measure how well that choice generalises.
+        "selected_k": {g: _best_k(rs, key, group_of, False) for g, rs in by_group_all.items()},
+    }
+
+
+def _class_analysis(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """The pre-registered PASS/FAIL test, plus the oracle ceilings it sits under."""
+    key = _metric_key(rows)
+    builds = sorted({r["build"] for r in rows})
+    decision = [r for r in rows if _query_class(r) in DECISION_CLASSES]
+    present = sorted({_query_class(r) for r in decision})
+
+    per_build: list[dict[str, Any]] = []
+    for b in builds:
+        br = [r for r in rows if r["build"] == b]
+        dr = [r for r in decision if r["build"] == b]
+        entry: dict[str, Any] = {"build": b}
+        if len(present) >= 2:
+            entry["class_macro"] = _cv_conditional(dr, key, _query_class, macro=True)
+            entry["class_micro"] = _cv_conditional(dr, key, _query_class, macro=False)
+        # By fixture: separates squad from scifact inside semantic_prose, and is
+        # the class-vs-domain check. On the original composed corpus this is the
+        # squad / scifact / corpus split measured inline on 2026-09-13.
+        entry["source_micro"] = _cv_conditional(br, key, _source, macro=False)
+        best = _best_k(br, key, _source, False)
+        fixed = _mean_at(br, best, key)
+        entry["best_fixed_k"] = best
+        entry["oracle_gain"] = (
+            statistics.fmean(max(r["per_k"][str(k)][key] for k in K_GRID) for r in br) - fixed
+        )
+        base3 = _mean_at(br, 3, key)
+        entry["two_arm_gain"] = {
+            big: statistics.fmean(max(r["per_k"]["3"][key], r["per_k"][str(big)][key]) for r in br)
+            - base3
+            for big in (60, 150)
+        }
+        per_build.append(entry)
+
+    curves = {
+        c: {str(k): _mean_at([r for r in rows if _query_class(r) == c], k, key) for k in K_GRID}
+        for c in sorted({_query_class(r) for r in rows})
+    }
+    # Within-class subgroups (fixture template, else source): a class whose
+    # optimal k is really its template's is risk 1 in the plan.
+    subgroups: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        name = f"{_query_class(r)}/{r.get('note') or _source(r)}"
+        subgroups.setdefault(name, {"rows": []})["rows"].append(r)
+    for s in subgroups.values():
+        rs = s.pop("rows")
+        s["n"] = len(rs)
+        s["best_k"] = _best_k(rs, key, _source, False)
+        s["at_best"] = _mean_at(rs, s["best_k"], key)
+        s["at_3"] = _mean_at(rs, 3, key)
+        s["at_60"] = _mean_at(rs, 60, key)
+
+    verdict = "N/A - fewer than two decision classes present"
+    if len(present) >= 2:
+        floor = min(e["class_macro"]["gain"] for e in per_build)
+        wants_large = [
+            c
+            for c in present
+            if all(e["class_macro"]["selected_k"].get(c, 0) >= PASS_MIN_K for e in per_build)
+        ]
+        passed = floor >= PASS_MIN_GAIN and bool(wants_large)
+        verdict = (
+            f"{'PASS' if passed else 'FAIL'} - macro gain floor {floor:+.4f} "
+            f"(needs >= {PASS_MIN_GAIN}); classes with k >= {PASS_MIN_K} in every "
+            f"build: {wants_large or 'none'}"
+        )
+    return {
+        "metric": key,
+        "classes_present": present,
+        "missing_classes": [c for c in DECISION_CLASSES if c not in present],
+        "per_build": per_build,
+        "class_curves": curves,
+        "subgroups": subgroups,
+        "verdict": verdict,
+    }
 
 
 def _summarise(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -375,23 +617,37 @@ def _summarise(rows: list[dict[str, Any]]) -> dict[str, Any]:
             )
         curve[str(k_rrf)] = entry
 
-    defined = [r for r in rows if r["tau"] is not None]
-    taus = [float(r["tau"]) for r in defined]
-    opt = [float(r["optimal_k"]) for r in defined]
-    rho = _spearman(opt, taus) if len(defined) >= 3 else None
+    key = _metric_key(rows)
+    winners = [_winners(r["per_k"], key) for r in rows]
+    n_flat = sum(1 for w in winners if len(w) == len(K_GRID))
+    # A row with a flat curve has no optimal k, so it cannot enter a correlation
+    # with one. A row tied over a subset keeps the median of that subset.
+    defined = [
+        (float(statistics.median(w)), float(r["tau"]))
+        for r, w in zip(rows, winners, strict=True)
+        if r["tau"] is not None and len(w) < len(K_GRID)
+    ]
+    taus = [float(r["tau"]) for r in rows if r["tau"] is not None]
+    rho = _spearman([d[0] for d in defined], [d[1] for d in defined]) if len(defined) >= 3 else None
 
     return {
         "n_rows": len(rows),
-        "n_tau_defined": len(defined),
-        "n_tau_undefined": len(rows) - len(defined),
+        "metric": key,
+        "n_flat": n_flat,
+        "n_unique_optimum": sum(1 for w in winners if len(w) == 1),
+        "n_tau_defined": len(taus),
+        "n_tau_undefined": len(rows) - len(taus),
         "mean_overlap_at_10": statistics.fmean([r["overlap_at_10"] for r in rows]),
         "tau_mean": statistics.fmean(taus) if taus else None,
         "tau_stdev": statistics.stdev(taus) if len(taus) > 1 else None,
+        "n_spearman_rows": len(defined),
         "spearman_optimal_k_vs_tau": rho,
+        # Unique optima only - a tie belongs to no single k.
         "optimal_k_distribution": {
-            str(k_rrf): sum(1 for r in rows if r["optimal_k"] == k_rrf) for k_rrf in K_GRID
+            str(k_rrf): sum(1 for w in winners if w == [k_rrf]) for k_rrf in K_GRID
         },
         "global_k_curve": curve,
+        "class_analysis": _class_analysis(rows),
     }
 
 
@@ -443,40 +699,59 @@ def _report(summary: dict[str, Any], threshold: float, corpus_name: str) -> str:
         f"  mean FTS/semantic overlap@10  {summary['mean_overlap_at_10']:.2f} of 10",
         f"  tau mean                      {_fmt(summary['tau_mean'])}",
         f"  tau stdev                     {_fmt(summary['tau_stdev'])}",
+        f"  flat k-curve (no optimum)     {summary['n_flat']}   (metric {summary['metric']})",
+        f"  unique optimum                {summary['n_unique_optimum']}",
         f"  Spearman(optimal k, tau)      {_fmt(summary['spearman_optimal_k_vs_tau'])}"
-        "   <- paper predicts monotone",
+        f"   over {summary['n_spearman_rows']} non-flat rows <- paper predicts monotone",
         "",
-        "  optimal-k distribution:",
+        "  unique-optimum distribution (ties belong to no single k):",
     ]
     dist = summary["optimal_k_distribution"]
     for k_rrf in K_GRID:
         lines.append(f"    k={k_rrf:<4} {dist[str(k_rrf)]:>4}")
-
-    # Two ways this correlation lies, both hit on the first corpus_squad run.
-    total = max(1, summary["n_rows"])
-    edges = (str(K_GRID[0]), str(K_GRID[-1]))
-    at_edge = max(dist[e] for e in edges)
-    if at_edge / total > 0.5:
+    if summary["n_spearman_rows"] < 30:
         lines.append(
-            f"  !! {at_edge}/{total} optimal-k values sit on a grid EDGE."
-            " The grid does not bracket the optimum,"
+            f"  !! only {summary['n_spearman_rows']} rows have any k preference;"
+            " the correlation above is not usable."
         )
-        lines.append("     so optimal-k is censored and the correlation above is not usable.")
-    modal = max(dist.values())
-    if modal / total > 0.9:
-        lines.append(
-            f"  !! optimal-k is one value for {modal}/{total} rows. A correlation"
-            " against a near-constant"
-        )
-        lines.append("     is void, not weak - do not read it as evidence either way.")
 
+    ca = summary["class_analysis"]
     lines += [
         "",
-        f"Read with care: {corpus_name} is one query register. This tests the",
-        "MECHANISM (section 4.4), not the five-class taxonomy, and cannot",
-        "validate the latter - no fixture here spans the five classes.",
+        f"Adaptive k by query class (pre-registered, CLAUDE.md 8.3a; metric {ca['metric']})",
+        "-" * 70,
+        f"  classes present: {ca['classes_present'] or 'none'}"
+        f"   missing: {ca['missing_classes'] or 'none'}",
         "",
+        f"  {'class':<18}" + "".join(f"{k:>7}" for k in K_GRID),
     ]
+    for c, curve in ca["class_curves"].items():
+        lines.append(f"  {c:<18}" + "".join(f"{curve[str(k)]:>7.4f}" for k in K_GRID))
+    lines += [
+        "",
+        f"  {'build':<6} {'test':<14} {'adaptive':>9} {'fixed':>9} {'k60':>9} {'gain':>8}",
+    ]
+    for e in ca["per_build"]:
+        for name in ("class_macro", "class_micro", "source_micro"):
+            if name not in e:
+                continue
+            r = e[name]
+            lines.append(
+                f"  {e['build']:<6} {name:<14} {r['adaptive']:>9.4f} {r['global_fixed']:>9.4f}"
+                f" {r['k60']:>9.4f} {r['gain']:>+8.4f}   k: {r['selected_k']}"
+            )
+        lines.append(
+            f"  {e['build']:<6} ceilings       best fixed k={e['best_fixed_k']}"
+            f"  per-query oracle {e['oracle_gain']:+.4f}"
+            f"  two-arm 3/60 {e['two_arm_gain'][60]:+.4f}  3/150 {e['two_arm_gain'][150]:+.4f}"
+        )
+    lines += ["", f"  {'subgroup':<44} {'n':>5} {'best k':>7} {'@best':>7} {'@3':>7} {'@60':>7}"]
+    for name, s in sorted(ca["subgroups"].items()):
+        lines.append(
+            f"  {name:<44} {s['n']:>5} {s['best_k']:>7} {s['at_best']:>7.4f}"
+            f" {s['at_3']:>7.4f} {s['at_60']:>7.4f}"
+        )
+    lines += ["", f"  VERDICT: {ca['verdict']}", ""]
     return "\n".join(lines)
 
 
@@ -572,6 +847,11 @@ def main() -> int:
     )
     p.add_argument("--json-out", default="", help="write the full per-query rows here")
     p.add_argument(
+        "--reanalyse",
+        default="",
+        help="re-score a saved --json-out file with the current analysis (no index build)",
+    )
+    p.add_argument(
         "--self-check",
         action="store_true",
         help="run the statistics negative control and exit (no index build)",
@@ -580,6 +860,12 @@ def main() -> int:
 
     if args.self_check:
         _self_check()
+        return 0
+    if args.reanalyse:
+        saved = json.loads(Path(args.reanalyse).read_text(encoding="utf-8"))
+        threshold = float(saved.get("threshold", args.threshold))
+        label = "+".join(str(c).replace("corpus_", "") for c in saved.get("corpus", ["?"]))
+        print(_report(_summarise(saved["rows"]), threshold, label))
         return 0
     return asyncio.run(_main_async(args))
 

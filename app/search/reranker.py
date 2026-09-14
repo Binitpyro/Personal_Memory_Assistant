@@ -231,39 +231,6 @@ def _bounded_candidates(
     return chosen
 
 
-def _fuse_with_incoming_order(candidates: list[dict[str, Any]], top_k: int) -> list[dict[str, Any]]:
-    """Fuse the cross-encoder's ordering with the incoming one, then truncate.
-
-    Every candidate must already carry ``rerank_score``. Separate from
-    ``rerank`` so ``scripts/analyze_fusion_k.py`` can replay the shipped fusion
-    over cached scores instead of re-implementing it.
-    """
-    # Fuse the cross-encoder's ordering with the incoming one rather than letting
-    # it replace it. `candidates` arrives in the caller's RRF order, so this is
-    # the same reciprocal-rank fusion the retrieval path already runs, over two
-    # lists instead of three. See settings.reranker_rrf_fusion_weight for the
-    # measurement that motivates it.
-    #
-    # Done here, before the top_k truncation, so every returned item still
-    # carries a rerank_score. Fusing at the caller would let an item with no
-    # score reach the answer window, and _apply_relevance_cutoff
-    # (app/search/context_builder.py) routes partially-scored lists to its
-    # "mixed scales - not assessable as one ranking" branch, which drops nothing.
-    ranked = sorted(candidates, key=lambda x: x["rerank_score"], reverse=True)
-    weight = settings.reranker_rrf_fusion_weight
-    if weight <= 0:
-        return ranked[:top_k]
-    k_rrf = settings.reranker_fusion_k
-    ce_pos = {id(item): pos for pos, item in enumerate(ranked)}
-    fused = sorted(
-        enumerate(candidates),
-        key=lambda pair: (
-            -(weight / (k_rrf + pair[0] + 1) + (1.0 - weight) / (k_rrf + ce_pos[id(pair[1])] + 1))
-        ),
-    )
-    return [item for _, item in fused][:top_k]
-
-
 async def rerank(
     query: str,
     results: list[dict[str, Any]],
@@ -357,7 +324,34 @@ async def rerank(
     for item, score in zip(candidates, scores, strict=False):
         item["rerank_score"] = round(float(score), 6)
 
-    top = _fuse_with_incoming_order(candidates, top_k)
+    # Fuse the cross-encoder's ordering with the incoming one rather than letting
+    # it replace it. `candidates` arrives in the caller's RRF order, so this is
+    # the same reciprocal-rank fusion the retrieval path already runs, over two
+    # lists instead of three. See settings.reranker_rrf_fusion_weight for the
+    # measurement that motivates it.
+    #
+    # Done here, before the top_k truncation, so every returned item still
+    # carries a rerank_score. Fusing at the caller would let an item with no
+    # score reach the answer window, and _apply_relevance_cutoff
+    # (app/search/context_builder.py) routes partially-scored lists to its
+    # "mixed scales - not assessable as one ranking" branch, which drops nothing.
+    ranked = sorted(candidates, key=lambda x: x["rerank_score"], reverse=True)
+    weight = settings.reranker_rrf_fusion_weight
+    if weight <= 0:
+        top = ranked[:top_k]
+    else:
+        k_rrf = settings.reranker_fusion_k
+        ce_pos = {id(item): pos for pos, item in enumerate(ranked)}
+        fused = sorted(
+            enumerate(candidates),
+            key=lambda pair: (
+                -(
+                    weight / (k_rrf + pair[0] + 1)
+                    + (1.0 - weight) / (k_rrf + ce_pos[id(pair[1])] + 1)
+                )
+            ),
+        )
+        top = [item for _, item in fused][:top_k]
 
     elapsed_ms = (time.perf_counter() - t0) * 1000
 

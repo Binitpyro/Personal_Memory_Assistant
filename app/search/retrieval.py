@@ -474,6 +474,25 @@ def _rebalance_after_rerank(results: list[dict[str, Any]], k: int) -> list[dict[
 _MIN_CANDIDATE_CHARS = 50
 
 
+async def _fetch_candidate_rows(db: DatabaseManager, chunk_ids: list[int]) -> dict[int, Any]:
+    """chunk id -> the row ``_build_candidate_results`` indexes by position.
+
+    Separate from ``hybrid_retrieve`` so ``scripts/analyze_fusion_k.py`` builds
+    reranker candidates from the same columns, in the same order, as production.
+    """
+    placeholders = ",".join("?" for _ in chunk_ids)
+    query_sql = (
+        f"SELECT c.id, zlib_decompress(c.text_preview) as text_preview, f.path, f.folder_tag, f.modified_at, c.start_offset, c.end_offset, c.sentence_offsets, c.segmenter_version, c.file_id "  # nosec B608 # noqa: S608
+        f"FROM chunks c JOIN files f ON c.file_id = f.id "
+        f"WHERE c.id IN ({placeholders})"
+    )
+    rows = await db.execute_query(query_sql, tuple(chunk_ids))
+    row_map: dict[int, Any] = {}
+    for row in rows:
+        row_map[row[0]] = row
+    return row_map
+
+
 def _build_candidate_results(
     chunk_ids_ordered: list[int],
     row_map: dict[int, Any],
@@ -653,16 +672,7 @@ async def hybrid_retrieve(
     chunk_ids_ordered = [int(cid) for cid, _ in sorted_ids]
     score_map = {int(cid): sc for cid, sc in sorted_ids}
 
-    placeholders = ",".join("?" for _ in chunk_ids_ordered)
-    query_sql = (
-        f"SELECT c.id, zlib_decompress(c.text_preview) as text_preview, f.path, f.folder_tag, f.modified_at, c.start_offset, c.end_offset, c.sentence_offsets, c.segmenter_version, c.file_id "  # nosec B608 # noqa: S608
-        f"FROM chunks c JOIN files f ON c.file_id = f.id "
-        f"WHERE c.id IN ({placeholders})"
-    )
-    rows = await db.execute_query(query_sql, tuple(chunk_ids_ordered))
-    row_map: dict[int, Any] = {}
-    for row in rows:
-        row_map[row[0]] = row
+    row_map = await _fetch_candidate_rows(db, chunk_ids_ordered)
 
     # The metadata join is hoisted above candidate construction so folder_tag is
     # available at allocation time (Phase 2) without a schema change - FTS

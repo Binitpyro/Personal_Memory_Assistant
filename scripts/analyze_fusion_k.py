@@ -34,8 +34,9 @@ Two deliberate departures from production
   off: the cross-encoder re-sorts whatever pool it is handed, which would put a
   downstream confound on an experiment about fusion. `--reranker` scores the
   production reranked list instead - the number that matters for shipping - by
-  scoring each query's candidates once and replaying the shipped fusion per k,
-  and aborts if that replay ever disagrees with `hybrid_retrieve`.
+  running production `rerank()` once per distinct candidate pool (scores are
+  batch-dependent, see `_rerank_replay`), and aborts if the result ever
+  disagrees with `hybrid_retrieve`.
 
 Usage:
     .venv\\Scripts\\python.exe scripts/analyze_fusion_k.py --self-check
@@ -302,15 +303,21 @@ async def _rerank_replay(
     pools: dict[int, tuple[list[int], dict[int, float]]],
     db: Any,
     relativize: Any,
-) -> tuple[dict[str, dict[str, float]], dict[int, list[int]]]:
-    """Score every k's reranked production list from ONE cross-encoder pass.
+) -> tuple[dict[str, dict[str, float]], dict[int, list[int]], int]:
+    """Every k's reranked production list, one cross-encoder pass per DISTINCT pool.
 
-    A cross-encoder score depends on (query, chunk text) and never on k, so the
-    union of all k's candidate pools is scored once and each k is replayed from
-    the cache through the shipped steps: _build_candidate_results ->
-    _bounded_candidates -> _fuse_with_incoming_order -> _rebalance_after_rerank
-    (retrieval.py hybrid_retrieve; reranker.py rerank). `pools[k]` is that k's
-    domain-balanced chunk ids and its RRF score map.
+    The obvious shortcut - score each chunk once and replay every k from that
+    cache - is wrong, measured 2026-09-14: the INT8 cross-encoder's score for a
+    chunk depends on its batch-mates. Adding 20 chunks to a 40-chunk batch moved
+    all 40 scores (max 0.41), and adding one SHORT chunk, which leaves padding
+    unchanged, still moved all 30 (max 0.09). Order within a batch changes
+    nothing. So the cache key is the exact candidate pool, and each distinct
+    pool goes through production `rerank()` itself: _build_candidate_results ->
+    rerank (_bounded_candidates, scoring, fusion) -> _rebalance_after_rerank,
+    as in hybrid_retrieve. Nearby k often yield the same pool, so this costs
+    fewer passes than one per k. `pools[k]` is that k's domain-balanced chunk
+    ids and its RRF score map. Returns per_k metrics, final ids per k, and the
+    number of cross-encoder passes spent.
     """
     from app.config import settings
     from app.search import reranker, retrieval
@@ -320,38 +327,25 @@ async def _rerank_replay(
     union = list(dict.fromkeys(c for balanced, _ in pools.values() for c in balanced))
     row_map = await retrieval._fetch_candidate_rows(db, union)
 
-    results_by_k: dict[int, list[dict[str, Any]]] = {}
-    pool_by_k: dict[int, list[dict[str, Any]]] = {}
-    for k_rrf, (balanced, score_map) in pools.items():
-        results = retrieval._build_candidate_results(balanced, row_map, score_map)
-        results_by_k[k_rrf] = results
-        pool_by_k[k_rrf] = reranker._bounded_candidates(results, window, "text")
-
-    todo = {c["chunk_id"]: dict(c) for pool in pool_by_k.values() for c in pool}
-    scores: dict[int, float] = {}
-    if todo:
-        items = list(todo.values())
-        # rerank() sets rerank_score on the items it scores, in place. Its batch
-        # cap is lifted for this call only so every candidate gets a score; the
-        # production cap already chose each k's pool in _bounded_candidates.
-        budget = settings.reranker_max_batch_chars
-        settings.reranker_max_batch_chars = 10**9
-        try:
-            await reranker.rerank(q.query, items, top_k=len(items))
-        finally:
-            settings.reranker_max_batch_chars = budget
-        scores = {it["chunk_id"]: it["rerank_score"] for it in items}
-
+    reranked: dict[tuple[int, ...], list[dict[str, Any]]] = {}
     per_k: dict[str, dict[str, float]] = {}
     final_ids: dict[int, list[int]] = {}
-    for k_rrf in pools:
-        results = results_by_k[k_rrf]
+    for k_rrf, (balanced, score_map) in pools.items():
+        results = retrieval._build_candidate_results(balanced, row_map, score_map)
         if len(results) <= 1:
             # _apply_reranker_if_needed skips the cross-encoder for one candidate.
             top = results
         else:
-            pool = [{**c, "rerank_score": scores[c["chunk_id"]]} for c in pool_by_k[k_rrf]]
-            top = reranker._fuse_with_incoming_order(pool, window)
+            # rerank() is a function of the pool it scores - its ids in order -
+            # so that is the whole cache key.
+            key = tuple(
+                c["chunk_id"] for c in reranker._bounded_candidates(results, window, "text")
+            )
+            if key not in reranked:
+                reranked[key] = await reranker.rerank(
+                    q.query, [dict(r) for r in results], top_k=window, text_key="text"
+                )
+            top = reranked[key]
         final = retrieval._rebalance_after_rerank(top, window)[:window]
         final_ids[k_rrf] = [r["chunk_id"] for r in final]
         ranked = metrics.ranked_files([{"file_path": relativize(r["file_path"])} for r in final])
@@ -359,7 +353,7 @@ async def _rerank_replay(
             "ndcg": metrics.ndcg_at_k(ranked, q.relevant_files, SCORE_AT),
             "recall": metrics.recall_at_k(ranked, q.relevant_files, SCORE_AT),
         }
-    return per_k, final_ids
+    return per_k, final_ids, len(reranked)
 
 
 async def _one_build(
@@ -403,7 +397,7 @@ async def _one_build(
 
     original_k = settings.rrf_k
     rows: list[dict[str, Any]] = []
-    check = {"matched": 0, "skipped_degraded": 0}
+    check = {"matched": 0, "skipped_degraded": 0, "passes": 0}
     try:
         path_map, tag_map = await _chunk_maps(db)
         for q in queries:
@@ -458,7 +452,8 @@ async def _one_build(
                 per_k[str(k_rrf)] = scored
 
             if use_reranker:
-                per_k, final_ids = await _rerank_replay(q, pools, db, idx.relativize)
+                per_k, final_ids, passes = await _rerank_replay(q, pools, db, idx.relativize)
+                check["passes"] += passes
                 # End-to-end check, build 0 only: the replay must reproduce what
                 # hybrid_retrieve itself returns at the shipped k. Only queries
                 # whose production recall_k is the pinned 50 (> 8 words,
@@ -505,10 +500,15 @@ async def _one_build(
     finally:
         settings.rrf_k = original_k
         await idx.close()
-    if use_reranker and build == 0:
+    if use_reranker:
+        if build == 0:
+            print(
+                f"[build 1] reranker replay == hybrid_retrieve on {check['matched']} queries"
+                f" ({check['skipped_degraded']} skipped: live reranker timed out)"
+            )
         print(
-            f"[build 1] reranker replay == hybrid_retrieve on {check['matched']} queries"
-            f" ({check['skipped_degraded']} skipped: live reranker timed out)"
+            f"[build {build + 1}] {check['passes']} cross-encoder passes over {len(queries)}"
+            f" queries ({check['passes'] / max(1, len(queries)):.1f} distinct pools per query)"
         )
     return rows
 

@@ -30,9 +30,12 @@ Two deliberate departures from production
   (retrieval.py:598-605), and since the reward ratio depends on list length,
   letting it vary would make optimal k partly track *query length* instead of
   agreement. Fixing it isolates agreement as the independent variable.
-* The reranker is off, as `tests/eval/harness.py` also leaves it off: the
-  cross-encoder re-sorts whatever pool it is handed, which would put a
-  downstream confound on an experiment about fusion.
+* The reranker is off by default, as `tests/eval/harness.py` also leaves it
+  off: the cross-encoder re-sorts whatever pool it is handed, which would put a
+  downstream confound on an experiment about fusion. `--reranker` scores the
+  production reranked list instead - the number that matters for shipping - by
+  scoring each query's candidates once and replaying the shipped fusion per k,
+  and aborts if that replay ever disagrees with `hybrid_retrieve`.
 
 Usage:
     .venv\\Scripts\\python.exe scripts/analyze_fusion_k.py --self-check
@@ -229,10 +232,17 @@ def _self_check() -> None:
     assert abs(macro["gain"] - 0.25) < 1e-9, macro["gain"]
     assert macro["selected_k"] == {"code_identifier": 0, "navigation": 150}, macro["selected_k"]
     assert ca["verdict"].startswith("PASS"), ca["verdict"]
+    # Anchored two-arm ceiling: half the rows want k=0, half k=150, so best
+    # fixed k is 0 (tie -> smallest) and a perfect switch to 150 adds 0.25.
+    anchored = ca["per_build"][0]["anchored_two_arm"]
+    assert anchored == {"partner_k": 150, "gain": 0.25}, anchored
+    assert ca["headroom_verdict"].startswith("OPEN"), ca["headroom_verdict"]
     # Negative control: two classes wanting the SAME k - nothing to adapt to.
     same = _class_analysis(rows_for("code_identifier", 5) + rows_for("navigation", 5))
     assert same["per_build"][0]["class_macro"]["gain"] == 0.0
     assert same["verdict"].startswith("FAIL"), same["verdict"]
+    assert same["per_build"][0]["anchored_two_arm"]["gain"] == 0.0
+    assert same["headroom_verdict"].startswith("CLOSED"), same["headroom_verdict"]
     print("self-check OK: _kendall_tau, _spearman, _rank_with_ties, _winners, _class_analysis")
 
 
@@ -287,8 +297,77 @@ async def _chunk_maps(db: Any) -> tuple[dict[int, str], dict[int, str]]:
     return paths, tags
 
 
+async def _rerank_replay(
+    q: Any,
+    pools: dict[int, tuple[list[int], dict[int, float]]],
+    db: Any,
+    relativize: Any,
+) -> tuple[dict[str, dict[str, float]], dict[int, list[int]]]:
+    """Score every k's reranked production list from ONE cross-encoder pass.
+
+    A cross-encoder score depends on (query, chunk text) and never on k, so the
+    union of all k's candidate pools is scored once and each k is replayed from
+    the cache through the shipped steps: _build_candidate_results ->
+    _bounded_candidates -> _fuse_with_incoming_order -> _rebalance_after_rerank
+    (retrieval.py hybrid_retrieve; reranker.py rerank). `pools[k]` is that k's
+    domain-balanced chunk ids and its RRF score map.
+    """
+    from app.config import settings
+    from app.search import reranker, retrieval
+    from tests.eval import metrics
+
+    window = settings.retrieval_top_k
+    union = list(dict.fromkeys(c for balanced, _ in pools.values() for c in balanced))
+    row_map = await retrieval._fetch_candidate_rows(db, union)
+
+    results_by_k: dict[int, list[dict[str, Any]]] = {}
+    pool_by_k: dict[int, list[dict[str, Any]]] = {}
+    for k_rrf, (balanced, score_map) in pools.items():
+        results = retrieval._build_candidate_results(balanced, row_map, score_map)
+        results_by_k[k_rrf] = results
+        pool_by_k[k_rrf] = reranker._bounded_candidates(results, window, "text")
+
+    todo = {c["chunk_id"]: dict(c) for pool in pool_by_k.values() for c in pool}
+    scores: dict[int, float] = {}
+    if todo:
+        items = list(todo.values())
+        # rerank() sets rerank_score on the items it scores, in place. Its batch
+        # cap is lifted for this call only so every candidate gets a score; the
+        # production cap already chose each k's pool in _bounded_candidates.
+        budget = settings.reranker_max_batch_chars
+        settings.reranker_max_batch_chars = 10**9
+        try:
+            await reranker.rerank(q.query, items, top_k=len(items))
+        finally:
+            settings.reranker_max_batch_chars = budget
+        scores = {it["chunk_id"]: it["rerank_score"] for it in items}
+
+    per_k: dict[str, dict[str, float]] = {}
+    final_ids: dict[int, list[int]] = {}
+    for k_rrf in pools:
+        results = results_by_k[k_rrf]
+        if len(results) <= 1:
+            # _apply_reranker_if_needed skips the cross-encoder for one candidate.
+            top = results
+        else:
+            pool = [{**c, "rerank_score": scores[c["chunk_id"]]} for c in pool_by_k[k_rrf]]
+            top = reranker._fuse_with_incoming_order(pool, window)
+        final = retrieval._rebalance_after_rerank(top, window)[:window]
+        final_ids[k_rrf] = [r["chunk_id"] for r in final]
+        ranked = metrics.ranked_files([{"file_path": relativize(r["file_path"])} for r in final])
+        per_k[str(k_rrf)] = {
+            "ndcg": metrics.ndcg_at_k(ranked, q.relevant_files, SCORE_AT),
+            "recall": metrics.recall_at_k(ranked, q.relevant_files, SCORE_AT),
+        }
+    return per_k, final_ids
+
+
 async def _one_build(
-    build: int, keyword_mode: str, corpus: Path, queries_files: Sequence[Path]
+    build: int,
+    keyword_mode: str,
+    corpus: Path,
+    queries_files: Sequence[Path],
+    use_reranker: bool = False,
 ) -> list[dict[str, Any]]:
     from app.config import settings
     from app.search import retrieval
@@ -324,6 +403,7 @@ async def _one_build(
 
     original_k = settings.rrf_k
     rows: list[dict[str, Any]] = []
+    check = {"matched": 0, "skipped_degraded": 0}
     try:
         path_map, tag_map = await _chunk_maps(db)
         for q in queries:
@@ -346,6 +426,7 @@ async def _one_build(
             overlap = len(set(fts_ids[:SCORE_AT]) & set(sem_ids[:SCORE_AT]))
 
             per_k: dict[str, dict[str, float]] = {}
+            pools: dict[int, tuple[list[int], dict[int, float]]] = {}
             for k_rrf in K_GRID:
                 # The real fusion, at this k. settings is a plain pydantic
                 # model with no validate_assignment, and harness.build()
@@ -361,6 +442,9 @@ async def _one_build(
                 # exists for. Measuring only the unbalanced ranking there would
                 # report a number production never computes.
                 balanced = retrieval._allocate_by_domain(ids, tag_map, RECALL_K)
+                if use_reranker:
+                    pools[k_rrf] = (balanced, {int(cid): sc for cid, sc in fused})
+                    continue
 
                 scored: dict[str, float] = {}
                 for suffix, chunk_ids in (("", ids), ("_bal", balanced)):
@@ -372,6 +456,34 @@ async def _one_build(
                         ranked, q.relevant_files, SCORE_AT
                     )
                 per_k[str(k_rrf)] = scored
+
+            if use_reranker:
+                per_k, final_ids = await _rerank_replay(q, pools, db, idx.relativize)
+                # End-to-end check, build 0 only: the replay must reproduce what
+                # hybrid_retrieve itself returns at the shipped k. Only queries
+                # whose production recall_k is the pinned 50 (> 8 words,
+                # retrieval.py:599-605) are comparable. A wrong replay stops the
+                # run here, in minutes, instead of reporting hours of fiction.
+                if build == 0 and keywords is None and len(q.query.split()) > 8:
+                    settings.rrf_k = 60
+                    retrieval.clear_retrieval_cache()
+                    live = await retrieval.hybrid_retrieve(
+                        query=q.query,
+                        db=db,
+                        embedding_service=embeddings,
+                        lancedb_client=lance,
+                        k=settings.retrieval_top_k,
+                        use_reranker=True,
+                    )
+                    if any(r.get("_degraded") for r in live):
+                        check["skipped_degraded"] += 1
+                    elif [r["chunk_id"] for r in live] != final_ids[60]:
+                        raise SystemExit(
+                            f"reranker replay != hybrid_retrieve for {q.id!r} at k=60:\n"
+                            f"  replay {final_ids[60]}\n  live   {[r['chunk_id'] for r in live]}"
+                        )
+                    else:
+                        check["matched"] += 1
 
             # No optimal k is stored: it is derived from per_k by _winners, which
             # keeps ties as ties. An argmax stored here once reported k=0 for
@@ -393,6 +505,11 @@ async def _one_build(
     finally:
         settings.rrf_k = original_k
         await idx.close()
+    if use_reranker and build == 0:
+        print(
+            f"[build 1] reranker replay == hybrid_retrieve on {check['matched']} queries"
+            f" ({check['skipped_degraded']} skipped: live reranker timed out)"
+        )
     return rows
 
 
@@ -555,6 +672,19 @@ def _class_analysis(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
             - base3
             for big in (60, 150)
         }
+        # The ceiling for any per-query binary switch off the best fixed k: a
+        # perfect switch to its best partner k'. Optimistic by construction (the
+        # partner is chosen in-sample), which is right for a kill test.
+        anchored = {
+            kk: statistics.fmean(
+                max(r["per_k"][str(best)][key], r["per_k"][str(kk)][key]) for r in br
+            )
+            - fixed
+            for kk in K_GRID
+            if kk != best
+        }
+        partner = max(anchored, key=lambda kk: anchored[kk])
+        entry["anchored_two_arm"] = {"partner_k": partner, "gain": anchored[partner]}
         per_build.append(entry)
 
     curves = {
@@ -589,8 +719,15 @@ def _class_analysis(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
             f"(needs >= {PASS_MIN_GAIN}); classes with k >= {PASS_MIN_K} in every "
             f"build: {wants_large or 'none'}"
         )
+    headroom_floor = min(e["anchored_two_arm"]["gain"] for e in per_build)
+    headroom = (
+        f"{'OPEN' if headroom_floor >= PASS_MIN_GAIN else 'CLOSED'} - anchored two-arm"
+        f" ceiling floor {headroom_floor:+.4f} (needs >= {PASS_MIN_GAIN} for any per-query"
+        " switch to be worth testing)"
+    )
     return {
         "metric": key,
+        "headroom_verdict": headroom,
         "classes_present": present,
         "missing_classes": [c for c in DECISION_CLASSES if c not in present],
         "per_build": per_build,
@@ -655,10 +792,13 @@ def _fmt(value: float | None) -> str:
     return "None" if value is None else f"{value:.4f}"
 
 
-def _report(summary: dict[str, Any], threshold: float, corpus_name: str) -> str:
+def _report(
+    summary: dict[str, Any], threshold: float, corpus_name: str, reranker: bool = False
+) -> str:
+    mode = "RERANKER ON - the production reranked list" if reranker else "reranker off"
     lines = [
         "",
-        f"Global k curve on {corpus_name} (mean over all queries and builds)",
+        f"Global k curve on {corpus_name} (mean over all queries and builds; {mode})",
         f"{'k':>5} {'nDCG@10':>9} {'recall@10':>10} {'nDCG bal':>9} {'rec bal':>9}",
         "-" * 48,
     ]
@@ -744,6 +884,8 @@ def _report(summary: dict[str, Any], threshold: float, corpus_name: str) -> str:
             f"  {e['build']:<6} ceilings       best fixed k={e['best_fixed_k']}"
             f"  per-query oracle {e['oracle_gain']:+.4f}"
             f"  two-arm 3/60 {e['two_arm_gain'][60]:+.4f}  3/150 {e['two_arm_gain'][150]:+.4f}"
+            f"  anchored {e['best_fixed_k']}/{e['anchored_two_arm']['partner_k']}"
+            f" {e['anchored_two_arm']['gain']:+.4f}"
         )
     lines += ["", f"  {'subgroup':<44} {'n':>5} {'best k':>7} {'@best':>7} {'@3':>7} {'@60':>7}"]
     for name, s in sorted(ca["subgroups"].items()):
@@ -751,7 +893,7 @@ def _report(summary: dict[str, Any], threshold: float, corpus_name: str) -> str:
             f"  {name:<44} {s['n']:>5} {s['best_k']:>7} {s['at_best']:>7.4f}"
             f" {s['at_3']:>7.4f} {s['at_60']:>7.4f}"
         )
-    lines += ["", f"  VERDICT: {ca['verdict']}", ""]
+    lines += ["", f"  VERDICT: {ca['verdict']}", f"  HEADROOM: {ca['headroom_verdict']}", ""]
     return "\n".join(lines)
 
 
@@ -777,14 +919,14 @@ async def _main_async(args: argparse.Namespace) -> int:
         all_rows: list[dict[str, Any]] = []
         for build in range(args.builds):
             print(f"[build {build + 1}/{args.builds}] indexing {label} ...")
-            rows = await _one_build(build, args.keywords, root, queries_files)
+            rows = await _one_build(build, args.keywords, root, queries_files, args.reranker)
             all_rows.extend(rows)
             print(f"[build {build + 1}/{args.builds}] {len(rows)} queries scored")
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
     summary = _summarise(all_rows)
-    print(_report(summary, args.threshold, label))
+    print(_report(summary, args.threshold, label, args.reranker))
 
     if args.json_out:
         out = Path(args.json_out)
@@ -795,6 +937,7 @@ async def _main_async(args: argparse.Namespace) -> int:
             "score_at": SCORE_AT,
             "builds": args.builds,
             "keyword_mode": args.keywords,
+            "reranker": args.reranker,
             "corpus": [c.name for c in corpora],
             "queries": [q.name for q in queries_files],
             "threshold": args.threshold,
@@ -852,6 +995,14 @@ def main() -> int:
         help="re-score a saved --json-out file with the current analysis (no index build)",
     )
     p.add_argument(
+        "--reranker",
+        action="store_true",
+        help=(
+            "score the production reranked list (cross-encoder on) instead of the "
+            "raw fused list; checks itself against hybrid_retrieve in build 1"
+        ),
+    )
+    p.add_argument(
         "--self-check",
         action="store_true",
         help="run the statistics negative control and exit (no index build)",
@@ -865,7 +1016,7 @@ def main() -> int:
         saved = json.loads(Path(args.reanalyse).read_text(encoding="utf-8"))
         threshold = float(saved.get("threshold", args.threshold))
         label = "+".join(str(c).replace("corpus_", "") for c in saved.get("corpus", ["?"]))
-        print(_report(_summarise(saved["rows"]), threshold, label))
+        print(_report(_summarise(saved["rows"]), threshold, label, bool(saved.get("reranker"))))
         return 0
     return asyncio.run(_main_async(args))
 

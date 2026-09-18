@@ -41,7 +41,7 @@ export function StorageSection({ sysInfo }: Readonly<{ sysInfo?: SystemInfo }>) 
                   style={{ width: `${pct}%` }}
                 />
               </div>
-              <div className="text-right text-[10px] text-text-secondary mt-1">{pct}% used · {v.free_gb.toFixed(1)} GB free</div>
+              <div className="text-right text-xs text-text-secondary mt-1">{pct}% used · {v.free_gb.toFixed(1)} GB free</div>
             </div>
           )
         })}

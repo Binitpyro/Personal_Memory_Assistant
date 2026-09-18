@@ -227,7 +227,7 @@ export function SearchPage() {
               className="absolute bottom-full mb-2 left-0 right-0 glass rounded-2xl border border-primary/10 shadow-2xl overflow-hidden z-20"
               role="listbox"
             >
-              <div className="px-4 py-2 text-[10px] font-black text-text-secondary border-b border-rule uppercase tracking-widest">Recent Searches</div>
+              <div className="px-4 py-2 text-xs font-black text-text-secondary border-b border-rule uppercase tracking-widest">Recent Searches</div>
               <div className="max-h-48 overflow-y-auto custom-scrollbar">
                 {historyData.history.slice(0, 10).map((h: HistoryItem) => (
                   <button
@@ -250,21 +250,22 @@ export function SearchPage() {
           )}
           {selectedChunks.length > 0 && (
             <div className="flex flex-wrap gap-2 items-center mb-1">
-              <span className="text-[10px] uppercase font-black text-text-secondary tracking-wider ml-1">Context:</span>
+              <span className="text-xs uppercase font-black text-text-secondary tracking-wider ml-1">Context:</span>
               {selectedChunks.map(chunk => (
                 <div key={chunk.id} className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-primary/10 border border-primary/20 text-xs text-primary-light">
                   <span className="truncate max-w-[150px]">{chunk.filename}</span>
-                  <button 
+                  <button
                     onClick={() => removeChunk(chunk.id)}
-                    className="hover:text-error transition-colors"
+                    aria-label={`Remove ${chunk.filename} from context`}
+                    className="tap-24 hover:text-error transition-colors"
                   >
                     &times;
                   </button>
                 </div>
               ))}
-              <button 
+              <button
                 onClick={() => clearChunks()}
-                className="text-[10px] uppercase font-bold text-text-secondary hover:text-error transition-colors ml-1"
+                className="tap-24 text-xs uppercase font-bold text-text-secondary hover:text-error transition-colors ml-1"
               >
                 Clear
               </button>
@@ -321,12 +322,12 @@ export function SearchPage() {
           />
           
           <div className="flex items-center justify-between px-2">
-            <div className="flex gap-4 text-[10px] text-text-secondary font-bold uppercase tracking-widest">
+            <div className="flex gap-4 text-xs text-text-secondary font-bold uppercase tracking-widest">
               <ModelPicker />
 
               <button
                 onClick={() => setShowHistory(v => !v)}
-                className={`flex items-center gap-1 hover:text-text-primary transition-colors ${showHistory ? 'text-primary' : ''}`}
+                className={`tap-24 flex items-center gap-1 hover:text-text-primary transition-colors ${showHistory ? 'text-primary' : ''}`}
                 aria-haspopup="listbox"
                 aria-expanded={showHistory}
               >
@@ -336,7 +337,7 @@ export function SearchPage() {
             {historyData?.history && historyData.history.length > 0 && (
               <button
                 onClick={handleClearHistory}
-                className="text-[10px] font-black text-error/60 hover:text-error transition-colors flex items-center gap-1"
+                className="tap-24 text-xs font-black text-error/60 hover:text-error transition-colors flex items-center gap-1"
               >
                 <Trash2 className="w-3 h-3" /> CLEAR HISTORY
               </button>

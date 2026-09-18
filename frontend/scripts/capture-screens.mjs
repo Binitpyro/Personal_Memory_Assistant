@@ -38,9 +38,18 @@ const ctx = await browser.newContext({
 });
 
 // The /setup gate is client-side (localStorage), so seed it before first paint.
+//
+// Both values must be the STRING 'true', not '1'. `TourOverlay.tsx` reads its
+// flag as `getItem(...) !== 'true'`, an exact comparison, so '1' never
+// suppressed the tour — every capture of /settings/providers came out with the
+// tour overlay on top of the page. `pma_setup_complete` is only a truthiness
+// check in `AppShell.tsx` today, so '1' worked there by luck; it is set to
+// 'true' as well because that is what the app itself writes (`SetupPage.tsx`
+// completeSetup, and e2e/pma.spec.ts), and a later tightening of that check
+// would otherwise break this script silently.
 await ctx.addInitScript(() => {
-  localStorage.setItem('pma_setup_complete', '1');
-  localStorage.setItem('pma_tour_completed', '1');
+  localStorage.setItem('pma_setup_complete', 'true');
+  localStorage.setItem('pma_tour_completed', 'true');
 });
 
 const page = await ctx.newPage();

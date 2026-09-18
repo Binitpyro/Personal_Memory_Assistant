@@ -69,7 +69,7 @@ function FolderNode({ node, depth, onSelect, selectedPath, onDeleteFolder, delet
           type="button"
           aria-expanded={open}
           onClick={() => setOpen(!open)}
-          className="flex items-center gap-2 min-w-0 flex-1 text-left cursor-pointer"
+          className="tap-24 flex items-center gap-2 min-w-0 flex-1 text-left cursor-pointer"
         >
           <span className="w-4 h-4 flex items-center justify-center text-text-secondary shrink-0">
             {(node.children.size > 0 || node.files.length > 0) && (
@@ -84,7 +84,7 @@ function FolderNode({ node, depth, onSelect, selectedPath, onDeleteFolder, delet
           type="button"
           onClick={handleDelete}
           disabled={isDeleting}
-          className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 p-1 text-text-secondary hover:text-error rounded-xs transition-[opacity,color] disabled:opacity-50 disabled:cursor-not-allowed mr-2"
+          className="tap-24 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 p-1 text-text-secondary hover:text-error rounded-xs transition-[opacity,color] disabled:opacity-50 disabled:cursor-not-allowed mr-2"
           aria-label={`Delete the index for ${node.name}`}
         >
           {isDeleting
@@ -125,14 +125,14 @@ function FolderNode({ node, depth, onSelect, selectedPath, onDeleteFolder, delet
                   >
                     <File className="w-3.5 h-3.5 shrink-0 text-text-tertiary" />
                     <span className="truncate flex-1">{fileName}</span>
-                    <span className="font-mono text-[10px] text-text-tertiary tabular-nums">{formatBytes(f.size)}</span>
+                    <span className="font-mono text-xs text-text-tertiary tabular-nums">{formatBytes(f.size)}</span>
                   </button>
                 )
               })
             }
 
             {remainingFiles > 0 && (
-              <div className="px-6 py-2 font-mono text-[10px] text-text-tertiary">
+              <div className="px-6 py-2 font-mono text-xs text-text-tertiary">
                 {remainingFiles} more files in this folder
               </div>
             )}
@@ -471,9 +471,9 @@ export function ExplorerPage() {
       {/* Header */}
       <div className="flex items-start justify-between gap-6 mb-6 shrink-0">
         <div className="min-w-0">
-          <div className="font-mono text-[10px] tracking-[0.16em] uppercase text-text-tertiary">
-            III · EXPL
-          </div>
+          {/* The `III · EXPL` mark above this heading went with the nav's roman
+              numerals: it abbreviated the word directly beneath it, and no other
+              page carried one. */}
           <h1 className="font-serif text-2xl font-normal text-text-primary leading-tight">
             Explorer
           </h1>
@@ -518,7 +518,7 @@ export function ExplorerPage() {
               type="button"
               onClick={() => setViewMode('tree')}
               aria-pressed={viewMode === 'tree'}
-              className={`flex items-center gap-2 h-10 px-4 font-mono text-[11px] tracking-[0.12em] uppercase transition-colors ${
+              className={`flex items-center gap-2 h-10 px-4 font-mono text-xs tracking-widest uppercase transition-colors ${
                 viewMode === 'tree' ? 'bg-plate text-on-plate' : 'text-text-secondary hover:bg-surface'
               }`}
             >
@@ -528,7 +528,7 @@ export function ExplorerPage() {
               type="button"
               onClick={() => setViewMode('treemap')}
               aria-pressed={viewMode === 'treemap'}
-              className={`flex items-center gap-2 h-10 px-4 font-mono text-[11px] tracking-[0.12em] uppercase border-l border-edge transition-colors ${
+              className={`flex items-center gap-2 h-10 px-4 font-mono text-xs tracking-widest uppercase border-l border-edge transition-colors ${
                 viewMode === 'treemap' ? 'bg-plate text-on-plate' : 'text-text-secondary hover:bg-surface'
               }`}
             >
@@ -550,7 +550,7 @@ export function ExplorerPage() {
           {activeExtension && (
             <Panel className="flex items-center justify-between gap-3 p-4 shrink-0">
               <div className="min-w-0">
-                <div className="font-mono text-[10px] tracking-[0.16em] uppercase text-text-tertiary">
+                <div className="font-mono text-xs tracking-widest uppercase text-text-tertiary">
                   Active filter
                 </div>
                 <div className="font-serif text-xl leading-tight truncate">{activeExtension}</div>
@@ -575,8 +575,8 @@ export function ExplorerPage() {
               <Field label="Size">{formatBytes(selectedFile.size)}</Field>
               <Field label="Usage">{selectedFile.usage_count ?? 0}</Field>
               <div className="border-t border-rule pt-2 mt-0">
-                <div className="font-mono text-[9px] tracking-[0.14em] uppercase text-text-tertiary mb-1">Path</div>
-                <div className="font-mono text-[10px] text-text-secondary break-all leading-snug">
+                <div className="font-mono text-xs tracking-widest uppercase text-text-tertiary mb-1">Path</div>
+                <div className="font-mono text-xs text-text-secondary break-all leading-snug">
                   {selectedFile.path}
                 </div>
               </div>
@@ -606,7 +606,7 @@ export function ExplorerPage() {
                   </Button>
                 )}
                 {ocrMessage && (
-                  <p className="font-mono text-[10px] text-text-tertiary m-0">{ocrMessage}</p>
+                  <p className="font-mono text-xs text-text-tertiary m-0">{ocrMessage}</p>
                 )}
               </div>
             </SpecimenCard>
@@ -616,7 +616,7 @@ export function ExplorerPage() {
             <Panel className="shrink-0 p-4">
               <div className="text-center py-4">
                 <File className="w-8 h-8 mx-auto mb-1 text-text-tertiary" aria-hidden />
-                <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-text-tertiary m-0">No Selection</p>
+                <p className="font-mono text-xs uppercase tracking-widest text-text-tertiary m-0">No Selection</p>
               </div>
             </Panel>
           )}

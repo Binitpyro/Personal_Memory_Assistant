@@ -1,8 +1,12 @@
 import { Outlet, NavLink, useNavigate, useLocation } from 'react-router-dom'
-import { AlertTriangle, RefreshCw } from 'lucide-react'
+import {
+  AlertTriangle, RefreshCw,
+  BookOpen, Search, Folder, BarChart3, Settings,
+  PanelLeftClose, PanelLeftOpen,
+} from 'lucide-react'
 import { useApi } from '../useApi'
 import { getAppConfig, getHealth, getProviderSettings } from '../api'
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useSessionProvider } from '../context/SessionProviderContext'
 import { CACHE_KEYS } from '../cacheKeys'
@@ -11,27 +15,46 @@ import { ThemeToggle } from './ui'
 /**
  * The catalogue index.
  *
- * Replaces a five-item hover-expand glyph rail, which was the single strongest
- * "generic dark app" tell in the product. Each route is a drawer front carrying
- * a real label slip — a mono catalogue line over a serif name — and nothing is
- * hover-gated, so labels are always legible and content is never overlaid.
+ * Each route is a drawer front: an icon and the route's own name. The rail
+ * collapses to icons only, and nothing is hover-gated — in both states the
+ * label is reachable, because collapsing hides it visually (`sr-only`) rather
+ * than unmounting it.
+ *
+ * The roman-numeral marks (`I · LIB` … `V · SET`) were removed: at 10px they
+ * were unreadable, and `SRCH`/`EXPL`/`INS` only abbreviated the word sitting
+ * directly beneath them. The icon carries the same "which drawer" job legibly.
  *
  * The `label` values must stay exactly as the route names: AppShell.test.tsx
  * locates each one by text.
  */
 const navItems = [
-  { to: '/library', mark: 'I · LIB', label: 'Library' },
-  { to: '/search', mark: 'II · SRCH', label: 'Search' },
-  { to: '/explorer', mark: 'III · EXPL', label: 'Explorer' },
-  { to: '/insights', mark: 'IV · INS', label: 'Insights' },
-  { to: '/settings', mark: 'V · SET', label: 'Settings' },
+  { to: '/library', icon: BookOpen, label: 'Library' },
+  { to: '/search', icon: Search, label: 'Search' },
+  { to: '/explorer', icon: Folder, label: 'Explorer' },
+  { to: '/insights', icon: BarChart3, label: 'Insights' },
+  { to: '/settings', icon: Settings, label: 'Settings' },
 ] as const
+
+const NAV_COLLAPSED_KEY = 'pma_nav_collapsed'
 
 export function AppShell() {
   const navigate = useNavigate()
   const location = useLocation()
   const queryClient = useQueryClient()
   const { weeklyCost } = useSessionProvider()
+
+  // Read once on mount rather than in a useEffect, so the rail paints at its
+  // stored width on the first frame instead of snapping open then shut.
+  const [navCollapsed, setNavCollapsed] = useState(() => {
+    try { return localStorage.getItem(NAV_COLLAPSED_KEY) === '1' } catch { return false }
+  })
+  const toggleNav = () => {
+    setNavCollapsed((v) => {
+      const next = !v
+      try { localStorage.setItem(NAV_COLLAPSED_KEY, next ? '1' : '0') } catch { /* private mode */ }
+      return next
+    })
+  }
 
   const isSyncing =
     (queryClient.getQueryData<{ split_brain_sync_status?: string }>(['health'])
@@ -108,7 +131,7 @@ export function AppShell() {
         </span>
       ),
       action: (
-        <NavLink to="/settings/diagnostics" className="text-primary underline underline-offset-4 font-medium shrink-0">
+        <NavLink to="/settings/diagnostics" className="tap-24 text-primary underline underline-offset-4 font-medium shrink-0">
           Diagnostics
         </NavLink>
       ),
@@ -126,7 +149,7 @@ export function AppShell() {
       action: (
         <NavLink
           to="/settings/providers#cloud-consent"
-          className="text-primary underline underline-offset-4 font-medium shrink-0"
+          className="tap-24 text-primary underline underline-offset-4 font-medium shrink-0"
         >
           Review now
         </NavLink>
@@ -152,41 +175,64 @@ export function AppShell() {
       <div className="h-full border border-edge flex overflow-hidden">
 
         {/* ── Catalogue index ──────────────────────────────────────── */}
-        <aside className="w-[216px] shrink-0 bg-raised flex flex-col border-r border-black/40">
-          <div className="px-4 pt-4 pb-3 border-b border-black/40">
-            <div className="font-mono text-[10px] tracking-[0.16em] uppercase text-text-tertiary">
-              Personal Memory Assistant
+        <aside
+          className={
+            'shrink-0 bg-raised flex flex-col border-r border-black/40 transition-[width] duration-200 ' +
+            (navCollapsed ? 'w-[68px]' : 'w-[216px]')
+          }
+        >
+          <div className={'border-b border-black/40 ' + (navCollapsed ? 'px-2 py-3' : 'px-4 pt-4 pb-3')}>
+            <div className="flex items-start gap-2">
+              {!navCollapsed && (
+                <div className="min-w-0 flex-grow">
+                  <div className="font-mono text-xs tracking-widest uppercase text-text-tertiary">
+                    Personal Memory Assistant
+                  </div>
+                  <div className="font-serif text-lg font-medium mt-0.5">The Cabinet</div>
+                </div>
+              )}
+              {/* 28x28 clears the 24x24 target minimum. */}
+              <button
+                type="button"
+                onClick={toggleNav}
+                aria-expanded={!navCollapsed}
+                aria-label={navCollapsed ? 'Expand navigation' : 'Collapse navigation'}
+                title={navCollapsed ? 'Expand navigation' : 'Collapse navigation'}
+                className={
+                  'shrink-0 grid place-items-center w-7 h-7 rounded-md border border-edge bg-surface ' +
+                  'text-text-secondary hover:text-text-primary hover:bg-raised transition-colors ' +
+                  (navCollapsed ? 'mx-auto' : '')
+                }
+              >
+                {navCollapsed
+                  ? <PanelLeftOpen className="w-4 h-4" aria-hidden />
+                  : <PanelLeftClose className="w-4 h-4" aria-hidden />}
+              </button>
             </div>
-            <div className="font-serif text-lg font-medium mt-0.5">The Cabinet</div>
           </div>
 
           <nav className="flex flex-col">
-            {navItems.map(({ to, mark, label }) => (
-              <NavLink key={to} to={to} className="block">
+            {navItems.map(({ to, icon: Icon, label }) => (
+              <NavLink key={to} to={to} className="block" title={navCollapsed ? label : undefined}>
                 {({ isActive }) => (
                   <div
                     className={
-                      'px-3 py-2.5 border-t border-t-white/[0.06] border-b border-b-black/40 transition-colors duration-150 ' +
+                      (navCollapsed ? 'px-2 py-3 ' : 'px-3 py-2.5 ') +
+                      'border-t border-t-white/[0.06] border-b border-b-black/40 transition-colors duration-150 ' +
                       (isActive
                         ? 'bg-surface shadow-[inset_3px_0_0_var(--color-plate),5px_0_12px_rgba(0,0,0,.45)]'
                         : 'bg-raised hover:bg-surface')
                     }
                   >
-                    <div className="flex items-center gap-3">
-                      {/* The pull is a rule, not a knob: a handle by position and
-                          material, without rendering a physical object. */}
-                      <span
+                    <div className={`flex items-center gap-3 ${navCollapsed ? 'justify-center' : ''}`}>
+                      <Icon
                         aria-hidden
-                        className={`w-5 h-[3px] rounded-[1px] bg-plate shrink-0 ${isActive ? 'opacity-100' : 'opacity-70'}`}
+                        className={`w-[18px] h-[18px] shrink-0 ${isActive ? 'text-primary' : 'text-text-tertiary'}`}
                       />
-                      <div className="flex-grow min-w-0">
-                        <div
-                          className={`font-mono text-[10px] tracking-[0.16em] uppercase ${
-                            isActive ? 'text-primary' : 'text-text-tertiary'
-                          }`}
-                        >
-                          {mark}
-                        </div>
+                      {/* Collapsing hides the label, it does not unmount it: the
+                          accessible name has to survive, and AppShell.test.tsx
+                          finds each route by this text. */}
+                      <div className={navCollapsed ? 'sr-only' : 'flex-grow min-w-0'}>
                         <div className="font-serif text-base leading-tight truncate">{label}</div>
                       </div>
                     </div>
@@ -197,7 +243,7 @@ export function AppShell() {
           </nav>
 
           {/* Colophon */}
-          <div className="mt-auto px-4 py-3 border-t border-black/40 flex flex-col gap-2">
+          <div className={'mt-auto border-t border-black/40 flex flex-col gap-2 ' + (navCollapsed ? 'px-2 py-3 items-center' : 'px-4 py-3')}>
             {/* Degraded optional subsystems. A fault the user cannot see is the
                 whole problem this reports, so it is never hover-gated. */}
             {downSubsystems.length > 0 && (
@@ -211,14 +257,18 @@ export function AppShell() {
                 <span className="truncate">{downSubsystems.join(', ')} off</span>
               </NavLink>
             )}
-            <div className="flex items-center justify-between">
-              <span className="font-mono text-[10px] text-text-tertiary">this week</span>
-              <span className="font-mono text-[10px] text-text-secondary">${weeklyCost.toFixed(3)}</span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="font-mono text-[10px] text-text-tertiary">
-                v{appConfig?.app_version ?? health?.version ?? '—'}
-              </span>
+            {!navCollapsed && (
+              <div className="flex items-center justify-between">
+                <span className="font-mono text-xs text-text-tertiary">this week</span>
+                <span className="font-mono text-xs text-text-secondary">${weeklyCost.toFixed(3)}</span>
+              </div>
+            )}
+            <div className={`flex items-center gap-2 ${navCollapsed ? 'flex-col' : 'justify-between'}`}>
+              {!navCollapsed && (
+                <span className="font-mono text-xs text-text-tertiary">
+                  v{appConfig?.app_version ?? health?.version ?? '—'}
+                </span>
+              )}
               <ThemeToggle />
             </div>
           </div>

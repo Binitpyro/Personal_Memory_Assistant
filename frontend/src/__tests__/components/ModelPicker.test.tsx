@@ -28,6 +28,7 @@ import { ModelPicker } from '../../components/providers/ModelPicker';
 
 vi.mock('../../api', () => ({
   getProviders: vi.fn().mockResolvedValue([]),
+  getCurrentProvider: vi.fn().mockResolvedValue({ provider: 'ollama', model: 'gemma4-local:latest', source: 'default' }),
 }));
 
 vi.mock('../../useApi', () => ({

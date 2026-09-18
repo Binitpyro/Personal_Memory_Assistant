@@ -14,6 +14,7 @@ const state = {
   loading: false,
   routingSettings: undefined as Record<string, unknown> | undefined,
   providers: [] as Record<string, unknown>[],
+  indexStatus: undefined as Record<string, unknown> | undefined,
 };
 
 /** A gemini card with a key already stored - the state that creates the obligation. */
@@ -41,6 +42,9 @@ vi.mock('../../useApi', () => ({
     if (opts?.cacheKey === 'provider-settings') {
       return { data: state.routingSettings, loading: state.loading, error: null, refetch: vi.fn() };
     }
+    if (opts?.cacheKey === 'index-status') {
+      return { data: state.indexStatus, loading: state.loading, error: null, refetch: vi.fn() };
+    }
 
     return { data: undefined, loading: false, error: null, refetch: vi.fn() };
   }),
@@ -57,6 +61,7 @@ vi.mock('../../api', () => ({
   getProviderSettings: vi.fn(),
   setProviderSettings: vi.fn(),
   seedDemo: vi.fn(),
+  getIndexStatus: vi.fn(),
 }));
 
 describe('SetupPage Component', () => {
@@ -68,6 +73,7 @@ describe('SetupPage Component', () => {
       free_bytes: 100000000,
     };
     state.loading = false;
+    state.indexStatus = undefined;
     state.routingSettings = undefined;
     state.providers = [];
   });
@@ -102,6 +108,7 @@ describe('SetupPage Component', () => {
     };
 
     state.loading = false;
+    state.indexStatus = undefined;
     const { unmount } = renderWithProviders(<SetupPage />);
     expect(screen.queryByText('Incompatible Storage Detected')).not.toBeNull();
     unmount();
@@ -187,6 +194,7 @@ describe('SetupPage stored-key replacement', () => {
       free_bytes: 100000000,
     };
     state.loading = false;
+    state.indexStatus = undefined;
     state.routingSettings = undefined;
     state.providers = [geminiConnected];
   });
@@ -218,5 +226,70 @@ describe('SetupPage stored-key replacement', () => {
     renderWithProviders(<SetupPage />);
 
     expect(screen.queryByRole('button', { name: /update/i })).toBeNull();
+  });
+});
+
+/**
+ * Onboarding is gated on a localStorage flag in AppShell, so cleared site data,
+ * a different browser or a private window drops a fully-indexed install back
+ * onto this screen. Two things must follow from finding content in the index:
+ * a way straight into the app, and no offer to seed the demo corpus on top of
+ * a real one.
+ *
+ * Negative control: drop the `!alreadyIndexed &&` guard around the demo button
+ * and the second test fails; drop the panel and the first two fail.
+ */
+describe('SetupPage on an install that is already indexed', () => {
+  const populated = { files_indexed: 12483, chunks_indexed: 90210, status: 'idle' };
+
+  beforeEach(() => {
+    state.driveInfo = {
+      is_portable_fs: false,
+      lancedb_mode: 'local',
+      mount_path: '/mock/path',
+      free_bytes: 100000000,
+    };
+    state.loading = false;
+    state.indexStatus = undefined;
+    state.routingSettings = { consent_required: false, cloud_privacy_consent: true };
+    state.providers = [geminiConnected];
+  });
+
+  it('offers a way straight into the app, with the file count as the evidence', () => {
+    state.indexStatus = populated;
+
+    renderWithProviders(<SetupPage />);
+
+    expect(screen.queryByRole('button', { name: /open the app/i })).not.toBeNull();
+    expect(screen.queryByText(/12,483 files/)).not.toBeNull();
+  });
+
+  it('does not offer to seed the demo corpus into a populated index', () => {
+    state.indexStatus = populated;
+
+    renderWithProviders(<SetupPage />);
+    fireEvent.click(screen.getByRole('button', { name: /continue/i }));
+
+    // The other button on that step still stands, so this is not asserting an
+    // empty screen.
+    expect(screen.queryByRole('button', { name: /index my first folder/i })).not.toBeNull();
+    expect(screen.queryByRole('button', { name: /try the demo corpus/i })).toBeNull();
+  });
+
+  it('leaves a genuinely fresh install untouched', () => {
+    state.indexStatus = { files_indexed: 0, chunks_indexed: 0, status: 'idle' };
+
+    renderWithProviders(<SetupPage />);
+    expect(screen.queryByRole('button', { name: /open the app/i })).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: /continue/i }));
+    expect(screen.queryByRole('button', { name: /try the demo corpus/i })).not.toBeNull();
+  });
+
+  it('assumes nothing before the index status has arrived', () => {
+    // Absent data must not render a claim about data we do not have yet.
+    renderWithProviders(<SetupPage />);
+
+    expect(screen.queryByRole('button', { name: /open the app/i })).toBeNull();
   });
 });

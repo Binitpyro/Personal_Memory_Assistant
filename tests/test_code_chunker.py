@@ -4,6 +4,8 @@ Full coverage of app/indexing/code_chunker.py — CodeChunker class.
 Tests Python, JS/TS, Rust, and fallback strategies.
 """
 
+import pytest
+
 from app.indexing.code_chunker import CodeChunker
 
 
@@ -238,6 +240,25 @@ class TestChunkOffsets:
             segment = self.JS_SRC[c["start_offset"] : c["end_offset"]]
             body = c["text_preview"].lstrip("\n")
             assert segment == body, f"span does not address its own text: {segment!r} != {body!r}"
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            # ast breaks at the lone "\r" as well; split("\n") did not, and the
+            # module-scope lookup indexed past the end of the line list.
+            "import os\r\r\ndef f():\r\r\n    return 1\r\r\ndef g():\r\r\n    return 2\r\r\nX = 1\r\r\n",
+            # str.splitlines breaks at the form feed; ast does not.
+            "import os\n# page\x0cbreak\ndef f():\n    return 1\ndef g():\n    return 2\nX = 1\n",
+        ],
+        ids=["cr-cr-lf", "form-feed"],
+    )
+    def test_python_lines_are_split_as_ast_splits_them(self, source):
+        chunks = CodeChunker(max_tokens=512).chunk_code(source, "m.py", prefix="")
+        assert chunks[0].get("kg_nodes"), "syntax path abandoned for the fallback: no graph"
+        for name in ("f", "g"):
+            [c] = [c for c in chunks if f"def {name}(" in c["text_preview"]]
+            at = source[c["start_offset"] :]
+            assert at.startswith(f"def {name}("), f"span of def {name} starts at {at[:20]!r}"
 
     def test_fallback_offsets_advance(self):
         cc = CodeChunker(max_tokens=40)

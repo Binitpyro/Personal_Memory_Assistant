@@ -298,7 +298,7 @@ export function ProvidersPage() {
             <Panel id="tour-fallback-router" className="p-3 flex flex-col gap-2.5 mb-2 shrink-0">
               {/* Was `text-[8px] text-text-secondary/60`: below even the mono
                   allowance, and the alpha dropped it under its measured ratio. */}
-              <div className="font-mono text-[10px] tracking-[0.16em] uppercase text-text-tertiary flex items-center justify-between">
+              <div className="font-mono text-xs tracking-widest uppercase text-text-tertiary flex items-center justify-between">
                 <span>Backup cascade</span>
                 <span className="tracking-normal normal-case">cascading retries</span>
               </div>
@@ -313,7 +313,7 @@ export function ProvidersPage() {
                         <button
                           disabled={index === 0}
                           onClick={() => handleMoveFallback(index, -1)}
-                          className="p-1 hover:bg-raised rounded-xs disabled:text-text-tertiary disabled:cursor-not-allowed cursor-pointer"
+                          className="tap-24 p-1 hover:bg-raised rounded-xs disabled:text-text-tertiary disabled:cursor-not-allowed cursor-pointer"
                           title="Move Up"
                           aria-label={`Move ${p.spec.display_name} earlier in the cascade`}
                         >
@@ -322,7 +322,7 @@ export function ProvidersPage() {
                         <button
                           disabled={index === routingSettings.fallback_chain.length - 1}
                           onClick={() => handleMoveFallback(index, 1)}
-                          className="p-1 hover:bg-raised rounded-xs disabled:text-text-tertiary disabled:cursor-not-allowed cursor-pointer"
+                          className="tap-24 p-1 hover:bg-raised rounded-xs disabled:text-text-tertiary disabled:cursor-not-allowed cursor-pointer"
                           title="Move Down"
                           aria-label={`Move ${p.spec.display_name} later in the cascade`}
                         >
@@ -408,7 +408,7 @@ export function ProvidersPage() {
                       {p.spec.display_name}
                       {p.stored_in === 'env' && <Badge mono tone="accent">ENV</Badge>}
                     </div>
-                    <span className="text-[11px] text-text-secondary capitalize">{p.spec.kind}</span>
+                    <span className="text-xs text-text-secondary capitalize">{p.spec.kind}</span>
                   </div>
                 </div>
 
@@ -458,7 +458,7 @@ export function ProvidersPage() {
                 {/* Base URL (if editable or present) */}
                 {(selectedProvider.spec.base_url_editable || selectedProvider.spec.default_base_url) && (
                   <div className="flex flex-col gap-1.5">
-                    <label htmlFor={baseUrlId} className="font-mono text-[10px] tracking-[0.16em] uppercase text-text-tertiary flex items-center gap-1.5">
+                    <label htmlFor={baseUrlId} className="font-mono text-xs tracking-widest uppercase text-text-tertiary flex items-center gap-1.5">
                       Base Endpoint URL
                       {!selectedProvider.spec.base_url_editable && <Lock className="w-3.5 h-3.5 text-text-tertiary" aria-hidden />}
                     </label>
@@ -490,7 +490,11 @@ export function ProvidersPage() {
                           'Free-tier cloud dispatches may use data inputs for model training/improvement per provider terms and are restricted for EEA, Switzerland, and UK users.'}
                       </span>
                     </div>
-                    <label className="flex items-center gap-2 pl-6 cursor-pointer select-none">
+                    {/* tap-24 on the LABEL, not the input: a checkbox is a
+                        replaced element and cannot carry a pseudo-element, and
+                        the label is the real target anyway. It measured 16px
+                        tall. */}
+                    <label className="tap-24 flex items-center gap-2 pl-6 cursor-pointer select-none">
                       <input
                         type="checkbox"
                         checked={!!routingSettings?.cloud_privacy_consent}
@@ -513,7 +517,7 @@ export function ProvidersPage() {
                         text is meant to focus its input, and a link there does
                         something else entirely. */}
                     <div className="flex items-center justify-between">
-                      <label htmlFor={apiKeyId} className="font-mono text-[10px] tracking-[0.16em] uppercase text-text-tertiary">
+                      <label htmlFor={apiKeyId} className="font-mono text-xs tracking-widest uppercase text-text-tertiary">
                         API Access Key
                       </label>
                       {selectedProvider.spec.api_key_docs_url && (
@@ -521,7 +525,7 @@ export function ProvidersPage() {
                           href={selectedProvider.spec.api_key_docs_url}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="text-[11px] font-medium text-primary hover:underline"
+                          className="tap-24 text-xs font-medium text-primary hover:underline"
                         >
                           Get Key
                         </a>
@@ -643,7 +647,7 @@ export function ProvidersPage() {
                 <Panel id="tour-model-selection" className="p-6 flex flex-col gap-4">
                   <div className="flex items-center justify-between border-b border-rule pb-2">
                     <h3 className="font-serif text-base font-medium text-text-primary m-0">Default target model</h3>
-                    <span className="font-mono text-[11px] text-text-tertiary tabular-nums">
+                    <span className="font-mono text-xs text-text-tertiary tabular-nums">
                       {validationResult.models.length} found
                     </span>
                   </div>

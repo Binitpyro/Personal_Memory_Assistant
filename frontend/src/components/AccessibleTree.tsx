@@ -87,7 +87,7 @@ function Item({
                 onActivate(node.id);
             }}
         >
-            <span aria-hidden className="font-mono text-[11px]">
+            <span aria-hidden className="font-mono text-xs">
                 {node.isFolder ? '▸ ' : '· '}
                 {label}
             </span>

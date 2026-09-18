@@ -15,6 +15,7 @@
 export const CACHE_KEYS = {
   appConfig: 'app-config',
   compactStatus: 'compact-status',
+  currentProvider: 'current-provider',
   driveInfo: 'drive-info',
   fileTree: 'file-tree',
   health: 'health',

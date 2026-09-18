@@ -134,13 +134,13 @@ export function InsightsPage() {
                 <div className="flex items-center bg-raised p-1 rounded-xl border border-rule shadow-inner">
                   <button
                     onClick={() => setVizMode('3d')}
-                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-bold transition-all ${vizMode === '3d' ? 'bg-plate text-on-plate shadow-lg' : 'text-text-secondary hover:text-text-primary'}`}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${vizMode === '3d' ? 'bg-plate text-on-plate shadow-lg' : 'text-text-secondary hover:text-text-primary'}`}
                   >
                     <Box className="w-3.5 h-3.5" /> 3D CRYSTAL
                   </button>
                   <button
                     onClick={() => setVizMode('2d')}
-                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-bold transition-all ${vizMode === '2d' ? 'bg-plate text-on-plate shadow-lg' : 'text-text-secondary hover:text-text-primary'}`}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${vizMode === '2d' ? 'bg-plate text-on-plate shadow-lg' : 'text-text-secondary hover:text-text-primary'}`}
                   >
                     <LayoutGrid className="w-3.5 h-3.5" /> 2D TREEMAP
                   </button>
@@ -201,7 +201,7 @@ export function InsightsPage() {
                   </div>
                   <button
                     onClick={() => handleFilterChange(null)}
-                    className="text-[9px] font-black bg-primary/20 text-primary hover:bg-primary/30 px-2 py-1 rounded transition-all"
+                    className="text-xs font-black bg-primary/20 text-primary hover:bg-primary/30 px-2 py-1 rounded transition-all"
                   >
                     CLEAR
                   </button>
@@ -237,7 +237,7 @@ export function InsightsPage() {
                         {filteredTopFiles.slice(0, 10).map((f) => (
                           <div key={f.path} className="flex items-baseline justify-between gap-3 py-2 border-b border-rule last:border-b-0">
                             <span className="truncate text-[13px] text-text-primary">{f.path.split(/[\\/]/).pop()}</span>
-                            <span className="font-mono text-[11px] text-primary shrink-0">{formatBytes(f.size)}</span>
+                            <span className="font-mono text-xs text-primary shrink-0">{formatBytes(f.size)}</span>
                           </div>
                         ))}
                       </div>
@@ -264,7 +264,7 @@ export function InsightsPage() {
                     {filteredColdFiles.slice(0, 8).map((f) => (
                       <div key={f.path} className="flex items-baseline justify-between gap-3 py-2 border-b border-rule last:border-b-0">
                         <span className="truncate text-[13px] text-text-primary">{f.path.split(/[\\/]/).pop()}</span>
-                        <span className="font-mono text-[11px] text-info shrink-0">
+                        <span className="font-mono text-xs text-info shrink-0">
                           {f.usage_count === undefined ? formatBytes(f.size || 0) : `${f.usage_count} hits`}
                         </span>
                       </div>

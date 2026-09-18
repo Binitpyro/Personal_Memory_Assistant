@@ -71,7 +71,7 @@ export function ShortcutOverlay({ open, onClose, groups, title }: ShortcutOverla
             <div className="px-6 py-5 flex flex-col gap-6 max-h-[70vh] overflow-y-auto overscroll-contain">
                 {visibleGroups.map(group => (
                     <section key={group}>
-                        <h3 className="font-mono text-[10px] tracking-[0.16em] uppercase text-text-tertiary m-0 mb-3">
+                        <h3 className="font-mono text-xs tracking-widest uppercase text-text-tertiary m-0 mb-3">
                             {GROUP_TITLE[group]}
                         </h3>
                         <dl className="m-0 flex flex-col gap-2">
@@ -83,7 +83,7 @@ export function ShortcutOverlay({ open, onClose, groups, title }: ShortcutOverla
                                             {b.keys.map(k => (
                                                 <kbd
                                                     key={k}
-                                                    className="px-1.5 py-0.5 bg-raised border border-rule rounded-xs font-mono text-[10px]"
+                                                    className="px-1.5 py-0.5 bg-raised border border-rule rounded-xs font-mono text-xs"
                                                 >
                                                     {k}
                                                 </kbd>

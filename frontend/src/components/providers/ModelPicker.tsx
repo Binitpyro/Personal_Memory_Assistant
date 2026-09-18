@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useId } from 'react';
 import { useApi } from '../../useApi';
-import { getProviders } from '../../api';
+import { getProviders, getCurrentProvider } from '../../api';
 import type { ProviderStatus } from '../../api';
 import { useSessionProvider } from '../../context/SessionProviderContext';
 import { Sparkles, Search, X, Check } from 'lucide-react';
@@ -12,6 +12,7 @@ import { Badge } from '../ui';
 
 export function ModelPicker() {
   const { data: providers, refetch: refreshProviders } = useApi(getProviders, { cacheKey: CACHE_KEYS.providersList });
+  const { data: activeProvider } = useApi(getCurrentProvider, { cacheKey: CACHE_KEYS.currentProvider });
   const { sessionModelOverride, setSessionModelOverride } = useSessionProvider();
   
   const [isOpen, setIsOpen] = useState(false);
@@ -143,10 +144,13 @@ export function ModelPicker() {
     }
   };
 
-  // Find active display model name
+  // Find active display model name.
+  // The fallback was the literal 'Gemini', which named a provider the user may
+  // never have chosen. `providers-list` order is not routing order, so fall
+  // through to the backend's own resolution instead of guessing.
   const currentModelDisplay = sessionModelOverride
     ? sessionModelOverride.model
-    : (providers?.find((p) => p.is_set)?.default_model || 'Gemini');
+    : (providers?.find((p) => p.is_set)?.default_model || activeProvider?.model || 'No model');
 
   return (
     <>
@@ -155,7 +159,7 @@ export function ModelPicker() {
         ref={triggerRef}
         type="button"
         onClick={() => setIsOpen(true)}
-        className="flex items-center gap-1.5 px-2.5 py-1 text-[10px] font-bold text-text-secondary hover:text-text-primary hover:bg-raised rounded-md transition-[color,background-color] uppercase tracking-wider cursor-pointer border border-rule bg-raised"
+        className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-bold text-text-secondary hover:text-text-primary hover:bg-raised rounded-md transition-[color,background-color] uppercase tracking-wider cursor-pointer border border-rule bg-raised"
         title="Change active session model (Cmd+K)"
       >
         <Sparkles className="w-3 h-3 text-primary animate-pulse" aria-hidden />
@@ -193,7 +197,7 @@ export function ModelPicker() {
               <button
                 type="button"
                 onClick={() => refreshProviders()}
-                className="p-1 hover:bg-raised rounded-md text-text-secondary hover:text-text-primary text-[10px] transition-[color,background-color]"
+                className="p-1 hover:bg-raised rounded-md text-text-secondary hover:text-text-primary text-xs transition-[color,background-color]"
                 title="Refresh model list"
               >
                 <span aria-hidden>🔄</span> Refresh
@@ -240,7 +244,7 @@ export function ModelPicker() {
                               #fde047 on Paper's #F1ECDF panel measures about 1.2. */}
                           {item.isOffline && <Badge tone="warning">Offline / Cached</Badge>}
                         </div>
-                        <span className={`text-[10px] uppercase tracking-wider ${isSelected ? 'text-text-secondary' : 'text-text-secondary/80'}`}>
+                        <span className={`text-xs uppercase tracking-wider ${isSelected ? 'text-text-secondary' : 'text-text-secondary/80'}`}>
                           {item.providerName}
                         </span>
                       </div>
@@ -300,15 +304,15 @@ export function ModelPicker() {
             </form>
 
             {/* Footer */}
-            <div className="px-4 py-2 border-t border-rule bg-raised flex items-center justify-between text-[10px] text-text-secondary">
+            <div className="px-4 py-2 border-t border-rule bg-raised flex items-center justify-between text-xs text-text-secondary">
               <span>
                 {filteredModels.length > MAX_DISPLAY
                   ? `Showing 30 of ${filteredModels.length} models. Type to narrow search.`
                   : `${filteredModels.length} models available`}
               </span>
               <span className="flex items-center gap-1.5">
-                <kbd className="px-1.5 py-0.5 bg-raised border border-rule rounded text-[9px]">↑↓</kbd> navigate
-                <kbd className="px-1.5 py-0.5 bg-raised border border-rule rounded text-[9px]">Enter</kbd> select
+                <kbd className="px-1.5 py-0.5 bg-raised border border-rule rounded text-xs">↑↓</kbd> navigate
+                <kbd className="px-1.5 py-0.5 bg-raised border border-rule rounded text-xs">Enter</kbd> select
               </span>
             </div>
         </div>

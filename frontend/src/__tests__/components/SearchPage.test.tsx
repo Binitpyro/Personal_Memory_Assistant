@@ -29,6 +29,7 @@ vi.mock('../../api', () => {
     getFileTree: vi.fn(),
     getAppConfig: vi.fn(),
     getProviders: vi.fn(),
+    getCurrentProvider: vi.fn().mockResolvedValue({ provider: 'ollama', model: 'gemma4-local:latest', source: 'default' }),
     // The file tree refreshes off index-progress events now instead of a 15s
     // poll. Returns the unsubscribe the component calls on unmount.
     subscribeProgress: vi.fn(() => vi.fn()),

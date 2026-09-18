@@ -196,7 +196,7 @@ export function TourOverlay() {
           </button>
 
           <div>
-            <span className="font-mono text-[10px] tracking-[0.16em] uppercase text-text-tertiary">
+            <span className="font-mono text-xs tracking-widest uppercase text-text-tertiary">
               Step {currentStep + 1} of {steps.length}
             </span>
             <h3 className="font-serif text-lg font-medium leading-tight mt-1">{step.title}</h3>

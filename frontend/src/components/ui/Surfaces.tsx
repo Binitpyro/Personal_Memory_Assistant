@@ -49,11 +49,11 @@ export function LabelSlip({
   return (
     <div className={`flex items-center gap-3 min-w-0 ${className}`}>
       <div className="flex-grow min-w-0">
-        <div className="font-mono text-[10px] tracking-[0.16em] uppercase text-text-tertiary">{mark}</div>
+        <div className="font-mono text-xs tracking-widest uppercase text-text-tertiary">{mark}</div>
         <div className="font-serif text-base leading-tight truncate">{name}</div>
       </div>
       {extent !== undefined && (
-        <div className="font-mono text-[10px] text-text-tertiary text-right leading-snug shrink-0">{extent}</div>
+        <div className="font-mono text-xs text-text-tertiary text-right leading-snug shrink-0">{extent}</div>
       )}
     </div>
   );
@@ -103,7 +103,7 @@ export function Field({
 }: Readonly<{ label: string; children: ReactNode }>) {
   return (
     <div className="grid grid-cols-[5.5rem_1fr] border-t border-rule">
-      <div className="py-1.5 font-mono text-[9px] tracking-[0.14em] uppercase text-text-tertiary">{label}</div>
+      <div className="py-1.5 font-mono text-xs tracking-widest uppercase text-text-tertiary">{label}</div>
       <div className="py-1.5 text-right text-xs text-text-secondary min-w-0 truncate">{children}</div>
     </div>
   );
@@ -128,7 +128,7 @@ export function SpecimenCard({
     <div className={`bg-surface border border-edge rounded-md p-4 ${className}`}>
       <div className="flex items-baseline justify-between gap-3">
         <div className="font-serif text-base leading-tight truncate">{name}</div>
-        {kind && <div className="font-mono text-[10px] text-primary shrink-0">{kind}</div>}
+        {kind && <div className="font-mono text-xs text-primary shrink-0">{kind}</div>}
       </div>
       {children && <div className="mt-3">{children}</div>}
     </div>

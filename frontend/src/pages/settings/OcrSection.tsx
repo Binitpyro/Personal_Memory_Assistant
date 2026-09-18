@@ -131,7 +131,7 @@ export function VlmPicker({
             <p className="text-xs font-semibold text-warning">
               Neither Ollama nor LM Studio is currently reachable.
             </p>
-            <p className="text-[11px] text-text-secondary mt-0.5">
+            <p className="text-xs text-text-secondary mt-0.5">
               Start your local model server, then check again to detect installed vision models.
             </p>
           </div>
@@ -203,7 +203,7 @@ export function VlmPicker({
                   The dispatch path refuses without consent, but the user should
                   see it here rather than discover it at a prompt. */}
               {!p.is_local && (
-                <span className="text-[10px] font-bold text-warning uppercase">
+                <span className="text-xs font-bold text-warning uppercase">
                   not on this machine
                 </span>
               )}
@@ -519,7 +519,9 @@ export function OcrSection() {
         <div className="flex flex-wrap items-center gap-3">
           {isSelectedActive ? (
             <>
-              <label className="flex items-center gap-2 text-sm font-medium text-text-primary cursor-pointer">
+              {/* tap-24 on the label: a checkbox cannot carry a pseudo-element,
+                  and the label is the real target. Measured 16px tall. */}
+              <label className="tap-24 flex items-center gap-2 text-sm font-medium text-text-primary cursor-pointer">
                 <input
                   type="checkbox"
                   checked={!!ocr?.enabled}
@@ -599,7 +601,7 @@ export function OcrSection() {
             ].map(({ label, value }) => (
               <div key={label} className="p-2 rounded-lg bg-surface">
                 <div className="text-lg font-bold text-text-primary">{value}</div>
-                <div className="text-[10px] uppercase tracking-wider text-text-secondary">{label}</div>
+                <div className="text-xs uppercase tracking-wider text-text-secondary">{label}</div>
               </div>
             ))}
           </div>
@@ -640,7 +642,7 @@ export function OcrSection() {
                 <div key={item.file_path} className="flex items-center justify-between gap-3 p-2 rounded-lg bg-surface">
                   <div className="min-w-0">
                     <div className="text-sm font-medium text-text-primary truncate">{item.file_name}</div>
-                    <div className="text-[10px] text-danger truncate">{item.last_error}</div>
+                    <div className="text-xs text-danger truncate">{item.last_error}</div>
                   </div>
                   <button
                     onClick={async () => { await retryOcr(item.file_path); loadFailed(); refetch() }}

@@ -25,13 +25,13 @@ export function FilterBar({
 }: FilterBarProps) {
   return (
     <div className="flex flex-wrap items-center gap-2 px-1">
-      <span className="text-[10px] text-text-secondary font-bold uppercase tracking-widest flex items-center gap-1">
+      <span className="text-xs text-text-secondary font-bold uppercase tracking-widest flex items-center gap-1">
         <Filter className="w-3 h-3" /> Quick Filters
       </span>
       <select
         value={selectedFileType}
         onChange={(e) => setSelectedFileType(e.target.value)}
-        className="text-[11px] bg-raised border border-rule rounded-lg px-2 py-1 text-text-primary"
+        className="text-xs bg-raised border border-rule rounded-lg px-2 py-1 text-text-primary"
         disabled={disabled}
       >
         <option value="">All file types</option>
@@ -42,7 +42,7 @@ export function FilterBar({
       <select
         value={selectedFolderTag}
         onChange={(e) => setSelectedFolderTag(e.target.value)}
-        className="text-[11px] bg-raised border border-rule rounded-lg px-2 py-1 text-text-primary"
+        className="text-xs bg-raised border border-rule rounded-lg px-2 py-1 text-text-primary"
         disabled={disabled}
       >
         <option value="">All folders</option>
@@ -53,7 +53,7 @@ export function FilterBar({
       <select
         value={selectedMode}
         onChange={(e) => setSelectedMode(e.target.value)}
-        className="text-[11px] bg-raised border border-rule rounded-lg px-2 py-1 text-text-primary"
+        className="text-xs bg-raised border border-rule rounded-lg px-2 py-1 text-text-primary"
         disabled={disabled}
       >
         <option value="">Default Mode</option>
@@ -71,7 +71,7 @@ export function FilterBar({
             setSelectedFolderTag('')
             setSelectedMode('')
           }}
-          className="text-[10px] px-2 py-1 rounded-lg border border-primary/20 text-primary-light hover:bg-primary/10"
+          className="text-xs px-2 py-1 rounded-lg border border-primary/20 text-primary-light hover:bg-primary/10"
         >
           Clear filters
         </button>

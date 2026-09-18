@@ -52,13 +52,12 @@ vi.mock('../../useApi', () => ({
         refetch: vi.fn(),
       };
     }
-    if (opts?.cacheKey === 'app-config') {
+    // Deliberately NOT gemini: the card used to read AppConfig.gemini_model and
+    // so named Gemini whoever was actually serving. A non-Gemini fixture is what
+    // makes the assertion below able to fail if that regresses.
+    if (opts?.cacheKey === 'current-provider') {
       return {
-        data: {
-          watch_dirs: [],
-          google_drive_sync: false,
-          gemini_model: 'default-model',
-        },
+        data: { provider: 'ollama', model: 'gemma4-local:latest', source: 'default' },
         loading: false,
         error: null,
         refetch: vi.fn(),
@@ -76,6 +75,7 @@ vi.mock('../../api', () => {
     getIndexStatus: vi.fn(),
     getSystemInfo: vi.fn(),
     getAppConfig: vi.fn(),
+    getCurrentProvider: vi.fn(),
     getOcrStatus: vi.fn().mockResolvedValue({
       tier: 'none',
       enabled: false,
@@ -104,6 +104,16 @@ describe('LibraryPage Component', () => {
     expect(screen.getByText('Library')).toBeDefined();
     expect(screen.getByText('Scan Status')).toBeDefined();
     expect(screen.getByText('10')).toBeDefined();
+  });
+
+  it('names the model the backend resolved, not a hardcoded provider', () => {
+    renderWithProviders(<LibraryPage />);
+
+    // The resolved model, and the provider that serves it, both surface.
+    expect(screen.getByText('gemma4-local:latest')).toBeDefined();
+    expect(screen.getByText('Model · ollama')).toBeDefined();
+    // Nothing on the card may name Gemini when Ollama is what answers.
+    expect(screen.queryByText(/gemini/i)).toBeNull();
   });
 
   it('handles custom directory index path input', () => {

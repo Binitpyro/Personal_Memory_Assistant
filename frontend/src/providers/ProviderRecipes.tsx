@@ -131,7 +131,7 @@ export function ProviderRecipes({
                 <Icon className={`w-4 h-4 ${r.color}`} aria-hidden />
               </div>
               <h4 className="font-medium text-sm group-hover:text-primary transition-colors">{r.title}</h4>
-              <p className="text-[11px] text-text-secondary mt-1">{r.desc}</p>
+              <p className="text-xs text-text-secondary mt-1">{r.desc}</p>
 
               {isApplying && (
                 // No backdrop-blur here: it sat on an opaque `bg-surface`, so it

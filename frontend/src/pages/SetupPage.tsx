@@ -5,7 +5,7 @@ import { toast } from 'sonner'
 import { useApi, invalidateCache } from '../useApi'
 import {
     getLocalModels, getDriveInfo, enableSplitBrain, getProviders, setProviderKey,
-    getProviderSettings, setProviderSettings, seedDemo, type ProviderStatus
+    getProviderSettings, setProviderSettings, seedDemo, getIndexStatus, type ProviderStatus
 } from '../api'
 import { CACHE_KEYS } from '../cacheKeys'
 import { Button, Panel, Skeleton } from '../components/ui'
@@ -85,7 +85,7 @@ function ApiKeyInput({ provider }: { provider: SetupProvider }) {
 
             {pData?.is_set && !editing ? (
                 <div className="flex-1 flex justify-end items-center gap-4">
-                    <span className="font-mono text-[11px] text-text-tertiary">
+                    <span className="font-mono text-xs text-text-tertiary">
                         {pData.stored_in === 'keyring' ? 'stored in keyring' : 'stored in env'}
                     </span>
                     <span className="text-success text-sm flex items-center gap-1 font-medium">
@@ -174,7 +174,7 @@ function StepMarks({ step }: Readonly<{ step: number }>) {
             {steps.map(s => (
                 <li key={s.n} aria-current={step === s.n ? 'step' : undefined}>
                     <div
-                        className={`font-mono text-[10px] tracking-[0.16em] uppercase ${
+                        className={`font-mono text-xs tracking-widest uppercase ${
                             step >= s.n ? 'text-primary' : 'text-text-tertiary'
                         }`}
                     >
@@ -199,6 +199,12 @@ export function SetupPage() {
     const { data: localModels, loading: localModelsLoading } = useApi(getLocalModels, { cacheKey: CACHE_KEYS.localModels })
     const { data: driveInfo, loading: driveLoading } = useApi(getDriveInfo, { cacheKey: CACHE_KEYS.driveInfo })
     const { data: routingSettings, refetch: refetchRouting } = useApi(getProviderSettings, { cacheKey: CACHE_KEYS.providerSettings })
+
+    const { data: indexStatus } = useApi(getIndexStatus, { cacheKey: CACHE_KEYS.indexStatus })
+    // AppShell gates the whole app on a localStorage flag, so cleared site data,
+    // a different browser or a private window lands a fully-indexed install
+    // here. Content in the index is the tell that this is not a fresh install.
+    const alreadyIndexed = (indexStatus?.files_indexed ?? 0) > 0
 
     const isLoading = providersLoading || localModelsLoading || driveLoading
 
@@ -304,7 +310,7 @@ export function SetupPage() {
                         <Library className="w-6 h-6 text-on-plate" />
                     </div>
                     <div className="min-w-0">
-                        <div className="font-mono text-[10px] tracking-[0.16em] uppercase text-text-tertiary">
+                        <div className="font-mono text-xs tracking-widest uppercase text-text-tertiary">
                             Personal Memory Assistant
                         </div>
                         <h1 className="font-serif text-3xl font-normal text-text-primary tracking-tight leading-tight">
@@ -316,6 +322,33 @@ export function SetupPage() {
                 <p className="text-text-secondary max-w-[52ch] mb-8 mt-0">
                     Everything stays on this machine. Point PMA at a model, then at your files.
                 </p>
+
+                {/* Not a fresh install. Offer the way out rather than leaving someone
+                    to set the flag by hand - and do not replace the flow, because
+                    Settings' "Restart Onboarding" sends people here deliberately. */}
+                {alreadyIndexed && (
+                    <div className="mb-8 p-4 rounded-md border border-edge bg-surface flex flex-col sm:flex-row sm:items-center gap-4">
+                        <Library className="w-5 h-5 text-text-tertiary shrink-0" />
+                        <p className="text-sm text-text-secondary m-0 flex-1">
+                            This library already holds{' '}
+                            <strong className="text-text-primary font-medium">
+                                {(indexStatus?.files_indexed ?? 0).toLocaleString()} files
+                            </strong>
+                            . Onboarding is tracked in this browser rather than with your
+                            index, so it reappears whenever that state is cleared.
+                        </p>
+                        <Button
+                            variant="plate"
+                            className="shrink-0"
+                            onClick={() => {
+                                completeSetup()
+                                navigate('/')
+                            }}
+                        >
+                            Open the app
+                        </Button>
+                    </div>
+                )}
 
                 <StepMarks step={step} />
 
@@ -413,7 +446,7 @@ export function SetupPage() {
                                         <div>
                                             <h3 className="font-serif text-lg font-medium flex items-center gap-3">
                                                 Cloud models
-                                                <span className="font-mono text-[10px] tracking-[0.16em] uppercase text-text-tertiary">
+                                                <span className="font-mono text-xs tracking-widest uppercase text-text-tertiary">
                                                     secure keyring
                                                 </span>
                                             </h3>
@@ -440,7 +473,7 @@ export function SetupPage() {
                                                         'Free-tier cloud dispatches may use data inputs for model training/improvement per provider terms and are restricted for EEA, Switzerland, and UK users.'}
                                                 </span>
                                             </div>
-                                            <label className="flex items-center gap-2 pl-6 cursor-pointer select-none">
+                                            <label className="tap-24 flex items-center gap-2 pl-6 cursor-pointer select-none">
                                                 <input
                                                     type="checkbox"
                                                     checked={!!routingSettings?.cloud_privacy_consent}
@@ -458,7 +491,7 @@ export function SetupPage() {
                                         <Link
                                             to="/settings/providers"
                                             onClick={completeSetup}
-                                            className="text-primary underline underline-offset-4 hover:text-primary-light transition-colors"
+                                            className="tap-24 text-primary underline underline-offset-4 hover:text-primary-light transition-colors"
                                         >
                                             See all providers
                                         </Link>
@@ -467,7 +500,7 @@ export function SetupPage() {
 
                                 <div className="flex items-center gap-4 my-2">
                                     <div className="flex-1 h-px bg-rule" />
-                                    <span className="font-mono text-[10px] tracking-[0.16em] uppercase text-text-tertiary">or auto-detected locals</span>
+                                    <span className="font-mono text-xs tracking-widest uppercase text-text-tertiary">or auto-detected locals</span>
                                     <div className="flex-1 h-px bg-rule" />
                                 </div>
 
@@ -533,14 +566,16 @@ export function SetupPage() {
                             folder is handed to Library, which already owns that flow and
                             its error states. */}
                         <div className="mt-2 flex flex-col sm:flex-row gap-4 w-full">
-                            <Button
-                                variant="plate"
-                                className="flex-1"
-                                onClick={() => void handleTryDemo()}
-                                loading={seeding}
-                            >
-                                Try the demo corpus
-                            </Button>
+                            {!alreadyIndexed && (
+                                <Button
+                                    variant="plate"
+                                    className="flex-1"
+                                    onClick={() => void handleTryDemo()}
+                                    loading={seeding}
+                                >
+                                    Try the demo corpus
+                                </Button>
+                            )}
                             <Button
                                 variant="secondary"
                                 className="flex-1"

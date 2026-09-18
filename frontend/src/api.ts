@@ -828,7 +828,18 @@ export const setProviderDefaultModel = (id: string, model: string) =>
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ model })
   });
-export const getCurrentProvider = () => json<{ provider: string; model: string }>('/providers/current');
+/**
+ * The provider/model the backend will actually dispatch to.
+ *
+ * Resolves `provider` preference first, then walks `fallback_chain` — the same
+ * order `llm_client.py` routes on — so this is the only honest answer to "which
+ * model is selected". `source` is env | keyring | default | unset.
+ *
+ * Prefer this over reading a provider-specific config field: the Library card
+ * used `AppConfig.gemini_model`, which named Gemini no matter who was serving.
+ */
+export const getCurrentProvider = () =>
+  json<{ provider: string; model: string; source: string }>('/providers/current');
 
 /** Whether PMA can start this provider itself (Ollama / LM Studio only). */
 export interface ProviderLaunchStatus {

@@ -787,20 +787,26 @@ const DreamscapeCanvas: React.FC<CanvasInnerProps> = ({ activeFilter, tier, onEr
         // `unsupported` branches above are different - they render on the
         // themed page, not the canvas, so those use tokens.
         <div ref={wrapperRef} className="w-full h-full min-h-[400px] relative bg-[#02030a] rounded-xl overflow-hidden border border-white/10 shadow-inner">
-            {/* Title */}
-            <div className="absolute top-6 left-8 z-10 pointer-events-none">
+            {/* Title.
+                Plated, like every other overlay here. The white-on-#02030a
+                contrast reasoned about below is the contrast against the
+                WRAPPER, and the canvas paints over the wrapper — the godray and
+                bloom passes composite additively, so the ground under this text
+                is bright, moving and unknowable at author time. The plate is
+                what makes the label readable regardless of the frame. */}
+            <div className="absolute top-6 left-8 z-10 pointer-events-none bg-black/60 backdrop-blur-sm rounded-lg px-4 py-2 border border-white/10">
                 <h2 className="text-2xl font-bold text-white flex items-center gap-3">
                     <span aria-hidden className={`w-3 h-3 rounded-full ${tierBadge.color}`} />
                     Crystal Dreamscape 3D
                 </h2>
-                <p className="text-white/50 text-[10px] font-bold mt-2 tracking-widest uppercase">
+                <p className="text-white/70 text-xs font-bold mt-2 tracking-widest uppercase">
                     {tierBadge.label}
                 </p>
             </div>
 
             {/* Breadcrumbs */}
             {breadcrumbs.length > 1 && (
-                <div className="absolute top-6 right-8 z-10 flex items-center gap-2 bg-black/40 backdrop-blur-sm rounded-full px-4 py-2 border border-white/10">
+                <div className="absolute top-6 right-8 z-10 flex items-center gap-2 bg-black/60 backdrop-blur-sm rounded-full px-4 py-2 border border-white/10">
                     <button
                         onClick={navigateUp}
                         className="text-white/80 hover:text-white text-xs font-bold uppercase tracking-widest"
@@ -817,9 +823,9 @@ const DreamscapeCanvas: React.FC<CanvasInnerProps> = ({ activeFilter, tier, onEr
 
             {/* Tooltip */}
             {selection && (
-                <div className="absolute bottom-6 left-8 z-10 bg-black/50 backdrop-blur-sm rounded-lg px-4 py-2 border border-white/10">
+                <div className="absolute bottom-6 left-8 z-10 bg-black/60 backdrop-blur-sm rounded-lg px-4 py-2 border border-white/10">
                     <p className="text-white/90 text-sm font-mono">{selection.name}</p>
-                    <p className="text-white/70 text-[10px] uppercase tracking-widest">Node #{selection.index}</p>
+                    <p className="text-white/70 text-xs uppercase tracking-widest">Node #{selection.index}</p>
                 </div>
             )}
 
@@ -830,11 +836,11 @@ const DreamscapeCanvas: React.FC<CanvasInnerProps> = ({ activeFilter, tier, onEr
                     style={{ left: hover.x + 14, top: hover.y + 14 }}
                 >
                     <p className="text-white/90 text-xs font-mono truncate max-w-[36ch]">{hover.name}</p>
-                    <p className="text-white/70 text-[10px] uppercase tracking-widest">
+                    <p className="text-white/70 text-xs uppercase tracking-widest">
                         {hover.kind}
                         {hover.fileCount !== undefined && ` · ${hover.fileCount} files`}
                     </p>
-                    <p className="text-white/60 text-[10px] font-mono mt-1">
+                    <p className="text-white/60 text-xs font-mono mt-1">
                         {hover.size === undefined ? '—' : formatBytes(hover.size)} · {hover.hits ?? 0} hits
                     </p>
                 </div>
@@ -906,7 +912,7 @@ const DreamscapeCanvas: React.FC<CanvasInnerProps> = ({ activeFilter, tier, onEr
                 of its controls. Short, with the full table one key away. */}
             <div
                 id="dreamscape-keyhint"
-                className="absolute bottom-4 right-6 z-10 pointer-events-none text-[10px] font-mono uppercase tracking-wider text-white/70"
+                className="absolute bottom-4 right-6 z-10 pointer-events-none text-xs font-mono uppercase tracking-wider text-white/90 bg-black/60 backdrop-blur-sm rounded-md px-3 py-1.5 border border-white/10"
             >
                 WASD fly · F frame · ↑↓←→ browse · ? keys
             </div>

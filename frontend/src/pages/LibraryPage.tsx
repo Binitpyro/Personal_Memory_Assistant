@@ -6,7 +6,7 @@ import {
   getHealth,
   getIndexStatus,
   getSystemInfo,
-  getAppConfig,
+  getCurrentProvider,
   getOcrStatus,
   pickFolder,
   startIndexing,
@@ -18,6 +18,7 @@ import {
   type IndexStatus,
 } from '../api'
 import { CACHE_KEYS } from '../cacheKeys'
+import { useSessionProvider } from '../context/SessionProviderContext'
 import { Well, Button } from '../components/ui'
 
 export function LibraryPage() {
@@ -33,7 +34,13 @@ export function LibraryPage() {
     refetchInterval: indexing ? 0 : 10_000,
   })
   const { data: sysInfo } = useApi(getSystemInfo, { cacheKey: CACHE_KEYS.systemInfo })
-  const { data: config } = useApi(getAppConfig, { cacheKey: CACHE_KEYS.appConfig })
+  // Which model actually answers. NOT AppConfig.gemini_model, which names
+  // Gemini whoever is serving, and NOT health.model_ready, which is the ONNX
+  // embedder's readiness rather than the chat LLM's.
+  const { data: activeProvider } = useApi(getCurrentProvider, {
+    cacheKey: CACHE_KEYS.currentProvider,
+  })
+  const { mostUsedModel } = useSessionProvider()
 
   // OCR runs after the index run finishes, so this keeps polling regardless of
   // indexing state. Without it "indexing complete" is a lie for scanned PDFs.
@@ -209,10 +216,15 @@ export function LibraryPage() {
           { label: 'Total Files', value: filesIndexed.toLocaleString(), color: 'text-text-primary' },
           { label: 'Chunks Indexed', value: chunksIndexed.toLocaleString(), color: 'text-text-primary' },
           { label: 'Scan Status', value: scanStatus, color: scanStatus === 'Idle' ? 'text-success' : 'text-warning' },
-          { label: 'Model', value: health?.model_ready ? (config?.gemini_model || 'Ready') : 'Loading…', color: health?.model_ready ? 'text-success' : 'text-warning' },
+          // Most-used once the user has actually run anything; until then there
+          // is no usage to report, so fall back to whichever model would answer
+          // right now. Both are real — neither is a hardcoded provider name.
+          mostUsedModel
+            ? { label: `Most used · ${mostUsedModel.provider}`, value: mostUsedModel.model, color: 'text-success' }
+            : { label: activeProvider?.provider ? `Model · ${activeProvider.provider}` : 'Model', value: activeProvider?.model || (activeProvider ? 'Not configured' : 'Loading…'), color: activeProvider?.model ? 'text-success' : 'text-warning' },
         ].map(({ label, value, color }) => (
           <Well key={label} className="px-4 py-3.5 min-w-0">
-            <div className="font-mono text-[10px] tracking-[0.16em] uppercase text-text-tertiary mb-2">{label}</div>
+            <div className="font-mono text-xs tracking-widest uppercase text-text-tertiary mb-2">{label}</div>
             <div className={`font-serif text-2xl leading-none truncate ${color}`} title={value}>{value}</div>
           </Well>
         ))}
@@ -389,7 +401,7 @@ export function LibraryPage() {
           <button
             onClick={handleDemo}
             disabled={isRunning}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface hover:bg-raised text-success border border-edge transition-all font-black text-[10px] uppercase tracking-widest shadow-sm disabled:opacity-40 disabled:cursor-not-allowed"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface hover:bg-raised text-success border border-edge transition-all font-black text-xs uppercase tracking-widest shadow-sm disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <Play className="w-3 h-3" />
             Seed Demo
@@ -397,7 +409,7 @@ export function LibraryPage() {
           <button
             onClick={handleClear}
             disabled={isRunning || clearIndexMutation.isPending}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface hover:bg-raised text-error border border-edge transition-all font-black text-[10px] uppercase tracking-widest shadow-sm disabled:opacity-40 disabled:cursor-not-allowed"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface hover:bg-raised text-error border border-edge transition-all font-black text-xs uppercase tracking-widest shadow-sm disabled:opacity-40 disabled:cursor-not-allowed"
           >
             {clearIndexMutation.isPending
               ? <Loader2 className="w-3 h-3 animate-spin" />

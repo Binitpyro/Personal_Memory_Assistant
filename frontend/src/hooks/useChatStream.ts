@@ -2,6 +2,7 @@ import { useReducer, useCallback, useRef, useEffect } from 'react';
 import { subscribeQuery, type QueryStreamChunk, type QuerySource, type ProviderStatus, type TraceEvent } from '../api';
 import { useSessionProvider } from '../context/SessionProviderContext';
 import { queryClient } from '../queryClient';
+import { CACHE_KEYS } from '../cacheKeys';
 
 export interface Message {
   id: string; // generated using crypto.randomUUID()
@@ -184,7 +185,7 @@ function calculateCost(
 
 export function useChatStream(onHistoryUpdate: () => void) {
   const [messages, dispatch] = useReducer(chatReducer, []);
-  const { sessionModelOverride, addSessionCost } = useSessionProvider();
+  const { sessionModelOverride, addSessionCost, recordModelUse } = useSessionProvider();
   
   const streamBufferRef = useRef('');
   const lastUpdateRef = useRef(0);
@@ -250,8 +251,13 @@ export function useChatStream(onHistoryUpdate: () => void) {
 
     // Resolve initial active provider and model
     const providers = queryClient.getQueryData<ProviderStatus[]>(['providers-list']);
-    const primaryProvider = sessionModelOverride?.provider || providers?.find(p => p.is_set)?.spec.id || 'gemini';
-    const primaryModel = sessionModelOverride?.model || providers?.find(p => p.is_set)?.default_model || 'default-model';
+    // Cost attribution only — these are not routing, the backend resolves that.
+    // The tail fallbacks were the literals 'gemini' / 'default-model', which
+    // billed a provider the user may never have selected. `current-provider` is
+    // the backend's own resolution, so prefer it over guessing from list order.
+    const active = queryClient.getQueryData<{ provider: string; model: string }>([CACHE_KEYS.currentProvider]);
+    const primaryProvider = sessionModelOverride?.provider || providers?.find(p => p.is_set)?.spec.id || active?.provider || 'unknown';
+    const primaryModel = sessionModelOverride?.model || providers?.find(p => p.is_set)?.default_model || active?.model || 'unknown';
 
     let currentProviderId = primaryProvider;
     let currentModelId = primaryModel;
@@ -276,6 +282,13 @@ export function useChatStream(onHistoryUpdate: () => void) {
           type: 'FINISH_STREAM',
           payload: { graph_hops: opts.graph_hops, stopped: opts.stopped }
         });
+
+        // Exactly once per delivered answer. `finalize` is idempotent via
+        // `settled` and is not reached on the error path, so a stream that
+        // failed never counts as a use — but a stopped one does, because the
+        // model did run. Recorded here rather than beside addSessionCost,
+        // which skips zero-cost (i.e. every local) model.
+        recordModelUse(currentProviderId, currentModelId);
 
         // A stopped or dropped stream never delivers the usage packet.
         if (!receivedUsage) {
@@ -330,7 +343,10 @@ export function useChatStream(onHistoryUpdate: () => void) {
         }
 
         if (chunk.type === 'fallback') {
-          currentProviderId = chunk.to || 'openai';
+          // Was `|| 'openai'`, which invented a provider the request may never
+          // have touched. That now feeds the usage tally, so a wrong guess is
+          // recorded as fact; keeping the current id is the honest fallback.
+          currentProviderId = chunk.to || currentProviderId;
           const fallbackProviderStatus = providers?.find(p => p.spec.id === currentProviderId);
           currentModelId = fallbackProviderStatus?.default_model || 'default-model';
           dispatch({ type: 'SET_FALLBACK', payload: { to: currentProviderId } });

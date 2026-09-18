@@ -19,7 +19,7 @@
 
   --pma-bg:        #14110E;  /* case interior / app ground              */
   --pma-surface:   #1C1815;  /* panels                                   */
-  --pma-raised:    #302A23;  /* the case itself — lighter than the well  */
+  --pma-raised:    #302A23;  /* the case itself — lighter here, see paper */
   --pma-deep:      #0A0806;  /* the deepest recess (tracks, vitrine)     */
   --pma-rule:      #3E362D;  /* decorative hairline. NOT a control edge  */
   --pma-edge:      #85765B;  /* control boundary — 3.98 / 3.20, WCAG 1.4.11 */
@@ -54,7 +54,13 @@
     color-scheme: light;
     --pma-bg:       #F7F3E9;
     --pma-surface:  #F1ECDF;
-    --pma-raised:   #F7F3E9;
+    /* The case is a shade DEEPER than the well here — the inverse of cabinet.
+       Going lighter has a ~1.06 ceiling against a near-white ground, which
+       measured invisible on screen; this is 1.11. Depth is then carried by
+       --pma-inset, which paper already defines as a dark inner shadow.
+       Was #F7F3E9, i.e. identical to --pma-bg, so the case/well distinction
+       did not render at all. */
+    --pma-raised:   #EDE7D8;
     --pma-deep:     #D3C9B1;
     --pma-rule:     #D6CDB6;
     --pma-edge:     #877755;
@@ -85,7 +91,8 @@
   color-scheme: light;
   --pma-bg:       #F7F3E9;
   --pma-surface:  #F1ECDF;
-  --pma-raised:   #F7F3E9;
+  /* Must stay identical to the prefers-color-scheme: light block above. */
+  --pma-raised:   #EDE7D8;
   --pma-deep:     #D3C9B1;
   --pma-rule:     #D6CDB6;
   --pma-edge:     #877755;
@@ -390,6 +397,31 @@ aside.glass {
    asked for `clip-triangle`, which did not exist — so every "triangle"
    provider has been rendering as a square. */
 .clip-triangle { clip-path: polygon(50% 0%, 100% 100%, 0% 100%); }
+
+/* ── Tap targets ──────────────────────────────────────────────────────────
+   WCAG 2.2 SC 2.5.8 wants 24x24 CSS px. This grows the HIT AREA only: the
+   pseudo-element is transparent and centred, so a dense row (the provider
+   reorder arrows, the Explorer delete) does not reflow when a 22x22 control
+   becomes compliant.
+
+   One rule covers both shapes — `max(100%, 24px)` grows a small icon button
+   on both axes while leaving a wide, short text button's width alone and
+   lifting only its height.
+
+   It does NOT work under `overflow: hidden`, which clips hit-testing as well
+   as paint. ThemeToggle's wrapper is exactly that, so those buttons are sized
+   for real instead (ui/Feedback.tsx).
+   ───────────────────────────────────────────────────────────────────────── */
+.tap-24 { position: relative; }
+.tap-24::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: max(100%, 24px);
+  height: max(100%, 24px);
+  transform: translate(-50%, -50%);
+}
 
 /* ── Native <dialog> ──────────────────────────────────────────────────────
    The model picker uses showModal(), so the platform supplies the focus trap,

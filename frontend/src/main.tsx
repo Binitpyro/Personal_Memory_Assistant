@@ -5,7 +5,7 @@ import './fonts'
 import './index.css'
 import { AppShell } from './components/AppShell'
 import { initTauriConnection } from './api';
-import { initTheme } from './theme'
+import { initTheme, useTheme } from './theme'
 import { initFonts } from './fonts'
 
 import { QueryClientProvider } from '@tanstack/react-query'
@@ -30,6 +30,26 @@ function PageLoader() {
     <div className="flex items-center justify-center min-h-[50vh]">
       <div className="w-8 h-8 border-2 border-primary border-t-transparent rounded-full animate-spin" />
     </div>
+  )
+}
+
+/**
+ * The toaster has to follow the app's theme, not the OS's.
+ *
+ * `<Toaster theme="system">` reads `prefers-color-scheme`, so picking Paper on
+ * a dark OS gave dark toasts on a light app — the explicit toggle never
+ * reached sonner. A component rather than an inline prop because `useTheme` is
+ * a hook and the Toaster below sits outside any component.
+ */
+function ThemedToaster() {
+  const theme = useTheme()
+  return (
+    <Toaster
+      theme={theme === 'paper' ? 'light' : 'dark'}
+      position="bottom-right"
+      richColors
+      closeButton
+    />
   )
 }
 
@@ -68,10 +88,7 @@ createRoot(document.getElementById('root')!).render(
             </Routes>
           </Suspense>
         </BrowserRouter>
-        {/* Was hardcoded `dark` on a light app. `system` tracks the OS, which is
-            also what the CSS does when the user has not chosen a theme; the
-            explicit toggle wires through in Phase 5. */}
-        <Toaster theme="system" position="bottom-right" richColors closeButton />
+        <ThemedToaster />
       </SessionProvider>
     </QueryClientProvider>
   </StrictMode>,

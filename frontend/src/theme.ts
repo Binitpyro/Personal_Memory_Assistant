@@ -109,3 +109,43 @@ export function useTheme(): Theme {
 
   return theme;
 }
+
+/** The token literals a canvas chart needs. */
+export interface ChartTokens {
+  surface: string;
+  raised: string;
+  bg: string;
+  rule: string;
+  edge: string;
+  text: string;
+  text2: string;
+  text3: string;
+  accent: string;
+  plate: string;
+}
+
+/**
+ * Resolve the `--pma-*` palette to literals, for the canvas charts described
+ * above. Fallbacks are the cabinet values, matching `index.css`'s `:root`.
+ *
+ * Read at option-build time, never at module scope: a module-level read would
+ * snapshot whichever theme happened to be active on first import and never
+ * update. Pair it with `useTheme()` in the memo deps so the option is rebuilt
+ * when the theme changes — the hook is what makes this function re-run.
+ */
+export function readChartTokens(): ChartTokens {
+  const cs = getComputedStyle(document.documentElement);
+  const v = (name: string, fallback: string) => cs.getPropertyValue(name).trim() || fallback;
+  return {
+    surface: v('--pma-surface', '#1C1815'),
+    raised: v('--pma-raised', '#302A23'),
+    bg: v('--pma-bg', '#14110E'),
+    rule: v('--pma-rule', '#3E362D'),
+    edge: v('--pma-edge', '#85765B'),
+    text: v('--pma-text', '#F2EBDD'),
+    text2: v('--pma-text-2', '#C4B79F'),
+    text3: v('--pma-text-3', '#AEA189'),
+    accent: v('--pma-accent', '#C4A26B'),
+    plate: v('--pma-plate', '#B08D57'),
+  };
+}

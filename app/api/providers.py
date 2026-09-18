@@ -5,7 +5,7 @@ from typing import Any
 
 import keyring
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Extra
+from pydantic import BaseModel, ConfigDict
 
 from app.api.models import PRIVACY_NOTICE
 from app.config import settings
@@ -73,16 +73,14 @@ class ValidatePayload(BaseModel):
     api_key: str | None = None
     base_url: str | None = None
 
-    class Config:
-        extra = Extra.ignore
+    model_config = ConfigDict(extra="ignore")
 
 
 class SetKeyPayload(BaseModel):
     api_key: str | None = None
     base_url: str | None = None
 
-    class Config:
-        extra = Extra.ignore
+    model_config = ConfigDict(extra="ignore")
 
 
 class SetDefaultModelPayload(BaseModel):
@@ -94,8 +92,7 @@ class LLMGeneralSettingsPayload(BaseModel):
     fallback_chain: list[str] | None = None
     cloud_privacy_consent: bool | None = None
 
-    class Config:
-        extra = Extra.ignore
+    model_config = ConfigDict(extra="ignore")
 
 
 _GATED_PROVIDER_KINDS = ("cloud", "aggregator")

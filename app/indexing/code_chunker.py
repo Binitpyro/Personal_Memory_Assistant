@@ -7,6 +7,10 @@ from app.indexing.graph_extractor import CodeGraphExtractor
 
 logger = logging.getLogger(__name__)
 
+# A line break as ``ast`` counts one: "\r\n", a lone "\r", or "\n" - nothing else.
+# A CRLF breaks at its "\n", so the "\r" stays on the line as ``split("\n")`` left it.
+_LINE_BREAK = re.compile(r"\r(?!\n)|\n")
+
 
 def _line_start_offsets(text: str) -> list[int]:
     """Character offset of the first character of each line.
@@ -14,10 +18,16 @@ def _line_start_offsets(text: str) -> list[int]:
     ``ast`` reports positions as 1-based line numbers; chunk offsets are
     character positions into the source. One table converts between them for a
     whole file, rather than re-scanning per node.
+
+    Lines must be split exactly as ``ast`` splits them. ``str.splitlines`` also
+    breaks on \\f, \\v, \\x1c-\\x1e, \\x85, \\u2028 and \\u2029, which shifted every
+    offset after one; ``split("\\n")`` ignores a lone \\r, which on a file saved
+    with "\\r\\r\\n" endings indexed past the end of the line list and dropped the
+    whole file to the blind fallback with no kg_nodes.
     """
-    offsets = [0]
-    for line in text.splitlines(keepends=True):
-        offsets.append(offsets[-1] + len(line))
+    offsets = [0] + [m.end() for m in _LINE_BREAK.finditer(text)]
+    if offsets[-1] != len(text):
+        offsets.append(len(text))
     return offsets
 
 
@@ -89,7 +99,7 @@ class CodeChunker:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", SyntaxWarning)
                 tree = ast.parse(text)
-            lines = text.split("\n")
+            lines = _LINE_BREAK.split(text)
             line_starts = _line_start_offsets(text)
 
             def span_of(node: Any) -> tuple[int, int]:

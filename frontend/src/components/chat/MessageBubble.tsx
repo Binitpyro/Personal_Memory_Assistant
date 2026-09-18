@@ -95,14 +95,14 @@ const ReasoningTrace = ({ trace }: Readonly<{ trace: TraceEvent[] }>) => {
             <div className="p-3 border-t border-primary/10 flex flex-col gap-2 text-xs text-text-secondary">
               {steps.map((e, i) => (
                 <div key={`${e.kind}-${i}`} className="flex items-start gap-2">
-                  <span className="text-primary-light/60 font-mono text-[10px] mt-0.5 shrink-0">
+                  <span className="text-primary-light/60 font-mono text-xs mt-0.5 shrink-0">
                     {e.kind}
                   </span>
                   <span>{e.detail}</span>
                 </div>
               ))}
               {summary && (
-                <div className="mt-1 pt-2 border-t border-rule text-[10px] text-text-secondary/70">
+                <div className="mt-1 pt-2 border-t border-rule text-xs text-text-secondary/70">
                   {summary.detail}
                 </div>
               )}
@@ -160,7 +160,7 @@ const SourceViewer = ({ src, onForceInclude }: Readonly<{ src: QuerySource, onFo
             {offsets.map(([start, end], i) => (
               <span key={i} className="hover:bg-primary/30 transition-colors rounded px-0.5 cursor-text relative group">
                 {src.text!.substring(start, end)}
-                <span className="absolute -top-7 left-1/2 -translate-x-1/2 bg-surface border border-edge text-[11px] text-text-primary px-2 py-1 rounded-sm shadow-md opacity-0 group-hover:opacity-100 pointer-events-none whitespace-nowrap z-10 transition-opacity">
+                <span className="absolute -top-7 left-1/2 -translate-x-1/2 bg-surface border border-edge text-xs text-text-primary px-2 py-1 rounded-sm shadow-md opacity-0 group-hover:opacity-100 pointer-events-none whitespace-nowrap z-10 transition-opacity">
                   Precision match
                 </span>
               </span>
@@ -187,23 +187,23 @@ const SourceViewer = ({ src, onForceInclude }: Readonly<{ src: QuerySource, onFo
         >
           <span
             aria-hidden
-            className={`font-mono text-[10px] mt-px shrink-0 ${src._challenge_source ? 'text-error' : 'text-primary'}`}
+            className={`font-mono text-xs mt-px shrink-0 ${src._challenge_source ? 'text-error' : 'text-primary'}`}
           >
             {isOpen ? '−' : '+'}
           </span>
           <span className="min-w-0">
-            <span className={`block font-mono text-[11px] leading-relaxed truncate group-hover/mark:text-primary transition-colors ${
+            <span className={`block font-mono text-xs leading-relaxed truncate group-hover/mark:text-primary transition-colors ${
               src._challenge_source ? 'text-error' : 'text-text-secondary'
             }`}>
               {src.file_path.split(/[\\/]/).pop()}
             </span>
             {src.folder_tag && (
-              <span className="block font-mono text-[10px] leading-relaxed text-text-tertiary truncate">
+              <span className="block font-mono text-xs leading-relaxed text-text-tertiary truncate">
                 {src.folder_tag}
               </span>
             )}
             {(src.chunk_id !== undefined || src.score !== undefined) && (
-              <span className="block font-mono text-[10px] leading-relaxed text-text-tertiary">
+              <span className="block font-mono text-xs leading-relaxed text-text-tertiary">
                 {src.chunk_id !== undefined ? `chunk ${src.chunk_id}` : ''}
                 {src.chunk_id !== undefined && src.score !== undefined ? ' · ' : ''}
                 {src.score !== undefined ? src.score.toFixed(2) : ''}
@@ -214,7 +214,7 @@ const SourceViewer = ({ src, onForceInclude }: Readonly<{ src: QuerySource, onFo
         {onForceInclude && (
           <button 
             onClick={(e) => { e.stopPropagation(); onForceInclude(); }}
-            className="flex items-center gap-1 px-1.5 py-1 bg-primary/10 hover:bg-primary/20 transition-colors rounded-lg text-[10px] text-primary-light border border-primary/20 ml-auto"
+            className="flex items-center gap-1 px-1.5 py-1 bg-primary/10 hover:bg-primary/20 transition-colors rounded-lg text-xs text-primary-light border border-primary/20 ml-auto"
             title="Force include this chunk into context and re-query"
           >
             <Plus className="w-3 h-3" />
@@ -234,7 +234,7 @@ const SourceViewer = ({ src, onForceInclude }: Readonly<{ src: QuerySource, onFo
           {isTauri && (
             <button
               onClick={() => { void openFile(src.file_path); }}
-              className="flex items-center gap-1.5 px-2 py-1 self-start bg-raised hover:bg-raised transition-colors rounded-lg text-[10px] text-text-secondary border border-rule"
+              className="flex items-center gap-1.5 px-2 py-1 self-start bg-raised hover:bg-raised transition-colors rounded-lg text-xs text-text-secondary border border-rule"
               title={`Open ${src.file_path}`}
             >
               <ExternalLink className="w-3 h-3 text-primary-light" />
@@ -359,7 +359,7 @@ export function MessageBubble({ message: msg, onNearMissClick }: Readonly<Messag
             from an answer that simply ended. */}
         {msg.role === 'assistant' && msg.stopped && (
           <div className="flex items-center gap-2 mt-1">
-            <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full border bg-raised text-text-secondary border-rule">
+            <span className="inline-flex items-center gap-1 text-xs font-bold px-2 py-0.5 rounded-full border bg-raised text-text-secondary border-rule">
               Stopped · partial answer
             </span>
           </div>
@@ -373,7 +373,7 @@ export function MessageBubble({ message: msg, onNearMissClick }: Readonly<Messag
                 weight as the rest of the metadata row. Before this, a cached
                 answer arrived with no sources and defaulted to "full_rag" -
                 presented as fresh. */}
-            <span className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+            <span className={`inline-flex items-center gap-1 text-xs font-bold px-2 py-0.5 rounded-full border ${
               msg.mode === 'fast_path'
                 ? 'bg-surface text-warning border-edge'
                 : msg.mode === 'degraded_rag'
@@ -393,7 +393,7 @@ export function MessageBubble({ message: msg, onNearMissClick }: Readonly<Messag
             {msg.query_mode && (
               <span
                 title="The answering style you selected"
-                className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full border capitalize ${
+                className={`inline-flex items-center gap-1 text-xs font-bold px-2 py-0.5 rounded-full border capitalize ${
                   msg.query_mode === 'challenge'
                     ? 'bg-surface text-error border-error/40'
                     : 'bg-raised text-text-secondary border-rule'
@@ -403,20 +403,20 @@ export function MessageBubble({ message: msg, onNearMissClick }: Readonly<Messag
               </span>
             )}
             {msg.fallbackTo && (
-              <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full border bg-surface text-error border-error/40">
+              <span className="inline-flex items-center gap-1 text-xs font-bold px-2 py-0.5 rounded-full border bg-surface text-error border-error/40">
                 ⚠️ Backup: {msg.fallbackTo}
               </span>
             )}
             {msg.latency_ms != null && msg.latency_ms > 0 && (
-              <span className="text-[10px] text-text-secondary/50">{msg.latency_ms.toFixed(0)}ms</span>
+              <span className="text-xs text-text-secondary/50">{msg.latency_ms.toFixed(0)}ms</span>
             )}
             {(msg.prompt_tokens != null || msg.completion_tokens != null) && (
-              <span className="text-[10px] text-text-secondary/50">
+              <span className="text-xs text-text-secondary/50">
                 • {((msg.prompt_tokens || 0) + (msg.completion_tokens || 0)).toLocaleString()} tokens
               </span>
             )}
             {msg.cost != null && msg.cost > 0 && (
-              <span className="text-[10px] text-success/80 font-semibold" title={msg.isEstimatedCost ? 'Estimated cost' : 'Token usage cost'}>
+              <span className="text-xs text-success/80 font-semibold" title={msg.isEstimatedCost ? 'Estimated cost' : 'Token usage cost'}>
                 • {msg.isEstimatedCost ? '~' : ''}{formatCurrency(msg.cost)}
               </span>
             )}
@@ -507,7 +507,7 @@ export function MessageBubble({ message: msg, onNearMissClick }: Readonly<Messag
           // apart from the answer as a different KIND of text — the margin of a
           // page rather than a row of chips under it.
           <div className="flex flex-col gap-3 mt-3 pl-4 border-l border-rule">
-            <div className="font-mono text-[10px] tracking-[0.16em] uppercase text-text-tertiary">
+            <div className="font-mono text-xs tracking-widest uppercase text-text-tertiary">
               Provenance
             </div>
             {(showAllSources ? msg.sources : msg.sources.slice(0, 3)).map((src) => (
@@ -516,7 +516,7 @@ export function MessageBubble({ message: msg, onNearMissClick }: Readonly<Messag
             {msg.sources.length > 3 && (
               <button
                 onClick={() => setShowAllSources(v => !v)}
-                className="font-mono text-[10px] text-text-tertiary self-start underline underline-offset-4 hover:text-primary transition-colors"
+                className="font-mono text-xs text-text-tertiary self-start underline underline-offset-4 hover:text-primary transition-colors"
               >
                 {showAllSources
                   ? 'Show fewer sources'
@@ -532,7 +532,7 @@ export function MessageBubble({ message: msg, onNearMissClick }: Readonly<Messag
                 const maxDate = new Date(Math.max(...dates)).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
                 const dateText = minDate === maxDate ? minDate : `${minDate} to ${maxDate}`;
                 return (
-                  <div className="text-[10px] text-text-secondary mt-1 flex items-center gap-1.5 border-t border-rule pt-2 pl-2">
+                  <div className="text-xs text-text-secondary mt-1 flex items-center gap-1.5 border-t border-rule pt-2 pl-2">
                     <Clock className="w-3 h-3 opacity-70" />
                     Based on documents from {dateText}
                   </div>
@@ -546,12 +546,12 @@ export function MessageBubble({ message: msg, onNearMissClick }: Readonly<Messag
         {msg.role === 'assistant' && msg.near_misses && msg.near_misses.length > 0 && (
           <div className="mt-4 pt-4 border-t border-rule">
             <details className="group cursor-pointer">
-              <summary className="text-[11px] font-medium text-text-secondary/70 hover:text-text-primary transition-colors flex items-center gap-2 select-none mb-2">
+              <summary className="text-xs font-medium text-text-secondary/70 hover:text-text-primary transition-colors flex items-center gap-2 select-none mb-2">
                 <span className="w-4 h-4 flex items-center justify-center rounded-sm bg-surface-elevation-2/50 group-hover:bg-surface-elevation-3 transition-colors">
-                  <span className="group-open:rotate-90 transition-transform text-[10px]">▶</span>
+                  <span className="group-open:rotate-90 transition-transform text-xs">▶</span>
                 </span>
                 Near Misses ({msg.near_misses.length})
-                <span className="text-[9px] text-text-secondary/50 font-normal ml-auto group-hover:text-text-secondary/80 transition-colors">Click to expand • May contain relevant context</span>
+                <span className="text-xs text-text-secondary/50 font-normal ml-auto group-hover:text-text-secondary/80 transition-colors">Click to expand • May contain relevant context</span>
               </summary>
               <div className="flex flex-col gap-2 pl-6 mt-3 animate-in slide-in-from-top-2 duration-200">
                 {msg.near_misses.map((src) => (

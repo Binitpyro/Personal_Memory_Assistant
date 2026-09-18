@@ -37,7 +37,7 @@ export function SettingsLayout() {
                 }
               >
                 <div
-                  className={`font-mono text-[10px] tracking-[0.16em] uppercase ${
+                  className={`font-mono text-xs tracking-widest uppercase ${
                     isActive ? 'text-primary' : 'text-text-tertiary'
                   }`}
                 >

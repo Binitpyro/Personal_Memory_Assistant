@@ -1,5 +1,5 @@
 import { useMemo, useCallback, useRef, useState, useEffect } from 'react'
-import { useTheme } from '../theme'
+import { useTheme, readChartTokens } from '../theme'
 import { AccessibleTree, type A11yNode } from './AccessibleTree'
 import { ShortcutOverlay } from './ShortcutOverlay'
 import { ChevronLeft, Home, File, Folder, Layers, Trash2 } from 'lucide-react'
@@ -30,21 +30,8 @@ echarts.use([EChartsTreemap, TooltipComponent, VisualMapComponent, CanvasRendere
  * would snapshot whichever theme happened to be active on first import and
  * never update.
  */
-function readTokens() {
-  const cs = getComputedStyle(document.documentElement)
-  const v = (name: string, fallback: string) => cs.getPropertyValue(name).trim() || fallback
-  return {
-    surface: v('--pma-surface', '#1C1815'),
-    raised: v('--pma-raised', '#302A23'),
-    bg: v('--pma-bg', '#14110E'),
-    rule: v('--pma-rule', '#3E362D'),
-    edge: v('--pma-edge', '#85765B'),
-    text: v('--pma-text', '#F2EBDD'),
-    text2: v('--pma-text-2', '#C4B79F'),
-    accent: v('--pma-accent', '#C4A26B'),
-    plate: v('--pma-plate', '#B08D57'),
-  }
-}
+/* `readChartTokens` lives in `theme.ts` so CrystalGraphTrace shares one
+   implementation rather than growing a second copy that can drift. */
 
 function prefersReducedMotion() {
   return typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches
@@ -83,7 +70,7 @@ const Breadcrumb: React.FC<BreadcrumbProps> = ({ navPath, onBreadcrumbClick }) =
         <div key={itemKey} className="flex items-center shrink-0">
           <button
             onClick={() => onBreadcrumbClick(i)}
-            className={`flex items-center gap-1.5 px-2 py-1 rounded-lg text-[11px] font-medium transition-colors hover:bg-raised ${isLast ? 'text-primary bg-primary/10' : 'text-text-secondary hover:text-text-primary'}`}
+            className={`flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs font-medium transition-colors hover:bg-raised ${isLast ? 'text-primary bg-primary/10' : 'text-text-secondary hover:text-text-primary'}`}
           >
             <Icon className="w-3 h-3" aria-hidden />
             <span className="max-w-[120px] truncate">{seg.name}</span>
@@ -292,7 +279,7 @@ export function FileTypeTreemap({ allFiles, activeFilter, onFilterChange, onFile
   }, [onDeleteFolder, navPath])
 
   const option = useMemo(() => {
-    const t = readTokens()
+    const t = readChartTokens()
     const reduced = prefersReducedMotion()
     return {
     backgroundColor: 'transparent',
@@ -411,11 +398,11 @@ export function FileTypeTreemap({ allFiles, activeFilter, onFilterChange, onFile
           </div>
           <div className="flex items-center gap-3">
             {onDeleteFolder && navPath.length > 1 && navPath.at(-1)?.fullPath && (
-              <button onClick={handleDeleteCurrent} className="flex items-center gap-1 px-3 py-1.5 bg-error/10 hover:bg-error/20 border border-error/20 text-error rounded-xl text-[10px] font-bold transition-colors"><Trash2 className="w-3.5 h-3.5" aria-hidden /> DELETE FOLDER INDEX</button>
+              <button onClick={handleDeleteCurrent} className="flex items-center gap-1 px-3 py-1.5 bg-error/10 hover:bg-error/20 border border-error/20 text-error rounded-xl text-xs font-bold transition-colors"><Trash2 className="w-3.5 h-3.5" aria-hidden /> DELETE FOLDER INDEX</button>
             )}
             <div className="flex items-center bg-raised p-1 rounded-xl border border-rule">
-              <button onClick={() => { setGroupMode('folder'); handleHome() }} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-bold transition-colors ${groupMode === 'folder' ? 'bg-plate text-on-plate shadow-lg' : 'text-text-secondary hover:text-text-primary'}`}><Folder className="w-3.5 h-3.5" aria-hidden /> BY FOLDERS</button>
-              <button onClick={() => { setGroupMode('type'); handleHome() }} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-bold transition-colors ${groupMode === 'type' ? 'bg-plate text-on-plate shadow-lg' : 'text-text-secondary hover:text-text-primary'}`}><Layers className="w-3.5 h-3.5" aria-hidden /> BY FILE TYPE</button>
+              <button onClick={() => { setGroupMode('folder'); handleHome() }} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${groupMode === 'folder' ? 'bg-plate text-on-plate shadow-lg' : 'text-text-secondary hover:text-text-primary'}`}><Folder className="w-3.5 h-3.5" aria-hidden /> BY FOLDERS</button>
+              <button onClick={() => { setGroupMode('type'); handleHome() }} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${groupMode === 'type' ? 'bg-plate text-on-plate shadow-lg' : 'text-text-secondary hover:text-text-primary'}`}><Layers className="w-3.5 h-3.5" aria-hidden /> BY FILE TYPE</button>
             </div>
           </div>
         </div>
@@ -440,7 +427,7 @@ export function FileTypeTreemap({ allFiles, activeFilter, onFilterChange, onFile
         <span className="sr-only" aria-live="polite">{announcement}</span>
         {/* Was `opacity-0 group-hover:opacity-60`: the only statement of how
             to drive the chart, revealed only on mouse hover. */}
-        <div id="treemap-keyhint" className="absolute top-12 right-4 z-10 pointer-events-none opacity-70 text-[10px] font-bold text-text-primary uppercase bg-surface border border-edge px-3 py-1.5 rounded-full shadow-sm">↑↓ browse · Enter open · ⌫ back · ? keys</div>
+        <div id="treemap-keyhint" className="absolute top-12 right-4 z-10 pointer-events-none opacity-70 text-xs font-bold text-text-primary uppercase bg-surface border border-edge px-3 py-1.5 rounded-full shadow-sm">↑↓ browse · Enter open · ⌫ back · ? keys</div>
         {buildError ? (
           <div className="flex items-center justify-center h-full text-text-secondary font-medium">{buildError}</div>
         ) : (

@@ -93,7 +93,15 @@ if not exist "node_modules" (
 )
 echo [INFO] Building frontend assets...
 call npm run build
+set BUILD_RC=%ERRORLEVEL%
 popd
+:: Vite empties static\react before it writes, so a failed build leaves the
+:: backend nothing to serve. Stop here rather than launch an empty UI.
+if %BUILD_RC% neq 0 (
+    echo [ERROR] Frontend build failed ^(exit %BUILD_RC%^). Nothing was launched; run StartPMA again.
+    pause
+    exit /b 1
+)
 
 :launch_wt
 echo.

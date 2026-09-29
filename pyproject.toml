@@ -172,12 +172,16 @@ explicit_package_bases = true
 # `find_sources_in_dir` has no error handling, so the whole run dies with
 # `OSError: [WinError 1392] The file or directory is corrupted and unreadable`
 # before a single module is checked. Seen 2026-09-02.
+# `PMA Obsidian/` is the gitignored research vault. mypy ignores .gitignore
+# (ruff respects it), so `mypy .` type-checked throwaway paper scripts there and
+# the local gate stopped at this step on 29 errors CI never sees.
 exclude = [
     '^\.pytest_temp/',
     '^tests/',
     '^dist/',
     '^app/ocr/worker/',
     '/target/',
+    '^PMA Obsidian/',
 ]
 
 [[tool.mypy.overrides]]

@@ -1,8 +1,5 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import {
-  Activity, AlertTriangle, ArrowLeft, CheckCircle2, Database, Gauge, MinusCircle, ScanText,
-} from 'lucide-react'
 import { toast } from 'sonner'
 import { useApi, invalidateCache } from '../useApi'
 import {
@@ -10,7 +7,7 @@ import {
   type HealthResponse, type StageMetrics, type OcrStatus,
 } from '../api'
 import { CACHE_KEYS } from '../cacheKeys'
-import { Button, Panel, ErrorState } from '../components/ui'
+import { Button, buttonClasses, Panel, ErrorState } from '../components/ui'
 import { formatDateTime } from '../utils/format'
 
 /**
@@ -40,18 +37,20 @@ function SubsystemRow({ name, info }: Readonly<{
   // 'disabled' is a configuration choice and 'unknown' means startup was never
   // attempted. Neither is a fault and neither may render as one.
   const tone = {
-    up: { cls: 'text-success', Icon: CheckCircle2, word: 'Running' },
-    down: { cls: 'text-error', Icon: AlertTriangle, word: 'Not running' },
-    disabled: { cls: 'text-text-secondary', Icon: MinusCircle, word: 'Turned off' },
-    unknown: { cls: 'text-text-secondary', Icon: MinusCircle, word: 'Not started' },
-  }[info.state] ?? { cls: 'text-text-secondary', Icon: MinusCircle, word: info.state }
+    // A square beside a word: filled when it is running or has failed, outlined
+    // when it is simply off. The word carries the state; the square only marks it.
+    up: { cls: 'text-success', filled: true, word: 'Running' },
+    down: { cls: 'text-error', filled: true, word: 'Not running' },
+    disabled: { cls: 'text-text-secondary', filled: false, word: 'Turned off' },
+    unknown: { cls: 'text-text-secondary', filled: false, word: 'Not started' },
+  }[info.state] ?? { cls: 'text-text-secondary', filled: false, word: info.state }
 
   return (
     <div className="flex items-start justify-between gap-4 py-2 border-b border-rule last:border-0">
       <span className="font-medium text-text-primary">{SUBSYSTEM_LABEL[name] ?? name}</span>
       <div className="flex flex-col items-end gap-0.5 text-right">
         <span className={`text-sm flex items-center gap-1.5 ${tone.cls}`}>
-          <tone.Icon className="w-4 h-4 shrink-0" /> {tone.word}
+          <span aria-hidden className={`w-2 h-2 shrink-0 ${tone.filled ? 'bg-current' : 'border border-current'}`} /> {tone.word}
         </span>
         {/* The reason was recorded all along and never shown. */}
         {info.detail && (
@@ -62,8 +61,7 @@ function SubsystemRow({ name, info }: Readonly<{
   )
 }
 
-function Card({ icon: Icon, title, blurb, children }: Readonly<{
-  icon: typeof Activity
+function Card({ title, blurb, children }: Readonly<{
   title: string
   blurb: string
   children: React.ReactNode
@@ -71,12 +69,8 @@ function Card({ icon: Icon, title, blurb, children }: Readonly<{
   return (
     <Panel className="p-6">
       <div className="flex items-start gap-4 mb-5">
-        {/* A recess, not a tinted wash: the chip is cut into the panel. */}
-        <div className="p-3 bg-raised border border-rule rounded-sm">
-          <Icon className="w-5 h-5 text-primary" />
-        </div>
         <div>
-          <h2 className="font-serif text-lg font-medium text-text-primary">{title}</h2>
+          <h2 className="font-bold [font-stretch:80%] text-lg text-text-primary m-0">{title}</h2>
           <p className="text-sm text-text-secondary mt-1">{blurb}</p>
         </div>
       </div>
@@ -151,16 +145,16 @@ export function DiagnosticsPage() {
       <div className="max-w-3xl mx-auto flex flex-col gap-6">
 
         <div className="flex items-center gap-3">
-          {/* Icon-only, so it needs a name: it had none at all. */}
+          {/* Visible text leads the accessible name (WCAG 2.5.3). */}
           <Link
             to="/settings"
             aria-label="Back to Settings"
-            className="p-2 rounded-sm hover:bg-surface transition-colors"
+            className={buttonClasses({ variant: 'quiet', size: 'sm' })}
           >
-            <ArrowLeft className="w-5 h-5" />
+            Back
           </Link>
           <div>
-            <h1 className="font-serif text-2xl font-normal text-text-primary">Diagnostics</h1>
+            <h1 className="stock text-[28px] leading-none m-0 text-text-primary">Diagnostics</h1>
             <p className="text-sm text-text-secondary">
               What PMA knows about its own health. Version {health?.version ?? '—'}.
             </p>
@@ -199,7 +193,7 @@ export function DiagnosticsPage() {
           />
         )}
 
-        <Card icon={Activity} title="Subsystems" blurb="Optional components, and why any of them is not running.">
+        <Card title="Subsystems" blurb="Optional components, and why any of them is not running.">
           {subsystems.length === 0
             ? <p className="text-sm text-text-secondary">No subsystem information reported.</p>
             : subsystems.map(([name, info]) => <SubsystemRow key={name} name={name} info={info} />)}
@@ -213,7 +207,7 @@ export function DiagnosticsPage() {
           </div>
         </Card>
 
-        <Card icon={Gauge} title="Query latency" blurb="Measured on this machine, this session. Milliseconds.">
+        <Card title="Query latency" blurb="Measured on this machine, this session. Milliseconds.">
           {metricRows.length === 0 ? (
             <p className="text-sm text-text-secondary">
               Nothing measured yet — ask a question and these fill in.
@@ -248,7 +242,7 @@ export function DiagnosticsPage() {
           )}
         </Card>
 
-        <Card icon={Database} title="Database maintenance" blurb="Reclaims space and re-optimizes the keyword index.">
+        <Card title="Database maintenance" blurb="Reclaims space and re-optimizes the keyword index.">
           <div className="flex items-center justify-between gap-4">
             <div className="text-sm">
               <div className="text-text-secondary">
@@ -269,7 +263,7 @@ export function DiagnosticsPage() {
         </Card>
 
         {ocrStatus?.installed && (
-          <Card icon={ScanText} title="OCR engine" blurb="Which model and hardware are actually in use.">
+          <Card title="OCR engine" blurb="Which model and hardware are actually in use.">
             <dl className="grid grid-cols-2 gap-y-2 text-sm">
               <dt className="text-text-secondary">Tier</dt>
               <dd className="font-medium">{ocrStatus.tier}</dd>

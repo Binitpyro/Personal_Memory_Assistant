@@ -27,6 +27,15 @@ const DATE_TIME = new Intl.DateTimeFormat(undefined, {
   minute: '2-digit',
 });
 
+/**
+ * A retrieval score to two places, truncated toward zero and never rounded, so
+ * 0.449 reads 0.44 and cannot look like it cleared a line it did not.
+ * The 1e-9 absorbs binary float error: 0.29 * 100 is 28.999999999999996.
+ */
+export function formatScore(n: number): string {
+  return ((Math.sign(n) * Math.floor(Math.abs(n) * 100 + 1e-9)) / 100).toFixed(2);
+}
+
 /** Prices and costs. USD because that is the unit every provider quotes in. */
 export function formatCurrency(value: number): string {
   return CURRENCY.format(value);

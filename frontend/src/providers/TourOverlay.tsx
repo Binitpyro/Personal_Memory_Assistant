@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { X, ChevronRight, Check } from 'lucide-react';
 import { Button } from '../components/ui';
 
 interface TourStep {
@@ -192,14 +191,14 @@ export function TourOverlay() {
             aria-label="Close tour"
             className="absolute top-3 right-3 p-1 hover:bg-raised rounded-sm text-text-secondary"
           >
-            <X className="w-4 h-4" aria-hidden />
+            <span aria-hidden>✕</span>
           </button>
 
           <div>
             <span className="font-mono text-xs tracking-widest uppercase text-text-tertiary">
               Step {currentStep + 1} of {steps.length}
             </span>
-            <h3 className="font-serif text-lg font-medium leading-tight mt-1">{step.title}</h3>
+            <h3 className="font-bold [font-stretch:80%] text-lg leading-tight mt-1 mb-0">{step.title}</h3>
           </div>
           
           <p className="text-sm text-text-secondary">
@@ -215,9 +214,9 @@ export function TourOverlay() {
             </button>
             <Button variant="plate" size="sm" onClick={handleNext}>
               {currentStep < steps.length - 1 ? (
-                <>Next <ChevronRight className="w-4 h-4" aria-hidden /></>
+                <>Next <span aria-hidden>›</span></>
               ) : (
-                <>Done <Check className="w-4 h-4" aria-hidden /></>
+                <>Done</>
               )}
             </Button>
           </div>

@@ -14,27 +14,12 @@ import type {
 import { toast } from 'sonner';
 import { useApi } from '../useApi';
 
-import { ProviderIcon } from '../providers/icons';
-import { Badge, Button, EmptyState, Panel, Skeleton } from '../components/ui';
+import { Badge, Button, buttonClasses, EmptyState, Panel, Skeleton } from '../components/ui';
 import { useProviderValidation } from '../providers/useProviderValidation';
 import { validateApiKeyFormat } from '../providers/keyValidators';
 import { ProviderSparkline } from '../providers/ProviderSparkline';
 import { ProviderRecipes } from '../providers/ProviderRecipes';
 import { TourOverlay } from '../providers/TourOverlay';
-import {
-  CheckCircle2,
-  XCircle,
-  Lock,
-  Globe,
-  ArrowLeft,
-  Key,
-  ChevronDown,
-  ChevronUp,
-  RefreshCw,
-  Search,
-  Star,
-  Zap,
-} from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { CACHE_KEYS } from '../cacheKeys'
 import { useOptimisticMutation } from '../useOptimisticMutation'
@@ -265,16 +250,16 @@ export function ProvidersPage() {
       {/* Top Header */}
       <div className="flex items-center justify-between px-8 py-4 border-b border-rule bg-surface relative z-10">
         <div className="flex items-center gap-3">
-          {/* Icon-only, so it needs a name: it had none. */}
+          {/* Visible text leads the accessible name (WCAG 2.5.3). */}
           <Link
             to="/settings"
             aria-label="Back to Settings"
-            className="p-2 hover:bg-raised rounded-sm transition-colors"
+            className={buttonClasses({ variant: 'quiet', size: 'sm' })}
           >
-            <ArrowLeft className="w-5 h-5 text-text-secondary" aria-hidden />
+            Back
           </Link>
           <div>
-            <h1 className="font-serif text-xl font-normal tracking-tight">Model providers</h1>
+            <h1 className="stock text-[28px] leading-none m-0">Model providers</h1>
             <p className="text-xs text-text-secondary">Configure cloud providers and local model backends</p>
           </div>
         </div>
@@ -284,7 +269,7 @@ export function ProvidersPage() {
           onClick={handleValidateAll}
           disabled={loading}
           loading={isValidatingAll}
-          icon={<RefreshCw className="w-4 h-4" />}
+          icon={<span aria-hidden>↻</span>}
         >
           Validate All
         </Button>
@@ -317,7 +302,7 @@ export function ProvidersPage() {
                           title="Move Up"
                           aria-label={`Move ${p.spec.display_name} earlier in the cascade`}
                         >
-                          <ChevronUp className="w-3.5 h-3.5" />
+                          <span aria-hidden>↑</span>
                         </button>
                         <button
                           disabled={index === routingSettings.fallback_chain.length - 1}
@@ -326,7 +311,7 @@ export function ProvidersPage() {
                           title="Move Down"
                           aria-label={`Move ${p.spec.display_name} later in the cascade`}
                         >
-                          <ChevronDown className="w-3.5 h-3.5" />
+                          <span aria-hidden>↓</span>
                         </button>
                       </div>
                     </div>
@@ -399,10 +384,6 @@ export function ProvidersPage() {
                 }`}
               >
                 <div className="flex items-center gap-3">
-                  <ProviderIcon
-                    id={p.spec.id}
-                    className={`w-5 h-5 ${isSelected ? 'text-primary' : 'text-text-secondary'}`}
-                  />
                   <div>
                     <div className="font-medium text-sm flex items-center gap-2">
                       {p.spec.display_name}
@@ -418,7 +399,7 @@ export function ProvidersPage() {
                     <div
                       title={dotLabel}
                       aria-hidden
-                      className={`w-2.5 h-2.5 rounded-full ${dotColor} ${
+                      className={`w-2.5 h-2.5 ${dotColor} ${
                         dotShape === 'triangle' ? 'clip-triangle' : ''
                       }`}
                     />
@@ -442,11 +423,8 @@ export function ProvidersPage() {
             <div className="max-w-2xl flex flex-col gap-6">
               {/* Header */}
               <div className="flex items-start gap-4">
-                <div className="w-12 h-12 bg-raised border border-rule rounded-md flex items-center justify-center text-primary shrink-0">
-                  <ProviderIcon id={selectedProvider.spec.id} className="w-6 h-6" />
-                </div>
                 <div>
-                  <h2 className="font-serif text-xl font-normal">{selectedProvider.spec.display_name}</h2>
+                  <h2 className="font-bold [font-stretch:80%] text-xl m-0">{selectedProvider.spec.display_name}</h2>
                   <p className="text-sm text-text-secondary mt-1">
                     Connect and configure default parameters for {selectedProvider.spec.display_name}.
                   </p>
@@ -460,10 +438,9 @@ export function ProvidersPage() {
                   <div className="flex flex-col gap-1.5">
                     <label htmlFor={baseUrlId} className="font-mono text-xs tracking-widest uppercase text-text-tertiary flex items-center gap-1.5">
                       Base Endpoint URL
-                      {!selectedProvider.spec.base_url_editable && <Lock className="w-3.5 h-3.5 text-text-tertiary" aria-hidden />}
+                      {!selectedProvider.spec.base_url_editable && <span>· fixed</span>}
                     </label>
                     <div className="relative flex items-center">
-                      <Globe className="absolute left-3.5 w-4 h-4 text-text-tertiary z-10" aria-hidden />
                       <input
                         id={baseUrlId}
                         type="url"
@@ -474,7 +451,7 @@ export function ProvidersPage() {
                         disabled={!selectedProvider.spec.base_url_editable || selectedProvider.stored_in === 'env'}
                         value={baseUrl}
                         onChange={e => setBaseUrlInput(e.target.value)}
-                        className="glass-input pl-10 pr-4 py-2.5 text-sm rounded-sm"
+                        className="glass-input px-4 py-2.5 text-sm"
                       />
                     </div>
                   </div>
@@ -483,7 +460,6 @@ export function ProvidersPage() {
                 {(selectedProvider.spec.kind === 'cloud' || selectedProvider.spec.kind === 'aggregator') && (
                   <div id="cloud-consent" className="p-3 bg-surface border border-warning rounded-md text-xs text-text-primary flex flex-col gap-2.5 scroll-mt-6">
                     <div className="flex items-start gap-2">
-                      <Zap className="w-4 h-4 text-warning shrink-0 mt-0.5" />
                       <span>
                         <strong>Privacy Notice:</strong>{' '}
                         {routingSettings?.cloud_privacy_notice ||
@@ -532,7 +508,6 @@ export function ProvidersPage() {
                       )}
                     </div>
                     <div className="relative flex items-center">
-                      <Key className="absolute left-3.5 w-4 h-4 text-text-tertiary z-10" aria-hidden />
                       <input
                         id={apiKeyId}
                         type="password"
@@ -545,7 +520,7 @@ export function ProvidersPage() {
                         onChange={e => setApiKeyInput(e.target.value)}
                         aria-invalid={!formatCheck.isValid}
                         aria-describedby={formatCheck.helperText ? apiKeyHelpId : undefined}
-                        className={`glass-input pl-10 pr-4 py-2.5 text-sm rounded-sm ${
+                        className={`glass-input px-4 py-2.5 text-sm ${
                           formatCheck.isValid ? '' : 'border-error'
                         }`}
                       />
@@ -561,7 +536,7 @@ export function ProvidersPage() {
                   <div>
                     {selectedProvider.stored_in === 'env' && (
                       <span className="text-xs text-text-secondary font-medium flex items-center gap-1">
-                        <Lock className="w-3.5 h-3.5" /> Managed via environment variables (.env)
+                        Managed via environment variables (.env)
                       </span>
                     )}
                   </div>
@@ -579,7 +554,6 @@ export function ProvidersPage() {
                       onClick={handleValidate}
                       disabled={selectedProvider.stored_in === 'env' || !formatCheck.isValid}
                       loading={isValidating}
-                      icon={<Zap className="w-3.5 h-3.5" />}
                     >
                       Test &amp; Validate
                     </Button>
@@ -612,11 +586,7 @@ export function ProvidersPage() {
                   validationResult.ok ? 'border-success' : 'border-error'
                 }`}>
                   <div className="flex items-center gap-2">
-                    {validationResult.ok ? (
-                      <CheckCircle2 className="w-5 h-5 text-success" />
-                    ) : (
-                      <XCircle className="w-5 h-5 text-error" />
-                    )}
+                    <span aria-hidden className={`w-2.5 h-2.5 shrink-0 bg-current ${validationResult.ok ? 'text-success' : 'text-error'}`} />
                     <span className="font-medium text-sm">
                       {validationResult.ok ? 'Connection Verified' : 'Connection Failed'}
                     </span>
@@ -646,7 +616,7 @@ export function ProvidersPage() {
               {validationResult?.ok && (
                 <Panel id="tour-model-selection" className="p-6 flex flex-col gap-4">
                   <div className="flex items-center justify-between border-b border-rule pb-2">
-                    <h3 className="font-serif text-base font-medium text-text-primary m-0">Default target model</h3>
+                    <h3 className="font-bold [font-stretch:80%] text-base text-text-primary m-0">Default target model</h3>
                     <span className="font-mono text-xs text-text-tertiary tabular-nums">
                       {validationResult.models.length} found
                     </span>
@@ -654,7 +624,6 @@ export function ProvidersPage() {
 
                   {/* Search Bar */}
                   <div className="relative flex items-center">
-                    <Search className="absolute left-3.5 w-4 h-4 text-text-tertiary z-10" aria-hidden />
                     <input
                       type="search"
                       spellCheck={false}
@@ -663,7 +632,7 @@ export function ProvidersPage() {
                       placeholder="e.g. llama3…"
                       value={modelSearch}
                       onChange={e => setModelSearch(e.target.value)}
-                      className="glass-input pl-10 pr-4 py-2.5 text-xs rounded-sm"
+                      className="glass-input px-4 py-2.5 text-xs"
                     />
                   </div>
 
@@ -692,9 +661,9 @@ export function ProvidersPage() {
                               onClick={() => togglePin(model.id)}
                               aria-pressed={isPinned}
                               aria-label={`${isPinned ? 'Unpin' : 'Pin'} ${model.id}`}
-                              className="text-text-tertiary hover:text-primary transition-colors"
+                              className={`tap-24 edge-type transition-colors ${isPinned ? 'text-text-primary' : 'text-text-tertiary hover:text-text-primary'}`}
                             >
-                              <Star className={`w-4 h-4 ${isPinned ? 'fill-current text-primary' : ''}`} />
+                              {isPinned ? 'Unpin' : 'Pin'}
                             </button>
 
                             <div>

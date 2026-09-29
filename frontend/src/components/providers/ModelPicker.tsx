@@ -3,7 +3,6 @@ import { useApi } from '../../useApi';
 import { getProviders, getCurrentProvider } from '../../api';
 import type { ProviderStatus } from '../../api';
 import { useSessionProvider } from '../../context/SessionProviderContext';
-import { Sparkles, Search, X, Check } from 'lucide-react';
 import { CACHE_KEYS } from '../../cacheKeys'
 import { Badge } from '../ui';
 
@@ -159,11 +158,11 @@ export function ModelPicker() {
         ref={triggerRef}
         type="button"
         onClick={() => setIsOpen(true)}
-        className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-bold text-text-secondary hover:text-text-primary hover:bg-raised rounded-md transition-[color,background-color] uppercase tracking-wider cursor-pointer border border-rule bg-raised"
+        className="sl-model"
         title="Change active session model (Cmd+K)"
       >
-        <Sparkles className="w-3 h-3 text-primary animate-pulse" aria-hidden />
         <span>{currentModelDisplay}</span>
+        <span aria-hidden>▾</span>
       </button>
 
       {/* Modal Dialog. Always mounted so the element exists for showModal(). */}
@@ -178,7 +177,6 @@ export function ModelPicker() {
               <label htmlFor={searchId} className="sr-only">
                 Search models or providers
               </label>
-              <Search className="w-4 h-4 text-text-secondary" aria-hidden />
               <input
                 ref={inputRef}
                 id={searchId}
@@ -208,7 +206,7 @@ export function ModelPicker() {
                 aria-label="Close model picker"
                 className="p-1 hover:bg-raised rounded-md text-text-secondary hover:text-text-primary transition-[color,background-color]"
               >
-                <X className="w-4 h-4" aria-hidden />
+                <span aria-hidden>✕</span>
               </button>
             </div>
 
@@ -249,10 +247,9 @@ export function ModelPicker() {
                         </span>
                       </div>
                       {(isActiveOverride || (!sessionModelOverride && item.modelId === currentModelDisplay)) && (
-                        <Check
-                          className={`w-4 h-4 flex-shrink-0 ${isSelected ? 'text-on-plate' : 'text-primary'}`}
-                          aria-label="Active model"
-                        />
+                        <span className={`edge-type shrink-0 ${isSelected ? 'text-on-plate' : 'text-text-primary'}`}>
+                          Active
+                        </span>
                       )}
                     </button>
                   );

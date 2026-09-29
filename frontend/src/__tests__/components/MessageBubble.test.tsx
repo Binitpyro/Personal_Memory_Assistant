@@ -1,8 +1,11 @@
-import { describe, it, expect, vi } from 'vitest';
-import { screen, fireEvent } from '@testing-library/react';
+import { describe, it, expect } from 'vitest';
+import { screen } from '@testing-library/react';
 import { MessageBubble } from '../../components/chat/MessageBubble';
 import { renderWithProviders } from '../test-utils';
 import { type Message } from '../../hooks/useChatStream';
+
+// A turn in the Answer pane. Its frames and receipt have their own panes and
+// their own tests (AskPanes.test.tsx).
 
 describe('MessageBubble Component', () => {
   it('renders user message', () => {
@@ -12,45 +15,21 @@ describe('MessageBubble Component', () => {
       content: 'What is the database size limit?',
     };
 
-    renderWithProviders(
-      <MessageBubble 
-        message={userMsg}
-        onNearMissClick={vi.fn()}
-      />
-    );
+    renderWithProviders(<MessageBubble message={userMsg} />);
 
     expect(screen.getByText('What is the database size limit?')).toBeDefined();
   });
 
-  it('renders assistant message with sources', () => {
-    const mockSources = [
-      { 
-        id: '1', 
-        file_path: 'C:/docs/limit.md', 
-        score: 0.9,
-        text: 'The database limit is 2GB.',
-        sentence_offsets: '[[0, 26]]',
-        _challenge_source: false
-      }
-    ];
-
+  it('renders the assistant answer', () => {
     const assistantMsg: Message = {
       id: '2',
       role: 'assistant',
       content: 'The database limit is 2GB.',
-      sources: mockSources,
     };
 
-    renderWithProviders(
-      <MessageBubble 
-        message={assistantMsg}
-        onNearMissClick={vi.fn()}
-      />
-    );
+    renderWithProviders(<MessageBubble message={assistantMsg} />);
 
     expect(screen.getByText('The database limit is 2GB.')).toBeDefined();
-    // Verify source path display (MessageBubble splits path and shows filename)
-    expect(screen.getByText('limit.md')).toBeDefined();
   });
 
   it('leads the retrieval trace with what was searched for and not found', () => {
@@ -78,9 +57,7 @@ describe('MessageBubble Component', () => {
       ],
     };
 
-    renderWithProviders(
-      <MessageBubble message={assistantMsg} onNearMissClick={vi.fn()} />
-    );
+    renderWithProviders(<MessageBubble message={assistantMsg} />);
 
     expect(screen.getByText('Searched for, but not found in your files')).toBeDefined();
     expect(screen.getByText('what is a wombat pipeline')).toBeDefined();
@@ -97,39 +74,12 @@ describe('MessageBubble Component', () => {
       trace: [{ kind: 'start', detail: 'Budget: 8000 tokens.' }],
     };
 
-    renderWithProviders(
-      <MessageBubble message={assistantMsg} onNearMissClick={vi.fn()} />
-    );
+    renderWithProviders(<MessageBubble message={assistantMsg} />);
 
     expect(screen.queryByText('How this answer was assembled')).toBeNull();
     expect(screen.queryByText('Searched for, but not found in your files')).toBeNull();
   });
-
-  it('hides the open-file action outside the desktop shell', () => {
-    // A browser tab cannot open a local file, so offering the button there
-    // would be an affordance that silently does nothing.
-    const assistantMsg: Message = {
-      id: '5',
-      role: 'assistant',
-      content: 'Answer.',
-      sources: [
-        {
-          file_path: 'C:/docs/limit.md',
-          score: 0.9,
-          text: 'The database limit is 2GB.',
-        },
-      ],
-    };
-
-    renderWithProviders(
-      <MessageBubble message={assistantMsg} onNearMissClick={vi.fn()} />
-    );
-
-    expect(screen.queryByText('Open file')).toBeNull();
-  });
 });
-
-// ── Phase 5: what the answer actually tells you about itself ────────────────
 
 describe('MessageBubble provenance', () => {
   const src = (n: number, path: string) => ({
@@ -149,40 +99,6 @@ describe('MessageBubble provenance', () => {
     ...extra,
   });
 
-  it('labels the answering style the user chose', () => {
-    // `mode` on the response is the retrieval path; the user's prompt mode was
-    // overwritten by it and never reached the UI. Challenge suffered most - it
-    // drives the red challenge-source styling but nothing named the answer.
-    renderWithProviders(
-      <MessageBubble message={answer({ query_mode: 'challenge' })} onNearMissClick={vi.fn()} />,
-    );
-
-    expect(screen.getByText(/challenge/i)).toBeDefined();
-    // The retrieval-path badge must still be there and unchanged.
-    expect(screen.getByText(/RAG Answer/i)).toBeDefined();
-  });
-
-  it('shows no style pill when the backend did not echo one', () => {
-    // A cached answer genuinely does not know which mode produced it, and an
-    // empty badge is worse than no badge.
-    renderWithProviders(<MessageBubble message={answer()} onNearMissClick={vi.fn()} />);
-
-    expect(screen.queryByText(/^◆/)).toBeNull();
-  });
-
-  it('can expand past the first three sources', () => {
-    // '+N more' was static text with nothing behind it.
-    const sources = [1, 2, 3, 4, 5].map(n => src(n, `C:/docs/file${n}.md`));
-
-    renderWithProviders(
-      <MessageBubble message={answer({ sources })} onNearMissClick={vi.fn()} />,
-    );
-
-    expect(screen.queryByText('file5.md')).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: /\+2 more/ }));
-    expect(screen.getByText('file5.md')).toBeDefined();
-  });
-
   it('names the files a conflict was detected in', () => {
     // The banner asserted a conflict and never said where, so the reader could
     // neither verify nor dismiss it.
@@ -191,10 +107,7 @@ describe('MessageBubble provenance', () => {
     const sources = [src(1, 'C:\\docs\\alpha.md'), src(2, 'C:\\docs\\beta.md')];
 
     renderWithProviders(
-      <MessageBubble
-        message={answer({ sources, contradictions_found: true, contradiction_sources: [2] })}
-        onNearMissClick={vi.fn()}
-      />,
+      <MessageBubble message={answer({ sources, contradictions_found: true, contradiction_sources: [2] })} />,
     );
 
     expect(screen.getByText(/Possible disagreement in beta\.md/)).toBeDefined();
@@ -206,91 +119,11 @@ describe('MessageBubble provenance', () => {
     // sentence. Painting that green as "High Confidence" is the
     // hallucination-with-a-citation failure mode.
     renderWithProviders(
-      <MessageBubble
-        message={answer({ content: '<claim sources="[1][2][3]">A grounded sentence.</claim>' })}
-        onNearMissClick={vi.fn()}
-      />,
+      <MessageBubble message={answer({ content: '<claim sources="[1][2][3]">A grounded sentence.</claim>' })} />,
     );
 
     const claim = screen.getByText('A grounded sentence.');
     expect(claim.getAttribute('title')).toContain('Cited 3 sources');
     expect(claim.getAttribute('title')).not.toContain('High Confidence');
-  });
-});
-
-describe('MessageBubble source body', () => {
-  // Regression cover for the empty-source-panel defect. Every chunk ships
-  // sentence_offsets as the literal string "[]": the offsets are only computed
-  // when PMA_SENTENCE_OFFSETS is set and it defaults to "0", so this is not an
-  // edge case, it is what every source looks like on a default install.
-  const source = (extra: Record<string, unknown> = {}) => ({
-    id: '1',
-    chunk_id: 1,
-    file_path: 'C:/docs/limit.md',
-    score: 0.9,
-    text: 'The database size limit is set at ingest.',
-    _challenge_source: false,
-    ...extra,
-  });
-
-  const answer = (sources: unknown[]): Message => ({
-    id: 'a',
-    role: 'assistant',
-    content: 'An answer.',
-    mode: 'full_rag',
-    sources,
-  } as Message);
-
-  const expand = () => {
-    // The disclosure is the button labelled with the file name.
-    fireEvent.click(screen.getByRole('button', { name: /limit\.md/ }));
-  };
-
-  it('shows the passage when sentence_offsets is the default "[]"', () => {
-    renderWithProviders(
-      <MessageBubble
-        message={answer([source({ sentence_offsets: '[]' })])}
-        onNearMissClick={vi.fn()}
-      />,
-    );
-    expand();
-    // Before the fix this rendered an empty box: "[]" is truthy, so the
-    // highlight branch was taken, mapped over zero offsets, and replaced the
-    // text with an empty fragment.
-    expect(screen.getByText(/The database size limit is set at ingest\./)).toBeDefined();
-  });
-
-  it('shows the passage when sentence_offsets is absent entirely', () => {
-    renderWithProviders(
-      <MessageBubble message={answer([source()])} onNearMissClick={vi.fn()} />,
-    );
-    expand();
-    expect(screen.getByText(/The database size limit is set at ingest\./)).toBeDefined();
-  });
-
-  it('still highlights sentences when real offsets are present', () => {
-    renderWithProviders(
-      <MessageBubble
-        message={answer([source({ sentence_offsets: '[[0,12],[13,40]]' })])}
-        onNearMissClick={vi.fn()}
-      />,
-    );
-    expand();
-    // The highlight path splits the text into spans, so the whole string is no
-    // longer one text node - assert the pieces instead. This is what stops the
-    // fix from being "delete the feature".
-    expect(screen.getByText('The database')).toBeDefined();
-    expect(screen.getAllByText('Precision match').length).toBeGreaterThan(0);
-  });
-
-  it('falls back to the raw passage when the offsets do not parse', () => {
-    renderWithProviders(
-      <MessageBubble
-        message={answer([source({ sentence_offsets: 'not json' })])}
-        onNearMissClick={vi.fn()}
-      />,
-    );
-    expand();
-    expect(screen.getByText(/The database size limit is set at ingest\./)).toBeDefined();
   });
 });

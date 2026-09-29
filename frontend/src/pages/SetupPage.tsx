@@ -1,5 +1,4 @@
 import { useState, useEffect } from 'react'
-import { Shield, ArrowRight, CheckCircle2, ChevronRight, HardDrive, AlertTriangle, Save, Library } from 'lucide-react'
 import { Link, useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
 import { useApi, invalidateCache } from '../useApi'
@@ -9,7 +8,6 @@ import {
 } from '../api'
 import { CACHE_KEYS } from '../cacheKeys'
 import { Button, Panel, Skeleton } from '../components/ui'
-import { ProviderIcon } from '../providers/icons'
 
 // Which providers onboarding leads with, and in what order. The list used to
 // carry hardcoded ids AND display names, which drifted from PROVIDER_REGISTRY
@@ -79,7 +77,6 @@ function ApiKeyInput({ provider }: { provider: SetupProvider }) {
             }`}
         >
             <div className="flex items-center gap-3 w-1/3">
-                <ProviderIcon id={provider.id} className="w-4 h-4 shrink-0" />
                 <span className="font-medium truncate">{provider.name}</span>
             </div>
 
@@ -89,7 +86,7 @@ function ApiKeyInput({ provider }: { provider: SetupProvider }) {
                         {pData.stored_in === 'keyring' ? 'stored in keyring' : 'stored in env'}
                     </span>
                     <span className="text-success text-sm flex items-center gap-1 font-medium">
-                        <CheckCircle2 className="w-4 h-4" /> Ready
+                        <span aria-hidden className="w-2 h-2 bg-current" /> Ready
                     </span>
                     {/* A key held in .env is not ours to replace - the same
                         rule ProvidersPage enforces by disabling save for it. */}
@@ -126,7 +123,6 @@ function ApiKeyInput({ provider }: { provider: SetupProvider }) {
                             onClick={handleSave}
                             disabled={!key}
                             loading={saving}
-                            icon={<Save className="w-4 h-4" />}
                         >
                             Save
                         </Button>
@@ -181,7 +177,7 @@ function StepMarks({ step }: Readonly<{ step: number }>) {
                         {s.mark}
                     </div>
                     <div
-                        className={`font-serif text-base leading-tight ${
+                        className={`font-semibold text-base leading-tight ${
                             step >= s.n ? 'text-text-primary' : 'text-text-tertiary'
                         }`}
                     >
@@ -303,20 +299,15 @@ export function SetupPage() {
             <Panel className="my-auto w-full max-w-2xl p-6 sm:p-10 animate-fade-in-up shadow-lg relative flex flex-col shrink-0">
 
                 {/* Header */}
-                <div className="flex items-center gap-4 mb-8">
-                    {/* Flat brass. This was a `from-primary to-accent-blue` gradient
-                        under a coloured glow, which is two accents and a halo. */}
-                    <div className="w-12 h-12 bg-plate rounded-md flex items-center justify-center shrink-0 shadow-md">
-                        <Library className="w-6 h-6 text-on-plate" />
+                <div className="mb-8">
+                    {/* The mark is the lamp square beside the name. There is no logo. */}
+                    <div className="flex items-center gap-2 font-mono text-xs tracking-widest uppercase text-text-tertiary">
+                        <span aria-hidden className="w-2.5 h-2.5 bg-plate shrink-0" />
+                        Personal Memory Assistant
                     </div>
-                    <div className="min-w-0">
-                        <div className="font-mono text-xs tracking-widest uppercase text-text-tertiary">
-                            Personal Memory Assistant
-                        </div>
-                        <h1 className="font-serif text-3xl font-normal text-text-primary tracking-tight leading-tight">
-                            Welcome to PMA
-                        </h1>
-                    </div>
+                    <h1 className="stock text-[40px] leading-[.92] text-text-primary mt-3 mb-0">
+                        Welcome to PMA
+                    </h1>
                 </div>
 
                 <p className="text-text-secondary max-w-[52ch] mb-8 mt-0">
@@ -328,7 +319,6 @@ export function SetupPage() {
                     Settings' "Restart Onboarding" sends people here deliberately. */}
                 {alreadyIndexed && (
                     <div className="mb-8 p-4 rounded-md border border-edge bg-surface flex flex-col sm:flex-row sm:items-center gap-4">
-                        <Library className="w-5 h-5 text-text-tertiary shrink-0" />
                         <p className="text-sm text-text-secondary m-0 flex-1">
                             This library already holds{' '}
                             <strong className="text-text-primary font-medium">
@@ -376,10 +366,9 @@ export function SetupPage() {
                         {!isDriveConfigSafe && driveInfo && !requiresRestart && (
                             <div className="p-4 rounded-md border border-warning bg-surface flex flex-col gap-3">
                                 <div className="flex items-start gap-3">
-                                    <AlertTriangle className="w-5 h-5 text-warning flex-shrink-0 mt-0.5" />
                                     <div>
                                         <h4 className="font-medium text-warning flex items-center gap-2">
-                                            <HardDrive className="w-4 h-4" /> Incompatible Storage Detected
+                                            <span aria-hidden>■</span>Incompatible Storage Detected
                                         </h4>
                                         <p className="text-sm text-text-secondary mt-1">
                                             Drive <strong>{driveInfo.drive}</strong> is formatted as{' '}
@@ -411,7 +400,6 @@ export function SetupPage() {
                         {/* Restart Required Banner */}
                         {requiresRestart && (
                             <div className="p-4 rounded-md border border-success bg-surface flex items-start gap-3 animate-fade-in">
-                                <CheckCircle2 className="w-5 h-5 text-success flex-shrink-0 mt-0.5" />
                                 <div>
                                     <h4 className="font-medium text-success flex items-center gap-2">
                                         Split-Brain Mode Enabled
@@ -428,7 +416,6 @@ export function SetupPage() {
                             already requires the data to have arrived. */}
                         {isDriveConfigSafe && driveInfo?.is_portable_fs && (
                             <div className="p-3 rounded-md border border-success bg-surface flex items-center gap-3">
-                                <CheckCircle2 className="w-4 h-4 text-success flex-shrink-0" />
                                 <p className="text-sm text-success font-medium">
                                     Split-Brain mode active — portable drive ({driveInfo.fs_type}) is safe.
                                 </p>
@@ -444,7 +431,7 @@ export function SetupPage() {
                                 >
                                     <div className="flex items-center justify-between mb-4">
                                         <div>
-                                            <h3 className="font-serif text-lg font-medium flex items-center gap-3">
+                                            <h3 className="font-bold [font-stretch:80%] text-lg flex items-center gap-3">
                                                 Cloud models
                                                 <span className="font-mono text-xs tracking-widest uppercase text-text-tertiary">
                                                     secure keyring
@@ -466,7 +453,6 @@ export function SetupPage() {
                                         // reads 8.18 on cabinet, 6.82 on paper.
                                         <div className="mt-4 p-3 bg-surface border border-warning rounded-md text-xs text-text-primary flex flex-col gap-2.5">
                                             <div className="flex items-start gap-2">
-                                                <AlertTriangle className="w-4 h-4 text-warning shrink-0 mt-0.5" />
                                                 <span>
                                                     <strong>Privacy Notice:</strong>{' '}
                                                     {routingSettings?.cloud_privacy_notice ||
@@ -507,20 +493,20 @@ export function SetupPage() {
                                 <div className="grid grid-cols-2 gap-4">
                                     <div className={`p-4 rounded-md border bg-surface ${localModels?.ollama.detected ? 'border-success' : 'border-rule'}`}>
                                         <h4 className="font-medium mb-1 flex items-center gap-2">
-                                            <ProviderIcon id="ollama" className="w-4 h-4" /> Ollama
+                                            Ollama
                                         </h4>
                                         {localModels?.ollama.detected ? (
-                                            <span className="text-success text-sm flex items-center gap-1"><CheckCircle2 className="w-4 h-4" /> Detected</span>
+                                            <span className="text-success text-sm flex items-center gap-1.5"><span aria-hidden className="w-2 h-2 bg-current" /> Detected</span>
                                         ) : (
                                             <span className="text-text-secondary text-sm">Not detected on port 11434</span>
                                         )}
                                     </div>
                                     <div className={`p-4 rounded-md border bg-surface ${localModels?.lm_studio.detected ? 'border-success' : 'border-rule'}`}>
                                         <h4 className="font-medium mb-1 flex items-center gap-2">
-                                            <ProviderIcon id="lm_studio" className="w-4 h-4" /> LM Studio
+                                            LM Studio
                                         </h4>
                                         {localModels?.lm_studio.detected ? (
-                                            <span className="text-success text-sm flex items-center gap-1"><CheckCircle2 className="w-4 h-4" /> Detected</span>
+                                            <span className="text-success text-sm flex items-center gap-1.5"><span aria-hidden className="w-2 h-2 bg-current" /> Detected</span>
                                         ) : (
                                             <span className="text-text-secondary text-sm">Not detected on port 1234</span>
                                         )}
@@ -538,7 +524,7 @@ export function SetupPage() {
                                 onClick={() => setStep(2)}
                                 disabled={!canProceed}
                             >
-                                Continue <ArrowRight className="w-4 h-4" />
+                                Continue <span aria-hidden>›</span>
                             </Button>
                         </div>
                     </div>
@@ -548,12 +534,8 @@ export function SetupPage() {
                 {step === 2 && (
                     <div className="flex flex-col gap-6 animate-fade-in-right items-start">
 
-                        <div className="w-12 h-12 bg-surface border border-edge rounded-md flex items-center justify-center text-success">
-                            <Shield className="w-6 h-6" />
-                        </div>
-
                         <div>
-                            <h3 className="font-serif text-2xl font-normal">Model connected</h3>
+                            <h3 className="stock text-[28px] leading-none m-0">Model connected</h3>
                             <p className="text-text-secondary max-w-[52ch] mt-2 mb-0">
                                 PMA can read now, but it has nothing to read yet. Give it a folder,
                                 or start with the demo corpus.
@@ -585,7 +567,7 @@ export function SetupPage() {
                                 }}
                             >
                                 Index my first folder
-                                <ChevronRight className="w-4 h-4" />
+                                <span aria-hidden>›</span>
                             </Button>
                         </div>
                     </div>

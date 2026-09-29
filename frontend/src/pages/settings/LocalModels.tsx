@@ -4,7 +4,7 @@
  * only the file boundary moved.
  */
 import { useState } from 'react'
-import { Cpu, RefreshCcw, Play, Download } from 'lucide-react'
+import { Button } from '../../components/ui'
 import { useApi, invalidateCache } from '../../useApi'
 import { getProviderLaunchStatus, launchProvider, type LocalModelDetection } from '../../api'
 import { CACHE_KEYS } from '../../cacheKeys'
@@ -64,7 +64,7 @@ export function StartLocalProviderButton({ providerId, displayName, offlineHint,
             rel="noopener noreferrer"
             className="inline-flex items-center gap-1.5 text-xs font-semibold text-primary hover:underline"
           >
-            <Download className="w-3.5 h-3.5" /> Install {displayName}
+            Install {displayName}
           </a>
         )}
       </div>
@@ -73,18 +73,9 @@ export function StartLocalProviderButton({ providerId, displayName, offlineHint,
 
   return (
     <div className="flex flex-col gap-2">
-      <button
-        onClick={handleStart}
-        disabled={starting}
-        className="glass-button !bg-primary/10 border border-primary/20 text-primary hover:!bg-primary/20 px-3 py-2 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 disabled:opacity-60 w-fit"
-      >
-        {starting ? (
-          <RefreshCcw className="w-3.5 h-3.5 animate-spin" />
-        ) : (
-          <Play className="w-3.5 h-3.5" />
-        )}
+      <Button size="sm" className="w-fit" onClick={handleStart} disabled={starting} icon={<span aria-hidden>▶</span>}>
         {starting ? 'Starting…' : `Start ${displayName}`}
-      </button>
+      </Button>
       {starting && (
         <span className="text-xs text-text-secondary">This can take up to a minute.</span>
       )}
@@ -95,10 +86,9 @@ export function StartLocalProviderButton({ providerId, displayName, offlineHint,
   )
 }
 
-function LocalProviderCard({ providerId, displayName, emoji, detection, emptyHint, offlineHint, onStarted }: Readonly<{
+function LocalProviderCard({ providerId, displayName, detection, emptyHint, offlineHint, onStarted }: Readonly<{
   providerId: string
   displayName: string
-  emoji: string
   detection?: { detected: boolean; models: string[] }
   emptyHint: string
   offlineHint: string
@@ -110,15 +100,17 @@ function LocalProviderCard({ providerId, displayName, emoji, detection, emptyHin
     <div className="p-4 rounded-xl border border-primary/5 bg-surface backdrop-blur-md">
       <div className="flex items-center justify-between mb-3">
         <h3 className="font-semibold text-text-primary flex items-center gap-2">
-          <span className="text-xl">{emoji}</span> {displayName}
+          {displayName}
         </h3>
+        {/* State is a square beside a word. Offline is not an error. */}
         {detected ? (
-          <span className="inline-flex items-center justify-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-success/15 text-success">
-            <span className="w-1.5 h-1.5 rounded-full bg-success"></span>
+          <span className="inline-flex items-center gap-1.5 edge-type text-text-primary">
+            <span aria-hidden className="w-2 h-2 bg-current" />
             Detected
           </span>
         ) : (
-          <span className="inline-flex items-center justify-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-text-secondary/15 text-text-secondary">
+          <span className="inline-flex items-center gap-1.5 edge-type text-text-tertiary">
+            <span aria-hidden className="w-2 h-2 border border-current" />
             Offline
           </span>
         )}
@@ -153,11 +145,8 @@ export function LocalModelsSection({ localModels, onStarted }: Readonly<{
   return (
     <div className="glass p-6 rounded-2xl border border-primary/10">
       <div className="flex items-start gap-4 mb-6">
-        <div className="p-3 bg-primary/10 rounded-xl">
-          <Cpu className="w-6 h-6 text-primary" />
-        </div>
         <div>
-          <h2 className="font-serif text-lg font-medium text-text-primary">Local LLM Auto-Detection</h2>
+          <h2 className="font-bold [font-stretch:80%] text-lg text-text-primary m-0">Local LLM Auto-Detection</h2>
           <p className="text-sm text-text-secondary mt-1 max-w-lg">
             Offline models running on your machine are detected automatically.
             The backend will cascade to these if Google Gemini is unavailable or not configured.
@@ -169,7 +158,6 @@ export function LocalModelsSection({ localModels, onStarted }: Readonly<{
         <LocalProviderCard
           providerId="ollama"
           displayName="Ollama"
-          emoji="🦙"
           detection={localModels?.ollama}
           emptyHint="Running, but no models installed."
           offlineHint="Ensure Ollama is running on localhost:11434."
@@ -178,7 +166,6 @@ export function LocalModelsSection({ localModels, onStarted }: Readonly<{
         <LocalProviderCard
           providerId="lm_studio"
           displayName="LM Studio"
-          emoji="🖥️"
           detection={localModels?.lm_studio}
           emptyHint="Running, but no model loaded."
           offlineHint="Ensure LM Studio's Local Server is running on localhost:1234."

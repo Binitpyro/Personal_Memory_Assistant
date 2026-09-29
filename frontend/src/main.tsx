@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import './fonts'
 import './index.css'
+import './safelight.css'
 import { AppShell } from './components/AppShell'
 import { initTauriConnection } from './api';
 import { initTheme, useTheme } from './theme'
@@ -28,7 +29,8 @@ const SettingsLayout = lazy(() => import('./pages/settings/SettingsLayout').then
 function PageLoader() {
   return (
     <div className="flex items-center justify-center min-h-[50vh]">
-      <div className="w-8 h-8 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+      {/* A working state is a word, not a spinner. */}
+      <span className="edge-type text-text-tertiary" role="status">Loading…</span>
     </div>
   )
 }

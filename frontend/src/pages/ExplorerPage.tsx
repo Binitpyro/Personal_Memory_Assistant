@@ -1,6 +1,5 @@
 import { useState, useMemo, useCallback } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
-import { File, Folder, ChevronRight, ChevronDown, Loader2, LayoutGrid, List, Trash2, Search, Download, Bot, ScanText } from 'lucide-react'
 import { toast } from 'sonner'
 import { useApi } from '../useApi'
 import { getFileTree, removeFolderIndex, getOcrStatus, forceOcr, type FileEntry, type FileTree } from '../api'
@@ -73,10 +72,9 @@ function FolderNode({ node, depth, onSelect, selectedPath, onDeleteFolder, delet
         >
           <span className="w-4 h-4 flex items-center justify-center text-text-secondary shrink-0">
             {(node.children.size > 0 || node.files.length > 0) && (
-              open ? <ChevronDown className="w-3.5 h-3.5" aria-hidden /> : <ChevronRight className="w-3.5 h-3.5" aria-hidden />
+              <span aria-hidden>{open ? '▾' : '›'}</span>
             )}
           </span>
-          <Folder className="w-4 h-4 text-primary shrink-0" aria-hidden />
           <span className="text-sm font-medium truncate" title={node.fullPath}>{node.name}</span>
         </button>
 
@@ -84,12 +82,10 @@ function FolderNode({ node, depth, onSelect, selectedPath, onDeleteFolder, delet
           type="button"
           onClick={handleDelete}
           disabled={isDeleting}
-          className="tap-24 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 p-1 text-text-secondary hover:text-error rounded-xs transition-[opacity,color] disabled:opacity-50 disabled:cursor-not-allowed mr-2"
+          className="tap-24 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 px-1 font-mono text-[10px] tracking-[.1em] uppercase text-text-secondary hover:text-error transition-[opacity,color] disabled:opacity-50 disabled:cursor-not-allowed mr-2"
           aria-label={`Delete the index for ${node.name}`}
         >
-          {isDeleting
-            ? <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden />
-            : <Trash2 className="w-3.5 h-3.5" aria-hidden />}
+          {isDeleting ? 'Deleting…' : 'Delete'}
         </button>
       </div>
 
@@ -123,7 +119,6 @@ function FolderNode({ node, depth, onSelect, selectedPath, onDeleteFolder, delet
                     className={`flex items-center gap-2 w-full px-6 py-1 rounded-sm text-left text-sm transition-colors cursor-pointer ${isSelected ? 'bg-surface text-primary' : 'hover:bg-surface text-text-secondary'
                       }`}
                   >
-                    <File className="w-3.5 h-3.5 shrink-0 text-text-tertiary" />
                     <span className="truncate flex-1">{fileName}</span>
                     <span className="font-mono text-xs text-text-tertiary tabular-nums">{formatBytes(f.size)}</span>
                   </button>
@@ -179,7 +174,7 @@ function SidebarList({ title, files, extentOf, onSelect }: Readonly<{
 }>) {
   return (
     <Panel className="flex-1 min-h-0 flex flex-col p-4">
-      <h3 className="font-serif text-base font-medium text-text-primary mb-3 shrink-0 border-b border-rule pb-2">
+      <h3 className="font-bold [font-stretch:80%] text-base text-text-primary mb-3 shrink-0 border-b border-rule pb-2">
         {title}
       </h3>
       <div className="space-y-0.5 overflow-y-auto custom-scrollbar pr-2 flex-1">
@@ -474,9 +469,10 @@ export function ExplorerPage() {
           {/* The `III · EXPL` mark above this heading went with the nav's roman
               numerals: it abbreviated the word directly beneath it, and no other
               page carried one. */}
-          <h1 className="font-serif text-2xl font-normal text-text-primary leading-tight">
-            Explorer
-          </h1>
+          <div className="flex items-baseline gap-3">
+            <span aria-hidden className="font-mono text-[10px] tracking-[.1em] text-text-tertiary">03</span>
+            <h1 className="stock text-[28px] leading-none m-0 text-text-primary">Explorer</h1>
+          </div>
           <p className="text-text-secondary mt-1 text-sm flex items-center gap-3">
             Browse indexed data
             {tree && (
@@ -489,7 +485,6 @@ export function ExplorerPage() {
 
         <div className="flex items-center gap-3 shrink-0">
           <div className="relative">
-            <Search className="w-4 h-4 text-text-tertiary absolute left-3 top-1/2 -translate-y-1/2" aria-hidden />
             <input
               type="search"
               spellCheck={false}
@@ -498,7 +493,7 @@ export function ExplorerPage() {
               placeholder="e.g. report.pdf…"
               value={searchQuery}
               onChange={e => setSearchQuery(e.target.value)}
-              className="glass-input pl-9 pr-4 py-2 text-sm rounded-sm w-56"
+              className="glass-input px-3 py-2 text-sm w-56"
             />
           </div>
 
@@ -506,7 +501,6 @@ export function ExplorerPage() {
             variant="secondary"
             onClick={handleExportCSV}
             aria-label="Export file list to CSV format"
-            icon={<Download className="w-4 h-4" />}
           >
             CSV
           </Button>
@@ -522,7 +516,7 @@ export function ExplorerPage() {
                 viewMode === 'tree' ? 'bg-plate text-on-plate' : 'text-text-secondary hover:bg-surface'
               }`}
             >
-              <List className="w-4 h-4" /> Tree
+              Tree
             </button>
             <button
               type="button"
@@ -532,7 +526,7 @@ export function ExplorerPage() {
                 viewMode === 'treemap' ? 'bg-plate text-on-plate' : 'text-text-secondary hover:bg-surface'
               }`}
             >
-              <LayoutGrid className="w-4 h-4" /> Treemap
+              Treemap
             </button>
           </div>
         </div>
@@ -553,7 +547,7 @@ export function ExplorerPage() {
                 <div className="font-mono text-xs tracking-widest uppercase text-text-tertiary">
                   Active filter
                 </div>
-                <div className="font-serif text-xl leading-tight truncate">{activeExtension}</div>
+                <div className="font-bold [font-stretch:80%] text-lg leading-tight truncate">{activeExtension}</div>
               </div>
               <Button variant="quiet" size="sm" onClick={() => setActiveExtension(null)}>
                 Clear
@@ -587,7 +581,6 @@ export function ExplorerPage() {
                   state={{ query: `Summarize or explain this file: ${selectedFile.path}` }}
                   className={buttonClasses({ variant: 'secondary', size: 'sm', className: 'w-full' })}
                 >
-                  <Bot className="w-4 h-4" aria-hidden />
                   Ask about this file
                 </Link>
                 {/* The detection gate only spots *missing* text, never wrong
@@ -600,7 +593,6 @@ export function ExplorerPage() {
                     className="w-full"
                     onClick={() => handleForceOcr(selectedFile.path)}
                     loading={ocrBusy === selectedFile.path}
-                    icon={<ScanText className="w-4 h-4" />}
                   >
                     Force OCR
                   </Button>
@@ -615,7 +607,6 @@ export function ExplorerPage() {
             // ratio. The tertiary token already means "quiet" and stays legible.
             <Panel className="shrink-0 p-4">
               <div className="text-center py-4">
-                <File className="w-8 h-8 mx-auto mb-1 text-text-tertiary" aria-hidden />
                 <p className="font-mono text-xs uppercase tracking-widest text-text-tertiary m-0">No Selection</p>
               </div>
             </Panel>

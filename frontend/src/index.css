@@ -1,118 +1,140 @@
 @import "tailwindcss";
 
 /* ═══════════════════════════════════════════════════════════════════════
-   PMA — Specimen Cabinet
-   Two themes: `cabinet` (dark, default) and `paper` (light).
+   PMA — Safelight
+   A dark room with one red lamp. Two themes, keeping their storage values
+   so no stored choice needs migrating: `cabinet` is Safelight (dark, the
+   default) and `paper` is Lights on (light).
 
-   Every colour below was measured with WCAG 2.1 against the real, opaque
-   surface. Lowest ratio in the system: 5.58. Surfaces are opaque on
-   purpose — the previous glass system made every contrast figure
-   best-case and backdrop-dependent.
+   Values are the board's (Safelight Design System v2, THEMES). Every ratio
+   below is WCAG 2, computed from these hex values against the opaque ground
+   named (room · sheet · raise). The source of truth for the system is the
+   Safelight Design System artifact; this block is its remap onto --pma-*.
 
-   Depth rule: THE CASE IS RECESSED, THE BRASS IS PROUD.
-   Content regions inset; only a primary action rises.
+   Rules the tokens encode:
+   - The lamp (--pma-accent / --pma-plate) marks the one live thing. It is
+     never a focus colour, and ink text never sits on it (3.09 / 3.53).
+   - Faults are fog. There is no green and no blue: state is a word beside a
+     square, so success and info fall back to ink2.
+   - Depth is tone. Nothing is rounded; only floating things cast a shadow.
    ═══════════════════════════════════════════════════════════════════════ */
 
-/* ── Cabinet (dark) — the default ─────────────────────────────────────── */
+/* ── Safelight (dark) — the default ───────────────────────────────────── */
 :root {
   color-scheme: dark;
 
-  --pma-bg:        #14110E;  /* case interior / app ground              */
-  --pma-surface:   #1C1815;  /* panels                                   */
-  --pma-raised:    #302A23;  /* the case itself — lighter here, see paper */
-  --pma-deep:      #0A0806;  /* the deepest recess (tracks, vitrine)     */
-  --pma-rule:      #3E362D;  /* decorative hairline. NOT a control edge  */
-  --pma-edge:      #85765B;  /* control boundary — 3.98 / 3.20, WCAG 1.4.11 */
+  --pma-bg:        #0B0A0A;  /* room: the window                         */
+  --pma-surface:   #131211;  /* sheet: panels                            */
+  --pma-raised:    #1B1918;  /* raise: hover, menus, what sits on a panel */
+  --pma-deep:      #0B0A0A;  /* the recess — code blocks sit on the room */
+  --pma-rule:      #2B2826;  /* line: decorative hairline. NOT a control edge */
+  --pma-edge:      #8F8883;  /* control boundary = ink3. 5.67 · 5.36 · 5.02,
+                                WCAG 1.4.11. The board's line2 is 1.73 · 1.64 · 1.53. */
 
-  --pma-text:      #F2EBDD;  /* 14.87 on surface · 11.95 on raised       */
-  --pma-text-2:    #C4B79F;  /*  8.92 ·  7.17                            */
-  --pma-text-3:    #AEA189;  /*  6.94 ·  5.58  ← lowest in the system    */
+  --pma-text:      #EFEBE7;  /* ink   16.67 · 15.78 · 14.77 */
+  --pma-text-2:    #B8B1AB;  /* ink2   9.34 ·  8.83 ·  8.27 */
+  --pma-text-3:    #8F8883;  /* ink3   5.67 ·  5.36 ·  5.02 */
 
-  --pma-accent:    #C4A26B;  /* brass, TEXT-safe. 7.33 · 5.89            */
-  --pma-accent-2:  #D4B784;  /* brass-300, hover                         */
-  --pma-plate:     #B08D57;  /* brass FILL. Never text: 3.84 on the edge */
-  --pma-on-plate:  #1C1815;  /* ink on brass — 5.70                      */
+  --pma-accent:    #F04A30;  /* the lamp, as text  5.39 · 5.10 · 4.78 */
+  --pma-accent-2:  #F04A30;  /* the lamp has no hover shade           */
+  --pma-plate:     #F04A30;  /* the lamp, as a fill                   */
+  --pma-on-plate:  #0B0A0A;  /* onsafe on the lamp 5.39               */
 
-  --pma-success:   #7FAE97;  /*  7.06 ·  5.67                            */
-  --pma-warning:   #D9A94E;  /*  8.18 ·  6.57  (was 2.65, at 10px)       */
-  --pma-error:     #E89684;  /*  7.66 ·  6.16                            */
-  --pma-danger:    #8C3226;  /* destructive FILL, bone label — 6.81      */
-  --pma-info:      #8FB0C4;  /*  7.70 ·  6.19                            */
+  --pma-success:   #B8B1AB;  /* ink2 — no green in the room           */
+  --pma-warning:   #F2B84B;  /* fog  11.05 · 10.45 · 9.79             */
+  --pma-error:     #F2B84B;  /* fog — faults are fog                  */
+  --pma-danger:    #F2B84B;  /* destructive FILL; room label on it 11.05 */
+  --pma-info:      #B8B1AB;  /* ink2 — no blue in the room            */
 
-  --pma-ring:      #F2EBDD;  /* focus. Theme-aware + offset: no single
-                                hue clears cabinet, paper AND the brass. */
+  --pma-ring:      #EFEBE7;  /* focus is ink, never the lamp          */
 
-  --pma-shadow-1: 0 1px 2px rgba(0,0,0,.50);
-  --pma-shadow-2: 0 3px 8px rgba(0,0,0,.55);
-  --pma-shadow-3: 0 8px 20px rgba(0,0,0,.60);
-  --pma-inset:    inset 0 3px 6px rgba(0,0,0,.55), inset 0 -1px 0 rgba(242,235,221,.07);
+  /* Receipt paper, printed in two inks. Receipts only. */
+  --pma-paper:      #E6E1DA;
+  --pma-paper-ink:  #141210;  /* 14.37 on paper */
+  --pma-paper-red:  #B8321E;  /*  4.60 on paper */
+  --pma-paper-mute: #5A554F;  /*  5.67 on paper */
+
+  /* `0 0 #0000`, not `none`: Tailwind composes shadows into a comma list,
+     where `none` would invalidate the whole declaration, rings included. */
+  --pma-shadow-1: 0 0 #0000;
+  --pma-shadow-2: 0 0 #0000;
+  --pma-shadow-3: 0 16px 40px rgba(0,0,0,.3);  /* shadow-float: menus, toasts */
+  --pma-inset:    0 0 #0000;
 }
 
-/* Respect the OS when the user has not chosen. Cabinet stays the default. */
+/* Respect the OS when the user has not chosen. Safelight stays the default. */
 @media (prefers-color-scheme: light) {
   :root:not([data-theme]) {
     color-scheme: light;
-    --pma-bg:       #F7F3E9;
-    --pma-surface:  #F1ECDF;
-    /* The case is a shade DEEPER than the well here — the inverse of cabinet.
-       Going lighter has a ~1.06 ceiling against a near-white ground, which
-       measured invisible on screen; this is 1.11. Depth is then carried by
-       --pma-inset, which paper already defines as a dark inner shadow.
-       Was #F7F3E9, i.e. identical to --pma-bg, so the case/well distinction
-       did not render at all. */
-    --pma-raised:   #EDE7D8;
-    --pma-deep:     #D3C9B1;
-    --pma-rule:     #D6CDB6;
-    --pma-edge:     #877755;
-    --pma-text:     #1C1815;
-    --pma-text-2:   #4A4236;
-    --pma-text-3:   #5C5344;
-    --pma-accent:   #5E4724;
-    --pma-accent-2: #3F2F17;
-    --pma-plate:    #7A5E31;
-    --pma-on-plate: #F7F3E9;
-    --pma-success:  #33513F;
-    --pma-warning:  #6B4A0E;
-    --pma-error:    #7B2D26;
-    --pma-danger:   #7B2D26;
-    --pma-info:     #284E63;
-    --pma-ring:     #1C1815;
-    --pma-shadow-1: 0 1px 2px rgba(60,48,30,.14);
-    --pma-shadow-2: 0 2px 6px rgba(60,48,30,.16);
-    --pma-shadow-3: 0 6px 16px rgba(60,48,30,.18);
-    --pma-inset:    inset 0 3px 6px rgba(60,48,30,.22), inset 0 -1px 0 rgba(255,255,255,.9);
+    /* Must stay identical to [data-theme="paper"] below. */
+    --pma-bg:       #F2F0ED;
+    --pma-surface:  #FFFFFF;
+    --pma-raised:   #E9E6E2;
+    --pma-deep:     #F2F0ED;
+    --pma-rule:     #D9D5D0;
+    --pma-edge:     #66615D;
+    --pma-text:     #121110;
+    --pma-text-2:   #45413E;
+    --pma-text-3:   #66615D;
+    --pma-accent:   #C8321C;
+    --pma-accent-2: #C8321C;
+    --pma-plate:    #C8321C;
+    --pma-on-plate: #FFFFFF;
+    --pma-success:  #45413E;
+    --pma-warning:  #8A5A00;
+    --pma-error:    #8A5A00;
+    --pma-danger:   #8A5A00;
+    --pma-info:     #45413E;
+    --pma-ring:     #121110;
+    --pma-paper:      #FFFFFF;
+    --pma-paper-ink:  #121110;
+    --pma-paper-red:  #C8321C;
+    --pma-paper-mute: #5A554F;
+    --pma-shadow-1: 0 0 #0000;
+    --pma-shadow-2: 0 0 #0000;
+    --pma-shadow-3: 0 16px 40px rgba(60,40,20,.14);
+    --pma-inset:    0 0 #0000;
   }
 }
 
 /* Explicit choice wins in both directions. */
 [data-theme="cabinet"] { color-scheme: dark; }
 
+/* Lights on. Ratios on room · sheet · raise:
+   ink 16.58 · 18.86 · 15.16   ink2 8.88 · 10.10 · 8.12   ink3 5.38 · 6.12 · 4.92
+   lamp 4.70 · 5.35 · 4.30 ← under 4.5 on raise: keep lamp text off raise
+   fog 5.21 · 5.93 · 4.76   onsafe on lamp 5.35   room on fog 5.21
+   paper-ink 18.86, paper-red 5.35, paper-mute 7.38 on paper.
+   Paper on room is 1.14, so a receipt here is bounded by its rules. */
 [data-theme="paper"] {
   color-scheme: light;
-  --pma-bg:       #F7F3E9;
-  --pma-surface:  #F1ECDF;
-  /* Must stay identical to the prefers-color-scheme: light block above. */
-  --pma-raised:   #EDE7D8;
-  --pma-deep:     #D3C9B1;
-  --pma-rule:     #D6CDB6;
-  --pma-edge:     #877755;
-  --pma-text:     #1C1815;
-  --pma-text-2:   #4A4236;
-  --pma-text-3:   #5C5344;
-  --pma-accent:   #5E4724;
-  --pma-accent-2: #3F2F17;
-  --pma-plate:    #7A5E31;
-  --pma-on-plate: #F7F3E9;
-  --pma-success:  #33513F;
-  --pma-warning:  #6B4A0E;
-  --pma-error:    #7B2D26;
-  --pma-danger:   #7B2D26;
-  --pma-info:     #284E63;
-  --pma-ring:     #1C1815;
-  --pma-shadow-1: 0 1px 2px rgba(60,48,30,.14);
-  --pma-shadow-2: 0 2px 6px rgba(60,48,30,.16);
-  --pma-shadow-3: 0 6px 16px rgba(60,48,30,.18);
-  --pma-inset:    inset 0 3px 6px rgba(60,48,30,.22), inset 0 -1px 0 rgba(255,255,255,.9);
+  --pma-bg:       #F2F0ED;
+  --pma-surface:  #FFFFFF;
+  --pma-raised:   #E9E6E2;
+  --pma-deep:     #F2F0ED;
+  --pma-rule:     #D9D5D0;
+  --pma-edge:     #66615D;
+  --pma-text:     #121110;
+  --pma-text-2:   #45413E;
+  --pma-text-3:   #66615D;
+  --pma-accent:   #C8321C;
+  --pma-accent-2: #C8321C;
+  --pma-plate:    #C8321C;
+  --pma-on-plate: #FFFFFF;
+  --pma-success:  #45413E;
+  --pma-warning:  #8A5A00;
+  --pma-error:    #8A5A00;
+  --pma-danger:   #8A5A00;
+  --pma-info:     #45413E;
+  --pma-ring:     #121110;
+  --pma-paper:      #FFFFFF;
+  --pma-paper-ink:  #121110;
+  --pma-paper-red:  #C8321C;
+  --pma-paper-mute: #5A554F;
+  --pma-shadow-1: 0 0 #0000;
+  --pma-shadow-2: 0 0 #0000;
+  --pma-shadow-3: 0 16px 40px rgba(60,40,20,.14);
+  --pma-inset:    0 0 #0000;
 }
 
 /* ── Tailwind theme ───────────────────────────────────────────────────────
@@ -132,10 +154,14 @@
   --color-text-secondary: var(--pma-text-2);
   --color-text-tertiary:  var(--pma-text-3);
 
-  --color-primary:     var(--pma-accent);    /* TEXT-safe brass */
-  --color-plate:       var(--pma-plate);     /* the FILL        */
+  /* `primary` is ink, not the lamp. ~140 pre-Safelight sites use text-,
+     bg- and border-primary as a generic highlight; mapped to the lamp they lit
+     every page red, and the lamp only means something if it marks one thing.
+     The lamp is spelled explicitly: `accent` as text or line, `plate` as fill. */
+  --color-primary:     var(--pma-text);
+  --color-plate:       var(--pma-plate);     /* the lamp as a FILL */
   --color-on-plate:    var(--pma-on-plate);
-  --color-accent:      var(--pma-accent);
+  --color-accent:      var(--pma-accent);    /* the lamp as text or line */
   --color-success:     var(--pma-success);
   --color-warning:     var(--pma-warning);
   --color-error:       var(--pma-error);
@@ -146,10 +172,17 @@
      Defining them here revives ~58 call sites without touching markup. */
   --color-danger:               var(--pma-error);
   --color-danger-fill:          var(--pma-danger);
-  --color-on-danger:            var(--pma-text);   /* 6.81 cabinet · 7.88 paper */
-  --color-primary-light:        var(--pma-accent-2);
-  --color-primary-dark:         var(--pma-accent-2);
-  --color-primary-h:            var(--pma-accent-2);
+  /* The room on fog: 11.05 · 5.21. Ink on a fog fill would be 1.51 in the dark. */
+  --color-on-danger:            var(--pma-bg);
+
+  /* Receipt paper — the Receipt primitive and nothing else. */
+  --color-paper:                var(--pma-paper);
+  --color-paper-ink:            var(--pma-paper-ink);
+  --color-paper-red:            var(--pma-paper-red);
+  --color-paper-mute:           var(--pma-paper-mute);
+  --color-primary-light:        var(--pma-text);
+  --color-primary-dark:         var(--pma-text);
+  --color-primary-h:            var(--pma-text);
   --color-accent-blue:          var(--pma-info);
   --color-surface-dark:         var(--pma-surface);
   --color-surface-lighter:      var(--pma-raised);
@@ -159,26 +192,27 @@
   --color-border:               var(--pma-rule);
   --color-text-muted:           var(--pma-text-3);
 
-  /* type — vendored via @fontsource, no CDN. Fallbacks keep close metrics so
-     the gate below has almost nothing to hide. */
-  --font-sans:    "IBM Plex Sans Variable", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  /* type — vendored via @fontsource, no CDN (fonts.ts). Archivo is the
+     interface and stock face; Newsreader prints answers and quotes only;
+     Geist Mono is the edge face for receipts, paths, scores and status. */
+  --font-sans:    "Archivo Variable", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
   --font-serif:   "Newsreader Variable", "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
-  --font-mono:    "IBM Plex Mono", "Cascadia Mono", Consolas, "SF Mono", ui-monospace, monospace;
-  --font-display: var(--font-serif);
+  --font-mono:    "Geist Mono Variable", "Cascadia Mono", Consolas, "SF Mono", ui-monospace, monospace;
+  --font-display: var(--font-sans);
 
-  /* radius — 8 values collapse to 4. Retroactive: every existing
-     rounded-* utility lands on the new scale with no markup change.
-     Cabinetry has crisp edges; 2.5rem was a glass-era shape. */
-  --radius-xs:  3px;
-  --radius-sm:  4px;
-  --radius-md:  6px;
-  --radius-lg:  6px;
-  --radius-xl:  10px;
-  --radius-2xl: 10px;
-  --radius-3xl: 10px;
-  --radius-4xl: 10px;
+  /* radius — nothing inside the window is rounded. Retroactive: every
+     rounded-* utility on the scale lands on 0 with no markup change.
+     `rounded-full` is not on the scale and is left alone. */
+  --radius-xs:  0px;
+  --radius-sm:  0px;
+  --radius-md:  0px;
+  --radius-lg:  0px;
+  --radius-xl:  0px;
+  --radius-2xl: 0px;
+  --radius-3xl: 0px;
+  --radius-4xl: 0px;
 
-  /* elevation — one light direction, no glow. Also retroactive. */
+  /* elevation — depth is tone; only xl and 2xl (floating things) cast one. */
   --shadow-2xs: var(--pma-shadow-1);
   --shadow-xs:  var(--pma-shadow-1);
   --shadow-sm:  var(--pma-shadow-1);
@@ -212,8 +246,8 @@ body {
    ───────────────────────────────────────────────────────────────────────── */
 .prose-answer {
   font-family: var(--font-serif);
-  font-size: 1.0625rem;
-  line-height: 1.66;
+  font-size: 17.5px;
+  line-height: 1.55;
   color: var(--pma-text);
 }
 .prose-answer > * + * { margin-top: .85em; }
@@ -268,14 +302,66 @@ body {
 .prose-answer th { font-weight: 600; color: var(--pma-text-2); }
 
 /* ── Focus ────────────────────────────────────────────────────────────────
-   `focus-visible` appeared ZERO times in the frontend before this.
-   Theme-aware and offset, so the ring never lands on the brass plate —
-   no single hue clears cabinet, paper and the plate at once.
+   A 2px ink ring, offset 2px, never the lamp: red means the one live thing,
+   so a red ring would say the focused control is it.
    ───────────────────────────────────────────────────────────────────────── */
 :where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
   outline: 2px solid var(--pma-ring);
-  outline-offset: 3px;
-  border-radius: var(--radius-sm);
+  outline-offset: 2px;
+}
+
+/* ── Safelight type roles ─────────────────────────────────────────────────
+   Stock: Archivo 800 at width 62, in caps — questions, pane titles, figures.
+   Edge: Geist Mono 500 in caps, tracked +12% — receipts, paths, scores,
+   status. Nothing is set below 10px.
+   ───────────────────────────────────────────────────────────────────────── */
+.stock {
+  font-family: var(--font-sans);
+  font-weight: 800;
+  font-stretch: 62%;
+  text-transform: uppercase;
+}
+.edge-type {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+
+/* ── The receipt ──────────────────────────────────────────────────────────
+   The only light object in the dark room, in two inks. The torn foot is a
+   mask, so it tears through whatever ground the receipt sits on.
+   ───────────────────────────────────────────────────────────────────────── */
+.receipt {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 20px 18px 26px;
+  background: var(--pma-paper);
+  color: var(--pma-paper-ink);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.5;
+  -webkit-mask: linear-gradient(#000 0 0) top / 100% calc(100% - 8px) no-repeat, conic-gradient(from -45deg at bottom, #000 90deg, #0000 0) bottom / 16px 8px repeat-x;
+  mask: linear-gradient(#000 0 0) top / 100% calc(100% - 8px) no-repeat, conic-gradient(from -45deg at bottom, #000 90deg, #0000 0) bottom / 16px 8px repeat-x;
+}
+.receipt__block { display: flex; flex-direction: column; padding-top: 8px; border-top: 1px dashed var(--pma-paper-ink); }
+.receipt__row { display: flex; justify-content: space-between; gap: 8px; }
+.receipt__mute { color: var(--pma-paper-mute); }
+.receipt__total { display: flex; justify-content: space-between; align-items: baseline; padding-top: 8px; border-top: 1px dashed var(--pma-paper-ink); }
+.receipt__total b { font-size: 26px; line-height: 1; }
+
+/* Print: the receipt feeds out top-down in 28 steps, never eased. The
+   reduced-motion block below collapses it to its final frame. */
+.receipt { animation: receipt-print 1400ms steps(28, end) both; }
+@keyframes receipt-print {
+  from { clip-path: inset(0 0 100% 0); }
+  to   { clip-path: inset(0); }
+}
+
+@media (forced-colors: active) {
+  .receipt { border: 1px solid CanvasText; -webkit-mask: none; mask: none; }
 }
 
 /* ── Case furniture ───────────────────────────────────────────────────────
@@ -338,7 +424,7 @@ body {
   transition: border-color 120ms ease;
 }
 .glass-input::placeholder { color: var(--pma-text-3); }
-.glass-input:focus { outline: 2px solid var(--pma-ring); outline-offset: 3px; border-color: var(--pma-accent); }
+.glass-input:focus { outline: 2px solid var(--pma-ring); outline-offset: 2px; border-color: var(--pma-text); }
 .glass-input:disabled { color: var(--pma-text-3); border-color: var(--pma-rule); cursor: not-allowed; }
 
 /* The rail is part of the case, so it takes the case tone, not the well's. */

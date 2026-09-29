@@ -5,7 +5,6 @@
  */
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Cpu } from 'lucide-react'
 import { useApi } from '../../useApi'
 import { getLLMPreferences, getProviders, type ProviderStatus, type LLMPreferences } from '../../api'
 import { CACHE_KEYS } from '../../cacheKeys'
@@ -76,11 +75,8 @@ export function LLMPreferencesSection({
   return (
     <div className="glass p-6 rounded-2xl border border-primary/10">
       <div className="flex items-start gap-4 mb-6">
-        <div className="p-3 bg-primary/10 rounded-xl">
-          <Cpu className="w-6 h-6 text-primary" />
-        </div>
         <div>
-          <h2 className="font-serif text-lg font-medium text-text-primary">Model Selection</h2>
+          <h2 className="font-bold [font-stretch:80%] text-lg text-text-primary m-0">Model Selection</h2>
           <p className="text-sm text-text-secondary mt-1">
             Choose your preferred intelligence provider and model. For detailed API key configurations, use the advanced view.
           </p>

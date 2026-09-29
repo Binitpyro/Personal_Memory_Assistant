@@ -13,11 +13,14 @@
  * The race against a timeout is the important part: `document.fonts.ready` can
  * hang if a face fails to decode, and text hidden forever is far worse than
  * text in a fallback. Whichever settles first wins.
+ *
+ * Archivo comes in as `wdth.css`, not the default entry: the default declares
+ * weight only, and a face declared without a stretch range clamps
+ * `font-stretch` to 100%, so the 62% stock width would silently not render.
  */
 import '@fontsource-variable/newsreader';
-import '@fontsource-variable/ibm-plex-sans';
-import '@fontsource/ibm-plex-mono/400.css';
-import '@fontsource/ibm-plex-mono/500.css';
+import '@fontsource-variable/archivo/wdth.css';
+import '@fontsource-variable/geist-mono';
 
 const READY_CLASS = 'fonts-ready';
 const MAX_BLOCK_MS = 800;

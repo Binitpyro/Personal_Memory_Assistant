@@ -22,6 +22,8 @@ vi.mock('../../api', () => {
   return {
     getAppConfig: vi.fn(),
     getHealth: vi.fn(),
+    // Read for the grain, which crawls while an index run is going.
+    getIndexStatus: vi.fn(),
     getProviderSettings: vi.fn(),
   };
 });
@@ -32,7 +34,7 @@ describe('AppShell Component', () => {
 
     // Check for navigation links
     expect(screen.getByText('Library')).toBeDefined();
-    expect(screen.getByText('Search')).toBeDefined();
+    expect(screen.getByText('Ask')).toBeDefined();
     expect(screen.getByText('Explorer')).toBeDefined();
     expect(screen.getByText('Insights')).toBeDefined();
     expect(screen.getByText('Settings')).toBeDefined();

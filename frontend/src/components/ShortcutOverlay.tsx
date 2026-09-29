@@ -10,7 +10,6 @@
  */
 
 import { useEffect, useRef } from 'react';
-import { X } from 'lucide-react';
 import { bindingsFor, GROUP_TITLE, type KeyGroup } from '../interaction/keymap';
 
 export interface ShortcutOverlayProps {
@@ -57,14 +56,14 @@ export function ShortcutOverlay({ open, onClose, groups, title }: ShortcutOverla
             className="w-full max-w-xl bg-surface text-text-primary border border-edge rounded-xl shadow-2xl p-0"
         >
             <div className="flex items-center justify-between px-6 py-4 border-b border-rule">
-                <h2 className="font-serif text-lg font-normal m-0">{title}</h2>
+                <h2 className="stock text-[28px] leading-none m-0">{title}</h2>
                 <button
                     type="button"
                     onClick={onClose}
                     aria-label="Close the keyboard reference"
                     className="p-1 rounded-sm text-text-secondary hover:text-text-primary hover:bg-raised transition-colors"
                 >
-                    <X className="w-4 h-4" aria-hidden />
+                    <span aria-hidden>✕</span>
                 </button>
             </div>
 

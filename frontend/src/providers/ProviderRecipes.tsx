@@ -1,4 +1,3 @@
-import { Rocket, Zap, Shield, Star, X, Loader2 } from 'lucide-react';
 import { useState } from 'react';
 import { setProviderSettings, setLLMPreferences, getLLMPreferences } from '../api';
 import { invalidateCache } from '../useApi';
@@ -50,24 +49,15 @@ export function ProviderRecipes({
   };
 
   /**
-   * The three-way colour coding is kept on purpose: these are three options a
-   * user picks between, and the tone carries which is which.
-   *
-   * What changed is that it is now expressed in tokens. `text-amber-500` /
-   * `bg-amber-500/10` were raw palette values authored for the dark theme, and
-   * this panel renders on the themed page rather than over the canvas — so on
-   * Paper the chip washed out the way the consent banners did. `success`,
-   * `warning` and `info` are the measured tokens and map onto the three
-   * recipes without straining the meaning.
+   * Three options told apart by their words. The per-recipe icon and tone went
+   * with Safelight: it has no icon set, success and info are both ink2, and
+   * "Maximum Quality" in fog would have read as a fault.
    */
   const recipes = [
     {
       id: 'local',
       title: 'Free & Local',
       desc: '100% private. Runs entirely on your machine.',
-      icon: Shield,
-      color: 'text-success',
-      bg: 'bg-success/10',
       fallback: ['ollama', 'lmstudio'],
       defaultModel: { provider: 'ollama', model: 'llama3:8b' }
     },
@@ -75,9 +65,6 @@ export function ProviderRecipes({
       id: 'quality',
       title: 'Maximum Quality',
       desc: 'Best available reasoning. Costs money.',
-      icon: Star,
-      color: 'text-warning',
-      bg: 'bg-warning/10',
       fallback: ['anthropic', 'openai', 'gemini'],
       defaultModel: { provider: 'anthropic', model: 'claude-3-5-sonnet-20240620' }
     },
@@ -85,11 +72,6 @@ export function ProviderRecipes({
       id: 'fast',
       title: 'Fast & Cheap',
       desc: 'Optimized for speed and minimal cost.',
-      icon: Zap,
-      // `accent-blue` is a real alias for `--pma-info`, so it emitted CSS and was
-      // never broken. One name per token, though.
-      color: 'text-info',
-      bg: 'bg-info/10',
       fallback: ['groq', 'gemini', 'openrouter'],
       defaultModel: { provider: 'groq', model: 'llama3-8b-8192' }
     }
@@ -105,17 +87,15 @@ export function ProviderRecipes({
         aria-label="Dismiss quick start recipes"
         className="absolute top-4 right-4 p-1.5 hover:bg-raised rounded-sm transition-colors"
       >
-        <X className="w-4 h-4 text-text-secondary" aria-hidden />
+        <span aria-hidden className="text-text-secondary">✕</span>
       </button>
 
       <div className="flex items-center gap-2 mb-4">
-        <Rocket className="w-5 h-5 text-primary" aria-hidden />
-        <h3 className="font-serif text-base font-medium m-0">Quick Start Recipes</h3>
+        <h3 className="font-bold [font-stretch:80%] text-lg m-0">Quick Start Recipes</h3>
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
         {recipes.map(r => {
-          const Icon = r.icon;
           const isApplying = applying === r.id;
           return (
             <button
@@ -127,9 +107,6 @@ export function ProviderRecipes({
               // WCAG 1.4.11 wants 3:1 on a boundary that identifies one.
               className="relative flex flex-col items-start text-left p-4 rounded-md border border-rule hover:border-edge hover:bg-raised transition-colors group disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              <div className={`p-2 rounded-sm ${r.bg} mb-3`}>
-                <Icon className={`w-4 h-4 ${r.color}`} aria-hidden />
-              </div>
               <h4 className="font-medium text-sm group-hover:text-primary transition-colors">{r.title}</h4>
               <p className="text-xs text-text-secondary mt-1">{r.desc}</p>
 
@@ -138,7 +115,7 @@ export function ProviderRecipes({
                 // blurred nothing and cost a compositor layer. Same defect the
                 // raw-palette pass removed from TourOverlay.
                 <div className="absolute inset-0 bg-surface rounded-md flex items-center justify-center">
-                  <Loader2 className="w-5 h-5 text-primary animate-spin" aria-hidden />
+                  <span className="edge-type text-text-tertiary">Applying…</span>
                 </div>
               )}
             </button>

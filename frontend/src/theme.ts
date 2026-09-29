@@ -1,7 +1,9 @@
 /**
- * Theme resolution for the Specimen Cabinet system.
+ * Theme resolution for the Safelight system.
  *
- * Two themes: `cabinet` (dark, the default) and `paper` (light).
+ * Two themes: `cabinet` (Safelight, dark, the default) and `paper` (Lights
+ * on, light). The values predate Safelight and are kept so a stored choice
+ * survives the redesign without migration code.
  * `index.css` carries cabinet values on `:root`, swaps to paper under
  * `prefers-color-scheme: light` when the user has NOT chosen, and honours an
  * explicit `[data-theme]` in both directions.
@@ -137,15 +139,15 @@ export function readChartTokens(): ChartTokens {
   const cs = getComputedStyle(document.documentElement);
   const v = (name: string, fallback: string) => cs.getPropertyValue(name).trim() || fallback;
   return {
-    surface: v('--pma-surface', '#1C1815'),
-    raised: v('--pma-raised', '#302A23'),
-    bg: v('--pma-bg', '#14110E'),
-    rule: v('--pma-rule', '#3E362D'),
-    edge: v('--pma-edge', '#85765B'),
-    text: v('--pma-text', '#F2EBDD'),
-    text2: v('--pma-text-2', '#C4B79F'),
-    text3: v('--pma-text-3', '#AEA189'),
-    accent: v('--pma-accent', '#C4A26B'),
-    plate: v('--pma-plate', '#B08D57'),
+    surface: v('--pma-surface', '#131211'),
+    raised: v('--pma-raised', '#1B1918'),
+    bg: v('--pma-bg', '#0B0A0A'),
+    rule: v('--pma-rule', '#2B2826'),
+    edge: v('--pma-edge', '#8F8883'),
+    text: v('--pma-text', '#EFEBE7'),
+    text2: v('--pma-text-2', '#B8B1AB'),
+    text3: v('--pma-text-3', '#8F8883'),
+    accent: v('--pma-accent', '#F04A30'),
+    plate: v('--pma-plate', '#F04A30'),
   };
 }

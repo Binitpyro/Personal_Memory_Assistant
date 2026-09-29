@@ -4,7 +4,6 @@
  * only the file boundary moved.
  */
 import { useState, useEffect, useCallback } from 'react'
-import { CheckCircle2, RefreshCcw, Play, Download, Loader2, ScanText } from 'lucide-react'
 import { useApi, invalidateCache } from '../../useApi'
 import { launchProvider, getOcrStatus, type OcrStatus, getOcrTiers, selectOcrTier, getVlmModels, getVlmSelection, selectVlmModel, getOcrInstallState, getOcrQueue, installOcrTier, uninstallOcrTier, cancelOcrInstall, resumeOcr, setOcrEnabled, retryOcr, clearOcrCache, type OcrInstallState, type OcrQueueItem } from '../../api'
 import { CACHE_KEYS } from '../../cacheKeys'
@@ -116,7 +115,7 @@ export function VlmPicker({
   if (loading && !data && !isChecking) {
     return (
       <div className="flex items-center gap-2 text-sm text-text-secondary mb-3">
-        <Loader2 className="w-4 h-4 animate-spin" /> Looking for models you already have…
+        Looking for models you already have…
       </div>
     )
   }
@@ -143,12 +142,8 @@ export function VlmPicker({
               className="glass-button px-2.5 py-1.5 text-xs flex items-center gap-1.5 disabled:opacity-50"
               title="Start Ollama server"
             >
-              {startingProvider === 'ollama' ? (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              ) : (
-                <Play className="w-3.5 h-3.5 text-success" />
-              )}
-              Start Ollama
+              <span aria-hidden>▶</span>
+              {startingProvider === 'ollama' ? 'Starting Ollama…' : 'Start Ollama'}
             </button>
             <button
               type="button"
@@ -157,12 +152,8 @@ export function VlmPicker({
               className="glass-button px-2.5 py-1.5 text-xs flex items-center gap-1.5 disabled:opacity-50"
               title="Start LM Studio server"
             >
-              {startingProvider === 'lm_studio' ? (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              ) : (
-                <Play className="w-3.5 h-3.5 text-success" />
-              )}
-              Start LM Studio
+              <span aria-hidden>▶</span>
+              {startingProvider === 'lm_studio' ? 'Starting LM Studio…' : 'Start LM Studio'}
             </button>
             <button
               type="button"
@@ -170,7 +161,7 @@ export function VlmPicker({
               disabled={isChecking || !!startingProvider}
               className="glass-button px-3 py-1.5 text-xs font-bold flex items-center gap-1.5 text-text-primary hover:bg-raised disabled:opacity-50"
             >
-              <RefreshCcw className={`w-3.5 h-3.5 ${isChecking || loading ? 'animate-spin' : ''}`} />
+              <span aria-hidden>↻</span>
               {isChecking || loading ? 'Checking…' : 'Check again'}
             </button>
           </div>
@@ -189,8 +180,8 @@ export function VlmPicker({
           disabled={isChecking || loading}
           className="text-xs text-text-secondary hover:text-text-primary flex items-center gap-1 transition-colors"
         >
-          <RefreshCcw className={`w-3 h-3 ${isChecking || loading ? 'animate-spin' : ''}`} />
-          Refresh models
+          <span aria-hidden>↻</span>
+          {isChecking || loading ? 'Refreshing models…' : 'Refresh models'}
         </button>
       </div>
       {reachable.map((p) => {
@@ -421,11 +412,8 @@ export function OcrSection() {
   return (
     <div className="glass p-6 rounded-2xl border border-primary/10">
       <div className="flex items-start gap-4 mb-6">
-        <div className="p-3 bg-primary/10 rounded-xl">
-          <ScanText className="w-6 h-6 text-primary" />
-        </div>
         <div>
-          <h2 className="font-serif text-lg font-medium text-text-primary">OCR for Scanned PDFs</h2>
+          <h2 className="font-bold [font-stretch:80%] text-lg text-text-primary m-0">OCR for Scanned PDFs</h2>
           <p className="text-sm text-text-secondary mt-1">
             Reads text out of scanned pages so they become searchable. Runs in its own isolated
             environment — nothing is added to the main install.
@@ -436,16 +424,17 @@ export function OcrSection() {
       <div className="p-4 rounded-xl border border-primary/5 bg-surface backdrop-blur-md">
         <div className="flex items-center justify-between mb-3">
           <h3 className="font-semibold text-text-primary">{TIER_COPY[selectedTier]?.title}</h3>
+          {/* State is a square beside a word: filled when running, outlined when not. */}
           {isSelectedActive ? (
-            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-success/15 text-success">
-              <span className="w-1.5 h-1.5 rounded-full bg-success"></span> Active
+            <span className="inline-flex items-center gap-1.5 edge-type text-text-primary">
+              <span aria-hidden className="w-2 h-2 bg-current" /> Active
             </span>
           ) : isSelectedInstalled ? (
-            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-primary/15 text-primary">
-              <span className="w-1.5 h-1.5 rounded-full bg-primary"></span> Ready
+            <span className="inline-flex items-center gap-1.5 edge-type text-text-secondary">
+              <span aria-hidden className="w-2 h-2 border border-current" /> Ready
             </span>
           ) : (
-            <span className="px-2.5 py-1 rounded-full text-xs font-semibold bg-text-secondary/15 text-text-secondary">
+            <span className="edge-type text-text-tertiary">
               Not installed
             </span>
           )}
@@ -504,7 +493,7 @@ export function OcrSection() {
               <span>{install?.message}</span>
               <span>{install?.pct}%</span>
             </div>
-            <div className="h-2 bg-surface rounded-full overflow-hidden">
+            <div className="h-2 bg-surface border border-rule overflow-hidden">
               <div className="h-full bg-primary transition-all duration-300" style={{ width: `${install?.pct ?? 0}%` }} />
             </div>
           </div>
@@ -558,10 +547,9 @@ export function OcrSection() {
                 type="button"
                 onClick={() => handleSelectActiveTier(selectedTier)}
                 disabled={busy}
-                className="glass-button flex items-center gap-2 bg-primary/10 text-primary font-bold hover:bg-primary/20 disabled:opacity-50"
+                className="glass-button flex items-center gap-2 font-bold disabled:opacity-50"
               >
-                {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
-                Switch to {TIER_COPY[selectedTier]?.short ?? ''}
+                Switch to {TIER_COPY[selectedTier]?.short ?? ''}{busy ? '…' : ''}
               </button>
               {selectedTier !== 'vlm' && (
                 <button
@@ -582,7 +570,6 @@ export function OcrSection() {
                 disabled={busy || !ocr?.uv_available || !!selectedTierInfo?.unavailable_reason}
                 className="glass-button flex items-center gap-2 disabled:opacity-50"
               >
-                {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
                 {busy ? 'Installing…' : `Install ${TIER_COPY[selectedTier]?.short ?? ''}`}
               </button>
             )

@@ -1,11 +1,12 @@
 /**
- * The Specimen Cabinet primitives.
+ * The shared primitives, dressed by Safelight's tokens (index.css).
  *
- * `Well`, `DrawerFront`, `SpecimenCard` and `LabelSlip` are the four that carry
- * the direction — they express the cabinet through layout rather than colour.
- * Without them in use, this system is a repaint.
+ * `Well`, `DrawerFront`, `SpecimenCard` and `LabelSlip` predate Safelight and
+ * are kept for their call sites; Safelight itself is carried by the tokens,
+ * the shell (AppShell) and the receipt (chat/MessageBubble).
  */
 export { Button, buttonClasses, type ButtonProps, type ButtonVariant, type ButtonSize } from './Button';
+export { Grain, WorkProvider, useWorking, Tally, FigureLine, FilmStrip, CellProgress, useReducedMotion, type Figure, type StripFile, type StripGroup } from './Safelight';
 export { Well, Panel, LabelSlip, DrawerFront, Field, SpecimenCard } from './Surfaces';
 export {
   Badge,

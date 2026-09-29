@@ -1,16 +1,9 @@
 import type { ReactNode, HTMLAttributes } from 'react';
 
 /**
- * The structural half of the Specimen Cabinet.
- *
- * The inversion these exist to express: in a typical dark app the background is
- * the darkest thing and cards float lighter above it. Here the CASE is the
- * lighter material and compartments are dark recesses cut into it. Depth runs
- * into the screen, not out of it — which is what stops the app reading as a
- * generic dark UI regardless of palette.
- *
- * Structural, never textural: no wood grain, no bevelled metal, no rendered
- * pulls. Those date on sight.
+ * Structural containers from the Specimen Cabinet system, kept for their call
+ * sites. Under Safelight depth is tone alone: `--pma-inset` is empty and every
+ * radius is 0, so a Well is the room and a Panel is a sheet.
  */
 
 /** A compartment cut into the case. The default container for content. */
@@ -50,7 +43,7 @@ export function LabelSlip({
     <div className={`flex items-center gap-3 min-w-0 ${className}`}>
       <div className="flex-grow min-w-0">
         <div className="font-mono text-xs tracking-widest uppercase text-text-tertiary">{mark}</div>
-        <div className="font-serif text-base leading-tight truncate">{name}</div>
+        <div className="font-semibold text-base leading-tight truncate">{name}</div>
       </div>
       {extent !== undefined && (
         <div className="font-mono text-xs text-text-tertiary text-right leading-snug shrink-0">{extent}</div>
@@ -127,7 +120,7 @@ export function SpecimenCard({
   return (
     <div className={`bg-surface border border-edge rounded-md p-4 ${className}`}>
       <div className="flex items-baseline justify-between gap-3">
-        <div className="font-serif text-base leading-tight truncate">{name}</div>
+        <div className="font-semibold text-base leading-tight truncate">{name}</div>
         {kind && <div className="font-mono text-xs text-primary shrink-0">{kind}</div>}
       </div>
       {children && <div className="mt-3">{children}</div>}

@@ -1,4 +1,3 @@
-import { Filter } from 'lucide-react';
 
 interface FilterBarProps {
   selectedFileType: string;
@@ -23,15 +22,16 @@ export function FilterBar({
   folderOptions,
   disabled
 }: FilterBarProps) {
+  // The ask bar's scope: what this question searches. Each select is named,
+  // because its first option is a value, not a label.
+  const select = 'h-[34px] max-w-[9.5rem] bg-transparent border border-edge px-2 font-mono text-[10.5px] tracking-[.1em] uppercase text-text-primary';
   return (
-    <div className="flex flex-wrap items-center gap-2 px-1">
-      <span className="text-xs text-text-secondary font-bold uppercase tracking-widest flex items-center gap-1">
-        <Filter className="w-3 h-3" /> Quick Filters
-      </span>
+    <div className="flex items-center gap-1.5">
       <select
         value={selectedFileType}
         onChange={(e) => setSelectedFileType(e.target.value)}
-        className="text-xs bg-raised border border-rule rounded-lg px-2 py-1 text-text-primary"
+        aria-label="File type"
+        className={select}
         disabled={disabled}
       >
         <option value="">All file types</option>
@@ -42,7 +42,8 @@ export function FilterBar({
       <select
         value={selectedFolderTag}
         onChange={(e) => setSelectedFolderTag(e.target.value)}
-        className="text-xs bg-raised border border-rule rounded-lg px-2 py-1 text-text-primary"
+        aria-label="Folder"
+        className={select}
         disabled={disabled}
       >
         <option value="">All folders</option>
@@ -53,7 +54,8 @@ export function FilterBar({
       <select
         value={selectedMode}
         onChange={(e) => setSelectedMode(e.target.value)}
-        className="text-xs bg-raised border border-rule rounded-lg px-2 py-1 text-text-primary"
+        aria-label="Answer style"
+        className={select}
         disabled={disabled}
       >
         <option value="">Default Mode</option>
@@ -71,7 +73,7 @@ export function FilterBar({
             setSelectedFolderTag('')
             setSelectedMode('')
           }}
-          className="text-xs px-2 py-1 rounded-lg border border-primary/20 text-primary-light hover:bg-primary/10"
+          className="tap-24 font-mono text-[10px] tracking-[.1em] uppercase text-text-secondary hover:text-text-primary underline underline-offset-4"
         >
           Clear filters
         </button>

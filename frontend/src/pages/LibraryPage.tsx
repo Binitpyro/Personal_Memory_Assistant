@@ -1,9 +1,9 @@
 import { useState, useCallback, useEffect } from 'react'
 import { useMutation } from '@tanstack/react-query'
-import { BookOpen, HardDrive, FolderPlus, RefreshCw, Loader2, CheckCircle2, AlertCircle, Play, Trash2, ScanText } from 'lucide-react'
 import { useApi, invalidateCorpusCaches } from '../useApi'
 import {
   getHealth,
+  getFileTree,
   getIndexStatus,
   getSystemInfo,
   getCurrentProvider,
@@ -19,7 +19,7 @@ import {
 } from '../api'
 import { CACHE_KEYS } from '../cacheKeys'
 import { useSessionProvider } from '../context/SessionProviderContext'
-import { Well, Button } from '../components/ui'
+import { Button, CellProgress, FigureLine, FilmStrip, useWorking } from '../components/ui'
 
 export function LibraryPage() {
   const [folderPath, setFolderPath] = useState('')
@@ -34,6 +34,8 @@ export function LibraryPage() {
     refetchInterval: indexing ? 0 : 10_000,
   })
   const { data: sysInfo } = useApi(getSystemInfo, { cacheKey: CACHE_KEYS.systemInfo })
+  // The same tree Ask and Explorer read, for the film strip and the figures.
+  const { data: fileTree } = useApi(getFileTree, { cacheKey: CACHE_KEYS.fileTree })
   // Which model actually answers. NOT AppConfig.gemini_model, which names
   // Gemini whoever is serving, and NOT health.model_ready, which is the ONNX
   // embedder's readiness rather than the chat LLM's.
@@ -51,6 +53,8 @@ export function LibraryPage() {
 
   // Derive running state from BOTH local flag and polled backend status
   const isRunning = indexing || status?.status === 'running'
+  // Starts the window's grain the moment Index is pressed, before any poll sees the run.
+  useWorking(isRunning)
 
   // Pause background polling while SSE stream is active
   const { data: health, refetch: refetchHealth } = useApi(getHealth, {
@@ -59,9 +63,11 @@ export function LibraryPage() {
   })
 
   // Sync local indexing flag from backend status on page load/poll
+  // 'cancelling' is still a run: the files in flight finish first, and the SSE
+  // stream is what reports the end. AppShell polls this same entry during a run.
   useEffect(() => {
     if (!status?.status) return
-    setIndexing(status.status === 'running')
+    setIndexing(status.status === 'running' || status.status === 'cancelling')
   }, [status?.status])
 
   // SSE progress stream while indexing (driven by isRunning, survives reload)
@@ -176,86 +182,97 @@ export function LibraryPage() {
   const scanStatus = isRunning ? 'Indexing…' : 'Idle'
   const progressPct = liveProgress?.progress_percent ?? status?.progress_percent ?? 0
 
+  // The film strip: every indexed file as a frame, grouped by folder. Past
+  // STRIP_MAX it samples every k-th file, so each folder keeps its share of the
+  // roll and the captions still line up with the bars.
+  // ponytail: sampled, not aggregated; bin by folder if a real library reads as noise.
+  const STRIP_MAX = 480
+  const folders = Object.entries(fileTree?.folders ?? {})
+  const allFiles = folders.flatMap(([, files]) => files)
+  const step = Math.max(1, Math.ceil(allFiles.length / STRIP_MAX))
+  const strip = {
+    files: allFiles.filter((_, i) => i % step === 0).map((f) => ({ size: f.size, opens: f.usage_count ?? 0 })),
+    groups: folders.map(([name, files]) => ({
+      name: name.split(/[\\/]/).filter(Boolean).pop() ?? name,
+      count: files.length,
+      detail: `${files.length} · ${(files.reduce((s, f) => s + f.size, 0) / (1024 * 1024)).toFixed(1)} MB`,
+    })),
+    note: step > 1 ? `1 in ${step} of ${allFiles.length.toLocaleString()} files shown` : undefined,
+  }
+
   return (
-    <div className="flex-1 overflow-y-auto p-6 space-y-6 animate-fade-in-up custom-scrollbar">
+    <div className="flex-1 overflow-y-auto px-8 py-6 space-y-8 custom-scrollbar">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="font-serif text-2xl font-normal flex items-center gap-3">
-            <BookOpen className="w-7 h-7 text-primary" />
-            Library
-          </h1>
-          <p className="text-text-secondary mt-1 text-sm">
+          <div className="flex items-baseline gap-3">
+            <span aria-hidden className="font-mono text-[10px] tracking-[.1em] text-text-tertiary">02</span>
+            <h1 className="stock text-[28px] leading-none m-0">Library</h1>
+          </div>
+          <p className="text-text-secondary mt-2 text-sm">
             Manage your indexed files and memory sources
           </p>
         </div>
         <div className="flex gap-3">
-          <button onClick={handleRefresh} disabled={refreshMutation.isPending} className="glass-button !py-2 gap-2 disabled:opacity-60">
-            <RefreshCw className="w-4 h-4" />
-            Refresh
-          </button>
+          <Button onClick={handleRefresh} disabled={refreshMutation.isPending}>
+            <span aria-hidden>↻</span> Refresh
+          </Button>
         </div>
       </div>
 
-      {/* Message banner */}
+      {/* Message banner: a square beside the words, fog for a fault. */}
       {message && (
-        <div className={`flex items-center gap-2 px-4 py-3 rounded-xl text-sm transition-all duration-300 ${message.type === 'ok' ? 'bg-success/20 text-success' : 'bg-error/20 text-error'}`}>
-          {message.type === 'ok' ? <CheckCircle2 className="w-4 h-4" /> : <AlertCircle className="w-4 h-4" />}
+        <div className={`flex items-center gap-2 px-4 py-3 text-sm bg-surface border border-rule ${message.type === 'ok' ? 'text-text-primary' : 'text-error'}`}>
+          <span aria-hidden className="w-2 h-2 shrink-0 bg-current" />
           {message.text}
         </div>
       )}
 
-      {/* Compartments, not tiles.
-          Deliberately uneven — an even four-column stat row is the most generic
-          layout in software, and the running scan is the thing worth the space.
-          Values are left-aligned so the eye reads down a column. */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5 md:[grid-template-columns:1.6fr_1fr_1fr_1.4fr]">
+      {/* Figures on one ruled line, counted up once. Safelight has no stat cards. */}
+      <FigureLine
+        items={[
+          { label: 'Files', value: filesIndexed },
+          { label: 'Chunks', value: chunksIndexed },
+          ...(fileTree ? [
+            { label: 'Folders', value: Object.keys(fileTree.folders).length },
+            { label: 'On disk', value: Math.round(fileTree.total_size / (1024 * 1024)), unit: 'MB' },
+          ] : []),
+        ]}
+      />
+
+      {/* The standing facts, in edge type. Casing is load-bearing for
+          LibraryPage.test.tsx; the caps are CSS. */}
+      <dl className="flex flex-wrap gap-x-10 gap-y-2 m-0 font-mono text-[10.5px] tracking-[.12em] uppercase">
         {[
-          // Casing is load-bearing for LibraryPage.test.tsx, and the label renders
-          // uppercase regardless, so there is nothing to gain by changing it.
-          { label: 'Total Files', value: filesIndexed.toLocaleString(), color: 'text-text-primary' },
-          { label: 'Chunks Indexed', value: chunksIndexed.toLocaleString(), color: 'text-text-primary' },
-          { label: 'Scan Status', value: scanStatus, color: scanStatus === 'Idle' ? 'text-success' : 'text-warning' },
+          { label: 'Scan Status', value: scanStatus },
           // Most-used once the user has actually run anything; until then there
           // is no usage to report, so fall back to whichever model would answer
           // right now. Both are real — neither is a hardcoded provider name.
           mostUsedModel
-            ? { label: `Most used · ${mostUsedModel.provider}`, value: mostUsedModel.model, color: 'text-success' }
-            : { label: activeProvider?.provider ? `Model · ${activeProvider.provider}` : 'Model', value: activeProvider?.model || (activeProvider ? 'Not configured' : 'Loading…'), color: activeProvider?.model ? 'text-success' : 'text-warning' },
-        ].map(({ label, value, color }) => (
-          <Well key={label} className="px-4 py-3.5 min-w-0">
-            <div className="font-mono text-xs tracking-widest uppercase text-text-tertiary mb-2">{label}</div>
-            <div className={`font-serif text-2xl leading-none truncate ${color}`} title={value}>{value}</div>
-          </Well>
+            ? { label: `Most used · ${mostUsedModel.provider}`, value: mostUsedModel.model }
+            : { label: activeProvider?.provider ? `Model · ${activeProvider.provider}` : 'Model', value: activeProvider?.model || (activeProvider ? 'Not configured' : 'Loading…') },
+        ].map(({ label, value }) => (
+          <div key={label} className="flex gap-3">
+            <dt className="text-text-tertiary">{label}</dt>
+            <dd className="m-0 text-text-primary">{value}</dd>
+          </div>
         ))}
-      </div>
+      </dl>
 
-      {/* Indexing progress bar */}
+      {/* Indexing: a word and a number, and the cells filling in. */}
       {isRunning && (
-        // Indexing is the longest operation in the product and a screen reader
-        // previously got nothing at all from it. Polite, so it does not
-        // interrupt; the file name changes far too often to announce, so only
-        // the progress summary is live.
-        <div className="glass-card" role="group" aria-label="Indexing progress">
-          <div className="flex items-center gap-3 mb-2">
-            <Loader2 className="w-5 h-5 text-primary animate-spin" aria-hidden />
-            <span className="text-sm text-text-secondary truncate">
-              {liveProgress?.current_file || 'Processing…'} ({liveProgress?.processed_files ?? status?.processed_files ?? 0}/{liveProgress?.total_files ?? status?.total_files ?? 0})
-            </span>
-          </div>
-          <div
-            className="w-full bg-deep border border-rule rounded-full h-2.5"
-            role="progressbar"
-            aria-valuenow={Math.round(progressPct)}
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-label={`Indexing ${liveProgress?.processed_files ?? status?.processed_files ?? 0} of ${liveProgress?.total_files ?? status?.total_files ?? 0} files`}
-          >
-            <div
-              className="bg-plate h-2.5 rounded-full transition-all duration-300"
-              style={{ width: `${progressPct}%` }}
-            />
-          </div>
+        // A screen reader previously got nothing at all from the longest
+        // operation in the product. Polite, so it does not interrupt; the file
+        // name changes far too often to announce, so only the summary is live.
+        <div className="glass-card flex flex-col gap-3" role="group" aria-label="Indexing progress">
+          <span className="text-sm text-text-secondary truncate">
+            {liveProgress?.current_file || 'Processing…'} ({liveProgress?.processed_files ?? status?.processed_files ?? 0}/{liveProgress?.total_files ?? status?.total_files ?? 0})
+          </span>
+          <CellProgress
+            label="Indexing…"
+            done={liveProgress?.processed_files ?? status?.processed_files ?? 0}
+            total={liveProgress?.total_files ?? status?.total_files ?? 0}
+          />
           <span className="sr-only" aria-live="polite">
             {`${Math.round(progressPct)} percent, ${liveProgress?.processed_files ?? 0} of ${liveProgress?.total_files ?? 0} files indexed`}
           </span>
@@ -267,9 +284,6 @@ export function LibraryPage() {
       {!!ocr?.pages_pending && (
         <div className="glass-card">
           <div className="flex items-center gap-3">
-            {ocr.worker_running
-              ? <Loader2 className="w-5 h-5 text-primary animate-spin shrink-0" />
-              : <ScanText className="w-5 h-5 text-primary shrink-0" />}
             <div className="min-w-0">
               <div className="text-sm font-semibold text-text-primary">
                 {ocr.pages_pending.toLocaleString()} page{ocr.pages_pending === 1 ? '' : 's'} pending OCR
@@ -288,7 +302,7 @@ export function LibraryPage() {
 
       {/* Add to Memory */}
       <div
-        className="glass-card transition-all duration-200 border-2 border-transparent hover:border-primary/30"
+        className="glass-card"
         onDragOver={(e) => { e.preventDefault(); e.stopPropagation() }}
         onDrop={(e) => {
           e.preventDefault()
@@ -303,19 +317,19 @@ export function LibraryPage() {
           }
         }}
       >
-        <h2 className="font-serif text-lg font-medium mb-4 flex items-center gap-2 text-text-primary">
-          <FolderPlus className="w-5 h-5 text-primary" />
+        <h2 className="font-bold [font-stretch:80%] text-lg mb-4 text-text-primary">
           Add to Memory
         </h2>
         <div className="flex gap-3">
+          {/* Bounded in ink3 like the ask field; the global ink ring shows focus. */}
           <input
             type="text"
             value={folderPath}
             onChange={(e) => setFolderPath(e.target.value)}
             placeholder="Select or drag a folder here..."
-            className="flex-1 bg-surface border border-primary/20 rounded-xl px-4 py-3 text-text-primary placeholder:text-text-secondary/50 focus:outline-none focus:ring-2 focus:ring-primary/40 shadow-inner"
+            className="flex-1 min-w-0 h-10 bg-background border border-edge px-4 text-text-primary placeholder:text-text-tertiary"
           />
-          <Button onClick={handleBrowse} icon={<HardDrive className="w-4 h-4" />}>
+          <Button onClick={handleBrowse}>
             Browse
           </Button>
           {/* The one plate on this screen. */}
@@ -323,23 +337,26 @@ export function LibraryPage() {
             variant="plate"
             onClick={handleIndex}
             disabled={!folderPath.trim() || isRunning}
-            icon={<Play className="w-4 h-4" />}
+            icon={<span aria-hidden>▶</span>}
             className={isRunning ? 'hidden' : ''}
           >
             Index
           </Button>
           {isRunning && (
-            <button
-              onClick={handleCancel}
-              disabled={cancelling}
-              className="flex items-center justify-center gap-2 bg-danger-fill hover:brightness-110 text-on-danger font-bold rounded-xl px-6 py-3 shadow-lg transition-all active:scale-95 disabled:opacity-40"
-            >
-              {cancelling ? <Loader2 className="w-4 h-4 animate-spin" /> : <AlertCircle className="w-4 h-4" />}
-              {cancelling ? 'Cancelling...' : 'Cancel'}
-            </button>
+            <Button variant="danger" onClick={handleCancel} disabled={cancelling}>
+              {cancelling ? 'Cancelling…' : 'Cancel'}
+            </Button>
           )}
         </div>
       </div>
+
+      {/* The library as one roll of film: height is size, brightness is use. */}
+      {strip.files.length > 0 && (
+        <section className="flex flex-col gap-4" aria-labelledby="library-roll">
+          <h2 id="library-roll" className="font-bold [font-stretch:80%] text-lg m-0 text-text-primary">Indexed files</h2>
+          <FilmStrip files={strip.files} groups={strip.groups} note={strip.note} />
+        </section>
+      )}
 
       {/* System Drives */}
       {sysInfo?.volumes && sysInfo.volumes.length > 0 && (
@@ -352,17 +369,14 @@ export function LibraryPage() {
 
             return (
               <div key={vol.letter} className="glass-card flex items-center gap-4">
-                <div className="bg-primary/10 p-3 rounded-2xl border border-primary/20">
-                  <HardDrive className="w-8 h-8 text-primary shrink-0" />
-                </div>
                 <div className="flex-1 min-w-0">
-                  <span className="text-lg font-bold text-text-primary">{vol.letter}</span>
+                  <span className="stock text-[28px] leading-none text-text-primary">{vol.letter}</span>
                   <p className="text-text-secondary text-sm">
                     {vol.used_gb} / {vol.total_gb} GB used ({usedPct}%)
                   </p>
-                  <div className="w-full bg-surface border border-edge rounded-full h-1.5 mt-2 shadow-inner">
+                  <div className="w-full bg-surface border border-edge h-1.5 mt-2">
                     <div
-                      className={`h-1.5 rounded-full ${colorClass}`}
+                      className={`h-1.5 ${colorClass}`}
                       style={{ width: `${usedPct}%` }}
                     />
                   </div>
@@ -398,24 +412,12 @@ export function LibraryPage() {
           </span>
         </div>
         <div className="flex gap-2 pl-4 ml-auto border-l border-rule">
-          <button
-            onClick={handleDemo}
-            disabled={isRunning}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface hover:bg-raised text-success border border-edge transition-all font-black text-xs uppercase tracking-widest shadow-sm disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            <Play className="w-3 h-3" />
+          <Button size="sm" onClick={handleDemo} disabled={isRunning} icon={<span aria-hidden>▶</span>}>
             Seed Demo
-          </button>
-          <button
-            onClick={handleClear}
-            disabled={isRunning || clearIndexMutation.isPending}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface hover:bg-raised text-error border border-edge transition-all font-black text-xs uppercase tracking-widest shadow-sm disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            {clearIndexMutation.isPending
-              ? <Loader2 className="w-3 h-3 animate-spin" />
-              : <Trash2 className="w-3 h-3" />}
+          </Button>
+          <Button size="sm" variant="danger" onClick={handleClear} disabled={isRunning || clearIndexMutation.isPending}>
             {clearIndexMutation.isPending ? 'Clearing…' : 'Clear Index'}
-          </button>
+          </Button>
         </div>
       </div>
     </div>

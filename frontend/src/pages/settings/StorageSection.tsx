@@ -3,7 +3,6 @@
  * unrelated section components in one unbroken scroll. Behaviour is unchanged;
  * only the file boundary moved.
  */
-import { HardDrive } from 'lucide-react'
 import { type SystemInfo } from '../../api'
 
 export function StorageSection({ sysInfo }: Readonly<{ sysInfo?: SystemInfo }>) {
@@ -18,11 +17,8 @@ export function StorageSection({ sysInfo }: Readonly<{ sysInfo?: SystemInfo }>) 
   return (
     <div className="glass p-6 rounded-2xl border border-primary/10">
       <div className="flex items-start gap-4 mb-6">
-        <div className="p-3 bg-primary/10 rounded-xl">
-          <HardDrive className="w-6 h-6 text-primary" />
-        </div>
         <div>
-          <h2 className="font-serif text-lg font-medium text-text-primary">Storage</h2>
+          <h2 className="font-bold [font-stretch:80%] text-lg text-text-primary m-0">Storage</h2>
           <p className="text-sm text-text-secondary mt-1">Disk usage on indexed volumes.</p>
         </div>
       </div>
@@ -35,9 +31,9 @@ export function StorageSection({ sysInfo }: Readonly<{ sysInfo?: SystemInfo }>) 
                 <span className="font-bold text-text-primary">{v.letter}:</span>
                 <span>{v.used_gb.toFixed(1)} GB used of {v.total_gb.toFixed(1)} GB</span>
               </div>
-              <div className="h-2 bg-raised rounded-full overflow-hidden">
+              <div className="h-2 bg-raised border border-rule overflow-hidden">
                 <div
-                  className={`h-full rounded-full transition-all duration-700 ${getProgressColor(pct)}`}
+                  className={`h-full transition-all duration-700 ${getProgressColor(pct)}`}
                   style={{ width: `${pct}%` }}
                 />
               </div>

@@ -1,49 +1,34 @@
 import type { ButtonHTMLAttributes, ReactNode } from 'react';
-import { Loader2 } from 'lucide-react';
 
 /**
- * The one control that rises off the surface.
+ * Safelight's button: square, a verb in caps at Archivo width 80.
  *
- * Depth rule for the whole system: the case is recessed, the brass is proud.
- * Everything else insets; only `plate` lifts, which is why there should be
- * exactly one per screen.
+ * `plate` is the lamp — the one live thing, so there should be exactly one per
+ * screen. Its label is onsafe (5.39 dark, 5.35 light); ink on the lamp would be
+ * 3.09. `secondary` is outlined in the control edge (ink3, >= 4.92 on every
+ * ground) rather than the board's line2, which measures 1.53-1.97.
  *
- * `plate` is a FILL and never a text colour — #B08D57 measures 3.84 against the
- * control edge, so the label inverts to ink instead (5.70 cabinet, 5.46 paper).
- * `danger` inverts the same way against oxblood.
+ * `danger` is outlined in fog at rest so a destructive action never looks like
+ * the default, and fills with fog under a room-coloured label on hover.
  */
 export type ButtonVariant = 'plate' | 'secondary' | 'quiet' | 'danger';
 export type ButtonSize = 'sm' | 'md';
 
 const BASE =
-  'inline-flex items-center justify-center gap-2 font-medium whitespace-nowrap ' +
-  'rounded-md border transition-[background-color,border-color,box-shadow,transform] duration-120 ' +
-  'disabled:cursor-not-allowed disabled:shadow-none disabled:translate-y-0';
+  'inline-flex items-center justify-center gap-2 font-semibold [font-stretch:80%] uppercase tracking-[.06em] ' +
+  'leading-none whitespace-nowrap border transition-[color,border-color,filter,opacity] duration-120 ' +
+  'disabled:cursor-not-allowed disabled:bg-transparent disabled:text-text-tertiary disabled:border-rule disabled:filter-none';
 
 const SIZES: Record<ButtonSize, string> = {
-  sm: 'h-8 px-3 text-xs',
+  sm: 'h-8 px-3 text-[13px]',
   md: 'h-10 px-4 text-sm',
 };
 
 const VARIANTS: Record<ButtonVariant, string> = {
-  // Seats into its recess when pressed rather than scaling.
-  plate:
-    'bg-plate text-on-plate border-black/20 shadow-md ' +
-    'hover:brightness-110 active:shadow-[inset_0_1px_3px_rgba(0,0,0,.45)] active:translate-y-px ' +
-    'disabled:bg-raised disabled:text-text-tertiary disabled:border-rule',
-  secondary:
-    'bg-surface text-text-primary border-edge ' +
-    'hover:bg-raised hover:shadow-sm active:shadow-[inset_0_1px_3px_rgba(0,0,0,.35)] active:translate-y-px ' +
-    'disabled:text-text-tertiary disabled:border-rule',
-  quiet:
-    'bg-transparent text-text-secondary border-transparent ' +
-    'hover:bg-surface hover:text-text-primary active:bg-raised active:translate-y-px ' +
-    'disabled:text-text-tertiary',
-  // Outlined at rest so the destructive action never looks like the default.
-  danger:
-    'bg-transparent text-error border-error ' +
-    'hover:bg-danger-fill hover:text-on-danger active:translate-y-px ' +
-    'disabled:text-text-tertiary disabled:border-rule',
+  plate: 'bg-plate text-on-plate border-transparent font-bold hover:brightness-110',
+  secondary: 'bg-transparent text-text-primary border-edge hover:border-text-primary',
+  quiet: 'bg-transparent text-text-secondary border-transparent hover:text-text-primary',
+  danger: 'bg-transparent text-error border-error hover:bg-danger-fill hover:text-on-danger',
 };
 
 /**
@@ -95,8 +80,10 @@ export function Button({
       className={buttonClasses({ variant, size, className })}
       {...rest}
     >
-      {loading ? <Loader2 className="w-4 h-4 animate-spin" aria-hidden /> : icon}
+      {/* A working state ends in an ellipsis rather than a spinner. */}
+      {!loading && icon}
       {children}
+      {loading && <span aria-hidden>…</span>}
     </button>
   );
 }

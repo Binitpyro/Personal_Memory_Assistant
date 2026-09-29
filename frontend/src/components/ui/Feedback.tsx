@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
-import { Moon, Sun } from 'lucide-react';
 import { setTheme, useTheme } from '../../theme';
+import { formatScore } from '../../utils/format';
 
 export type Tone = 'neutral' | 'success' | 'warning' | 'error' | 'info' | 'accent';
 
@@ -41,7 +41,8 @@ export function Badge({
         `${TONE_TEXT[tone]} ${mono ? 'font-mono text-xs' : ''} ${className}`
       }
     >
-      {dot && <span aria-hidden className={`w-1.5 h-1.5 rounded-full shrink-0 ${TONE_DOT[tone]}`} />}
+      {/* State is a square beside a word, never a dot. */}
+      {dot && <span aria-hidden className={`w-1.5 h-1.5 shrink-0 ${TONE_DOT[tone]}`} />}
       {children}
     </span>
   );
@@ -80,8 +81,8 @@ export function EmptyState({
   return (
     <div className="bg-surface border border-rule rounded-xl px-8 py-9">
       <div className="font-mono text-xs tracking-widest uppercase text-text-tertiary mb-4">Empty</div>
-      <div className="font-serif text-xl mb-2">{title}</div>
-      {body && <p className="font-serif text-base text-text-secondary leading-relaxed max-w-[46ch] m-0">{body}</p>}
+      <div className="font-bold [font-stretch:80%] text-lg mb-2">{title}</div>
+      {body && <p className="text-base text-text-secondary leading-relaxed max-w-[46ch] m-0">{body}</p>}
       {actions && <div className="flex gap-2.5 mt-5">{actions}</div>}
     </div>
   );
@@ -94,9 +95,9 @@ export function ErrorState({
 }: Readonly<{ title: string; body?: ReactNode; actions?: ReactNode }>) {
   return (
     <div className="bg-surface border border-rule border-l-2 border-l-error rounded-xl px-8 py-9" role="alert">
-      <div className="font-mono text-xs tracking-widest uppercase text-error mb-4">Error</div>
-      <div className="font-serif text-xl mb-2">{title}</div>
-      {body && <p className="font-serif text-base text-text-secondary leading-relaxed max-w-[48ch] m-0">{body}</p>}
+      <div className="font-mono text-xs tracking-widest uppercase text-error mb-4"><span aria-hidden>■ </span>Error</div>
+      <div className="font-bold [font-stretch:80%] text-lg mb-2">{title}</div>
+      {body && <p className="text-base text-text-secondary leading-relaxed max-w-[48ch] m-0">{body}</p>}
       {actions && <div className="flex gap-2.5 mt-5">{actions}</div>}
     </div>
   );
@@ -144,7 +145,7 @@ export function ShelfMark({
               <div className="font-mono text-xs text-text-tertiary leading-relaxed">
                 {chunkId !== undefined ? `chunk ${chunkId}` : ''}
                 {chunkId !== undefined && score !== undefined ? ' · ' : ''}
-                {score !== undefined ? score.toFixed(2) : ''}
+                {score !== undefined ? formatScore(score) : ''}
               </div>
             )}
           </>
@@ -155,7 +156,9 @@ export function ShelfMark({
 }
 
 /**
- * Cabinet / Paper. Writes the choice through so it survives a reload.
+ * Lights on: one toggle with a constant label, pressed while the light theme
+ * shows. Safelight has no icon set, so the control is its own words.
+ * Writes the choice through so it survives a reload.
  *
  * Reads `useTheme` rather than seeding local state from `resolveTheme()` once:
  * with no stored choice the theme still tracks the OS, so a one-shot read left
@@ -164,37 +167,22 @@ export function ShelfMark({
  */
 export function ThemeToggle({ className = '' }: Readonly<{ className?: string }>) {
   const theme = useTheme();
+  const on = theme === 'paper';
 
   return (
-    // 28x28 per button, matching the nav toggle in AppShell, for WCAG 2.2
-    // SC 2.5.8. Deliberately NOT `.tap-24`: this wrapper is `overflow-hidden`,
-    // which clips hit-testing as well as paint, so an overflowing transparent
-    // pseudo-element would be dead area.
-    <div className={`inline-flex border border-edge rounded-sm overflow-hidden ${className}`} role="group" aria-label="Theme">
-      <button
-        type="button"
-        onClick={() => setTheme('cabinet')}
-        aria-pressed={theme === 'cabinet'}
-        aria-label="Cabinet — dark theme"
-        title="Cabinet — dark"
-        className={`w-7 h-7 flex items-center justify-center transition-colors ${
-          theme === 'cabinet' ? 'bg-surface text-text-primary' : 'text-text-tertiary hover:text-text-secondary'
-        }`}
-      >
-        <Moon className="w-3 h-3" aria-hidden />
-      </button>
-      <button
-        type="button"
-        onClick={() => setTheme('paper')}
-        aria-pressed={theme === 'paper'}
-        aria-label="Paper — light theme"
-        title="Paper — light"
-        className={`w-7 h-7 flex items-center justify-center border-l border-edge transition-colors ${
-          theme === 'paper' ? 'bg-surface text-text-primary' : 'text-text-tertiary hover:text-text-secondary'
-        }`}
-      >
-        <Sun className="w-3 h-3" aria-hidden />
-      </button>
-    </div>
+    // 56x32, over the 24x24 target minimum (WCAG 2.2 SC 2.5.8).
+    <button
+      type="button"
+      onClick={() => setTheme(on ? 'cabinet' : 'paper')}
+      aria-pressed={on}
+      title={on ? 'Lights on — switch to Safelight' : 'Safelight — switch to Lights on'}
+      className={
+        `w-14 h-8 border font-mono text-[10px] leading-[1.15] tracking-[.1em] uppercase transition-colors ${
+          on ? 'border-text-primary text-text-primary' : 'border-edge text-text-tertiary hover:text-text-primary'
+        } ${className}`
+      }
+    >
+      Lights on
+    </button>
   );
 }

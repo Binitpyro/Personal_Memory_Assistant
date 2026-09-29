@@ -32,7 +32,8 @@ export function SettingsLayout() {
                 className={
                   'px-5 py-2.5 border-r border-rule transition-colors duration-150 ' +
                   (isActive
-                    ? 'bg-raised shadow-[inset_0_2px_0_var(--color-plate)]'
+                    // No raise fill under the lamp mark: lamp on raise is 4.30 in Lights on.
+                    ? 'shadow-[inset_0_2px_0_var(--color-plate)]'
                     : 'hover:bg-raised')
                 }
               >
@@ -43,7 +44,7 @@ export function SettingsLayout() {
                 >
                   {mark}
                 </div>
-                <div className="font-serif text-[15px] leading-tight">{label}</div>
+                <div className="font-semibold text-[15px] leading-tight">{label}</div>
               </div>
             )}
           </NavLink>

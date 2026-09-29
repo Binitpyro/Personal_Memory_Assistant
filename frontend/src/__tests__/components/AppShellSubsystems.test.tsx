@@ -29,6 +29,7 @@ vi.mock('../../useApi', () => ({
 vi.mock('../../api', () => ({
   getAppConfig: vi.fn(),
   getHealth: vi.fn(),
+  getIndexStatus: vi.fn(),
   getProviderSettings: vi.fn(),
 }));
 

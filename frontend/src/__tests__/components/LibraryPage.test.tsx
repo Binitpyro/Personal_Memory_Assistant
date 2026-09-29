@@ -72,6 +72,8 @@ vi.mock('../../useApi', () => ({
 vi.mock('../../api', () => {
   return {
     getHealth: vi.fn(),
+    // The film strip reads the file tree; unmocked data here means no strip.
+    getFileTree: vi.fn(),
     getIndexStatus: vi.fn(),
     getSystemInfo: vi.fn(),
     getAppConfig: vi.fn(),

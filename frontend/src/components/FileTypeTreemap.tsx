@@ -2,7 +2,6 @@ import { useMemo, useCallback, useRef, useState, useEffect } from 'react'
 import { useTheme, readChartTokens } from '../theme'
 import { AccessibleTree, type A11yNode } from './AccessibleTree'
 import { ShortcutOverlay } from './ShortcutOverlay'
-import { ChevronLeft, Home, File, Folder, Layers, Trash2 } from 'lucide-react'
 import ReactEChartsCore from 'echarts-for-react/lib/core'
 import * as echarts from 'echarts/core'
 import { TreemapChart as EChartsTreemap } from 'echarts/charts'
@@ -60,11 +59,6 @@ const Breadcrumb: React.FC<BreadcrumbProps> = ({ navPath, onBreadcrumbClick }) =
   <div className="flex items-center gap-1 bg-raised px-3 py-2 rounded-xl border border-rule overflow-x-auto no-scrollbar scroll-smooth">
     {navPath.map((seg, i) => {
       const isLast = i === navPath.length - 1;
-      const isFile = isLast && !seg.fullPath;
-      let Icon = Folder;
-      if (i === 0) Icon = Home;
-      else if (isFile) Icon = File;
-
       const itemKey = seg.fullPath ? `${seg.fullPath}-${i}` : `${seg.name}-${i}`;
       return (
         <div key={itemKey} className="flex items-center shrink-0">
@@ -72,7 +66,6 @@ const Breadcrumb: React.FC<BreadcrumbProps> = ({ navPath, onBreadcrumbClick }) =
             onClick={() => onBreadcrumbClick(i)}
             className={`flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs font-medium transition-colors hover:bg-raised ${isLast ? 'text-primary bg-primary/10' : 'text-text-secondary hover:text-text-primary'}`}
           >
-            <Icon className="w-3 h-3" aria-hidden />
             <span className="max-w-[120px] truncate">{seg.name}</span>
           </button>
           {!isLast && <span className="text-text-secondary/20 mx-0.5">/</span>}
@@ -393,16 +386,16 @@ export function FileTypeTreemap({ allFiles, activeFilter, onFilterChange, onFile
       <div className="flex flex-col gap-3 glass p-3 rounded-2xl border border-edge shadow-inner mb-4 shrink-0">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <button onClick={handleBack} disabled={navPath.length <= 1} className="flex items-center gap-1 px-3 py-1.5 bg-raised hover:bg-primary/10 border border-rule rounded-xl text-xs font-bold transition-colors disabled:opacity-20 text-text-primary"><ChevronLeft className="w-4 h-4" aria-hidden /> BACK</button>
-            <button onClick={handleHome} className="flex items-center gap-1 px-3 py-1.5 bg-raised hover:bg-primary/10 border border-rule rounded-xl text-xs font-bold transition-colors text-text-primary"><Home className="w-4 h-4" aria-hidden /> HOME</button>
+            <button onClick={handleBack} disabled={navPath.length <= 1} className="flex items-center gap-1 px-3 py-1.5 bg-raised hover:bg-primary/10 border border-rule rounded-xl text-xs font-bold transition-colors disabled:opacity-20 text-text-primary">BACK</button>
+            <button onClick={handleHome} className="flex items-center gap-1 px-3 py-1.5 bg-raised hover:bg-primary/10 border border-rule rounded-xl text-xs font-bold transition-colors text-text-primary">HOME</button>
           </div>
           <div className="flex items-center gap-3">
             {onDeleteFolder && navPath.length > 1 && navPath.at(-1)?.fullPath && (
-              <button onClick={handleDeleteCurrent} className="flex items-center gap-1 px-3 py-1.5 bg-error/10 hover:bg-error/20 border border-error/20 text-error rounded-xl text-xs font-bold transition-colors"><Trash2 className="w-3.5 h-3.5" aria-hidden /> DELETE FOLDER INDEX</button>
+              <button onClick={handleDeleteCurrent} className="flex items-center gap-1 px-3 py-1.5 bg-error/10 hover:bg-error/20 border border-error/20 text-error rounded-xl text-xs font-bold transition-colors">DELETE FOLDER INDEX</button>
             )}
             <div className="flex items-center bg-raised p-1 rounded-xl border border-rule">
-              <button onClick={() => { setGroupMode('folder'); handleHome() }} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${groupMode === 'folder' ? 'bg-plate text-on-plate shadow-lg' : 'text-text-secondary hover:text-text-primary'}`}><Folder className="w-3.5 h-3.5" aria-hidden /> BY FOLDERS</button>
-              <button onClick={() => { setGroupMode('type'); handleHome() }} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${groupMode === 'type' ? 'bg-plate text-on-plate shadow-lg' : 'text-text-secondary hover:text-text-primary'}`}><Layers className="w-3.5 h-3.5" aria-hidden /> BY FILE TYPE</button>
+              <button onClick={() => { setGroupMode('folder'); handleHome() }} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${groupMode === 'folder' ? 'bg-plate text-on-plate shadow-lg' : 'text-text-secondary hover:text-text-primary'}`}>BY FOLDERS</button>
+              <button onClick={() => { setGroupMode('type'); handleHome() }} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${groupMode === 'type' ? 'bg-plate text-on-plate shadow-lg' : 'text-text-secondary hover:text-text-primary'}`}>BY FILE TYPE</button>
             </div>
           </div>
         </div>
@@ -427,7 +420,7 @@ export function FileTypeTreemap({ allFiles, activeFilter, onFilterChange, onFile
         <span className="sr-only" aria-live="polite">{announcement}</span>
         {/* Was `opacity-0 group-hover:opacity-60`: the only statement of how
             to drive the chart, revealed only on mouse hover. */}
-        <div id="treemap-keyhint" className="absolute top-12 right-4 z-10 pointer-events-none opacity-70 text-xs font-bold text-text-primary uppercase bg-surface border border-edge px-3 py-1.5 rounded-full shadow-sm">↑↓ browse · Enter open · ⌫ back · ? keys</div>
+        <div id="treemap-keyhint" className="absolute top-12 right-4 z-10 pointer-events-none opacity-70 text-xs font-bold text-text-primary uppercase bg-surface border border-edge px-3 py-1.5">↑↓ browse · Enter open · ⌫ back · ? keys</div>
         {buildError ? (
           <div className="flex items-center justify-center h-full text-text-secondary font-medium">{buildError}</div>
         ) : (

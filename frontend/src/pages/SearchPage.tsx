@@ -1,17 +1,29 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { Search, Send, Square, Sparkles, Clock, Trash2, RotateCcw } from 'lucide-react';
 import { toast } from 'sonner';
 import { useApi, invalidateCache } from '../useApi';
 import { getQueryHistory, clearQueryHistory, getFileTree, subscribeProgress, type HistoryItem } from '../api';
 
 import { useChatStream } from '../hooks/useChatStream';
 import { MessageBubble } from '../components/chat/MessageBubble';
+import { FramesPanel } from '../components/chat/FramesPanel';
+import { Receipt } from '../components/chat/Receipt';
 import { FilterBar } from '../components/chat/FilterBar';
 import { ModelPicker } from '../components/providers/ModelPicker';
+import { useWorking } from '../components/ui';
 import { useDreamscapeStore } from '../store/dreamscapeStore';
 import { CACHE_KEYS } from '../cacheKeys'
 
+/**
+ * Ask, composed as the Safelight board draws it: the ask bar across the top,
+ * then three panes — Frames (what the latest answer rests on), Answer (the
+ * conversation, question in stock and answer in print) and the Receipt in its
+ * printer slot. The window's grain crawls while PMA searches and writes.
+ *
+ * One deliberate departure: the board shows one answer at a time. The Answer
+ * pane keeps the whole conversation, so a follow-up keeps its visible
+ * context; Frames and Receipt follow the latest answer.
+ */
 export function SearchPage() {
   const selectedChunks = useDreamscapeStore(state => state.selectedChunks);
   const removeChunk = useDreamscapeStore(state => state.removeChunk);
@@ -25,13 +37,17 @@ export function SearchPage() {
   const [selectedMode, setSelectedMode] = useState('');
 
   const { data: historyData, refetch: refetchHistory } = useApi(getQueryHistory, { cacheKey: CACHE_KEYS.queryHistory });
-  
+
   const { messages, executeSearch, resetChat: resetChatStream, stopStream } = useChatStream(() => {
     invalidateCache(CACHE_KEYS.queryHistory);
     refetchHistory();
   });
 
   const isSearching = messages.at(-1)?.isStreaming ?? false;
+  useWorking(isSearching);
+  const newestFirst = [...messages].reverse();
+  const latestAnswer = newestFirst.find(m => m.role === 'assistant');
+  const latestQuestionId = newestFirst.find(m => m.role === 'user')?.id;
 
   // U-5: the file tree changes only when indexing does, and subscribeProgress
   // already pushes those events. A fixed 15s poll re-fetched the whole tree
@@ -59,17 +75,13 @@ export function SearchPage() {
   const inputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  };
-
   useEffect(() => {
-    scrollToBottom();
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
   const handleSearch = useCallback(async (overrideQuestion?: string, forcedChunkId?: number) => {
     let userMsg = overrideQuestion || question.trim();
-    
+
     // If we're forcing a chunk but have no question text, re-use the last user question
     if (!userMsg && forcedChunkId) {
       const lastUserMsg = messages.filter(m => m.role === 'user').pop();
@@ -99,13 +111,6 @@ export function SearchPage() {
       });
     }
   }, [question, isSearching, executeSearch, selectedFileType, selectedFolderTag, selectedMode, messages, selectedChunks]);
-
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSearch();
-    }
-  };
 
   // Native confirm()/alert() rendered as platform dialogs that do not match the
   // app's visual language, and confirm() blocks the event loop. sonner was
@@ -152,164 +157,31 @@ export function SearchPage() {
     )
   ).sort((a, b) => a.localeCompare(b));
 
+  const history = historyData?.history ?? [];
+  const paneLink = 'tap-24 hover:text-text-primary underline-offset-4 hover:underline';
+
   return (
-    <div className="flex-1 flex flex-col h-full overflow-hidden animate-fade-in-up">
-      {/* Header */}
-      <div className="flex items-center justify-between p-6 shrink-0">
-        <div>
-          <h1 className="font-serif text-2xl font-normal flex items-center gap-3 text-text-primary">
-            <Search className="w-7 h-7 text-primary" />
-            AI Chat
-          </h1>
-          <p className="text-text-secondary mt-1 text-sm">
-            Conversational memory assistant
-          </p>
-        </div>
-        <button
-          onClick={resetChat}
-          className="flex items-center gap-2 px-4 py-2 bg-raised hover:bg-raised rounded-xl text-xs font-bold transition-all text-text-secondary border border-rule shadow-sm"
-        >
-          <RotateCcw className="w-3.5 h-3.5" /> NEW CHAT
-        </button>
-      </div>
-
-      {/* Chat Area */}
-      {/* `log` + polite: an answer streams in token by token, so assertive
-          would interrupt continuously. A screen reader got nothing here before. */}
-      <div
-        className="flex-1 overflow-y-auto p-6 space-y-6 custom-scrollbar"
-        role="log"
-        aria-live="polite"
-        aria-label="Conversation"
+    <div className="sl-askscreen">
+      {/* The ask bar: a lamp Q., the question, its scope, the model, and the plate. */}
+      <form
+        className="sl-ask sl-ask--bar"
+        role="search"
+        onSubmit={(e) => { e.preventDefault(); void handleSearch(); }}
       >
-        {messages.length === 0 ? (
-          <div className="h-full flex flex-col items-center justify-center text-center">
-            <Sparkles className="w-12 h-12 text-text-tertiary mb-4" aria-hidden />
-            <h2 className="text-xl font-bold text-text-primary mb-2">How can I help you?</h2>
-            <p className="max-w-sm text-sm text-text-secondary">Ask about your documents, codebases, or project statistics. I remember our conversation context.</p>
-          </div>
-        ) : (
-          <div className="max-w-4xl mx-auto space-y-8">
-            {messages.map((msg) => (
-              <MessageBubble 
-                key={msg.id} 
-                message={msg} 
-                onNearMissClick={(suggestion: string, forcedChunkId?: number) => handleSearch(suggestion, forcedChunkId)} 
-              />
-            ))}
-            <div ref={messagesEndRef} />
-          </div>
-        )}
-      </div>
-
-      {/* Input Area */}
-      <div className="p-6 shrink-0 bg-surface-dark/50 backdrop-blur-md border-t border-rule">
-        <div className="max-w-4xl mx-auto flex flex-col gap-3">
-          {error && (
-            <div className="bg-error/10 border border-error/20 text-error text-xs p-3 rounded-xl flex items-center justify-between gap-3">
-              <span>{error.text}</span>
-              <span className="flex items-center gap-3 shrink-0">
-                {error.code === 'cloud_consent_required' && (
-                  <Link
-                    to="/settings/providers#cloud-consent"
-                    className="underline font-semibold hover:opacity-80"
-                  >
-                    Review cloud settings
-                  </Link>
-                )}
-                <button onClick={() => setError(null)} className="font-bold opacity-60 hover:opacity-100">&times;</button>
-              </span>
-            </div>
-          )}
-          {/* Recent searches dropdown */}
-          {showHistory && historyData?.history && historyData.history.length > 0 && (
-            <div 
-              className="absolute bottom-full mb-2 left-0 right-0 glass rounded-2xl border border-primary/10 shadow-2xl overflow-hidden z-20"
-              role="listbox"
-            >
-              <div className="px-4 py-2 text-xs font-black text-text-secondary border-b border-rule uppercase tracking-widest">Recent Searches</div>
-              <div className="max-h-48 overflow-y-auto custom-scrollbar">
-                {historyData.history.slice(0, 10).map((h: HistoryItem) => (
-                  <button
-                    key={`${h.created_at}-${h.question}`}
-                    role="option"
-                    aria-selected="false"
-                    className="w-full text-left px-4 py-2.5 text-sm text-text-primary hover:bg-primary/10 transition-colors flex items-center gap-3 border-b border-rule last:border-none"
-                    onClick={() => {
-                      setQuestion(h.question);
-                      setShowHistory(false);
-                      inputRef.current?.focus();
-                    }}
-                  >
-                    <Clock className="w-3.5 h-3.5 text-text-secondary shrink-0" />
-                    <span className="truncate">{h.question}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-          {selectedChunks.length > 0 && (
-            <div className="flex flex-wrap gap-2 items-center mb-1">
-              <span className="text-xs uppercase font-black text-text-secondary tracking-wider ml-1">Context:</span>
-              {selectedChunks.map(chunk => (
-                <div key={chunk.id} className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-primary/10 border border-primary/20 text-xs text-primary-light">
-                  <span className="truncate max-w-[150px]">{chunk.filename}</span>
-                  <button
-                    onClick={() => removeChunk(chunk.id)}
-                    aria-label={`Remove ${chunk.filename} from context`}
-                    className="tap-24 hover:text-error transition-colors"
-                  >
-                    &times;
-                  </button>
-                </div>
-              ))}
-              <button
-                onClick={() => clearChunks()}
-                className="tap-24 text-xs uppercase font-bold text-text-secondary hover:text-error transition-colors ml-1"
-              >
-                Clear
-              </button>
-            </div>
-          )}
-          {/* The blurred gradient halo that used to sit behind this input was the
-              clearest instance of the register the redesign moves away from —
-              glow, not material. Focus is carried by the edge and the ring. */}
-          <div className="relative group">
-            <div className="relative flex items-center bg-surface border border-edge rounded-md overflow-hidden focus-within:border-primary transition-colors">
-              <input
-                ref={inputRef}
-                type="text"
-                value={question}
-                onChange={(e) => setQuestion(e.target.value)}
-                onKeyDown={handleKeyDown}
-                placeholder={isSearching ? "AI is thinking..." : "Ask a follow-up or a new question..."}
-                className="flex-1 bg-transparent px-6 py-4 text-text-primary placeholder:text-text-secondary/50 focus:outline-none text-base"
-                disabled={isSearching}
-                aria-expanded={showHistory}
-              />
-              {isSearching ? (
-                <button
-                  onClick={stopStream}
-                  aria-label="Stop generating"
-                  title="Stop generating"
-                  className="p-3 mr-2 bg-raised hover:bg-raised text-text-primary rounded-xl transition-all shadow-lg"
-                >
-                  <Square className="w-5 h-5 fill-current" />
-                </button>
-              ) : (
-                <button
-                  onClick={() => handleSearch()}
-                  disabled={!question.trim()}
-                  aria-label="Send question"
-                  className="p-3 mr-2 bg-plate hover:brightness-110 disabled:bg-surface disabled:text-text-tertiary text-on-plate rounded-xl transition-all shadow-lg"
-                >
-                  <Send className="w-5 h-5" />
-                </button>
-              )}
-            </div>
-          </div>
-          
-          <FilterBar 
+        <span className="sl-ask__q" aria-hidden="true">Q.</span>
+        <input
+          ref={inputRef}
+          className="sl-ask__input"
+          aria-label="Ask your files"
+          value={question}
+          onChange={(e) => setQuestion(e.target.value)}
+          placeholder={isSearching ? 'Writing…' : 'Ask a follow-up or a new question...'}
+          disabled={isSearching}
+          autoComplete="off"
+          spellCheck={false}
+        />
+        <span className="sl-ask__scope">
+          <FilterBar
             selectedFileType={selectedFileType}
             setSelectedFileType={setSelectedFileType}
             selectedFolderTag={selectedFolderTag}
@@ -320,30 +192,156 @@ export function SearchPage() {
             folderOptions={folderOptions}
             disabled={isSearching}
           />
-          
-          <div className="flex items-center justify-between px-2">
-            <div className="flex gap-4 text-xs text-text-secondary font-bold uppercase tracking-widest">
-              <ModelPicker />
+        </span>
+        <ModelPicker />
+        {/* Visible text leads each accessible name (WCAG 2.5.3). */}
+        {isSearching ? (
+          <button type="button" className="sl-ask__enter sl-ask__enter--stop" onClick={stopStream} aria-label="Stop generating" title="Stop generating">
+            Stop
+          </button>
+        ) : (
+          <button type="submit" className="sl-ask__enter" disabled={!question.trim()} aria-label="Ask — send question">
+            <span aria-hidden>⏎</span> Ask
+          </button>
+        )}
+      </form>
 
+      <div className="sl-panes">
+        <FramesPanel
+          message={latestAnswer}
+          onForceInclude={(chunkId) => void handleSearch('', chunkId)}
+        />
+
+        <section className="sl-answerpane" aria-label="Answer">
+          <div className="sl-panehead">
+            <span>Answer</span>
+            <span className="relative flex items-center gap-4">
               <button
+                type="button"
+                className={paneLink}
                 onClick={() => setShowHistory(v => !v)}
-                className={`tap-24 flex items-center gap-1 hover:text-text-primary transition-colors ${showHistory ? 'text-primary' : ''}`}
                 aria-haspopup="listbox"
                 aria-expanded={showHistory}
               >
-                <Clock className="w-3 h-3" /> {historyData?.history?.length ?? 0} Recent
+                {history.length} recent <span aria-hidden>▾</span>
               </button>
+              <button type="button" className={paneLink} onClick={resetChat}>
+                <span aria-hidden>↻</span> New chat
+              </button>
+              {history.length > 0 && (
+                <button type="button" className={paneLink} onClick={handleClearHistory}>
+                  Clear history
+                </button>
+              )}
+              {showHistory && history.length > 0 && (
+                <div
+                  className="absolute right-0 top-full mt-2 w-[26rem] bg-raised border border-rule shadow-xl z-20 normal-case tracking-normal"
+                  role="listbox"
+                  aria-label="Recent questions"
+                >
+                  <div className="max-h-64 overflow-y-auto custom-scrollbar">
+                    {history.slice(0, 10).map((h: HistoryItem) => (
+                      <button
+                        key={`${h.created_at}-${h.question}`}
+                        type="button"
+                        role="option"
+                        aria-selected="false"
+                        className="w-full text-left px-4 py-2.5 font-sans text-sm text-text-primary hover:bg-surface border-b border-rule last:border-none truncate"
+                        onClick={() => {
+                          setQuestion(h.question);
+                          setShowHistory(false);
+                          inputRef.current?.focus();
+                        }}
+                      >
+                        {h.question}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </span>
+          </div>
+
+          {(error || selectedChunks.length > 0) && (
+            <div className="flex flex-col gap-3 px-11 pt-5">
+              {error && (
+                // A fault: fog, a title, what still worked.
+                <div className="flex items-start justify-between gap-3 border border-warning p-3 text-sm" role="alert">
+                  <span>
+                    <span className="block font-mono text-[10.5px] font-semibold tracking-[.12em] uppercase text-warning mb-1">
+                      <span aria-hidden>■ </span>No answer written
+                    </span>
+                    {error.text}
+                  </span>
+                  <span className="flex items-center gap-3 shrink-0">
+                    {error.code === 'cloud_consent_required' && (
+                      <Link to="/settings/providers#cloud-consent" className="underline underline-offset-4 font-semibold">
+                        Review cloud settings
+                      </Link>
+                    )}
+                    <button type="button" onClick={() => setError(null)} aria-label="Dismiss" className="tap-24 opacity-70 hover:opacity-100">✕</button>
+                  </span>
+                </div>
+              )}
+              {selectedChunks.length > 0 && (
+                <div className="flex flex-wrap gap-2 items-center">
+                  <span className="font-mono text-[10px] uppercase tracking-[.12em] text-text-tertiary">Context</span>
+                  {selectedChunks.map(chunk => (
+                    <div key={chunk.id} className="flex items-center gap-1.5 px-2.5 py-1 bg-raised border border-rule text-xs text-text-primary">
+                      <span className="truncate max-w-[150px]">{chunk.filename}</span>
+                      <button
+                        type="button"
+                        onClick={() => removeChunk(chunk.id)}
+                        aria-label={`Remove ${chunk.filename} from context`}
+                        className="tap-24 hover:text-error transition-colors"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+                  <button type="button" onClick={() => clearChunks()} className={`font-mono text-[10px] uppercase tracking-[.1em] text-text-secondary ${paneLink}`}>
+                    Clear
+                  </button>
+                </div>
+              )}
             </div>
-            {historyData?.history && historyData.history.length > 0 && (
-              <button
-                onClick={handleClearHistory}
-                className="tap-24 text-xs font-black text-error/60 hover:text-error transition-colors flex items-center gap-1"
-              >
-                <Trash2 className="w-3 h-3" /> CLEAR HISTORY
-              </button>
+          )}
+
+          {/* `log` + polite: an answer streams in token by token, so assertive
+              would interrupt continuously. */}
+          <div className="flex-1 flex flex-col" role="log" aria-live="polite" aria-label="Conversation">
+            {messages.length === 0 ? (
+              // The answer column's idle state. Nothing is lit until a question is asked.
+              <div className="sl-answer__idle">
+                <strong className="sl-stock">Nothing developed yet.</strong>
+                <span>Ask, and only the frames that hold the answer come up.</span>
+              </div>
+            ) : (
+              <div className="sl-answer">
+                {messages.map((msg) => (
+                  <MessageBubble key={msg.id} message={msg} latest={msg.id === latestQuestionId} />
+                ))}
+                <div ref={messagesEndRef} />
+              </div>
             )}
           </div>
-        </div>
+        </section>
+
+        <section className="sl-receiptpane" aria-label="Receipt">
+          <div className="sl-panehead">
+            <span>Receipt</span>
+          </div>
+          <div className="sl-receiptpane__body">
+            {/* Same condition the old metadata row used: the path is known only
+                once sources arrive, and a stopped stream never gets one. Keyed on
+                the answer, so each new one prints out of the slot afresh. */}
+            {latestAnswer && !latestAnswer.isStreaming && latestAnswer.mode ? (
+              <Receipt key={latestAnswer.id} msg={latestAnswer} />
+            ) : (
+              <div className="sl-receipt__slot sl-receipt__slot--idle" aria-hidden="true" />
+            )}
+          </div>
+        </section>
       </div>
     </div>
   );

@@ -1,5 +1,4 @@
 import { useState } from 'react'
-import { Settings, CheckCircle2, AlertCircle } from 'lucide-react'
 import { useApi, invalidateCache } from '../useApi'
 import { getLocalModels, getSystemInfo, getLLMPreferences, setLLMPreferences, setProviderDefaultModel, clearIndex, getDriveInfo, purgeHostCache, type LLMPreferences } from '../api'
 import { CACHE_KEYS } from '../cacheKeys'
@@ -88,20 +87,20 @@ export function SettingsPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="font-serif text-2xl font-normal flex items-center gap-3">
-            <Settings className="w-7 h-7 text-primary" />
-            Settings
-          </h1>
-          <p className="text-text-secondary mt-1 text-sm">
+          <div className="flex items-baseline gap-3">
+            <span aria-hidden className="font-mono text-[10px] tracking-[.1em] text-text-tertiary">05</span>
+            <h1 className="stock text-[28px] leading-none m-0">Settings</h1>
+          </div>
+          <p className="text-text-secondary mt-2 text-sm">
             Configure integrations and application preferences
           </p>
         </div>
       </div>
 
-      {/* Message banner */}
+      {/* Message banner: a square beside the words, fog for a fault. */}
       {message && (
-        <div className={`flex items-center gap-2 px-4 py-3 rounded-xl text-sm transition-all duration-300 ${message.type === 'ok' ? 'bg-success/20 text-success' : 'bg-error/20 text-error'}`}>
-          {message.type === 'ok' ? <CheckCircle2 className="w-4 h-4" /> : <AlertCircle className="w-4 h-4" />}
+        <div className={`flex items-center gap-2 px-4 py-3 text-sm bg-surface border border-rule ${message.type === 'ok' ? 'text-text-primary' : 'text-error'}`}>
+          <span aria-hidden className="w-2 h-2 shrink-0 bg-current" />
           {message.text}
         </div>
       )}

@@ -1,0 +1,216 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   Safelight components, ported from the Safelight Design System artifact
+   (project/components/src/safelight.css). Rules are copied as drawn; only
+   the pieces PMA renders are here.
+
+   The artifact names its tokens --room, --ink, --safe…; here they alias the
+   --pma-* palette in index.css, so both themes (cabinet / paper) follow with
+   no second palette to keep in step. Two departures from the artifact, both
+   measured: rows under the floor are ink3 rather than 42% opacity (which put
+   file names under 4.5:1), and `[data-theme="light"]` is `paper` here.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+:root {
+  --room: var(--pma-bg);
+  --sheet: var(--pma-surface);
+  --raise: var(--pma-raised);
+  --line: var(--pma-rule);
+  --ink: var(--pma-text);
+  --ink2: var(--pma-text-2);
+  --ink3: var(--pma-text-3);
+  --safe: var(--pma-accent);
+  --onsafe: var(--pma-on-plate);
+  --fog: var(--pma-warning);
+  --paper: var(--pma-paper);
+  --paper-ink: var(--pma-paper-ink);
+  --paper-red: var(--pma-paper-red);
+  --paper-mute: var(--pma-paper-mute);
+  /* Not in the --pma-* palette: decorative outline and the printer slot. */
+  --line2: #3D3936;
+  --slot: #050505;
+
+  --control-sm: 32px;
+  --control-md: 40px;
+  --ask-field: 48px;
+  --ask-row: 64px;
+  --frame-row: 44px;
+  --pane-head: 38px;
+  --frames-width: 330px;
+  --receipt-width: 318px;
+  --radius-slot: 5px;
+  --duration-pull: 1000ms;
+  --duration-floor: 700ms;
+  --duration-tally: 1200ms;
+  --duration-print: 1400ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-print: steps(28, end);
+  --font-stock: var(--font-sans);
+  --font-print: var(--font-serif);
+  --font-edge: var(--font-mono);
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) { --line2: #BDB8B2; --slot: #121110; }
+}
+[data-theme="paper"] { --line2: #BDB8B2; --slot: #121110; }
+
+/* ── Type roles ─────────────────────────────────────────────────────────── */
+.sl-stock { font-family: var(--font-stock); font-weight: 800; font-stretch: 62%; font-variation-settings: 'wdth' 62; text-transform: uppercase; }
+.sl-visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+:where([class^="sl-"], [class*=" sl-"]):focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+
+/* ── Ask ────────────────────────────────────────────────────────────────── */
+.sl-ask { display: flex; align-items: center; gap: 12px; height: var(--ask-field); padding: 0 6px 0 14px; background: var(--room); border: 1px solid var(--ink3); }
+.sl-ask:focus-within { outline: 2px solid var(--ink); outline-offset: 2px; }
+.sl-ask__q { flex: none; font-family: var(--font-edge); font-size: 11px; letter-spacing: 0.1em; color: var(--safe); }
+.sl-ask__input { flex: 1; min-width: 0; height: 100%; padding: 0; border: 0; background: transparent; color: var(--ink); font-family: var(--font-stock); font-size: 15px; font-weight: 500; }
+.sl-ask__input::placeholder { color: var(--ink3); }
+.sl-ask__input:focus { outline: none; }
+.sl-ask__scope { display: flex; align-items: center; gap: 6px; flex: none; }
+.sl-ask__enter {
+  flex: none; display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 10px; border: 0; border-radius: 0; background: var(--safe); color: var(--onsafe);
+  font-family: var(--font-edge); font-size: 10.5px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; cursor: pointer;
+}
+.sl-ask__enter:disabled { background: transparent; color: var(--ink3); box-shadow: inset 0 0 0 1px var(--line2); cursor: not-allowed; }
+.sl-ask__enter--stop { background: transparent; color: var(--ink); box-shadow: inset 0 0 0 1px var(--ink3); }
+.sl-ask--bar { flex: none; height: var(--ask-row); gap: 14px; padding: 0 16px 0 22px; border: 0; border-bottom: 1px solid var(--line); }
+/* The bar's input is the field: its focus is the ring on the input itself. */
+.sl-ask--bar:focus-within { outline: none; }
+.sl-ask--bar .sl-ask__input:focus-visible { outline: 2px solid var(--ink); outline-offset: 4px; }
+.sl-ask--bar .sl-ask__q { font-size: 12px; }
+.sl-ask--bar .sl-ask__input { font-size: 19px; }
+.sl-ask--bar .sl-ask__enter { padding: 0 12px; }
+
+/* The model button. The board draws a lamp or leak square beside the name;
+   PMA does not know which provider will answer, so it prints only the name.
+   Bounded in ink3, not line2 (1.64:1), because it is a control. */
+.sl-model {
+  display: inline-flex; align-items: center; gap: 8px; height: 34px; max-width: 14rem; padding: 0 12px; flex: none; border: 1px solid var(--ink3); border-radius: 0; background: transparent; color: var(--ink); cursor: pointer;
+  font-family: var(--font-edge); font-size: 10.5px; font-weight: 500; letter-spacing: 0.1em; text-transform: uppercase; white-space: nowrap; overflow: hidden;
+}
+.sl-model:hover { border-color: var(--ink); }
+.sl-model > span:first-child { overflow: hidden; text-overflow: ellipsis; }
+
+/* ── The Ask screen: three panes under the bar ──────────────────────────── */
+.sl-askscreen { position: relative; display: flex; flex-direction: column; flex: 1; min-height: 0; background: var(--room); }
+.sl-panes {
+  flex: 1; min-height: 0; display: grid;
+  grid-template-columns: var(--frames-width) minmax(0, 1fr) var(--receipt-width);
+  grid-template-areas: "frames answer receipt";
+}
+.sl-panes > * { min-height: 0; overflow-y: auto; }
+/* Narrow windows keep all three: the receipt drops under the frames. */
+@media (max-width: 1180px) {
+  .sl-panes { grid-template-columns: 300px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; grid-template-areas: "frames answer" "receipt answer"; }
+}
+
+.sl-panehead { position: sticky; top: 0; z-index: 1; height: var(--pane-head); flex: none; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 16px; border-bottom: 1px solid var(--line); background: inherit; color: var(--ink3); font-family: var(--font-edge); font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; white-space: nowrap; }
+
+/* ── Frames ─────────────────────────────────────────────────────────────── */
+.sl-frames { grid-area: frames; display: flex; flex-direction: column; background: var(--sheet); border-right: 1px solid var(--line); }
+.sl-frames__list { margin: 0; padding: 0; list-style: none; }
+.sl-frames__empty { padding: 18px 16px; color: var(--ink3); font-family: var(--font-edge); font-size: 10px; line-height: 1.6; letter-spacing: 0.1em; text-transform: uppercase; }
+.sl-frame { background: var(--sheet); border-bottom: 1px solid var(--line); animation: sl-rise 600ms var(--ease-standard) both; animation-delay: calc(var(--i, 0) * 35ms); }
+.sl-frame__row {
+  width: 100%; min-height: var(--frame-row); display: grid; grid-template-columns: 26px minmax(0, 1fr) 40px; align-items: center; gap: 0 10px;
+  padding: 6px 16px; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer;
+}
+.sl-frame__row:hover, .sl-frame.is-open .sl-frame__row { background: var(--raise); }
+.sl-frame__n { font-family: var(--font-edge); font-size: 10.5px; font-weight: 500; letter-spacing: 0.06em; color: var(--ink3); }
+.sl-frame__file { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.sl-frame__name { font-family: var(--font-stock); font-size: 13.5px; font-weight: 500; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sl-frame__folder { font-family: var(--font-edge); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sl-frame__ev { text-align: right; font-family: var(--font-edge); font-size: 11px; font-weight: 600; color: var(--ink); }
+/* Near misses: shown, never used. ink3 keeps them readable (5.36:1). */
+.sl-frame.is-under .sl-frame__name, .sl-frame.is-under .sl-frame__ev { color: var(--ink3); }
+.sl-frame.is-challenge .sl-frame__name { color: var(--fog); }
+
+/* The rule between what was used and what was not: the lamp, wiping in once
+   the frames have come up. */
+.sl-floor { position: relative; height: 0; border-top: 2px solid var(--safe); transform-origin: 0 50%; animation: sl-floor var(--duration-floor) var(--ease-standard) 450ms both; list-style: none; }
+.sl-floor__label { position: absolute; right: 12px; top: -10px; padding: 2px 6px; background: var(--safe); color: var(--onsafe); font-family: var(--font-edge); font-size: 10px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; white-space: nowrap; }
+@keyframes sl-floor { from { transform: scaleX(0); opacity: 0; } to { transform: none; opacity: 1; } }
+
+/* The passage, opened under its frame. */
+.sl-loupe { display: flex; flex-direction: column; gap: 10px; padding: 12px 16px 14px; background: var(--room); border-top: 1px solid var(--line); }
+.sl-loupe__quote { margin: 0; max-height: 14rem; overflow-y: auto; font-family: var(--font-print); font-size: 15px; line-height: 1.55; color: var(--ink2); white-space: pre-wrap; }
+.sl-loupe__quote mark { background: none; color: var(--ink); text-decoration: underline; text-decoration-color: var(--safe); text-decoration-thickness: 2px; text-underline-offset: 4px; }
+.sl-loupe__foot { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; color: var(--ink3); font-family: var(--font-edge); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; }
+
+/* ── Answer ─────────────────────────────────────────────────────────────── */
+.sl-answerpane { grid-area: answer; position: relative; display: flex; flex-direction: column; background: var(--room); }
+.sl-answer { display: flex; flex-direction: column; gap: 28px; padding: 26px 34px 32px 44px; min-width: 0; }
+.sl-answer__q { margin: 0; font-size: 28px; line-height: 0.95; color: var(--ink); overflow-wrap: anywhere; }
+.sl-answer__q--latest { font-size: 40px; line-height: 0.92; }
+.sl-answer__idle { display: flex; flex-direction: column; justify-content: center; gap: 12px; flex: 1; padding: 0 44px; }
+.sl-answer__idle strong { font-size: 48px; line-height: 0.9; color: var(--ink3); }
+.sl-answer__idle span { color: var(--ink3); font-family: var(--font-edge); font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase; }
+.sl-develop-in { animation: sl-rise 700ms var(--ease-standard) both; }
+@keyframes sl-rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+
+/* ── Receipt ────────────────────────────────────────────────────────────── */
+.sl-receiptpane { grid-area: receipt; display: flex; flex-direction: column; background: var(--room); border-left: 1px solid var(--line); }
+.sl-receiptpane__body { padding: 16px 20px 24px; }
+.sl-receipt-wrap { position: relative; padding-top: 4px; }
+.sl-receipt__slot { position: absolute; left: -8px; right: -8px; top: 0; z-index: 2; height: 9px; background: var(--slot); border: 1px solid var(--line2); border-radius: var(--radius-slot); }
+.sl-receipt__slot--idle { position: relative; left: -8px; width: calc(100% + 16px); }
+.sl-receipt__feed { overflow: hidden; }
+.sl-receipt {
+  position: relative; display: flex; flex-direction: column; gap: 8px; padding: 24px 18px 30px; background: var(--paper); color: var(--paper-ink);
+  font-family: var(--font-edge); font-size: 10.5px; line-height: 1.5; text-transform: uppercase;
+  -webkit-mask: linear-gradient(#000 0 0) top / 100% calc(100% - 8px) no-repeat, conic-gradient(from -45deg at bottom, #000 90deg, #0000 0) bottom / 16px 8px repeat-x;
+  mask: linear-gradient(#000 0 0) top / 100% calc(100% - 8px) no-repeat, conic-gradient(from -45deg at bottom, #000 90deg, #0000 0) bottom / 16px 8px repeat-x;
+}
+/* It feeds out of the slot in 28 steps, never eased. */
+.sl-receipt.is-printing { animation: sl-print var(--duration-print) var(--ease-print) both; }
+@keyframes sl-print { from { transform: translateY(-102%); } to { transform: none; } }
+.sl-receipt__head { display: flex; flex-direction: column; align-items: center; gap: 1px; text-align: center; }
+.sl-receipt__brand { font-size: 26px; line-height: 1; letter-spacing: 0.02em; }
+.sl-receipt__mute { color: var(--paper-mute); }
+.sl-receipt__block { display: flex; flex-direction: column; padding-top: 8px; border-top: 1px dashed var(--paper-ink); }
+.sl-receipt__row { display: flex; justify-content: space-between; gap: 8px; }
+.sl-receipt__total { display: flex; justify-content: space-between; align-items: baseline; padding-top: 8px; border-top: 1px dashed var(--paper-ink); }
+.sl-receipt__total span:first-child { font-weight: 600; font-size: 12px; }
+.sl-receipt__total b { font-size: 32px; line-height: 1; }
+
+/* ── Library ────────────────────────────────────────────────────────────── */
+.sl-figures { display: flex; flex-wrap: wrap; margin: 0; border-top: 1px solid var(--line2); border-bottom: 1px solid var(--line2); }
+.sl-figure { flex: 1 1 180px; display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 22px 24px; border-left: 1px solid var(--line); min-width: 0; }
+.sl-figure:first-child { padding-left: 0; border-left: 0; }
+.sl-figure dt { color: var(--ink3); font-family: var(--font-edge); font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase; }
+.sl-figure dd { margin: 0; font-size: 64px; line-height: 0.86; font-variant-numeric: tabular-nums; color: var(--ink); overflow-wrap: anywhere; }
+.sl-figure dd small { font-size: 0.5em; color: var(--ink2); }
+
+.sl-strip { display: flex; flex-direction: column; gap: 10px; margin: 0; }
+.sl-strip__bars { position: relative; display: flex; align-items: flex-end; gap: 1px; height: 160px; padding-top: 16px; }
+.sl-strip__bar { position: relative; flex: 1 1 0; min-width: 1px; }
+.sl-strip__bar i { position: absolute; inset: 0; background: var(--ink); }
+.sl-strip__groups { display: flex; gap: 10px; color: var(--ink3); font-family: var(--font-edge); font-size: 10px; line-height: 1.5; letter-spacing: 0.1em; text-transform: uppercase; }
+.sl-strip__group { min-width: 0; padding-top: 8px; border-top: 1px solid var(--ink2); overflow: hidden; }
+.sl-strip__group b { display: block; color: var(--ink); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sl-strip__note { color: var(--ink3); font-family: var(--font-edge); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; }
+
+.sl-cells { display: flex; flex-direction: column; gap: 14px; }
+.sl-cells__head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; min-width: 0; }
+.sl-cells__label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-stock); font-weight: 700; font-stretch: 80%; font-variation-settings: 'wdth' 80; font-size: 18px; color: var(--ink); }
+.sl-cells__count { flex: none; font-family: var(--font-edge); font-size: 11px; letter-spacing: 0.1em; color: var(--ink2); font-variant-numeric: tabular-nums; }
+.sl-cells__grid { display: grid; grid-template-columns: repeat(20, minmax(0, 1fr)); gap: 3px; }
+.sl-cells__grid span { height: 16px; box-shadow: inset 0 0 0 1px var(--line2); }
+.sl-cells__grid span.is-done { background: var(--ink); box-shadow: none; }
+.sl-cells__grid span.is-now { background: var(--safe); box-shadow: none; }
+
+/* ── Motion ─────────────────────────────────────────────────────────────── */
+.sl-grain { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 60; opacity: 0.07; mix-blend-mode: screen; }
+@media (prefers-color-scheme: light) { :root:not([data-theme]) .sl-grain { opacity: 0.1; mix-blend-mode: multiply; } }
+[data-theme="paper"] .sl-grain { opacity: 0.1; mix-blend-mode: multiply; }
+.sl-tally { font-variant-numeric: tabular-nums; }
+
+/* ── Reduced motion and contrast themes ─────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  [class^="sl-"], [class*=" sl-"], [class^="sl-"]::before, [class*=" sl-"]::before, [class^="sl-"]::after, [class*=" sl-"]::after { animation: none !important; transition: none !important; }
+}
+@media (forced-colors: active) {
+  .sl-cells__grid span.is-done, .sl-cells__grid span.is-now, .sl-strip__bar i, .sl-floor { forced-color-adjust: none; background: CanvasText; border-color: CanvasText; }
+  .sl-ask__enter, .sl-floor__label { forced-color-adjust: none; background: Highlight; color: HighlightText; }
+  .sl-receipt { border: 1px solid CanvasText; -webkit-mask: none; mask: none; }
+  .sl-grain { display: none; }
+}

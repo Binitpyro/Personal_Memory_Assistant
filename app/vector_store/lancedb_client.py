@@ -3,6 +3,7 @@ import logging
 import math
 import threading
 from collections.abc import Sequence
+from datetime import timedelta
 from functools import partial
 from typing import Any
 
@@ -542,18 +543,21 @@ class LanceDBClient:
             try:
                 with self._write_lock:
                     total = tbl.count_rows()
-                    if total <= max_rows:
-                        return 0
-                    stamps = sorted(
-                        r["timestamp"] for r in tbl.to_arrow().select(["timestamp"]).to_pylist()
-                    )
-                    cutoff = stamps[total - max_rows]
-                    tbl.delete(f"timestamp < {cutoff}")
-                    removed = int(total) - int(tbl.count_rows())
-                    try:
-                        tbl.compact_files()
-                    except Exception as e:  # pragma: no cover - version dependent
-                        logger.debug("query_cache compaction unavailable: %s", e)
+                    removed = 0
+                    if total > max_rows:
+                        stamps = sorted(
+                            r["timestamp"] for r in tbl.to_arrow().select(["timestamp"]).to_pylist()
+                        )
+                        cutoff = stamps[total - max_rows]
+                        tbl.delete(f"timestamp < {cutoff}")
+                        removed = int(total) - int(tbl.count_rows())
+                    # Every prune, not only above the cap: fragments and versions
+                    # grow per answer whatever the row count. compact_files() needs
+                    # pylance, which is not installed, so it failed into a DEBUG log
+                    # on every call. Measured 2026-09-30 at 5,000 answers: 5,000
+                    # versions, 1.09 GB, search 181 ms; after optimize() 1 version,
+                    # 8.7 MB, 11 ms. Zero retention: no reader uses old versions.
+                    tbl.optimize(cleanup_older_than=timedelta(0))
                     return removed
             except Exception as e:
                 logger.warning("query_cache prune failed: %s", e)

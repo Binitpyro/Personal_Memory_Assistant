@@ -176,3 +176,31 @@ async def test_lancedb_client_full_lifecycle(real_lancedb_dir):
     await client.clear_all()
     assert "pma_chunks" not in client.db.list_tables()
     assert "pma_summaries" not in client.db.list_tables()
+
+
+@pytest.mark.asyncio
+async def test_query_cache_prune_reclaims_versions_below_the_row_cap(real_lancedb_dir, monkeypatch):
+    """Each cached answer is a one-row append: one fragment and one version.
+
+    Compaction ran only above the row cap, and compact_files() needs pylance,
+    which is not installed, so it failed into a DEBUG log and nothing was ever
+    reclaimed. Measured 2026-09-30 at 5,000 answers: 5,000 versions, 1.09 GB on
+    disk, search_cache 181 ms; after optimize() 1 version, 8.7 MB, 11 ms.
+    """
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "query_cache_prune_interval", 5)
+    monkeypatch.setattr(settings, "query_cache_max_rows", 1000)
+    client = LanceDBClient(persist_directory=real_lancedb_dir)
+    client.connect()
+
+    for i in range(5):
+        vec = np.zeros(384, dtype=np.float32)
+        vec[i] = 1.0
+        await client.add_query_cache(vec, f"q{i}", f"a{i}", float(i))
+
+    tbl = client._get_table("query_cache")
+    assert tbl.count_rows() == 5, "pruning below the cap must not drop answers"
+    versions = len(tbl.list_versions())
+    assert versions <= 2, f"{versions} versions after 5 appends - the prune reclaimed nothing"
+    assert (await client.search_cache([1.0] + [0.0] * 383, threshold=0.99))["query_text"] == "q0"

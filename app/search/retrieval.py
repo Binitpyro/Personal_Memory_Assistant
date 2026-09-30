@@ -643,8 +643,6 @@ async def hybrid_retrieve(
     )
     if query_emb is None:
         query_emb = await embedding_service.embed_query(query)
-    else:
-        await fts_task  # wait for FTS to complete while we skip re-embedding
 
     # Launch semantic & summary search concurrently
     semantic_task = asyncio.create_task(
@@ -765,18 +763,28 @@ async def attach_parent_windows(db: DatabaseManager, results: list[dict[str, Any
         if r.get("file_id") is not None and r.get("start_offset") is not None:
             by_file.setdefault(r["file_id"], []).append(r)
 
-    # One query for every file in the result set, not one per file. The
-    # per-file ranges are OR-ed rather than collapsed to `file_id IN (...)`
-    # so each file still fetches only the siblings its own window needs -
-    # the same row set the per-file queries returned, in a single round trip.
+    # One query for every file in the result set, not one per file, and one
+    # clause per result rather than one [first hit, last hit] span per file: two
+    # hits at opposite ends of a long file fetched every chunk between them
+    # (75,000 rows and 559 ms for 15 files of 5,000 chunks, 2026-09-30). Each
+    # window is clipped to that same span, so the rows the stitch below uses -
+    # and so parent_text - are unchanged.
+    # ponytail: the clip keeps a truncation - with hits close together a result's
+    # own window extends past the span. Widening it changes model context, which
+    # needs an eval first (CLAUDE.md 8.3).
     clauses: list[str] = []
     params: list[Any] = []
     for file_id, group in by_file.items():
         lo = min(int(r["start_offset"]) for r in group)
         hi = max(int(r["end_offset"]) for r in group)
         pad = max(0, (width - (hi - lo)) // 2)
-        clauses.append("(file_id = ? AND end_offset > ? AND start_offset < ?)")
-        params.extend((file_id, lo - pad, hi + pad))
+        span_lo, span_hi = lo - pad, hi + pad
+        for r in group:
+            centre = (int(r["start_offset"]) + int(r["end_offset"])) // 2
+            clauses.append("(file_id = ? AND end_offset > ? AND start_offset < ?)")
+            params.extend(
+                (file_id, max(centre - width // 2, span_lo), min(centre + width // 2, span_hi))
+            )
 
     try:
         batched = await db.execute_query(

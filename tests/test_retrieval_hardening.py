@@ -4,11 +4,13 @@ One test per numbered item in the hardening plan. Each asserts the behaviour the
 fix exists to produce, not that the code was edited.
 """
 
+import asyncio
 import json
 import zlib
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
+import aiosqlite
 import pytest
 
 from app.search import agentic, retrieval
@@ -234,6 +236,79 @@ async def test_get_chunk_ids_for_paths_is_bounded_and_ordered(real_db):
     assert by_path["long.md"] == a_chunks[:3]
     assert by_path["short.md"] == b_chunks
     assert await real_db.get_chunk_ids_for_paths([], per_file_limit=3) == {}
+
+
+@pytest.mark.asyncio
+async def test_get_chunk_ids_for_paths_caps_rows_in_sql(real_db, monkeypatch):
+    """The per-file cap must hold in the query, not after it.
+
+    Truncating in Python after fetchall() read every chunk id of every routed
+    file, so the cost followed document length: 39.7 ms for 15 files of 5,000
+    chunks against 0.41 ms with the LIMIT in SQL (perf sweep 2026-09-30).
+    """
+    _, chunks = await _seed_file_with_chunks(
+        real_db, "big.md", "notes", [f"part {i}" for i in range(50)]
+    )
+    fetched: list[int] = []
+    original_fetchall = aiosqlite.Cursor.fetchall
+
+    async def counting_fetchall(self):
+        rows = await original_fetchall(self)
+        fetched.append(len(rows))
+        return rows
+
+    monkeypatch.setattr(aiosqlite.Cursor, "fetchall", counting_fetchall)
+
+    by_path = await real_db.get_chunk_ids_for_paths(["big.md"], per_file_limit=3)
+
+    assert by_path["big.md"] == chunks[:3]
+    assert fetched == [3], f"read {fetched} rows to keep 3 - the cap is not in the SQL"
+
+
+@pytest.mark.asyncio
+async def test_fts_leg_overlaps_the_vector_legs_with_a_supplied_embedding(monkeypatch):
+    """With a pre-computed embedding - always the case in production, since
+    _gather_full_rag_inputs passes one - FTS was awaited before the semantic and
+    summary legs were created, so the latencies added instead of overlapping.
+    Measured 2026-09-30 on SciFact: -10.9 ms median per query, results
+    identical 900/900.
+
+    The FTS stub blocks until the semantic stub has started, so a serial
+    implementation times out here.
+    """
+    retrieval.clear_retrieval_cache()
+    semantic_started = asyncio.Event()
+    overlapped: list[bool] = []
+
+    async def fts(*_a, **_kw):
+        try:
+            await asyncio.wait_for(semantic_started.wait(), timeout=1.0)
+            overlapped.append(True)
+        except TimeoutError:
+            overlapped.append(False)
+        return []
+
+    async def semantic(*_a, **_kw):
+        semantic_started.set()
+        return []
+
+    monkeypatch.setattr(retrieval, "_fts_search", fts)
+    monkeypatch.setattr(retrieval, "_semantic_search_with_emb", semantic)
+    monkeypatch.setattr(retrieval, "_summary_search_with_emb", AsyncMock(return_value=[]))
+    monkeypatch.setattr(retrieval, "_expand_summary_paths_to_chunks", AsyncMock(return_value=[]))
+
+    out = await retrieval.hybrid_retrieve(
+        query="overlap probe",
+        db=MagicMock(),
+        embedding_service=MagicMock(),
+        lancedb_client=MagicMock(),
+        k=5,
+        use_reranker=False,
+        query_emb=[0.0] * 8,
+    )
+
+    assert out == []
+    assert overlapped == [True], "FTS finished before the semantic leg was started"
 
 
 # ── 1.3a Indexing writes per-file summaries to the routing index ────────────

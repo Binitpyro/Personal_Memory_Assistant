@@ -7,7 +7,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app import state as app_state
@@ -295,7 +295,13 @@ async def uninstall(request: Request, payload: UninstallPayload | None = None):
     from app.ocr.settings import detect_installed_tier, persist_active_tier
 
     target_tier = (payload.tier if payload and payload.tier else settings.ocr_tier) or "cpu"
-    res = await registry.uninstall_tier(target_tier)
+    if (payload and payload.tier) or target_tier in registry.TIER_DEPS:
+        res = await registry.uninstall_tier(target_tier)
+        if not res["ok"]:
+            raise HTTPException(status_code=400, detail=res["error_code"])
+    else:
+        # Active tier is "vlm"/"none": it owns no venv, but the reset below must still run.
+        res = {"ok": True, "removed": []}
 
     # If the uninstalled tier was active, fall back to another installed tier or disable
     if settings.ocr_tier == target_tier or target_tier == "all":

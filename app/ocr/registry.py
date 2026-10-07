@@ -890,8 +890,16 @@ async def uninstall_tier(tier: str | None = None) -> dict[str, Any]:
     `ocr_tier_models_dir()`, which a tier downloads into and therefore owns, is
     removed.
     """
+    # `tier` reaches here from the request body and names a path component, so
+    # "../.." or an absolute path would rmtree arbitrary directories.
+    if tier is not None and tier not in TIER_DEPS:
+        return {"ok": False, "error_code": "UNKNOWN_TIER", "removed": []}
+    root = ocr_root().resolve()
+    targets = (ocr_env_dir(tier), ocr_tier_models_dir(tier))
+    if not all(t.resolve().is_relative_to(root) and t.resolve() != root for t in targets):
+        return {"ok": False, "error_code": "UNKNOWN_TIER", "removed": []}
     removed = []
-    for target in (ocr_env_dir(tier), ocr_tier_models_dir(tier)):
+    for target in targets:
         if target.exists():
             await asyncio.to_thread(shutil.rmtree, target, True)
             removed.append(str(target))

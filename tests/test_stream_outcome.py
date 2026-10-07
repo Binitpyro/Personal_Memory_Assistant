@@ -152,8 +152,11 @@ async def test_a_blank_clean_stream_is_an_empty_answer_error_and_saved_nowhere(
     mock_lancedb.add_query_cache.assert_not_called()
 
 
-async def test_a_good_answer_is_still_annotated_saved_and_cached(mock_db, mock_emb, mock_lancedb):
+async def test_a_good_answer_is_still_annotated_saved_and_cached(
+    mock_db, mock_emb, mock_lancedb, monkeypatch
+):
     """Control: the guards above must not have turned the happy path off."""
+    monkeypatch.setattr(retrieval.settings, "pattern_annotator_enabled", True)
     llm, _ = _llm(["fine answer", _USAGE], annotation="a, b")
     frames = await _run(mock_db, mock_emb, mock_lancedb, llm)
 
@@ -164,12 +167,30 @@ async def test_a_good_answer_is_still_annotated_saved_and_cached(mock_db, mock_e
     mock_lancedb.add_query_cache.assert_called_once()
 
 
-async def test_an_annotator_that_returns_the_unavailable_prose_yields_no_chips(
+async def test_the_annotator_is_off_by_default_and_costs_no_second_llm_call(
     mock_db, mock_emb, mock_lancedb
 ):
+    """Measured +3.6 s (gemma2) to +17 s (LM Studio) per query for a chip row."""
+    assert retrieval.settings.pattern_annotator_enabled is False
+    llm, _ = _llm(["fine answer", _USAGE], annotation="a, b")
+    frames = await _run(mock_db, mock_emb, mock_lancedb, llm)
+
+    llm.generate_answer.assert_not_called()
+    assert not [f for f in frames if f["type"] == "metadata"]
+    # Everything else is unchanged.
+    assert "error" not in [f["type"] for f in frames]
+    mock_db.save_query.assert_awaited_once()
+    mock_lancedb.add_query_cache.assert_called_once()
+
+
+async def test_an_annotator_that_returns_the_unavailable_prose_yields_no_chips(
+    mock_db, mock_emb, mock_lancedb, monkeypatch
+):
+    monkeypatch.setattr(retrieval.settings, "pattern_annotator_enabled", True)
     llm, _ = _llm(["fine answer", _USAGE], annotation=f"{LLM_UNAVAILABLE_PREFIX}: chain failed")
     frames = await _run(mock_db, mock_emb, mock_lancedb, llm)
 
+    llm.generate_answer.assert_awaited_once()  # the annotator really ran
     assert not [f for f in frames if f["type"] == "metadata"]
     mock_db.save_query.assert_awaited_once()  # the real answer is unaffected
 

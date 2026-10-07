@@ -28,6 +28,8 @@ export interface Message {
   completion_tokens?: number;
   cost?: number;
   isEstimatedCost?: boolean;
+  /** Why this turn failed. Rendered inside the bubble, below any partial answer. */
+  error?: { text: string; code?: string };
 }
 
 type ChatAction =
@@ -41,7 +43,7 @@ type ChatAction =
   | { type: 'SET_TRACE'; payload: { trace: TraceEvent[] } }
   | { type: 'SET_FALLBACK'; payload: { to: string } }
   | { type: 'SET_USAGE'; payload: { prompt_tokens: number; completion_tokens: number; cost: number; isEstimatedCost: boolean } }
-  | { type: 'SET_ERROR'; payload: { text: string } }
+  | { type: 'SET_ERROR'; payload: { text: string; code?: string } }
   | { type: 'RESET' };
 
 function chatReducer(state: Message[], action: ChatAction): Message[] {
@@ -147,7 +149,11 @@ function chatReducer(state: Message[], action: ChatAction): Message[] {
     case 'SET_ERROR': {
         const last = state.at(-1);
         if (last?.role === 'assistant') {
-            return [...state.slice(0, -1), { ...last, isStreaming: false }];
+            return [...state.slice(0, -1), {
+              ...last,
+              isStreaming: false,
+              error: { text: action.payload.text, code: action.payload.code },
+            }];
         }
         return state;
     }
@@ -338,7 +344,14 @@ export function useChatStream(onHistoryUpdate: () => void) {
           settled = true;
           unsubscribeRef.current = null;
           finalizeStreamRef.current = null;
-          dispatch({ type: 'SET_ERROR', payload: { text: chunk.text || 'Search failed' } });
+          // The 50 ms throttle may still hold tokens the model did stream; land
+          // them first so the bubble's "cut short" title matches what it shows.
+          if (throttleTimeoutRef.current) {
+            clearTimeout(throttleTimeoutRef.current);
+            throttleTimeoutRef.current = null;
+          }
+          flushStreamBuffer();
+          dispatch({ type: 'SET_ERROR', payload: { text: chunk.text || 'Search failed', code: chunk.code } });
           // Carry the machine-readable reason onto the Error so the page can
           // offer the matching remedy. A consent failure is one click from
           // fixable; a bare message is not.

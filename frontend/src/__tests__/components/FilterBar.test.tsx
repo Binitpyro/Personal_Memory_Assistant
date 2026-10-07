@@ -31,4 +31,27 @@ describe('FilterBar Component', () => {
     fireEvent.change(select, { target: { value: '.txt' } });
     expect(setSelectedFileType).toHaveBeenCalledWith('.txt');
   });
+
+  it('does not offer Challenge mode', () => {
+    // Its extra chunks are cut by the context budget, so the model never sees
+    // them while the UI lists them as sources.
+    renderWithProviders(
+      <FilterBar
+        selectedFileType=""
+        setSelectedFileType={vi.fn()}
+        selectedFolderTag=""
+        setSelectedFolderTag={vi.fn()}
+        selectedMode=""
+        setSelectedMode={vi.fn()}
+        fileTypeOptions={[]}
+        folderOptions={[]}
+        disabled={false}
+      />
+    );
+
+    const style = screen.getByLabelText('Answer style') as HTMLSelectElement;
+    const values = Array.from(style.options).map((o) => o.value);
+    expect(values).toEqual(['', 'explain', 'verify', 'explore', 'distill']);
+    expect(screen.queryByRole('option', { name: 'Challenge' })).toBeNull();
+  });
 });

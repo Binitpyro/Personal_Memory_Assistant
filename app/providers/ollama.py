@@ -204,7 +204,10 @@ def _family(item: dict[str, Any]) -> str:
 
     caps = item.get("capabilities")
     if isinstance(caps, list) and caps:
-        return "vision" if "vision" in caps else "chat"
+        if "vision" in caps:
+            return "vision"
+        # nomic-embed-text reports ["embedding"]: it cannot answer a chat turn.
+        return "chat" if "completion" in caps else "embedding"
     return "vision" if looks_like_vision_model(str(item.get("name") or "")) else "chat"
 
 

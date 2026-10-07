@@ -222,11 +222,13 @@ async def clear_index(
     db: DatabaseManager = Depends(get_db),
     lancedb_client=Depends(get_lancedb),
 ):
+    from app.search.retrieval import clear_retrieval_cache
     from app.state import file_tree_cache as _file_tree_cache
     from app.state import insights_cache as _insights_cache
 
     res = await db.clear_all()
     await lancedb_client.clear_all()
+    clear_retrieval_cache()
     _file_tree_cache["data"] = _insights_cache["data"] = None
     return res
 
@@ -351,6 +353,10 @@ async def remove_folder_index(
 
         await db.delete_files_by_folder_prefix(folder)
 
+        from app.search.retrieval import clear_retrieval_cache
+
+        # In-process answer/retrieval caches would otherwise keep serving the folder.
+        clear_retrieval_cache()
         _file_tree_cache["data"] = _insights_cache["data"] = None
         return {"message": f"Removed {folder}", "chunks_removed": len(chunk_ids_to_remove)}
     except Exception as e:

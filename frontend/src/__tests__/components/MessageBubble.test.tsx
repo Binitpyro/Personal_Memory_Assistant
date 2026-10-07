@@ -126,4 +126,42 @@ describe('MessageBubble provenance', () => {
     expect(claim.getAttribute('title')).toContain('Cited 3 sources');
     expect(claim.getAttribute('title')).not.toContain('High Confidence');
   });
+
+  describe('a failed turn', () => {
+    const failed = (content: string, error: Message['error']) =>
+      renderWithProviders(<MessageBubble message={{ id: 'f', role: 'assistant', content, error }} />);
+
+    it('with no content shows only the titled error, not an empty bubble', () => {
+      const { container } = failed('', { text: 'raw provider text', code: 'empty_answer' });
+      const alert = screen.getByRole('alert');
+      expect(alert.textContent).toContain('No answer written');
+      expect(alert.textContent).toContain('The model returned an empty reply. Try again or pick another model.');
+      expect(alert.textContent).not.toContain('raw provider text');
+      expect(container.querySelector('.prose-answer')).toBeNull();
+    });
+
+    it('after partial content shows the text, then "Answer cut short" and the sentence, in one bubble', () => {
+      const { container } = failed('The answer began', { text: 'raw', code: 'context_overflow' });
+      const alert = screen.getByRole('alert');
+      const partial = screen.getByText('The answer began');
+      expect(alert.textContent).toContain('Answer cut short');
+      expect(alert.textContent).toContain("too long for this model's context");
+      expect(alert.textContent).not.toContain('No answer written');
+      // Same bubble, partial text first.
+      expect(container.firstElementChild!.contains(partial)).toBe(true);
+      expect(container.firstElementChild!.contains(alert)).toBe(true);
+      expect(partial.compareDocumentPosition(alert) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
+
+    it('falls back to the raw error text for an unknown code', () => {
+      failed('', { text: 'upstream said no', code: 'brand_new_code' });
+      expect(screen.getByRole('alert').textContent).toContain('upstream said no');
+    });
+
+    it('offers the cloud settings link for a consent failure', () => {
+      failed('', { text: 'consent needed', code: 'cloud_consent_required' });
+      expect(screen.getByRole('link', { name: 'Review cloud settings' }).getAttribute('href'))
+        .toBe('/settings/providers#cloud-consent');
+    });
+  });
 });

@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
@@ -135,6 +136,27 @@ const GraphTraceViewer = ({ traceData }: Readonly<{ traceData: string }>) => {
   );
 };
 
+const ERROR_SENTENCES: Record<string, string> = {
+  context_overflow: "The question plus its sources is too long for this model's context. Narrow the folder/type filter, or load the model with a larger context.",
+  empty_answer: 'The model returned an empty reply. Try again or pick another model.',
+  local_provider_down: "The local model server isn't running. Start Ollama/LM Studio and try again.",
+};
+
+/** A fault: fog, a title, what still worked. Lives in the turn that failed, so it cannot scroll away from it. */
+const StreamError = ({ error, hasContent }: Readonly<{ error: NonNullable<Message['error']>; hasContent: boolean }>) => (
+  <div className="border border-warning p-3 text-sm" role="alert">
+    <span className="block font-mono text-[10.5px] font-semibold tracking-[.12em] uppercase text-warning mb-1">
+      <span aria-hidden>■ </span>{hasContent ? 'Answer cut short' : 'No answer written'}
+    </span>
+    {(error.code && ERROR_SENTENCES[error.code]) || error.text}
+    {error.code === 'cloud_consent_required' && (
+      <Link to="/settings/providers#cloud-consent" className="block mt-2 underline underline-offset-4 font-semibold">
+        Review cloud settings
+      </Link>
+    )}
+  </div>
+);
+
 export interface MessageBubbleProps {
   readonly message: Message;
   /** The newest question is set at 40px; earlier ones at pane size. */
@@ -157,7 +179,8 @@ export function MessageBubble({ message: msg, latest = false }: Readonly<Message
   return (
     <div className="min-w-0">
       <div className="flex flex-col gap-2 min-w-0 items-start">
-        <div className="max-w-[60ch]">
+        {/* A failed turn with no text shows only its error, not an empty bubble. */}
+        {!(msg.error && !msg.content.trim()) && <div className="max-w-[60ch]">
           {msg.isStreaming && !msg.content ? (
             <div className="edge-type text-text-tertiary py-1" role="status" aria-label="Generating answer…">
               Writing…
@@ -237,7 +260,13 @@ export function MessageBubble({ message: msg, latest = false }: Readonly<Message
               </ReactMarkdown>
             </div>
           )}
-        </div>
+        </div>}
+
+        {msg.error && (
+          <div className="max-w-[60ch] w-full">
+            <StreamError error={msg.error} hasContent={!!msg.content.trim()} />
+          </div>
+        )}
 
         {/* Stopped by the user. Rendered separately from the mode badge below,
             which only appears once sources arrive - a stream stopped before

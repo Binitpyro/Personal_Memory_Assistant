@@ -189,6 +189,13 @@ class TestFamilyComesFromReportedCapabilities:
         capabilities, not to keep patching the fragment list."""
         assert _family({"name": "gemma4-local:latest"}) == "vision"
 
+    def test_an_embedding_only_model_is_not_chat(self):
+        """The Free & Local recipe picks the first `chat` model; an embedder there
+        would be written as the answer model and fail every query."""
+        assert _family({"name": "nomic-embed-text:latest", "capabilities": ["embedding"]}) == (
+            "embedding"
+        )
+
     def test_a_name_with_no_capabilities_and_no_match_is_chat(self):
         assert _family({"name": "qwen-coder-local:latest"}) == "chat"
         assert _family({}) == "chat"

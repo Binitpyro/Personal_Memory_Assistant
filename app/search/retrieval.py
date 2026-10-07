@@ -77,6 +77,20 @@ def clear_retrieval_cache():
     logger.info("Retrieval + RAG response caches cleared (generation=%d).", _index_generation)
 
 
+async def clear_all_query_caches(lancedb_client) -> None:
+    """`clear_retrieval_cache()` plus the persistent LanceDB `query_cache` table.
+
+    That table holds verbatim question and answer text and is served for any
+    similar query, so an answer quoting a re-indexed or deleted file outlived the
+    file. Failure is logged, never raised: the cache must not fail an index run.
+    """
+    clear_retrieval_cache()
+    try:
+        await lancedb_client.clear_query_cache()
+    except Exception as exc:
+        logger.warning("Persistent semantic query cache not cleared: %s", exc)
+
+
 async def _append_latest_files(lines: list[str], db: DatabaseManager):
     rows = await db.execute_query(
         "SELECT path, modified_at FROM files ORDER BY modified_at DESC LIMIT 5"
@@ -1756,7 +1770,7 @@ async def stream_rag(
 
     # Phase 5: Personal Pattern Annotator
     pattern_annotations = []
-    if not stream_failed:
+    if settings.pattern_annotator_enabled and not stream_failed:
         try:
             annotation_query = "Extract patterns"
             annotation_context = (

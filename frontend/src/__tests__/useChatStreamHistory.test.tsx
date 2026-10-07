@@ -47,4 +47,27 @@ describe('useChatStream history payload', () => {
     // (3) clipped by code points, not UTF-16 units (no split surrogate).
     expect(Array.from(last.at(-1)!.content)).toHaveLength(10_000);
   });
+
+  it('stores a stream error and its code on the assistant message it belongs to', async () => {
+    vi.mocked(subscribeQuery).mockImplementation(((_p: unknown, cb: (c: unknown) => void) => {
+      queueMicrotask(() => {
+        cb({ type: 'content', text: 'partial' });
+        cb({ type: 'error', text: 'boom', code: 'empty_answer' });
+      });
+      return () => {};
+    }) as never);
+
+    const { result } = renderHook(() => useChatStream(() => {}));
+    await act(async () => {
+      await result.current.executeSearch('q', {}).catch(() => {});
+    });
+
+    const assistant = result.current.messages.at(-1)!;
+    expect(assistant.role).toBe('assistant');
+    expect(assistant.isStreaming).toBe(false);
+    expect(assistant.error).toEqual({ text: 'boom', code: 'empty_answer' });
+    // Tokens still held by the 50 ms throttle are landed before the error.
+    expect(assistant.content).toBe('partial');
+    expect(result.current.messages.filter(m => m.role === 'user').every(m => !m.error)).toBe(true);
+  });
 });

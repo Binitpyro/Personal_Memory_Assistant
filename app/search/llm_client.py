@@ -61,6 +61,13 @@ async def _get_effective_fallback_chain_async() -> list[str]:
 LLM_UNAVAILABLE_PREFIX = "LLM unavailable"
 
 
+def _chain_failure_message(providers_to_try: list, last_error: object) -> str:
+    """Say "All providers in fallback chain failed" only when more than one was tried."""
+    if len(providers_to_try) == 1:
+        return f"{providers_to_try[0][0]} failed: {last_error!s}"
+    return f"All providers in fallback chain failed. Last error: {last_error!s}"
+
+
 class ProviderNotConfiguredError(Exception):
     """Raised when no active LLM provider can be resolved.
 
@@ -610,7 +617,9 @@ Answer:
                 attempt += 1
 
         if last_error:
-            return f"{LLM_UNAVAILABLE_PREFIX}: All providers in fallback chain failed. Last error: {last_error!s}"
+            return (
+                f"{LLM_UNAVAILABLE_PREFIX}: {_chain_failure_message(providers_to_try, last_error)}"
+            )
         return f"{LLM_UNAVAILABLE_PREFIX}: No providers configured."
 
     async def generate_raw(
@@ -660,7 +669,7 @@ Answer:
                 attempt += 1
 
         if last_error:
-            return f"LLM unavailable: All providers in fallback chain failed. Last error: {last_error!s}"
+            return f"LLM unavailable: {_chain_failure_message(providers_to_try, last_error)}"
         return "LLM unavailable: No providers configured."
 
     async def stream_answer(
@@ -760,7 +769,7 @@ Answer:
                 # model produced and carries no affordance for fixing it. The
                 # retrieval layer turns this into a typed error event.
                 if last_error:
-                    message = f"All providers in fallback chain failed. Last error: {last_error!s}"
+                    message = _chain_failure_message(providers_to_try, last_error)
                     code = getattr(last_error, "code", None)
                 else:
                     message = "No providers configured."

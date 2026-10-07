@@ -377,6 +377,13 @@ class LanceDBClient:
                     f"'{doc_id.replace(chr(39), chr(39) + chr(39))}'" for doc_id in ids
                 )
                 tbl.delete(f"id IN ({id_list})")
+                # Every removal of chunks (folder removal, a changed file's old
+                # rows, OCR re-index) leaves cached answers quoting text that no
+                # longer exists. A failure here must not fail the delete.
+                try:
+                    self._drop_query_cache()
+                except Exception as exc:
+                    logger.warning("query_cache not dropped after delete: %s", exc)
 
         await loop.run_in_executor(None, _delete)
 
@@ -585,12 +592,17 @@ class LanceDBClient:
 
         def _drop():
             with self._write_lock:
-                if "query_cache" in _list_tables(db):
-                    db.drop_table("query_cache")
-                self._table_cache.pop("query_cache", None)
+                self._drop_query_cache()
 
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, _drop)
+
+    def _drop_query_cache(self) -> None:
+        """Drop the `query_cache` table. Caller holds ``_write_lock``."""
+        db = self.db
+        if db is not None and "query_cache" in _list_tables(db):
+            db.drop_table("query_cache")
+        self._table_cache.pop("query_cache", None)
 
     async def create_hnsw_index(self, table_name: str = "pma_chunks") -> None:
         """Create HNSW index on the vector column of the specified table."""

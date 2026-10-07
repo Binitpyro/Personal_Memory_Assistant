@@ -114,6 +114,30 @@ async def test_indexing_endpoints_lifecycle(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("url", "body"),
+    [("/api/index/folder/remove", {"folders": ["C:/gone"]}), ("/api/index/clear", None)],
+    ids=["folder-remove", "clear"],
+)
+async def test_removing_indexed_content_clears_in_process_answer_caches(
+    client: AsyncClient, mock_lancedb, url, body
+):
+    """A cached RAG answer quoting a removed folder must not outlive it."""
+    from app.search import retrieval
+
+    mock_lancedb.clear_all = AsyncMock()
+    mock_lancedb.delete_documents = AsyncMock()
+    retrieval._rag_response_cache[("q", None, None, None, -1)] = {"answer": "stale"}
+    before = retrieval._index_generation
+
+    response = await client.post(url, json=body) if body else await client.post(url)
+
+    assert response.status_code == 200
+    assert retrieval._index_generation > before
+    assert not retrieval._rag_response_cache
+
+
+@pytest.mark.asyncio
 async def test_indexing_blocked_and_invalid_folders(client: AsyncClient):
     # System path (should be blocked)
     blocked_path = "C:\\Windows\\System32"

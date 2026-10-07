@@ -297,7 +297,7 @@ async def compact_status():
 
 
 @router.post("/system/clear-cache")
-async def clear_cache():
+async def clear_cache(lancedb_client=Depends(get_lancedb)):
     try:
         from app.state import file_tree_cache as _file_tree_cache
         from app.state import insights_cache as _insights_cache
@@ -306,9 +306,9 @@ async def clear_cache():
     except ImportError:
         pass
 
-    from app.search.retrieval import clear_retrieval_cache
+    from app.search.retrieval import clear_all_query_caches
 
-    clear_retrieval_cache()
+    await clear_all_query_caches(lancedb_client)
     return {"message": "Caches cleared."}
 
 

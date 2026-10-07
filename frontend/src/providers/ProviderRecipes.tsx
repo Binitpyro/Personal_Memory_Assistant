@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { setProviderSettings, setLLMPreferences, getLLMPreferences } from '../api';
+import { setProviderSettings, setLLMPreferences, getLLMPreferences, validateProvider } from '../api';
 import { invalidateCache } from '../useApi';
 import { CACHE_KEYS } from '../cacheKeys'
 import { Panel } from '../components/ui';
@@ -14,27 +14,55 @@ export function ProviderRecipes({
   );
   const [applying, setApplying] = useState<string | null>(null);
   const [applyError, setApplyError] = useState<string | null>(null);
+  // Installed chat models offered by "Free & Local"; null until it is clicked.
+  const [localModels, setLocalModels] = useState<string[] | null>(null);
+  const [localChoice, setLocalChoice] = useState('');
 
   if (isDismissed) return null;
 
-  const handleApply = async (id: string, fallback: string[], defaultModel: { provider: string; model: string }) => {
+  const handleApply = async (
+    id: string,
+    fallback: string[],
+    defaultModel: { provider: string; model: string | null },
+    chosen?: string,
+  ) => {
     setApplying(id);
     setApplyError(null);
     try {
+      const currentPrefs = await getLLMPreferences();
+      // A null model means "whatever is installed": the first click lists it and
+      // writes nothing, so the user picks before settings change.
+      const model = defaultModel.model ?? chosen ?? null;
+      if (model === null) {
+        // family === 'chat' comes from the provider's reported capabilities, not
+        // the name. Preselect the user's saved pick if it is still installed.
+        const installed = await validateProvider(defaultModel.provider, {})
+          .then(r => (r.ok ? r.models : []))
+          .catch(() => [])
+          .then(ms => ms.filter(m => m.family === 'chat').map(m => m.id));
+        if (installed.length === 0) {
+          setLocalModels(null);
+          throw new Error('No local models found. Install one in Ollama or LM Studio, then try again.');
+        }
+        const saved = currentPrefs[`${defaultModel.provider}_model`];
+        setLocalChoice(installed.includes(saved) ? saved : installed[0]);
+        setLocalModels(installed);
+        return;
+      }
+
       // 1. Update routing fallback chain
       await setProviderSettings({ provider: defaultModel.provider, fallback_chain: fallback });
 
-      // Fetch latest prefs
-      const currentPrefs = await getLLMPreferences();
       // 2. Set default model
       await setLLMPreferences({
         ...currentPrefs,
         provider: defaultModel.provider as any,
-        [`${defaultModel.provider}_model`]: defaultModel.model,
+        [`${defaultModel.provider}_model`]: model,
       });
 
       invalidateCache(CACHE_KEYS.providerSettings);
       invalidateCache(CACHE_KEYS.llmPreferences);
+      setLocalModels(null);
       onRecipeApplied();
     } catch (e: any) {
       setApplyError(e.message || 'Failed to apply recipe');
@@ -58,8 +86,8 @@ export function ProviderRecipes({
       id: 'local',
       title: 'Free & Local',
       desc: '100% private. Runs entirely on your machine.',
-      fallback: ['ollama', 'lmstudio'],
-      defaultModel: { provider: 'ollama', model: 'llama3:8b' }
+      fallback: ['ollama', 'lm_studio'],
+      defaultModel: { provider: 'ollama', model: null }
     },
     {
       id: 'quality',
@@ -122,6 +150,33 @@ export function ProviderRecipes({
           )
         })}
       </div>
+      {localModels && (
+        // Same native select as Settings > Model Selection.
+        <div className="mt-3 flex flex-col sm:flex-row gap-3 sm:items-end">
+          <label className="text-sm text-text-secondary flex flex-col gap-1 w-full sm:w-64">
+            Local model
+            <select
+              value={localChoice}
+              onChange={e => setLocalChoice(e.target.value)}
+              className="bg-raised border border-rule rounded-lg px-3 py-2 text-text-primary"
+            >
+              {localModels.map(m => (
+                <option key={m} value={m}>{m}</option>
+              ))}
+            </select>
+          </label>
+          <button
+            disabled={applying !== null}
+            onClick={() => {
+              const local = recipes.find(r => r.id === 'local')!;
+              handleApply(local.id, local.fallback, local.defaultModel, localChoice);
+            }}
+            className="glass-button !bg-plate !text-on-plate hover:!bg-plate !py-2 !px-4 disabled:opacity-50"
+          >
+            Use this model
+          </button>
+        </div>
+      )}
       {applyError && (
         // `danger` aliases `--pma-error`, so the colour was right; `error` is the
         // canonical name. The 5%-alpha fill is gone — invisible tints are what

@@ -766,9 +766,9 @@ class IndexingService:
                 logger.error("Failed to index file summaries: %s", e, exc_info=True)
 
             await self._generate_folder_profiles(all_files, unique_folders)
-            from app.search.retrieval import clear_retrieval_cache
+            from app.search.retrieval import clear_all_query_caches
 
-            clear_retrieval_cache()
+            await clear_all_query_caches(self.lancedb_client)
 
             # Create/update HNSW index at the end of the ingestion run.
             # pma_summaries is searched once per query (the document-routing
@@ -1798,9 +1798,9 @@ class IndexingService:
             await self._flush_pending_chunks_lancedb(l_ids, l_embs, l_metas)
 
         try:
-            from app.search.retrieval import clear_retrieval_cache
+            from app.search.retrieval import clear_all_query_caches
 
-            clear_retrieval_cache()
+            await clear_all_query_caches(self.lancedb_client)
         except Exception as exc:
             logger.debug("Could not clear retrieval cache after OCR: %s", exc)
 

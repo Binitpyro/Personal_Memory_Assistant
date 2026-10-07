@@ -1,5 +1,4 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { Link } from 'react-router-dom';
 import { toast } from 'sonner';
 import { useApi, invalidateCache } from '../useApi';
 import { getQueryHistory, clearQueryHistory, getFileTree, subscribeProgress, type HistoryItem } from '../api';
@@ -24,19 +23,12 @@ import { CACHE_KEYS } from '../cacheKeys'
  * pane keeps the whole conversation, so a follow-up keeps its visible
  * context; Frames and Receipt follow the latest answer.
  */
-const ERROR_SENTENCES: Record<string, string> = {
-  context_overflow: "The question plus its sources is too long for this model's context. Narrow the folder/type filter, or load the model with a larger context.",
-  empty_answer: 'The model returned an empty reply. Try again or pick another model.',
-  local_provider_down: "The local model server isn't running. Start Ollama/LM Studio and try again.",
-};
-
 export function SearchPage() {
   const selectedChunks = useDreamscapeStore(state => state.selectedChunks);
   const removeChunk = useDreamscapeStore(state => state.removeChunk);
   const clearChunks = useDreamscapeStore(state => state.clearChunks);
 
   const [question, setQuestion] = useState('');
-  const [error, setError] = useState<{ text: string; code?: string } | null>(null);
   const [showHistory, setShowHistory] = useState(false);
   const [selectedFileType, setSelectedFileType] = useState('');
   const [selectedFolderTag, setSelectedFolderTag] = useState('');
@@ -99,7 +91,6 @@ export function SearchPage() {
     if (!userMsg || isSearching) return;
 
     if (!overrideQuestion) setQuestion('');
-    setError(null);
 
     try {
       await executeSearch(userMsg, {
@@ -110,11 +101,9 @@ export function SearchPage() {
         selected_chunk_ids: selectedChunks.map(c => c.id),
         isRetry: !!overrideQuestion || !!forcedChunkId
       });
-    } catch (err) {
-      setError({
-        text: err instanceof Error ? err.message : 'Search failed',
-        code: (err as Error & { code?: string })?.code,
-      });
+    } catch {
+      // A failed stream is stored on its assistant message by useChatStream and
+      // rendered inside that bubble; there is no separate banner to feed.
     }
   }, [question, isSearching, executeSearch, selectedFileType, selectedFolderTag, selectedMode, messages, selectedChunks]);
 
@@ -150,7 +139,6 @@ export function SearchPage() {
   const resetChat = () => {
     resetChatStream();
     setQuestion('');
-    setError(null);
   };
 
   const folderOptions = Object.keys(fileTree?.folders ?? {}).sort((a, b) => a.localeCompare(b));
@@ -268,27 +256,8 @@ export function SearchPage() {
             </span>
           </div>
 
-          {(error || selectedChunks.length > 0) && (
+          {selectedChunks.length > 0 && (
             <div className="flex flex-col gap-3 px-11 pt-5">
-              {error && (
-                // A fault: fog, a title, what still worked.
-                <div className="flex items-start justify-between gap-3 border border-warning p-3 text-sm" role="alert">
-                  <span>
-                    <span className="block font-mono text-[10.5px] font-semibold tracking-[.12em] uppercase text-warning mb-1">
-                      <span aria-hidden>■ </span>{messages.at(-1)?.content.trim() ? 'Answer cut short' : 'No answer written'}
-                    </span>
-                    {(error.code && ERROR_SENTENCES[error.code]) || error.text}
-                  </span>
-                  <span className="flex items-center gap-3 shrink-0">
-                    {error.code === 'cloud_consent_required' && (
-                      <Link to="/settings/providers#cloud-consent" className="underline underline-offset-4 font-semibold">
-                        Review cloud settings
-                      </Link>
-                    )}
-                    <button type="button" onClick={() => setError(null)} aria-label="Dismiss" className="tap-24 opacity-70 hover:opacity-100">✕</button>
-                  </span>
-                </div>
-              )}
               {selectedChunks.length > 0 && (
                 <div className="flex flex-wrap gap-2 items-center">
                   <span className="font-mono text-[10px] uppercase tracking-[.12em] text-text-tertiary">Context</span>

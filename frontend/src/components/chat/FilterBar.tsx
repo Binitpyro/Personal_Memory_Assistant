@@ -63,7 +63,6 @@ export function FilterBar({
         <option value="verify">Verify</option>
         <option value="explore">Explore</option>
         <option value="distill">Distill</option>
-        <option value="challenge">Challenge</option>
       </select>
       {(selectedFileType || selectedFolderTag || selectedMode) && (
         <button

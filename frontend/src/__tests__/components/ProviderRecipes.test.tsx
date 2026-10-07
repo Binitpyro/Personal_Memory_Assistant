@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { ProviderRecipes } from '../../providers/ProviderRecipes';
-import { setProviderSettings, setLLMPreferences, getLLMPreferences } from '../../api';
+import { setProviderSettings, setLLMPreferences, getLLMPreferences, validateProvider } from '../../api';
 
 /**
  * First coverage for this component.
@@ -20,6 +20,7 @@ vi.mock('../../api', () => ({
   setProviderSettings: vi.fn(() => Promise.resolve({})),
   setLLMPreferences: vi.fn(() => Promise.resolve({})),
   getLLMPreferences: vi.fn(() => Promise.resolve({ provider: 'ollama' })),
+  validateProvider: vi.fn(),
 }));
 
 vi.mock('../../useApi', () => ({
@@ -71,6 +72,106 @@ describe('ProviderRecipes', () => {
     // A half-applied recipe must not report success.
     expect(onApplied).not.toHaveBeenCalled();
     expect(setLLMPreferences).not.toHaveBeenCalled();
+  });
+
+  describe('Free & Local', () => {
+    const models = (...ids: [string, string][]) =>
+      ids.map(([id, family]) => ({ id, family, context_length: null, pricing_hint: 0 }));
+    const validation = (ms: ReturnType<typeof models>, ok = true) =>
+      Promise.resolve({ ok, latency_ms: 1, models: ms, error: null, error_code: null, server_time: null });
+
+    /** Click the recipe, wait for the installed-model select, then apply. */
+    const listThenApply = async (onApplied: () => void, pick?: string) => {
+      fireEvent.click(screen.getByText('Free & Local'));
+      const select = (await screen.findByLabelText('Local model')) as HTMLSelectElement;
+      if (pick) fireEvent.change(select, { target: { value: pick } });
+      fireEvent.click(screen.getByRole('button', { name: 'Use this model' }));
+      await waitFor(() => expect(onApplied).toHaveBeenCalled());
+      return select;
+    };
+
+    it('writes the lm_studio id, not lmstudio', async () => {
+      vi.mocked(validateProvider).mockReturnValue(validation(models(['qwen3:4b', 'chat'])));
+      const onApplied = vi.fn();
+      render(<ProviderRecipes onRecipeApplied={onApplied} />);
+
+      await listThenApply(onApplied);
+
+      expect(setProviderSettings).toHaveBeenCalledWith({
+        provider: 'ollama',
+        fallback_chain: ['ollama', 'lm_studio'],
+      });
+    });
+
+    it('lists only installed chat models and writes nothing until one is chosen', async () => {
+      vi.mocked(validateProvider).mockReturnValue(
+        validation(models(['glm-ocr', 'vision'], ['nomic-embed-text', 'embedding'], ['qwen3:4b', 'chat'], ['gemma2:2b', 'chat'])),
+      );
+      const onApplied = vi.fn();
+      render(<ProviderRecipes onRecipeApplied={onApplied} />);
+
+      fireEvent.click(screen.getByText('Free & Local'));
+      const select = (await screen.findByLabelText('Local model')) as HTMLSelectElement;
+
+      expect(validateProvider).toHaveBeenCalledWith('ollama', {});
+      expect([...select.options].map(o => o.value)).toEqual(['qwen3:4b', 'gemma2:2b']);
+      expect(select.value).toBe('qwen3:4b');
+      expect(setProviderSettings).not.toHaveBeenCalled();
+      expect(setLLMPreferences).not.toHaveBeenCalled();
+    });
+
+    it('writes the model the user picked', async () => {
+      vi.mocked(validateProvider).mockReturnValue(
+        validation(models(['qwen3:4b', 'chat'], ['gemma2:2b', 'chat'])),
+      );
+      const onApplied = vi.fn();
+      render(<ProviderRecipes onRecipeApplied={onApplied} />);
+
+      await listThenApply(onApplied, 'gemma2:2b');
+
+      expect(setLLMPreferences).toHaveBeenCalledWith(
+        expect.objectContaining({ provider: 'ollama', ollama_model: 'gemma2:2b' }),
+      );
+      expect(screen.queryByLabelText('Local model')).toBeNull();
+    });
+
+    it('preselects the saved model when it is still installed', async () => {
+      const saved = { provider: 'ollama', ollama_model: 'gemma2:2b' };
+      // Read once to list, once to apply.
+      vi.mocked(getLLMPreferences).mockResolvedValueOnce(saved).mockResolvedValueOnce(saved);
+      vi.mocked(validateProvider).mockReturnValue(
+        validation(models(['qwen3:4b', 'chat'], ['gemma2:2b', 'chat'])),
+      );
+      const onApplied = vi.fn();
+      render(<ProviderRecipes onRecipeApplied={onApplied} />);
+
+      const select = await listThenApply(onApplied);
+
+      expect(select.value).toBe('gemma2:2b');
+      expect(setLLMPreferences).toHaveBeenCalledWith(
+        expect.objectContaining({ ollama_model: 'gemma2:2b' }),
+      );
+    });
+
+    it.each([
+      ['no models installed', () => validation([])],
+      ['only a vision model', () => validation(models(['glm-ocr', 'vision']))],
+      ['Ollama reports not ok', () => validation(models(['qwen3:4b', 'chat']), false)],
+      ['Ollama unreachable', () => Promise.reject(new Error('Failed to fetch'))],
+    ])('writes nothing and says so when %s', async (_name, result) => {
+      vi.mocked(validateProvider).mockImplementation(result as () => ReturnType<typeof validateProvider>);
+      const onApplied = vi.fn();
+      render(<ProviderRecipes onRecipeApplied={onApplied} />);
+
+      fireEvent.click(screen.getByText('Free & Local'));
+
+      expect(
+        await screen.findByText(/no local models found\. install one in ollama or lm studio/i),
+      ).toBeDefined();
+      expect(setProviderSettings).not.toHaveBeenCalled();
+      expect(setLLMPreferences).not.toHaveBeenCalled();
+      expect(onApplied).not.toHaveBeenCalled();
+    });
   });
 
   it('dismisses, and stays dismissed across a remount', () => {

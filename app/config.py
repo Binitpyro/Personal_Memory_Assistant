@@ -726,6 +726,13 @@ class Settings(BaseSettings):
     # long answer is legitimately slow.
     query_stream_timeout_s: int = 180
 
+    # ── Pattern annotator ────────────────────────────────────────────────────
+    # After the answer, stream_rag can make a SECOND full LLM call to pull out
+    # "patterns" as chips. Measured: +3.6 s (gemma2), +16 s (gemma4), +17 s (LM
+    # Studio) per query, doubles cloud calls (Gemini 429 after 12 calls in 15 s),
+    # and gemma4 refused in 7 of 20. Off by default; PMA_PATTERN_ANNOTATOR_ENABLED.
+    pattern_annotator_enabled: bool = False
+
     # ── Source-balanced fusion ───────────────────────────────────────────────
     # Allocate the result window across folder_tag domains rather than taking a
     # single global ranking. Without this a lexically dense corpus floods every

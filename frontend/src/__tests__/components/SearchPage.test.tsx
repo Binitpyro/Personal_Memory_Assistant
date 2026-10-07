@@ -83,40 +83,50 @@ describe('SearchPage Component', () => {
 
     expect(mockExecuteSearch).toHaveBeenCalledWith('How does LinearBVH work?', expect.any(Object));
   });
-  describe('failed-answer banner', () => {
-    async function failWith(code: string | undefined, messages: unknown[]) {
+  describe('failed answer, rendered inside its bubble', () => {
+    // The error now lives on the assistant message (useChatStream stores it),
+    // so these render the page with such a message rather than rejecting
+    // executeSearch. There is no separate banner to find.
+    function renderFailed(code: string | undefined, content: string) {
       vi.mocked(useChatStream).mockReturnValue({
-        messages,
+        messages: [
+          { id: 'u', role: 'user', content: 'q' },
+          { id: 'a', role: 'assistant', content, error: { text: 'raw provider text', code } },
+        ],
         executeSearch: mockExecuteSearch,
         resetChat: mockResetChat,
       } as any);
-      mockExecuteSearch.mockRejectedValueOnce(Object.assign(new Error('raw provider text'), { code }));
       renderWithProviders(<SearchPage />);
-      fireEvent.change(screen.getByPlaceholderText('Ask a follow-up or a new question...'), { target: { value: 'q' } });
-      fireEvent.click(screen.getByRole('button', { name: /send question/i }));
-      return await screen.findByRole('alert');
+      return screen.getByRole('alert');
     }
+
+    it('shows the error in the conversation log, not in a banner above it', () => {
+      const alert = renderFailed('empty_answer', '');
+      expect(screen.getByRole('log', { name: 'Conversation' }).contains(alert)).toBe(true);
+      expect(screen.getAllByRole('alert')).toHaveLength(1);
+    });
 
     it.each([
       ['context_overflow', "The question plus its sources is too long for this model's context. Narrow the folder/type filter, or load the model with a larger context."],
       ['empty_answer', 'The model returned an empty reply. Try again or pick another model.'],
       ['local_provider_down', "The local model server isn't running. Start Ollama/LM Studio and try again."],
-    ])('maps %s to one plain sentence', async (code, sentence) => {
-      const alert = await failWith(code, []);
+    ])('maps %s to one plain sentence', (code, sentence) => {
+      const alert = renderFailed(code, '');
       expect(alert.textContent).toContain(sentence);
       expect(alert.textContent).not.toContain('raw provider text');
     });
 
-    it('titles a failed turn with no content "No answer written"', async () => {
-      const alert = await failWith(undefined, [{ id: 'a', role: 'assistant', content: '   ' }]);
+    it('titles a failed turn with no content "No answer written"', () => {
+      const alert = renderFailed(undefined, '   ');
       expect(alert.textContent).toContain('No answer written');
       expect(alert.textContent).toContain('raw provider text');
     });
 
-    it('titles a failed turn that already has content "Answer cut short"', async () => {
-      const alert = await failWith('empty_answer', [{ id: 'a', role: 'assistant', content: 'partial answer' }]);
+    it('titles a failed turn that already has content "Answer cut short"', () => {
+      const alert = renderFailed('empty_answer', 'partial answer');
       expect(alert.textContent).toContain('Answer cut short');
       expect(alert.textContent).not.toContain('No answer written');
+      expect(screen.getByText('partial answer')).toBeDefined();
     });
   });
 });

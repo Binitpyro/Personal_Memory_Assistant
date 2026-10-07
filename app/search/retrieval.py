@@ -7,6 +7,7 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import AsyncGenerator
+from contextlib import aclosing
 from pathlib import Path
 from typing import Any, cast
 
@@ -26,7 +27,7 @@ from app.search.context_builder import (
     append_project_profile_lines,
     build_context,
 )
-from app.search.llm_client import LLMClient
+from app.search.llm_client import LLM_UNAVAILABLE_PREFIX, LLMClient
 from app.search.planner import PlanMode, QueryPlanner
 from app.search.reranker import RerankerFailedError, RerankerNotInstalledError, rerank
 from app.storage.db import DatabaseManager
@@ -1328,6 +1329,9 @@ async def full_rag(
                 "Please try again."
             )
             _llm_error = True
+    # generate_answer reports a dead chain as prose, not an exception.
+    if answer.startswith(LLM_UNAVAILABLE_PREFIX):
+        _llm_error = True
     llm_ms = round((time.perf_counter() - t_llm) * 1000, 1)
 
     total_ms = round((time.perf_counter() - t_start) * 1000, 1)
@@ -1692,65 +1696,85 @@ async def stream_rag(
     )
 
     full_answer = ""
+    stream_failed = False
     with Timer("llm_generation"):
-        async for chunk in llm_client.stream_answer(
-            query,
-            context,
-            history=history,
-            mode=mode,
-            override_provider=override_provider,
-            override_model=override_model,
-        ):
-            if chunk.startswith('{"control":'):
-                try:
-                    control_data = json.loads(chunk)
-                    ctrl_type = control_data.get("control")
-                    if ctrl_type == "fallback":
-                        yield {"type": "fallback", "to": control_data.get("to")}
-                    elif ctrl_type == "usage":
-                        yield {
-                            "type": "usage",
-                            "prompt_tokens": control_data.get("prompt_tokens"),
-                            "completion_tokens": control_data.get("completion_tokens"),
-                        }
-                    elif ctrl_type == "provider_error":
-                        # Chain exhausted. Surfaced as a typed error so the UI
-                        # can offer the matching remedy - a consent failure is
-                        # one click from fixable - instead of printing the
-                        # message into the answer body.
-                        yield {
-                            "type": "error",
-                            "text": control_data.get("message", "Provider unavailable."),
-                            "code": control_data.get("code"),
-                        }
-                except Exception:
-                    # Fallback to normal text if JSON fails to parse
+        async with aclosing(
+            llm_client.stream_answer(
+                query,
+                context,
+                history=history,
+                mode=mode,
+                override_provider=override_provider,
+                override_model=override_model,
+            )
+        ) as stream:
+            async for chunk in stream:
+                if chunk.startswith('{"control":'):
+                    try:
+                        control_data = json.loads(chunk)
+                        ctrl_type = control_data.get("control")
+                        if ctrl_type == "fallback":
+                            yield {"type": "fallback", "to": control_data.get("to")}
+                        elif ctrl_type == "usage":
+                            yield {
+                                "type": "usage",
+                                "prompt_tokens": control_data.get("prompt_tokens"),
+                                "completion_tokens": control_data.get("completion_tokens"),
+                            }
+                        elif ctrl_type == "provider_error":
+                            # Chain exhausted. Surfaced as a typed error so the UI
+                            # can offer the matching remedy - a consent failure is
+                            # one click from fixable - instead of printing the
+                            # message into the answer body.
+                            yield {
+                                "type": "error",
+                                "text": control_data.get("message", "Provider unavailable."),
+                                "code": control_data.get("code"),
+                            }
+                            # Nothing after this is an answer: stop reading,
+                            # and the annotator and the cache are skipped below.
+                            stream_failed = True
+                            break
+                    except Exception:
+                        # Fallback to normal text if JSON fails to parse
+                        full_answer += chunk
+                        yield {"type": "content", "text": chunk}
+                else:
                     full_answer += chunk
                     yield {"type": "content", "text": chunk}
-            else:
-                full_answer += chunk
-                yield {"type": "content", "text": chunk}
+
+    if not full_answer.strip():
+        # Nothing to annotate, cache or save. A provider_error already told the
+        # user why; a clean-but-blank stream has not.
+        if not stream_failed:
+            yield {
+                "type": "error",
+                "text": "The model returned an empty reply.",
+                "code": "empty_answer",
+            }
+        return
 
     # Phase 5: Personal Pattern Annotator
     pattern_annotations = []
-    try:
-        annotation_query = "Extract patterns"
-        annotation_context = (
-            f"Identify 1 to 3 coding/writing patterns or stylistic technical decisions from this answer:\n"
-            f"{full_answer}\n"
-            "Return them as a simple comma-separated list."
-        )
-        annotations_raw = await llm_client.generate_answer(
-            annotation_query,
-            annotation_context,
-            override_provider=override_provider,
-            override_model=override_model,
-        )
+    if not stream_failed:
+        try:
+            annotation_query = "Extract patterns"
+            annotation_context = (
+                f"Identify 1 to 3 coding/writing patterns or stylistic technical decisions from this answer:\n"
+                f"{full_answer}\n"
+                "Return them as a simple comma-separated list."
+            )
+            annotations_raw = await llm_client.generate_answer(
+                annotation_query,
+                annotation_context,
+                override_provider=override_provider,
+                override_model=override_model,
+            )
 
-        if annotations_raw:
-            pattern_annotations = [a.strip() for a in annotations_raw.split(",") if a.strip()]
-    except Exception as e:
-        logger.warning("Pattern annotation failed: %s", e)
+            if annotations_raw and not annotations_raw.startswith(LLM_UNAVAILABLE_PREFIX):
+                pattern_annotations = [a.strip() for a in annotations_raw.split(",") if a.strip()]
+        except Exception as e:
+            logger.warning("Pattern annotation failed: %s", e)
 
     if pattern_annotations:
         yield {
@@ -1777,8 +1801,8 @@ async def stream_rag(
         state.bg_tasks.add(telemetry_task)
         telemetry_task.add_done_callback(state.bg_tasks.discard)
 
-        # Phase 7: Add to persistent semantic cache
-        if not history and query_emb is not None:
+        # Phase 7: Add to persistent semantic cache (never a failed turn's partial)
+        if not history and query_emb is not None and not stream_failed:
             import numpy as np
 
             task = asyncio.create_task(
@@ -1819,7 +1843,7 @@ async def stream_rag(
                 state.bg_tasks.add(telemetry_task)
                 telemetry_task.add_done_callback(state.bg_tasks.discard)
 
-                if not history and query_emb is not None:
+                if not history and query_emb is not None and not stream_failed:
                     import numpy as np
 
                     await lancedb_client.add_query_cache(
@@ -1832,6 +1856,8 @@ async def stream_rag(
         except Exception:  # nosec B110
             pass
 
+    if stream_failed:
+        return
     if graph_paths_text:
         yield {"type": "done", "graph_hops": graph_paths_text}
 

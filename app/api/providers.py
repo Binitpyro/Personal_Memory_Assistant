@@ -7,6 +7,7 @@ import keyring
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict
 
+from app.api.deps import get_llm
 from app.api.models import PRIVACY_NOTICE
 from app.config import settings
 from app.providers import (
@@ -147,6 +148,8 @@ async def update_llm_settings(payload: LLMGeneralSettingsPayload):
         consent = payload.cloud_privacy_consent
 
     if payload.provider is not None:
+        if payload.provider not in ("auto", *PROVIDER_IDS):
+            raise HTTPException(status_code=400, detail=f"Unknown provider: {payload.provider}")
         gated_selection = (
             payload.provider in PROVIDER_REGISTRY
             and PROVIDER_REGISTRY[payload.provider].kind in _GATED_PROVIDER_KINDS
@@ -265,6 +268,22 @@ async def validate_provider(provider_id: str, payload: ValidatePayload) -> Valid
     data = migrate_settings_if_needed(data)
     per_provider = data.get("llm", {}).get("per_provider", {})
     provider_settings = per_provider.get(provider_id, {})
+
+    spec = PROVIDER_REGISTRY[provider_id]
+    if base_url is not None and not spec.base_url_editable:
+        # The stored key must not follow a caller-supplied URL to another host.
+        # The UI always echoes the effective URL, so only a different one is refused.
+        effective = (
+            provider_settings.get("base_url")
+            or env_base_url(provider_id)
+            or spec.default_base_url
+            or ""
+        )
+        if base_url.strip().rstrip("/").lower() != effective.strip().rstrip("/").lower():
+            raise HTTPException(
+                status_code=400,
+                detail=f"The base URL for {provider_id} is fixed and cannot be changed.",
+            )
 
     if base_url is None:
         base_url = provider_settings.get("base_url") or env_base_url(provider_id)
@@ -407,6 +426,12 @@ async def set_provider_key(provider_id: str, payload: SetKeyPayload):
             raise HTTPException(
                 status_code=500, detail=f"Failed to write to OS keyring: {e!s}"
             ) from e
+        # The running client caches keys from first use; without this the old
+        # key keeps being sent until restart.
+        llm = get_llm()
+        llm.provider_keys[provider_id] = payload.api_key
+        if provider_id == "gemini":
+            llm.api_key = payload.api_key
 
     if payload.base_url is not None:
         spec = PROVIDER_REGISTRY[provider_id]
@@ -440,6 +465,11 @@ async def delete_provider_key(provider_id: str):
         await asyncio.to_thread(keyring.delete_password, "pma_backend", provider_id)
     except Exception as e:
         logger.debug("Failed to delete key for %s from keyring: %s", provider_id, e)
+
+    llm = get_llm()
+    llm.provider_keys.pop(provider_id, None)
+    if provider_id == "gemini":
+        llm.api_key = None
 
     validation_cache.clear()
     return {"status": "success"}

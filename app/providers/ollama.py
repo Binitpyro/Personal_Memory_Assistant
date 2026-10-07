@@ -6,7 +6,7 @@ from typing import Any, cast
 
 import httpx
 
-from app.providers.base import ModelInfo, ValidationResult
+from app.providers.base import ModelInfo, ValidationResult, stream_error_for
 from app.providers.cache import validation_cache
 from app.providers.registry import spec_of
 
@@ -106,6 +106,70 @@ def _required_num_ctx(messages: list[dict[str, Any]], max_tokens: int) -> int:
     """
     chars = sum(len(str(m.get("content") or "")) for m in messages)
     return chars // _CHARS_PER_TOKEN + max_tokens + _NUM_CTX_HEADROOM
+
+
+# Ollama reloads the model on ANY num_ctx change (measured ~4 s gemma2, ~7.8 s
+# gemma4 per call), and `_required_num_ctx` differs on every request, so answer
+# and annotator calls each reloaded. Sizes are therefore bucketed to 8192 and a
+# per-(server, model) high-water mark keeps later, smaller requests on the window
+# already loaded. The mark is capped (a 7b ceiling of 10,000 + 4096 + 256) so one
+# oversized request cannot ratchet VRAM up for everyone; such a request is sent at
+# its own bucket and never raises the mark. Process-local, bounded to 64 keys.
+_NUM_CTX_HW: dict[tuple[str, str], int] = {}
+_HW_CAP = 16384
+_HW_MAX_KEYS = 64
+_BUCKET = 8192
+# Keys already warned about a num_ctx above the model's reported window (F5b).
+_NUM_CTX_WARNED: set[tuple[str, str]] = set()
+
+
+def _warn_if_over_window(key: tuple[str, str], num_ctx: int) -> None:
+    """One WARNING per (server, model) when num_ctx exceeds its reported window.
+
+    Ollama clamps to the model's window, so the prompt tail may be silently
+    truncated. Reads the in-memory heap `validate()` fills; silent when the model
+    was never validated (unknown window).
+    """
+    if key in _NUM_CTX_WARNED:
+        return
+    model = key[1]
+    window = next(
+        (
+            m.get("context_length")
+            for m in validation_cache.get_persistent_models("ollama")
+            if m.get("id") in (model, f"{model}:latest")
+        ),
+        None,
+    )
+    if not isinstance(window, int) or num_ctx <= window:
+        return
+    if len(_NUM_CTX_WARNED) < _HW_MAX_KEYS:
+        _NUM_CTX_WARNED.add(key)
+    logger.warning(
+        "Ollama model %s: num_ctx %d exceeds its reported context window %d; the prompt "
+        "may be silently truncated.",
+        model,
+        num_ctx,
+        window,
+    )
+
+
+def _resolve_num_ctx(base_url: str | None, model_name: str, required: int) -> int | None:
+    """The num_ctx to send, or None to leave it at Ollama's default."""
+    key = (base_url or "", model_name)
+    hw = _NUM_CTX_HW.get(key, 0)
+    if required > _OLLAMA_DEFAULT_NUM_CTX:
+        bucketed = -(-required // _BUCKET) * _BUCKET
+        num_ctx = max(bucketed, hw)
+        if hw < bucketed <= _HW_CAP and (key in _NUM_CTX_HW or len(_NUM_CTX_HW) < _HW_MAX_KEYS):
+            _NUM_CTX_HW[key] = bucketed
+            logger.info("Ollama num_ctx high-water for %s raised to %d", model_name, bucketed)
+    elif hw:
+        num_ctx = hw
+    else:
+        return None
+    _warn_if_over_window(key, num_ctx)
+    return num_ctx
 
 
 def _family(item: dict[str, Any]) -> str:
@@ -263,8 +327,10 @@ class OllamaProvider:
         think: bool | None = None,
     ) -> dict[str, Any]:
         options: dict[str, Any] = {"temperature": temperature, "num_predict": max_tokens}
-        num_ctx = _required_num_ctx(messages, max_tokens)
-        if num_ctx > _OLLAMA_DEFAULT_NUM_CTX:
+        num_ctx = _resolve_num_ctx(
+            self.base_url, model_name, _required_num_ctx(messages, max_tokens)
+        )
+        if num_ctx is not None:
             options["num_ctx"] = num_ctx
         payload: dict[str, Any] = {
             "model": model_name,
@@ -377,6 +443,7 @@ class OllamaProvider:
             payload = self._chat_payload(
                 messages, model_name, temperature, max_tokens, stream=True, think=think
             )
+            got_content = False
             async with client.stream("POST", url, json=payload) as resp:
                 resp.raise_for_status()
                 async for line in resp.aiter_lines():
@@ -384,20 +451,32 @@ class OllamaProvider:
                         continue
                     try:
                         parsed = json.loads(line)
+                        err = parsed.get("error")
                         msg = parsed.get("message", {})
                         content = msg.get("content")
-                        if content:
-                            yield content, False
-                        elif msg.get("thinking"):
-                            # Not yielded to the caller - it is reasoning, not an
-                            # answer - but recorded so the retry can be gated on
-                            # having actually seen some.
-                            yield "", True
-                        if parsed.get("done", False):
-                            break
+                        thinking = msg.get("thinking")
+                        done = parsed.get("done", False)
                     except Exception as e:
                         logger.debug("Failed to parse Ollama stream chunk: %s", e)
                         continue
+                    # An in-stream {"error": ...} line: raised outside the try so
+                    # it is not swallowed. After content, end the stream rather
+                    # than let the fallback loop join a second answer onto it.
+                    if err:
+                        if got_content:
+                            logger.warning("Ollama stream error after content: %s", str(err)[:500])
+                            return
+                        raise stream_error_for(err)
+                    if content:
+                        got_content = True
+                        yield content, False
+                    elif thinking:
+                        # Not yielded to the caller - it is reasoning, not an
+                        # answer - but recorded so the retry can be gated on
+                        # having actually seen some.
+                        yield "", True
+                    if done:
+                        break
 
         produced = thought = False
         async for text, is_thinking in _once(None):

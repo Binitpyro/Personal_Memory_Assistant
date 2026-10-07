@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { screen, fireEvent, waitFor } from '@testing-library/react';
 import { ProvidersPage } from '../../pages/ProvidersPage';
 import { renderWithProviders } from '../test-utils';
-import { setProviderKey, deleteProviderKey } from '../../api';
+import { setProviderKey, deleteProviderKey, validateProvider } from '../../api';
 
 // TourOverlay mounts inside this page and scrolls its anchor into view; jsdom
 // does not implement scrollIntoView.
@@ -117,5 +117,35 @@ describe('ProvidersPage connection details', () => {
     fireEvent.click(screen.getByRole('button', { name: /Remove Connection/i }));
 
     expect(deleteProviderKey).not.toHaveBeenCalled();
+  });
+});
+
+describe('ProvidersPage model list', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.providers = [editable];
+  });
+
+  it('renders a model whose context_length is null without crashing', async () => {
+    // LM Studio reports no context window; `null.toLocaleString()` threw and
+    // took the whole page down.
+    vi.mocked(validateProvider).mockResolvedValue({
+      ok: true,
+      latency_ms: 5,
+      models: [
+        { id: 'no-ctx-model', context_length: null, pricing_hint: 0, family: 'text' },
+        { id: 'ctx-model', context_length: 8192, pricing_hint: 0, family: 'text' },
+      ],
+      error: null,
+      error_code: null,
+      server_time: null,
+    } as never);
+    renderWithProviders(<ProvidersPage />);
+    selectProvider();
+    fireEvent.click(screen.getByRole('button', { name: /Test & Validate/i }));
+
+    expect(await screen.findByText('no-ctx-model')).toBeDefined();
+    expect(screen.getByText('8,192 ctx')).toBeDefined();
+    expect(screen.getAllByText(/ctx$/)).toHaveLength(1);
   });
 });

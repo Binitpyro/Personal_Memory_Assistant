@@ -440,6 +440,8 @@ class LanceDBClient:
         scope: str = "|",
     ) -> None:
         """Add a successful RAG response to the persistent semantic cache."""
+        if not response_text.strip():
+            return
         self.connect()
 
         if isinstance(query_emb, list):

@@ -6,7 +6,7 @@ from typing import Any, cast
 
 import httpx
 
-from app.providers.base import ModelInfo, ValidationResult
+from app.providers.base import ModelInfo, ValidationResult, stream_error_for
 from app.providers.cache import validation_cache
 from app.providers.registry import ProviderSpec
 
@@ -297,6 +297,7 @@ class OpenAICompatibleProvider:
             "stream": True,
         }
 
+        got_content = False
         async with client.stream("POST", url, headers=headers, json=payload) as resp:
             resp.raise_for_status()
             async for line in resp.aiter_lines():
@@ -307,9 +308,20 @@ class OpenAICompatibleProvider:
                     break
                 try:
                     parsed = json.loads(payload_str)
+                    err = parsed.get("error")
                     delta = parsed.get("choices", [{}])[0].get("delta", {}).get("content")
-                    if delta:
-                        yield delta
                 except Exception as e:
                     logger.debug("Failed to parse stream chunk: %s", e)
                     continue
+                # An HTTP 200 stream can carry an error object (LM Studio on a
+                # context overflow). Raised outside the try so it is not swallowed:
+                # before content it lets the fallback loop act on it; after content
+                # a fallback would join two answers, so the stream just ends.
+                if err:
+                    if got_content:
+                        logger.warning("Stream error after content: %s", str(err)[:500])
+                        return
+                    raise stream_error_for(err)
+                if delta:
+                    got_content = True
+                    yield delta

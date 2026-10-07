@@ -161,3 +161,62 @@ async def test_vlm_unopenable_pdf_still_reports_per_page(monkeypatch, tmp_path):
     assert err == ""
     assert [p.page_num for p in pages] == [0, 1, 2]
     assert all(p.error == "RASTER_FAILED" for p in pages)
+
+
+class _RecordingProvider:
+    """Stands in for the vision provider and records every request."""
+
+    def __init__(self, calls):
+        self.calls = calls
+
+    async def chat(self, messages, **kwargs):
+        self.calls.append(("chat", kwargs.get("model")))
+        return "hello page"
+
+    async def close(self):
+        pass
+
+
+def _vlm_at(monkeypatch, base_url):
+    from app.ocr import settings as ocr_settings
+
+    calls: list = []
+
+    def fake_create_provider(pid, **kwargs):
+        calls.append(("create", kwargs.get("base_url")))
+        return _RecordingProvider(calls)
+
+    monkeypatch.setattr(
+        ocr_settings, "vlm_selection", lambda: {"provider": "ollama", "model": "glm-ocr"}
+    )
+    monkeypatch.setattr("app.providers.env_base_url", lambda pid: base_url)
+    monkeypatch.setattr("app.providers.create_provider", fake_create_provider)
+    monkeypatch.setattr(
+        "app.settings_store.SettingsStore.read",
+        lambda: {"llm": {"cloud_privacy_consent": False}},
+    )
+    monkeypatch.setattr("app.ocr.vlm_engine.render_page_png", lambda *a: b"\x89PNG")
+    return calls
+
+
+async def test_vlm_refuses_an_off_box_endpoint_without_consent(monkeypatch):
+    """Page images are corpus content; an Ollama aimed at another host must not
+    receive them unless the user opted in, same as LLM dispatch."""
+    from app.ocr.vlm_engine import VlmNotConfiguredError, recognize_page
+
+    calls = _vlm_at(monkeypatch, "http://ocr.example.com:11434")
+
+    with pytest.raises(VlmNotConfiguredError, match="consent"):
+        await recognize_page("doc.pdf", 0)
+    assert calls == [], "no provider may be built or called before consent"
+
+
+async def test_vlm_on_loopback_is_not_refused_without_consent(monkeypatch):
+    from app.ocr.vlm_engine import recognize_page
+
+    calls = _vlm_at(monkeypatch, "http://127.0.0.1:11434")
+
+    page = await recognize_page("doc.pdf", 0)
+    assert page.error is None
+    assert [ln.text for ln in page.lines] == ["hello page"]
+    assert calls == [("create", "http://127.0.0.1:11434"), ("chat", "glm-ocr")]

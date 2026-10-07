@@ -426,6 +426,63 @@ async def test_a_local_provider_on_loopback_is_still_ungated(monkeypatch):
     await provider.close()
 
 
+@pytest.mark.parametrize(
+    ("base_url", "leaves"),
+    [
+        ("https://llm.example.com/v1", True),
+        ("http://192.168.1.50:8080/v1", True),
+        ("http://127.0.0.1:8080/v1", False),
+        ("http://localhost:8080/v1", False),
+        (None, False),
+        ("", False),
+    ],
+)
+def test_openai_compatible_leaves_device_only_when_aimed_off_box(base_url, leaves):
+    """kind="custom" was exempt whatever its URL, so a remote endpoint got the
+    corpus with no consent. Unset is not gated: with no URL nothing can be sent."""
+    from app.search.llm_client import provider_leaves_device
+
+    assert provider_leaves_device("openai_compatible", base_url) is leaves
+
+
+def _custom_settings(base_url: str) -> dict:
+    return {
+        "llm": {
+            "per_provider": {"openai_compatible": {"base_url": base_url}},
+            "cloud_privacy_consent": False,
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_remote_openai_compatible_endpoint_needs_consent(monkeypatch):
+    from app.search.llm_client import ProviderNotConfiguredError
+
+    client = LLMClient()
+    # A key is present, so without the gate this would resolve and dispatch.
+    client.provider_keys["openai_compatible"] = "sk-test"
+    monkeypatch.setattr(
+        "app.search.llm_client.SettingsStore.read",
+        lambda: _custom_settings("https://llm.example.com/v1"),
+    )
+    with pytest.raises(ProviderNotConfiguredError) as exc:
+        await client._resolve_provider_by_id("openai_compatible")
+    assert exc.value.code == "cloud_consent_required"
+
+
+@pytest.mark.asyncio
+async def test_a_loopback_openai_compatible_endpoint_is_ungated(monkeypatch):
+    client = LLMClient()
+    client.provider_keys["openai_compatible"] = "sk-test"
+    monkeypatch.setattr(
+        "app.search.llm_client.SettingsStore.read",
+        lambda: _custom_settings("http://127.0.0.1:8080/v1"),
+    )
+    provider = await client._resolve_provider_by_id("openai_compatible")
+    assert provider is not None
+    await provider.close()
+
+
 class TestEffectiveFallbackChain:
     """`_get_effective_fallback_chain()` decides which providers get tried.
 

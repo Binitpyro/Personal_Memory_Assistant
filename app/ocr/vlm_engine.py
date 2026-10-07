@@ -172,6 +172,8 @@ async def recognize_page(path: str | Path, page_num: int, *, doc=None) -> OcrPag
     from app.providers import create_provider, env_base_url
     from app.providers.registry import PROVIDER_REGISTRY
     from app.providers.vision import build_vision_messages
+    from app.search.llm_client import provider_leaves_device
+    from app.settings_store import SettingsStore
 
     selection = vlm_selection()
     if not selection:
@@ -181,6 +183,19 @@ async def recognize_page(path: str | Path, page_num: int, *, doc=None) -> OcrPag
     spec = PROVIDER_REGISTRY.get(provider_id)
     if spec is None:
         raise VlmNotConfiguredError(f"Unknown provider {provider_id!r}.")
+
+    # Same destination gate as LLM dispatch: page images are corpus content.
+    base_url = env_base_url(provider_id) or spec.default_base_url
+    if provider_leaves_device(provider_id, base_url):
+        try:
+            consent = SettingsStore.read().get("llm", {}).get("cloud_privacy_consent", False)
+        except Exception:
+            consent = False
+        if not consent:
+            raise VlmNotConfiguredError(
+                f"Cloud privacy consent required before sending page images to {provider_id} "
+                "off this machine."
+            )
 
     started = time.time()
     try:
@@ -200,7 +215,7 @@ async def recognize_page(path: str | Path, page_num: int, *, doc=None) -> OcrPag
     provider = create_provider(
         provider_id,
         api_key=None,
-        base_url=env_base_url(provider_id) or spec.default_base_url,
+        base_url=base_url,
         default_model=model,
         timeout=settings.ocr_vlm_request_timeout_s,
     )

@@ -669,9 +669,11 @@ export function ProvidersPage() {
                             <div>
                               <div className="text-xs font-mono tracking-tight">{model.id}</div>
                               <div className="flex items-center gap-2 mt-1.5">
-                                <Badge mono tone="accent">
-                                  {model.context_length.toLocaleString()} ctx
-                                </Badge>
+                                {model.context_length != null && (
+                                  <Badge mono tone="accent">
+                                    {model.context_length.toLocaleString()} ctx
+                                  </Badge>
+                                )}
                                 {model.pricing_hint > 0 && (
                                   <Badge mono tone="success">
                                     {formatCurrency(model.pricing_hint)}/1M tok

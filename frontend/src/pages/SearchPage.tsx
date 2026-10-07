@@ -24,6 +24,12 @@ import { CACHE_KEYS } from '../cacheKeys'
  * pane keeps the whole conversation, so a follow-up keeps its visible
  * context; Frames and Receipt follow the latest answer.
  */
+const ERROR_SENTENCES: Record<string, string> = {
+  context_overflow: "The question plus its sources is too long for this model's context. Narrow the folder/type filter, or load the model with a larger context.",
+  empty_answer: 'The model returned an empty reply. Try again or pick another model.',
+  local_provider_down: "The local model server isn't running. Start Ollama/LM Studio and try again.",
+};
+
 export function SearchPage() {
   const selectedChunks = useDreamscapeStore(state => state.selectedChunks);
   const removeChunk = useDreamscapeStore(state => state.removeChunk);
@@ -269,9 +275,9 @@ export function SearchPage() {
                 <div className="flex items-start justify-between gap-3 border border-warning p-3 text-sm" role="alert">
                   <span>
                     <span className="block font-mono text-[10.5px] font-semibold tracking-[.12em] uppercase text-warning mb-1">
-                      <span aria-hidden>■ </span>No answer written
+                      <span aria-hidden>■ </span>{messages.at(-1)?.content.trim() ? 'Answer cut short' : 'No answer written'}
                     </span>
-                    {error.text}
+                    {(error.code && ERROR_SENTENCES[error.code]) || error.text}
                   </span>
                   <span className="flex items-center gap-3 shrink-0">
                     {error.code === 'cloud_consent_required' && (

@@ -243,8 +243,14 @@ export function useChatStream(onHistoryUpdate: () => void) {
     dispatch({ type: 'ADD_USER_MESSAGE', payload: { id: crypto.randomUUID(), content: userMessageContent } });
     dispatch({ type: 'START_ASSISTANT_STREAM', payload: { id: crypto.randomUUID() } });
 
-    const historyForApi = messages.map(m => ({ role: m.role, content: m.content }));
+    // A failed turn leaves an empty assistant message; sending it wastes budget.
+    const historyForApi = messages
+      .filter(m => m.role !== 'assistant' || m.content.trim())
+      .map(m => ({ role: m.role, content: m.content }));
     historyForApi.push({ role: 'user', content: userMessageContent });
+    const boundedHistory = historyForApi
+      .slice(-50)
+      .map(m => ({ ...m, content: Array.from(m.content).slice(0, 10000).join('') }));
     
     let currentSources: QuerySource[] = [];
     let currentLatency = 0;
@@ -319,7 +325,7 @@ export function useChatStream(onHistoryUpdate: () => void) {
 
       unsubscribeRef.current = subscribeQuery({
         question: userMsg,
-        history: historyForApi,
+        history: boundedHistory,
         file_type: options.file_type || null,
         folder_tag: options.folder_tag || null,
         mode: options.mode || null,

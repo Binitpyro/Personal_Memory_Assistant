@@ -56,6 +56,11 @@ async def _get_effective_fallback_chain_async() -> list[str]:
     return await asyncio.to_thread(_get_effective_fallback_chain)
 
 
+# What `generate_answer` returns, as prose, when every provider failed. Callers
+# that must not treat that string as an answer (cache, annotator) test for it.
+LLM_UNAVAILABLE_PREFIX = "LLM unavailable"
+
+
 class ProviderNotConfiguredError(Exception):
     """Raised when no active LLM provider can be resolved.
 
@@ -77,7 +82,8 @@ def provider_leaves_device(pid: str, base_url: str | None) -> bool:
     registered as kind="local" - ollama, lm_studio - can be aimed at another
     host. Checking kind alone makes this a label check rather than a data-egress
     check. openai_compatible stays exempt when it points at this machine, which
-    is the self-hosted case the exemption was written for.
+    is the self-hosted case the exemption was written for, or when no URL is set,
+    since then it can reach nothing.
 
     Shared by the dispatch gate below and the `consent_required` field on
     GET /api/providers/settings, so the banner cannot drift from the gate.
@@ -89,6 +95,9 @@ def provider_leaves_device(pid: str, base_url: str | None) -> bool:
         return True
     if spec.kind == "local":
         return not is_loopback_url(base_url or spec.default_base_url)
+    if spec.kind == "custom":
+        url = base_url or spec.default_base_url
+        return bool(url) and not is_loopback_url(url)
     return False
 
 
@@ -601,8 +610,8 @@ Answer:
                 attempt += 1
 
         if last_error:
-            return f"LLM unavailable: All providers in fallback chain failed. Last error: {last_error!s}"
-        return "LLM unavailable: No providers configured."
+            return f"{LLM_UNAVAILABLE_PREFIX}: All providers in fallback chain failed. Last error: {last_error!s}"
+        return f"{LLM_UNAVAILABLE_PREFIX}: No providers configured."
 
     async def generate_raw(
         self,

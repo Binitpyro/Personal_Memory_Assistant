@@ -36,6 +36,18 @@ export async function initTauriConnection() {
 
 // â”€â”€ API Wrappers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+/**
+ * FastAPI bodies: HTTPException is `{"detail": "..."}`, a 422 is
+ * `{"error": "Validation error", "detail": [{"msg": ...}, ...]}`.
+ */
+export function httpErrorMessage(body: any, status: number): string {
+  if (Array.isArray(body?.detail)) {
+    const msgs = body.detail.map((d: { msg?: string }) => d.msg).filter(Boolean).join('; ');
+    return `${body.error ?? 'Validation error'}: ${msgs}`;
+  }
+  return body?.detail ?? body?.error ?? `HTTP ${status}`;
+}
+
 /** Basic fetch wrapper for JSON responses */
 export async function json<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
   const headers: Record<string, string> = {
@@ -47,7 +59,7 @@ export async function json<T>(endpoint: string, options: RequestInit = {}): Prom
   const res = await fetch(`${ENDPOINT}/api${endpoint}`, { ...options, headers });
   if (!res.ok) {
     const body = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(body.error || `HTTP ${res.status}`);
+    throw new Error(httpErrorMessage(body, res.status));
   }
   return res.json() as Promise<T>;
 }
@@ -687,7 +699,10 @@ export function subscribeQuery(
     body: JSON.stringify(payload),
     signal: controller.signal
   }).then(async (response) => {
-    if (!response.ok) throw new Error('Stream request failed');
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(httpErrorMessage(body, response.status));
+    }
     const reader = response.body?.getReader();
     if (!reader) return;
 
@@ -790,7 +805,7 @@ export interface ProviderStatus {
 
 export interface ModelInfo {
   id: string;
-  context_length: number;
+  context_length: number | null;
   pricing_hint: number;
   family: string;
 }

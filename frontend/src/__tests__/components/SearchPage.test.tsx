@@ -43,6 +43,9 @@ vi.mock('../../hooks/useChatStream', () => {
   };
 });
 
+// jsdom does not implement scrollIntoView; the page scrolls to the newest message.
+Element.prototype.scrollIntoView = vi.fn();
+
 describe('SearchPage Component', () => {
   const mockExecuteSearch = vi.fn();
   const mockResetChat = vi.fn();
@@ -79,5 +82,41 @@ describe('SearchPage Component', () => {
     fireEvent.click(sendButton);
 
     expect(mockExecuteSearch).toHaveBeenCalledWith('How does LinearBVH work?', expect.any(Object));
+  });
+  describe('failed-answer banner', () => {
+    async function failWith(code: string | undefined, messages: unknown[]) {
+      vi.mocked(useChatStream).mockReturnValue({
+        messages,
+        executeSearch: mockExecuteSearch,
+        resetChat: mockResetChat,
+      } as any);
+      mockExecuteSearch.mockRejectedValueOnce(Object.assign(new Error('raw provider text'), { code }));
+      renderWithProviders(<SearchPage />);
+      fireEvent.change(screen.getByPlaceholderText('Ask a follow-up or a new question...'), { target: { value: 'q' } });
+      fireEvent.click(screen.getByRole('button', { name: /send question/i }));
+      return await screen.findByRole('alert');
+    }
+
+    it.each([
+      ['context_overflow', "The question plus its sources is too long for this model's context. Narrow the folder/type filter, or load the model with a larger context."],
+      ['empty_answer', 'The model returned an empty reply. Try again or pick another model.'],
+      ['local_provider_down', "The local model server isn't running. Start Ollama/LM Studio and try again."],
+    ])('maps %s to one plain sentence', async (code, sentence) => {
+      const alert = await failWith(code, []);
+      expect(alert.textContent).toContain(sentence);
+      expect(alert.textContent).not.toContain('raw provider text');
+    });
+
+    it('titles a failed turn with no content "No answer written"', async () => {
+      const alert = await failWith(undefined, [{ id: 'a', role: 'assistant', content: '   ' }]);
+      expect(alert.textContent).toContain('No answer written');
+      expect(alert.textContent).toContain('raw provider text');
+    });
+
+    it('titles a failed turn that already has content "Answer cut short"', async () => {
+      const alert = await failWith('empty_answer', [{ id: 'a', role: 'assistant', content: 'partial answer' }]);
+      expect(alert.textContent).toContain('Answer cut short');
+      expect(alert.textContent).not.toContain('No answer written');
+    });
   });
 });

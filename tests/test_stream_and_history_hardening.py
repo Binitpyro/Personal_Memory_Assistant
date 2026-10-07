@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import time
 
 import pytest
 from httpx import AsyncClient
@@ -29,6 +30,39 @@ async def test_stream_aborts_past_the_wall_clock_cap(client: AsyncClient, monkey
 
     response = await client.post("/api/query/stream", json={"question": "hi"})
     assert response.status_code == 200
+
+    records = [json.loads(line) for line in response.text.splitlines() if line.strip()]
+    errors = [r for r in records if r.get("type") == "error"]
+    assert errors, records[:5]
+    assert "timed out" in errors[0]["text"].lower()
+
+
+@pytest.mark.asyncio
+async def test_stream_timeout_fires_before_keepalive_expires(client: AsyncClient, monkeypatch):
+    """The deadline is checked within each wait cycle, not just at the loop top.
+
+    Without the deadline-aware timeout, a 1-second deadline could wait the full
+    _KEEPALIVE_SECONDS (30 here) before checking it, missing the deadline by 29
+    seconds. This test uses a generator that yields early (before the deadline),
+    then blocks, so the timeout is only caught if the wait respects the deadline.
+    """
+    monkeypatch.setattr(settings, "query_stream_timeout_s", 1)
+    monkeypatch.setattr(search_mod, "_KEEPALIVE_SECONDS", 30)
+
+    async def _yields_then_blocks(*args, **kwargs):
+        # Yield immediately (before 1-second deadline), then block forever
+        yield {"type": "content", "text": "before_deadline"}
+        await asyncio.sleep(100)  # Block way past the deadline
+
+    monkeypatch.setattr("app.search.retrieval.stream_rag", _yields_then_blocks)
+
+    start = time.monotonic()
+    response = await client.post("/api/query/stream", json={"question": "hi"})
+    elapsed = time.monotonic() - start
+
+    assert response.status_code == 200
+    # With the fix, timeout happens ~1s. Without it, would wait ~30s.
+    assert elapsed < 5, f"Request took {elapsed:.1f}s, should timeout around 1s"
 
     records = [json.loads(line) for line in response.text.splitlines() if line.strip()]
     errors = [r for r in records if r.get("type") == "error"]

@@ -1,6 +1,27 @@
 from collections.abc import AsyncGenerator
 from typing import Any, Protocol, TypedDict
 
+import httpx
+
+
+class ProviderStreamError(httpx.RequestError):
+    """An `error` object a provider sent inside an HTTP 200 stream, before any content.
+
+    An httpx.RequestError so the llm_client fallback loop already catches it;
+    `code` is what that loop forwards as the provider_error frame's code.
+    """
+
+    def __init__(self, message: str, code: str | None = None):
+        super().__init__(message)
+        self.code = code
+
+
+def stream_error_for(err: Any) -> ProviderStreamError:
+    """Build the exception for an in-stream `error` value (a string, or {"message": ...})."""
+    text = str(err.get("message") or err) if isinstance(err, dict) else str(err)
+    overflow = "exceed_context_size_error" in text or "exceeds the available context size" in text
+    return ProviderStreamError(text[:500], "context_overflow" if overflow else None)
+
 
 class ModelInfo(TypedDict):
     id: str

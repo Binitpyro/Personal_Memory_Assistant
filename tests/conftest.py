@@ -177,6 +177,16 @@ async def cleanup_db():
 
 
 @pytest.fixture(autouse=True)
+def reset_ollama_num_ctx_state():
+    """The Ollama num_ctx high-water mark and F5b warned-set are process-global."""
+    from app.providers import ollama
+
+    ollama._NUM_CTX_HW.clear()
+    ollama._NUM_CTX_WARNED.clear()
+    yield
+
+
+@pytest.fixture(autouse=True)
 def mock_local_reachability_default(monkeypatch, request):
     """Default fixture to mock local reachability in tests unless test module explicitly exercises real socket logic."""
     if request.module and "test_provider_manifest" in request.module.__name__:

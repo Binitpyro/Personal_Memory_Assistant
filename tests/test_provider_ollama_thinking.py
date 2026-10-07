@@ -21,6 +21,8 @@ import httpx
 import pytest
 
 from app.providers import create_provider
+from app.providers import ollama as ollama_mod
+from app.providers.cache import validation_cache
 from app.providers.ollama import _OLLAMA_DEFAULT_NUM_CTX, _required_num_ctx
 
 _URL = "http://localhost:11434/api/chat"
@@ -251,3 +253,80 @@ class TestNumCtxIsSetSoOllamaStopsDiscardingContext:
         )
         assert payload["stream"] is True
         assert payload["options"]["num_ctx"] > _OLLAMA_DEFAULT_NUM_CTX
+
+
+def _ctx(provider, tokens: int, model: str = "m") -> int | None:
+    """num_ctx sent for a prompt of about `tokens` (required = tokens + 512)."""
+    payload = provider._chat_payload(
+        [{"role": "user", "content": "x" * (tokens * 4)}], model, 0.2, 256, stream=False
+    )
+    return payload["options"].get("num_ctx")
+
+
+class TestNumCtxIsBucketedAndHeldAtHighWater:
+    """Ollama reloads the model on any num_ctx change; a new value per request
+    meant 2 reloads per query (answer + annotator)."""
+
+    def test_two_lengths_in_one_bucket_send_the_same_value(self):
+        provider = _provider()
+        assert _ctx(provider, 5000) == 8192
+        assert _ctx(provider, 7500) == 8192
+
+    def test_high_water_holds_after_a_larger_request(self):
+        provider = _provider()
+        assert [_ctx(provider, t) for t in (6000, 14000, 6000)] == [8192, 16384, 16384]
+
+    def test_a_request_over_the_cap_uses_its_bucket_and_never_raises_the_mark(self):
+        provider = _provider()
+        assert _ctx(provider, 6000) == 8192
+        assert _ctx(provider, 24000) == 24576
+        assert _ctx(provider, 6000) == 8192
+
+    def test_the_mark_is_per_model(self):
+        provider = _provider()
+        assert _ctx(provider, 14000, "a") == 16384
+        assert _ctx(provider, 6000, "b") == 8192
+
+    def test_the_mark_table_is_bounded(self):
+        provider = _provider()
+        for i in range(ollama_mod._HW_MAX_KEYS):
+            assert _ctx(provider, 6000, f"m{i}") == 8192
+        assert len(ollama_mod._NUM_CTX_HW) == ollama_mod._HW_MAX_KEYS
+        # A 65th model is still bucketed but not tracked, so it does not stick.
+        assert _ctx(provider, 14000, "extra") == 16384
+        assert _ctx(provider, 6000, "extra") == 8192
+        assert len(ollama_mod._NUM_CTX_HW) == ollama_mod._HW_MAX_KEYS
+        # An already-tracked key can still grow.
+        assert _ctx(provider, 14000, "m0") == 16384
+        assert _ctx(provider, 6000, "m0") == 16384
+
+    def test_a_short_prompt_sends_the_mark_to_avoid_a_reload(self):
+        provider = _provider()
+        assert _ctx(provider, 6000) == 8192
+        assert _ctx(provider, 100) == 8192
+
+    def test_a_short_prompt_with_no_mark_is_still_unset(self):
+        assert _ctx(_provider(), 100) is None
+
+
+class TestNumCtxAboveReportedWindowWarnsOnce:
+    def _seed(self, monkeypatch, models):
+        monkeypatch.setitem(validation_cache._persistent_heap, "ollama", models)
+
+    def test_warns_once_per_model(self, monkeypatch, caplog):
+        self._seed(monkeypatch, [{"id": "tiny:latest", "context_length": 4096}])
+        provider = _provider()
+        with caplog.at_level("WARNING", logger="app.providers.ollama"):
+            _ctx(provider, 6000, "tiny")
+            _ctx(provider, 6000, "tiny")
+        hits = [r for r in caplog.records if "context window" in r.getMessage()]
+        assert len(hits) == 1
+        assert "tiny" in hits[0].getMessage()
+
+    def test_silent_when_within_window_or_model_unknown(self, monkeypatch, caplog):
+        self._seed(monkeypatch, [{"id": "big", "context_length": 131072}])
+        provider = _provider()
+        with caplog.at_level("WARNING", logger="app.providers.ollama"):
+            _ctx(provider, 6000, "big")
+            _ctx(provider, 6000, "never-validated")
+        assert not [r for r in caplog.records if "context window" in r.getMessage()]

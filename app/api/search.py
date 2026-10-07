@@ -226,7 +226,10 @@ async def query_stream(
                     # point and left it unusable, so the next anext() raised
                     # StopAsyncIteration and the answer was silently truncated
                     # at the first 15s gap.
-                    done, _ = await asyncio.wait({pending}, timeout=_KEEPALIVE_SECONDS)
+                    done, _ = await asyncio.wait(
+                        {pending},
+                        timeout=min(_KEEPALIVE_SECONDS, max(0.0, deadline - time.monotonic())),
+                    )
 
                     if not done:
                         if await http_request.is_disconnected():

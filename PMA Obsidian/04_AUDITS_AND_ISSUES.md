@@ -994,6 +994,8 @@ This is a real, live Google Gemini API key in a committed file that ships inside
 
 ## CRITICAL ISSUES â€” Detailed Status
 
+> Statuses in this section are as recorded at the 2026-05-11 audit. Corrected statuses: 'Complete Fix Status Register' and 'Status update 2026-10-08' below.
+
 ---
 
 ### C-01 Â· FTS Corruption After `clear_all` âœ… FIXED
@@ -1103,6 +1105,8 @@ if request.url.path.startswith("/api/") and request.method != "OPTIONS":
 ---
 
 ## HIGH ISSUES â€” Detailed Status
+
+> Statuses in this section are as recorded at the 2026-05-11 audit. Corrected statuses: 'Complete Fix Status Register' and 'Status update 2026-10-08' below.
 
 ---
 
@@ -1390,6 +1394,8 @@ sha256 = await loop.run_in_executor(_DISK_EXECUTOR, self._calculate_sha256, path
 
 ## MEDIUM ISSUES â€” Detailed Status
 
+> Statuses in this section are as recorded at the 2026-05-11 audit. Corrected statuses: 'Complete Fix Status Register' and 'Status update 2026-10-08' below.
+
 ---
 
 ### M-01 Â· SQL Injection via WHERE Clause Interpolation âœ… FIXED
@@ -1590,6 +1596,8 @@ except (Exception, asyncio.CancelledError) as e:
 ---
 
 ## LOW ISSUES â€” Detailed Status
+
+> Statuses in this section are as recorded at the 2026-05-11 audit. Corrected statuses: 'Complete Fix Status Register' and 'Status update 2026-10-08' below.
 
 ---
 
@@ -1821,12 +1829,12 @@ Fast-path (line 706) and full-path (line 782) `save_query` calls are mutually ex
 |---|---|---|
 |P-01|Wire Barnes-Hut layout.rs|âœ… Done (H-06)|
 |P-02|Replace SequenceMatcher with MinHash|âŒ Not done|
-|P-03|`lru_cache` on tiktoken encoding|âŒ Not done|
+|P-03|`lru_cache` on tiktoken encoding|âœ… Done (module-global cached encoding)|
 |P-04|FTS5 trigram index for short queries|âŒ Not done|
 |P-05|Pass `query_emb` to avoid double embed|âœ… Done|
-|P-06|HNSW index type in LanceDB|âŒ Not done|
-|P-07|SQLite connection pool (4 readers)|âŒ Not done|
-|P-08|Reranker input: 256 chars â†’ 2048|âŒ Not done|
+|P-06|HNSW index type in LanceDB|âœ… Done (IVF_HNSW_SQ)|
+|P-07|SQLite connection pool (4 readers)|âœ… Done (read-connection pool)|
+|P-08|Reranker input: 256 chars â†’ 2048|âœ… Done (_MAX_RERANKER_INPUT_LEN = 2048)|
 
 P-02 through P-04 and P-06 through P-08 are all straightforward changes with significant throughput impact. P-08 (`_MAX_RERANKER_INPUT_LEN = 256`) in particular is a 5-minute fix that would improve reranker quality noticeably.
 
@@ -1837,81 +1845,97 @@ P-02 through P-04 and P-06 through P-08 are all straightforward changes with sig
 |ID|Description|Status|
 |---|---|---|
 |**C-01**|FTS corruption after clear_all|âœ… Fixed|
-|**C-02**|Remove folder 404|âŒ **NOT FIXED**|
+|**C-02**|Remove folder 404|âœ… Fixed (route /index/folder/remove matches api.ts; was mislabelled NOT FIXED. LIKE over-match fixed 876a652, A2-02)|
 |**C-03**|Extractor deadlock|âœ… Fixed|
-|**C-04**|Split-brain sync multi-worker|âœ… Fixed|
+|**C-04**|Split-brain sync multi-worker|âœ… Fixed 669a156 (old guard was a no-op: uvicorn never sets UVICORN_WORKER_ID; run_server now clamps to 1 worker, A10-06)|
 |**C-05**|NameError on fresh install|âœ… Fixed|
-|**C-06**|API key bundled in exe|âœ… Fixed (key still in repo â€” rotate!)|
+|**C-06**|API key bundled in exe|âœ… Fixed (key still in repo â€” rotate!) [PMA.spec is now untracked/gitignored; see URGENT-KEY row, left as is]|
 |**C-07**|Double query save|âœ… Reclassified (not a bug)|
-|**C-08**|Fail-open security|âŒ **NOT FIXED**|
+|**C-08**|Fail-open security|âœ… Fixed (main.py:61-95 always provisions a token and refuses to start without one; was mislabelled NOT FIXED)|
 |**H-01**|Semantic cache wrong distance|âœ… Fixed|
-|**H-02**|get_max_id O(n) memory|âŒ Not fixed|
-|**H-03**|SHA256 never compared|âŒ **NOT FIXED**|
-|**H-04**|Blocking HTTP in OAuth|âœ… Fixed|
-|**H-05**|Blocking model.encode in async|âŒ Not fixed|
+|**H-02**|get_max_id O(n) memory|âš ï¸ Partial 9a7cb06 (A10-17: memory now O(batch) via to_batches; time still O(n))|
+|**H-03**|SHA256 never compared|âœ… Fixed (service.py:1006-1012 sha256 early-out; was mislabelled NOT FIXED)|
+|**H-04**|Blocking HTTP in OAuth|âœ… Obsolete (api/auth.py removed)|
+|**H-05**|Blocking model.encode in async|âœ… Obsolete (Unreal import endpoint removed)|
 |**H-06**|layout.rs orphaned|âœ… Fixed|
-|**H-07**|Blocking HTTP in LLMClient init|âŒ Not fixed|
-|**H-08**|Vacuum race condition|âŒ Not fixed|
-|**H-09**|QueryPlanner double instantiation|âŒ Not fixed|
+|**H-07**|Blocking HTTP in LLMClient init|âœ… Fixed (llm_client.py:217-223 loads off-loop via to_thread; was mislabelled NOT FIXED)|
+|**H-08**|Vacuum race condition|âœ… Fixed (system.py:29-33,248-257 asyncio.Lock; worker-0 guard is a no-op, single worker enforced 669a156)|
+|**H-09**|QueryPlanner double instantiation|âœ… Fixed (planner injected via deps; no QueryPlanner() in retrieval.py; was mislabelled NOT FIXED)|
 |**H-10**|PyInstaller missing rust_core|âœ… Fixed|
-|**H-11**|auth_status blocking refresh|âœ… Fixed|
-|**H-12**|deps.py singleton breaks tests|âŒ Not fixed|
-|**H-13**|PMA.spec missing rust_core|âœ… Fixed|
+|**H-11**|auth_status blocking refresh|âœ… Obsolete (api/auth.py removed)|
+|**H-12**|deps.py singleton breaks tests|âœ… Fixed (deps.py:32-38 lazy singleton; conftest.py:178 closes it; was mislabelled NOT FIXED)|
+|**H-13**|PMA.spec missing rust_core|âœ… Obsolete (PMA.spec is untracked and gitignored; build is scripts/Build-Exe.bat)|
 |**H-14**|Duplicate debug_query_plan|âœ… Fixed|
-|**H-15**|Auto-VACUUM locks DB|âŒ Not fixed|
+|**H-15**|Auto-VACUUM locks DB|âœ… Fixed (_index_then_compact runs fts_optimize only, no VACUUM; compaction made effective in 876a652/9a7cb06, A2-09/A2-16)|
 |**H-16**|Savepoint name collision|âœ… Fixed|
-|**H-17**|Ghost vectors on delete|âœ… Fixed|
-|**H-18**|Thread pool starvation|âŒ Not fixed|
+|**H-17**|Ghost vectors on delete|âœ… Fixed 9a7cb06 (was true only in split_brain; portable mode now removes vectors via remove_from_index/cleanup_stale_files, A10-09/A1-04)|
+|**H-18**|Thread pool starvation|âœ… Fixed (service.py:366-367 dedicated executors; was mislabelled NOT FIXED)|
 |**M-01**|SQL injection in LanceDB|âœ… Fixed|
 |**M-02**|Wrong column returns in db.py|âœ… Fixed|
-|**M-03**|Silent no-op PRAGMAs|âŒ Not fixed|
+|**M-03**|Silent no-op PRAGMAs|âŒ Not fixed (page_size=32768 is a no-op: journal_mode=WAL is set first, db.py:207-215)|
 |**M-04**|mmap_size 30 GB|âœ… Fixed|
 |**M-05**|TOCTOU savepoint race|âœ… Fixed|
-|**M-06**|Wrong training pair strategy|âŒ Not fixed|
+|**M-06**|Wrong training pair strategy|âœ… Obsolete (embeddings/finetune.py removed)|
 |**M-07**|O(nÂ²) dedup cap in retrieval.py|âœ… Fixed|
-|**M-08**|O(nÂ²) dedup cap in context_builder.py|âŒ Not fixed|
+|**M-08**|O(nÂ²) dedup cap in context_builder.py|âœ… Fixed (context_builder.py:202-204 breaks at 100)|
 |**M-09**|Stream spinner hang|âœ… Fixed|
-|**M-10**|Test DB files leaking|âš ï¸ Partial (GC only, not explicit close)|
-|**M-11**|SonarLint wrong project key|âŒ Not fixed (sonar-project.properties still pma_sandisk)|
-|**M-12**|list(rows) called 3 times|âŒ Not fixed|
-|**M-13**|Unreal import 512-token truncation|âŒ Not fixed|
+|**M-10**|Test DB files leaking|âœ… Fixed (conftest.py:178 awaits the DatabaseManager close)|
+|**M-11**|SonarLint wrong project key|âœ… Obsolete (sonar-project.properties and .vscode/ are gitignored, not in the repo; projectKey is now Binitpyro_Personal_Memory_Assistant)|
+|**M-12**|list(rows) called 3 times|âœ… Fixed (no list(rows) in reindex_embeddings.py)|
+|**M-13**|Unreal import 512-token truncation|âœ… Obsolete (Unreal import removed)|
 |**M-14**|Redundant imports in every chunk|âœ… Fixed|
-|**M-15**|CancelledError discards history|âŒ Not fixed|
-|**L-01**|_test_clear.py not a pytest test|âŒ Not fixed|
-|**L-02**|verify_fps.py benchmarks empty render|âŒ Not fixed|
+|**M-15**|CancelledError discards history|âŒ Not fixed (re-verified 2026-10-08: retrieval.py stream loop at :1820 sits outside the save try at :1894)|
+|**L-01**|_test_clear.py not a pytest test|âœ… Obsolete (_test_clear.py removed; tests/test_clear_all.py exists)|
+|**L-02**|verify_fps.py benchmarks empty render|âœ… Fixed (verify_fps.py generate_mock_db now inserts rows)|
 |**L-03**|streamTracking wrong API contract|âœ… Fixed|
-|**L-04**|api.test.ts shadow-copy tests|âš ï¸ Comment only|
+|**L-04**|api.test.ts shadow-copy tests|âŒ Not fixed (helpers moved to utils/api-helpers.ts, imported only by tests)|
 |**L-05**|conftest missing 4 columns|âœ… Fixed|
-|**L-06**|test_db_manager passes with bug|âŒ Not fixed|
+|**L-06**|test_db_manager passes with bug|âœ… Fixed (test_db_manager_extended.py:150-155 asserts the ISO type)|
 |**L-07**|Wrong patch path in embeddings test|âœ… Fixed|
-|**L-08**|Order-dependent FakeInsightsDB|âš ï¸ Partial|
-|**L-09**|coverage.xml stale source path|âŒ Not fixed|
-|**L-10**|AI playbook Chroma contamination|âš ï¸ Partial (SanHack still present)|
+|**L-08**|Order-dependent FakeInsightsDB|âœ… Fixed (test_coverage_boost.py FakeInsightsDB dispatches on SQL text)|
+|**L-09**|coverage.xml stale source path|âœ… Fixed (pyproject.toml:147 relative_files = true; logs/ is gitignored)|
+|**L-10**|AI playbook Chroma contamination|âœ… Obsolete (AI_ASSISTANT_PLAYBOOK.md removed)|
 |**L-11**|CATALOG.md in reading order|âœ… Fixed|
-|**L-12**|O(1) claim false in docs/code|âŒ Not fixed|
+|**L-12**|O(1) claim false in docs/code|âŒ Not fixed (02_ARCHITECTURE_AND_CORE.md:13,205 still claim O(1) memory)|
 |**L-13**|Adler32 stale doc|âœ… Fixed|
 |**L-14**|WBOIT labelled MBOIT|âœ… Fixed|
 |**L-15**|Orphaned EnvelopingCamera/Verlet|âœ… Fixed|
-|**L-16**|LinearBVH BVH never built|âŒ Not fixed (TODO only)|
+|**L-16**|LinearBVH BVH never built|âœ… Obsolete (LinearBVH.ts removed)|
 |**L-17**|visualizer.py parent_index|âœ… Fixed|
 |**L-18**|Test count "232" inflated|âœ… Fixed|
 |**L-19**|console=True in spec|âœ… Fixed|
 |**L-20**|reindex_embeddings not in scripts|âœ… Fixed|
-|**L-21**|mkdir at import time|âŒ Not fixed|
-|**L-22**|OAuth port locked at import|âŒ Not fixed|
+|**L-21**|mkdir at import time|âœ… Obsolete (api/auth.py removed)|
+|**L-22**|OAuth port locked at import|âœ… Obsolete (auth.py removed; PORT now honoured by __main__.py, 31faf3f, A8-01)|
 |**L-23**|C-07 reclassification|âœ… Confirmed|
 |**P-01**|Barnes-Hut wired|âœ… Done|
 |**P-02**|MinHash dedup|âŒ Not done|
-|**P-03**|lru_cache tiktoken|âŒ Not done|
+|**P-03**|lru_cache tiktoken|âœ… Done (context_builder.py:22,58-69 caches the encoding in a module global)|
 |**P-04**|FTS5 trigram index|âŒ Not done|
 |**P-05**|embed_query double call|âœ… Done|
-|**P-06**|HNSW index type|âŒ Not done|
-|**P-07**|Connection pool|âŒ Not done|
-|**P-08**|Reranker truncation 256â†’2048|âŒ Not done|
+|**P-06**|HNSW index type|âœ… Done (lancedb_client.py:667,675 IVF_HNSW_SQ)|
+|**P-07**|Connection pool|âœ… Done (db.py:155-182 read-connection pool; not in the audit list)|
+|**P-08**|Reranker truncation 256â†’2048|âœ… Done (reranker.py:20-22 _MAX_RERANKER_INPUT_LEN = 2048)|
+
+---
+
+## Status update 2026-10-08 (audit-fix fleet, HEAD 669a156)
+
+Corrections to the 2026-05-11 register above, each re-verified against the code at HEAD 669a156 (the cited file:line is in the status cell). Fleet commits: 31faf3f 5d7843e a3d10db 833bcb3 0c6a93c 5e9128e 876a652 a8eaf33 f82f423 98e0ac8 7469265 9a7cb06 e0bd87a 8a75ac9 669a156. Per-finding results for the 164 A1-A10 audit findings: `files/audit_fix_2026-10-07/FINAL_REPORT.md`.
+
+- **Mislabelled NOT FIXED, actually fixed:** C-02, C-08, H-03, H-07, H-08, H-09, H-12, H-15, H-18, M-08, M-10 and L-08 (both were Partial), M-12, L-02, L-06, L-09 (A10-16, A3-23, A4-17, A5-15, A5-16, A7-16).
+- **Mislabelled FIXED, was open:** C-04 (guard keyed on a variable uvicorn never sets) now fixed by the 1-worker clamp, 669a156 (A10-06); H-17 (portable-mode ghost vectors) now fixed, 9a7cb06 (A10-09, A1-04).
+- **Obsolete (file or feature gone):** H-04, H-05, H-11, H-13, M-06, M-11, M-13, L-01, L-10, L-16, L-21, L-22. PMA.spec, sonar-project.properties and .vscode/ exist on the dev box but are gitignored and untracked.
+- **Still open at HEAD:** M-03 (page_size no-op), M-15 (cancel during the stream loses history), L-04, L-12; H-02 is partial (memory bounded, time still O(n)).
+- **Performance table (A9-14, A3-23):** P-03, P-06, P-07, P-08 are done; P-05 already was.
+- **URGENT-KEY:** unchanged by this update. The user has recorded the key as stale and chose to leave the lines as they are (audit A10-12, IGNORED).
 
 ---
 
 ## Priority Fix Order for Remaining Issues
+
+> Superseded 2026-10-08 by the 'Status update 2026-10-08' above: C-02, C-08, H-03, H-05 (obsolete), H-07, H-08, H-09, H-15, H-18, M-08, M-12 and M-13 (obsolete) are closed. Still open: M-15, L-12.
+
 
 ### Tier 1 â€” Fix This Session (Critical/Security)
 

@@ -59,7 +59,7 @@ Local-first is enforced in the code, not just claimed in the pitch.
 - **Node.js 20+**
 - **Rust Toolchain** (Latest stable)
 
-**Hardware.** PMA targets budget machines on purpose: a ~4 GB VRAM GPU (GTX 1650 / RX 580 class) and an 8 GB RAM laptop. It holds roughly 196 MB resident while serving queries; bulk indexing peaks a few hundred MB above that and returns.
+**Hardware.** PMA targets budget machines on purpose: a ~4 GB VRAM GPU (GTX 1650 / RX 580 class) and an 8 GB RAM laptop. It holds roughly 196 MB resident while serving queries (Windows working set, idle or serving, `PMA_LANCEDB_MODE=portable`, measured 2026-08-20; resident size on Linux reads higher). Bulk indexing is a bounded transient that peaked 535 MB above idle on a 403 MB document corpus under the same conditions; a 2026-10 audit read higher peaks on Linux and the return to baseline afterwards has not been re-measured.
 
 ### 4.2 Quick Start (Windows)
 Copy the example configuration, then choose the development workflow you need:
@@ -222,7 +222,7 @@ graph LR
 ```
 
 ### 9.2 Unified Search Flow
-A query planner first classifies intent into one of four modes: fast metadata/project lookups bypass retrieval entirely, graph-intent queries traverse the knowledge graph, and everything else runs the full RAG pipeline. FULL_RAG fuses three signals — keyword matching (SQLite FTS5), chunk-level semantic search, and document-summary semantic search — via **Reciprocal Rank Fusion (RRF)**, then applies a cross-encoder reranker for maximum precision, automatically bypassed when the top result's confidence decisively clears the runner-up.
+A query planner first classifies intent into one of four modes: fast metadata/project lookups bypass retrieval entirely, graph-intent queries traverse the knowledge graph, and everything else runs the full RAG pipeline. FULL_RAG fuses three signals — keyword matching (SQLite FTS5), chunk-level semantic search, and document-summary semantic search — via **Reciprocal Rank Fusion (RRF)**, then applies a cross-encoder reranker for maximum precision. There is no score-margin bypass (that heuristic was removed as unsound): the reranker is skipped only for project-overview and inventory-style queries or when fewer than two candidates remain, and a 5-second deadline falls back to RRF order and marks the answer degraded.
 
 ```mermaid
 graph LR
@@ -239,10 +239,8 @@ graph LR
     C --> E[RRF Ranker]
     D --> E
     N --> E
-    E --> R{Confidence Gap >= 2x?}
-    R -->|Yes: bypass| F[Context Builder]
-    R -->|No: rerank| Q[Cross-Encoder Reranker]
-    Q --> F
+    E --> Q[Cross-Encoder Reranker]
+    Q --> F[Context Builder]
     F --> L[LLM Answer]
 ```
 

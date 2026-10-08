@@ -19,7 +19,6 @@ CREATE INDEX IF NOT EXISTS idx_files_folder_tag ON files(folder_tag);
 CREATE INDEX IF NOT EXISTS idx_files_modified_at ON files(modified_at);
 CREATE INDEX IF NOT EXISTS idx_files_type ON files(type);
 CREATE INDEX IF NOT EXISTS idx_files_size ON files(size);
-CREATE INDEX IF NOT EXISTS idx_files_change_detection ON files(path, modified_at, sha256);
 
 -- Chunks table for storing text segments
 CREATE TABLE IF NOT EXISTS chunks (
@@ -68,16 +67,23 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5(
     detail=full -- Updated to full to fix trigram phrase search
 );
 
--- Trigger to keep FTS index in sync with chunks table
-CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
+-- Triggers to keep FTS index in sync with chunks table. Named chunk_fts_*
+-- to match FTS_TRIGGERS_DDL (db.py), which enter/exit_ingest_mode drop and
+-- recreate. The legacy chunks_ai/ad/au names were recreated here on every boot
+-- next to chunk_fts_*, so each write hit the FTS table twice; drop them.
+DROP TRIGGER IF EXISTS chunks_ai;
+DROP TRIGGER IF EXISTS chunks_ad;
+DROP TRIGGER IF EXISTS chunks_au;
+
+CREATE TRIGGER IF NOT EXISTS chunk_fts_ai AFTER INSERT ON chunks BEGIN
   INSERT INTO chunk_fts(rowid, chunks_text) VALUES (new.id, zlib_decompress(new.text_preview));
 END;
 
-CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
+CREATE TRIGGER IF NOT EXISTS chunk_fts_ad AFTER DELETE ON chunks BEGIN
   INSERT INTO chunk_fts(chunk_fts, rowid, chunks_text) VALUES('delete', old.id, zlib_decompress(old.text_preview));
 END;
 
-CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
+CREATE TRIGGER IF NOT EXISTS chunk_fts_au AFTER UPDATE ON chunks BEGIN
   INSERT INTO chunk_fts(chunk_fts, rowid, chunks_text) VALUES('delete', old.id, zlib_decompress(old.text_preview));
   INSERT INTO chunk_fts(rowid, chunks_text) VALUES (new.id, zlib_decompress(new.text_preview));
 END;

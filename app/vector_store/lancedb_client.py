@@ -188,15 +188,17 @@ class LanceDBClient:
         try:
             tbl = self._get_table(table_name)
             if tbl is not None:
-                # Use PyArrow on just the 'id' column to avoid loading metadata and vectors, fixing O(1) violation.
-                arrow_tbl = tbl.search(None).select(["id"]).to_arrow()
-                col = arrow_tbl.column("id")
-                if len(col) > 0:
-                    import pyarrow as pa
-                    import pyarrow.compute as pc  # type: ignore
+                # Stream the 'id' column in batches: memory is bounded by the batch,
+                # not the table (1M rows: 7.9 MB -> 0.5 MB Arrow peak, 6x faster).
+                import pyarrow as pa
+                import pyarrow.compute as pc  # type: ignore
 
-                    val = pc.max(col.cast(pa.int64())).as_py()
-                    return int(val) if val is not None else 0
+                best = 0
+                for batch in tbl.search(None).select(["id"]).to_batches(65536):
+                    val = pc.max(batch.column("id").cast(pa.int64())).as_py()
+                    if val is not None and val > best:
+                        best = int(val)
+                return best
         except Exception as exc:
             logger.error("Failed to get max id from %s: %s", table_name, exc)
         return 0
@@ -614,8 +616,40 @@ class LanceDBClient:
             db.drop_table("query_cache")
         self._table_cache.pop("query_cache", None)
 
+    # Versions kept after optimize. Zero would also delete files an in-flight
+    # search on the previous version is still reading; a minute bounds growth
+    # (one version per add/delete otherwise) without that race.
+    _VERSION_RETENTION = timedelta(minutes=1)
+    # ponytail: a delta index per run until either cap trips, then one full
+    # rebuild. Upgrade to a size-aware schedule if recall on grown tables slips.
+    _MAX_DELTA_INDICES = 8
+    _MAX_UNINDEXED_FRACTION = 0.5
+
+    def _needs_full_rebuild(self, tbl) -> bool:
+        """True when the vector index is missing or too stale to extend."""
+        try:
+            idx = next(i for i in tbl.list_indices() if "vector" in list(i.columns))
+            st = tbl.index_stats(idx.name)
+        except Exception:
+            return True
+        if st is None or not st.num_indexed_rows:
+            return True
+        return bool(
+            st.num_indices > self._MAX_DELTA_INDICES
+            or st.num_unindexed_rows > self._MAX_UNINDEXED_FRACTION * st.num_indexed_rows
+        )
+
     async def create_hnsw_index(self, table_name: str = "pma_chunks") -> None:
-        """Create HNSW index on the vector column of the specified table."""
+        """Bring the vector index of *table_name* up to date and compact the table.
+
+        Every indexing run and every OCR drain calls this, and it used to rebuild
+        the whole IVF_HNSW_SQ index each time (20k rows 10-32 s, 100k rows
+        70-150 s, all cores) even for a one-file edit or a no-op run. It now
+        rebuilds only when there is no index or it is too stale to extend;
+        otherwise `optimize()` indexes the new rows incrementally, compacts
+        fragments and prunes old versions. pma_chunks/pma_summaries gain a version
+        on every add and delete, and nothing else ever compacted them.
+        """
         self.connect()
         tbl = self._get_table(table_name)
         if tbl is not None:
@@ -626,21 +660,31 @@ class LanceDBClient:
                 # independently (measured on 0.30.2: 20k rows, concurrent add and
                 # delete, no errors, counts exact), so _write_lock is not needed.
                 with self._index_lock:
-                    try:
-                        # Attempt to create index with replace=True to overwrite old index
-                        tbl.create_index(metric="cosine", index_type="IVF_HNSW_SQ", replace=True)
-                        logger.info(
-                            "LanceDB HNSW index created/updated successfully on %s", table_name
-                        )
-                    except Exception as e:
+                    if self._needs_full_rebuild(tbl):
                         try:
-                            # Fallback if replace is not supported or fails
-                            tbl.create_index(metric="cosine", index_type="IVF_HNSW_SQ")
-                            logger.info("LanceDB HNSW index created successfully on %s", table_name)
-                        except Exception as e2:
-                            logger.error(
-                                "LanceDB HNSW index creation failed: %s (fallback %s)", e, e2
+                            # Attempt to create index with replace=True to overwrite old index
+                            tbl.create_index(
+                                metric="cosine", index_type="IVF_HNSW_SQ", replace=True
                             )
+                            logger.info(
+                                "LanceDB HNSW index created/updated successfully on %s", table_name
+                            )
+                        except Exception as e:
+                            try:
+                                # Fallback if replace is not supported or fails
+                                tbl.create_index(metric="cosine", index_type="IVF_HNSW_SQ")
+                                logger.info(
+                                    "LanceDB HNSW index created successfully on %s", table_name
+                                )
+                            except Exception as e2:
+                                logger.error(
+                                    "LanceDB HNSW index creation failed: %s (fallback %s)", e, e2
+                                )
+                    try:
+                        with self._write_lock:
+                            tbl.optimize(cleanup_older_than=self._VERSION_RETENTION)
+                    except Exception as e:
+                        logger.warning("LanceDB optimize failed on %s: %s", table_name, e)
 
             await loop.run_in_executor(None, _create)
 

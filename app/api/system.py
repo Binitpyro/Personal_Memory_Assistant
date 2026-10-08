@@ -258,7 +258,7 @@ async def compact_db(db: DatabaseManager = Depends(get_db)):
             _vacuum_last_error = None
             try:
                 # FTS optimize via aiosqlite (non-blocking in event loop terms)
-                await db.fts_optimize()
+                await db.fts_optimize(full=True)
                 # Frees every free page, in batches that release the write lock.
                 await db.incremental_vacuum()
                 from datetime import datetime
@@ -330,7 +330,7 @@ async def demo_seed(
     async def _demo_index_then_compact():
         await service.index_folders([demo_folder])
         try:
-            await db.fts_optimize()
+            await db.fts_optimize(full=True)
             await db.incremental_vacuum()
             logger.info("Auto-compact completed after demo indexing.")
         except Exception as e:

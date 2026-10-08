@@ -162,17 +162,33 @@ class DatabaseManager:
             if self._read_pool is None:
                 self._read_pool = asyncio.Queue()
 
-            # 1. Primary write connection
-            self._write_conn = await aiosqlite.connect(self.db_path)
-            await self._configure_conn(self._write_conn, is_write_conn=True)
+            try:
+                # 1. Primary write connection
+                self._write_conn = await aiosqlite.connect(self.db_path)
+                await self._configure_conn(self._write_conn, is_write_conn=True)
 
-            # 2. Read connection pool
-            self._read_conns = []
-            for _ in range(self.pool_size):
-                conn = await aiosqlite.connect(self.db_path, isolation_level=None)
-                await self._configure_conn(conn, is_write_conn=False)
-                self._read_conns.append(conn)
-                await self._read_pool.put(conn)
+                # 2. Read connection pool
+                self._read_conns = []
+                for _ in range(self.pool_size):
+                    conn = await aiosqlite.connect(self.db_path, isolation_level=None)
+                    # Ledgered before it is configured: a pragma failing below must
+                    # not strand a live, non-daemon aiosqlite thread that blocks
+                    # interpreter exit (CLAUDE.md 8.4).
+                    self._read_conns.append(conn)
+                    await self._configure_conn(conn, is_write_conn=False)
+                    await self._read_pool.put(conn)
+            except BaseException:
+                if self._write_conn is not None:
+                    with contextlib.suppress(Exception):
+                        await self._write_conn.close()
+                    self._write_conn = None
+                for conn in self._read_conns:
+                    with contextlib.suppress(Exception):
+                        await conn.close()
+                self._read_conns = []
+                while not self._read_pool.empty():
+                    self._read_pool.get_nowait()
+                raise
 
             self._pool_initialized = True
 
@@ -658,10 +674,20 @@ class DatabaseManager:
                     DELETE FROM kg_edges WHERE source = OLD.id;
                 END
             """)
+            # An edge INTO a deleted node from another file is not dead: only
+            # the callee's file was re-indexed, and the unchanged caller is never
+            # re-extracted, so deleting the edge lost it for good. Turn
+            # CALLS/INHERITS back into the PENDING:: form the extractor emits;
+            # resolve_pending_graph_edges re-binds it to the re-created node (or
+            # drops it if the node is really gone). A rewritten row that
+            # collides with an existing PENDING edge replaces it.
+            await conn.execute("DROP TRIGGER IF EXISTS trg_kg_edges_cascade_target")
             await conn.execute("""
-                CREATE TRIGGER IF NOT EXISTS trg_kg_edges_cascade_target
+                CREATE TRIGGER trg_kg_edges_cascade_target
                 AFTER DELETE ON kg_nodes
                 BEGIN
+                    UPDATE OR REPLACE kg_edges SET target = 'PENDING::' || OLD.label
+                    WHERE target = OLD.id AND relation IN ('CALLS', 'INHERITS');
                     DELETE FROM kg_edges WHERE target = OLD.id;
                 END
             """)
@@ -841,12 +867,21 @@ class DatabaseManager:
         await self._maybe_commit(conn)
 
     @serialize_write
-    async def fts_optimize(self) -> None:
-        """Optimizes the FTS5 index to reduce fragmentation and improve search speed."""
+    async def fts_optimize(self, full: bool = False) -> None:
+        """Keep the FTS5 index from fragmenting.
+
+        Default is a bounded incremental merge: 'optimize' rewrites every segment
+        into one, so its cost (and the write-lock hold) scales with the corpus,
+        not with what a run changed (measured 4.5 s for one new row at 40k
+        chunks). `full=True` is for explicit maintenance (compact-db).
+        """
         conn = self._get_conn()
         try:
             logger.info("Optimizing FTS5 index (chunk_fts)...")
-            await conn.execute("INSERT INTO chunk_fts(chunk_fts) VALUES('optimize')")
+            if full:
+                await conn.execute("INSERT INTO chunk_fts(chunk_fts) VALUES('optimize')")
+            else:
+                await conn.execute("INSERT INTO chunk_fts(chunk_fts, rank) VALUES('merge', 500)")
             await conn.commit()
             logger.info("FTS5 index optimization complete.")
         except Exception as e:
@@ -2108,6 +2143,18 @@ class DatabaseManager:
         )
         async with self._get_read_conn() as conn, conn.execute(sql, params) as cursor:
             return list(await cursor.fetchall())
+
+    async def get_file_paths_under(self, folder: str) -> list[tuple[int, str]]:
+        """Return (id, path) of every indexed file at or beneath *folder*."""
+        clause, params = _folder_match("path", folder)
+        async with (
+            self._get_read_conn() as conn,
+            conn.execute(
+                f"SELECT id, path FROM files WHERE {clause}",  # nosec B608 # noqa: S608
+                params,
+            ) as cur,
+        ):
+            return [(r[0], r[1]) for r in await cur.fetchall()]
 
     async def delete_files_by_folder_prefix(self, folder: str) -> None:
         """Delete all files (and cascading chunks) at or beneath *folder*.

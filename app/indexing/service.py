@@ -128,6 +128,9 @@ class IndexingProgress:
         self.is_cancelled = False
         self.last_error = ""
         self.run_failed = False
+        # Bumped once per index_folders run (not by reset(), which a run calls
+        # twice). The UI keys "a run finished" on it; counters can repeat.
+        self.run_id = 0
 
     def reset(self, total_files: int, initial_status: str = "running"):
         with self._lock:
@@ -268,6 +271,21 @@ _STUB_STATUS = {
 #                 default from db.py:700/:749, which re-indexes once and settles.
 #   NOCONTENT   - extraction produced no chunks from a non-empty file.
 _INCOMPLETE_SHA_STATES = ("", "ERROR", "CANCELLED", "NOCONTENT")
+
+
+def _path_is_gone(path: str) -> bool:
+    """True only when the OS says the path does not exist.
+
+    `os.path.exists` is False on ANY OSError, so a PermissionError or an ACL
+    change would read as "deleted" and drop the file's index rows and vectors.
+    """
+    try:
+        os.stat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return True
+    except OSError:
+        return False
+    return False
 
 
 #: One scanned file: its path, the basename of the indexed folder it came from,
@@ -706,6 +724,7 @@ class IndexingService:
 
             progress.reset(0)
             with progress._lock:
+                progress.run_id += 1
                 progress.status = "running"
                 progress.current_file = "Scanning folders…"
 
@@ -740,6 +759,16 @@ class IndexingService:
             if progress.is_cancelled:  # cancelled during change detection
                 progress.complete()
                 return
+
+            try:
+                if await self._remove_vanished_files(unique_folders, all_files):
+                    from app.search.retrieval import clear_all_query_caches
+
+                    await clear_all_query_caches(self.lancedb_client)
+            except Exception as exc:
+                # Nothing is lost by failing: the chunk vectors go first and abort
+                # before any SQLite row is touched, so the next run retries.
+                logger.error("Removing deleted files from the index failed: %s", exc)
 
             progress.reset(len(files_to_index))
             with progress._lock:
@@ -2069,6 +2098,57 @@ class IndexingService:
                     seen_paths.add(abs_p)
                     all_files.append((fp, f.name, str(f)))
         return all_files, "scandir", scan_dur
+
+    async def _remove_vanished_files(
+        self, unique_folders: list[Path], all_files: list[ScannedFile]
+    ) -> int:
+        """Drop indexed files that were deleted or renamed under the scanned roots.
+
+        Without this a re-index only ever added: the old path's rows, chunks, FTS
+        entries and vectors stayed searchable forever (audit A1-04). Conservative
+        by construction, because `D:` is a USB drive that can vanish mid-session
+        and an unplugged root must never wipe its index:
+          - only roots scanned in THIS run, and only if the root is still a
+            directory and the scan found at least one file under it;
+          - a candidate is removed only if it was not scanned AND a direct
+            `os.stat` raises FileNotFoundError/NotADirectoryError (a scanner that
+            skipped a subtree cannot delete anything still on disk, and a
+            PermissionError or other I/O error means "unknown", i.e. keep);
+          - the root is checked to still be a directory AGAIN after the stat
+            fan-out, immediately before removal: a drive that drops mid-run makes
+            every unscanned row read as gone.
+        Returns the number of files removed.
+        """
+        loop = asyncio.get_running_loop()
+        scanned = {str(fp.absolute()) for fp, _, _ in all_files}
+        vanished_by_root: list[tuple[Path, list[int]]] = []
+        for folder in unique_folders:
+            base = folder.absolute()
+            if not await loop.run_in_executor(_DISK_EXECUTOR, base.is_dir):
+                continue
+            if not any(Path(p).is_relative_to(base) for p in scanned):
+                continue
+            rows = await self.db.get_file_paths_under(str(base))
+            todo = [(i, p) for i, p in rows if p not in scanned]
+            ids: list[int] = []
+            for start in range(0, len(todo), 1000):
+                batch = todo[start : start + 1000]
+                gone = await asyncio.gather(
+                    *(loop.run_in_executor(_DISK_EXECUTOR, _path_is_gone, p) for _, p in batch)
+                )
+                ids.extend(i for (i, _), g in zip(batch, gone, strict=True) if g)
+            vanished_by_root.append((base, ids))
+        vanished: list[int] = []
+        for base, ids in vanished_by_root:
+            still_there = bool(ids) and await loop.run_in_executor(_DISK_EXECUTOR, base.is_dir)
+            if still_there:
+                vanished.extend(ids)
+        if not vanished or progress.is_cancelled:
+            return 0
+        progress.set_current_file("Removing deleted files…")
+        result = await self.db.remove_from_index(self.lancedb_client, file_ids=vanished)
+        logger.info("Removed %d deleted/renamed files from the index.", result["files_removed"])
+        return int(result["files_removed"])
 
     async def _detect_changes(
         self, all_files: list[ScannedFile], reader_conn: aiosqlite.Connection

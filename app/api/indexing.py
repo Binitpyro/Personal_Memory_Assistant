@@ -1,23 +1,23 @@
 import asyncio
 import json
 import logging
-from concurrent.futures import ThreadPoolExecutor
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
+from app import state
 from app.api.deps import ensure_indexing, get_db, get_emb, get_lancedb
 from app.api.limiter import limiter
 from app.storage.db import DatabaseManager
 
 logger = logging.getLogger(__name__)
 
-# Single-worker pool to prevent out-of-memory spikes during concurrent encodes
-_ENCODE_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pma-encode")
-
 router = APIRouter()
+
+# The running index task, kept so shutdown can ask it to stop (A10-11).
+_index_task: asyncio.Task | None = None
 
 # System directories that must never be indexed (PE8 Constant)
 BLOCKED_ROOTS: tuple[str, ...] = (
@@ -30,6 +30,21 @@ BLOCKED_ROOTS: tuple[str, ...] = (
     "/dev",
     "/boot",
 )
+
+
+def _is_blocked_root(path: str) -> bool:
+    """True if *path* is a blocked root, lies beneath one, or CONTAINS one.
+
+    The scanner walks everything under a root, so `/` or a drive root would index
+    /etc or the Windows directory though neither is itself blocked. Compared by
+    path component, so `/devices_backup` no longer matches `/dev`.
+    """
+    r = path.replace("\\", "/").rstrip("/").lower()
+    for b in BLOCKED_ROOTS:
+        n = b.replace("\\", "/").rstrip("/").lower()
+        if r == n or r.startswith(n + "/") or (n + "/").startswith(r + "/"):
+            return True
+    return False
 
 
 class IndexRequest(BaseModel):
@@ -55,8 +70,7 @@ class IndexRequest(BaseModel):
                 logger.warning("Rejected folder with traversal sequence: %s", p)
                 continue
             # Block sensitive system directories
-            r_lower = resolved.lower()
-            if any(r_lower.startswith(b.lower()) for b in BLOCKED_ROOTS):
+            if _is_blocked_root(resolved):
                 logger.warning("Rejected blocked system path: %s", resolved)
                 continue
             # Must exist and be a directory
@@ -72,7 +86,6 @@ class IndexRequest(BaseModel):
 async def index_start(
     request: Request,
     payload: IndexRequest,
-    background_tasks: BackgroundTasks,
     db: DatabaseManager = Depends(get_db),
     emb=Depends(get_emb),
     lancedb_client=Depends(get_lancedb),
@@ -107,8 +120,33 @@ async def index_start(
         except Exception as e:
             logger.debug("Could not notify OCR manager after indexing: %s", e)
 
-    background_tasks.add_task(_index_then_compact)
+    # A plain task in `state.bg_tasks`, not a Starlette BackgroundTask: uvicorn
+    # waits for an in-flight request's background work before it runs the
+    # lifespan shutdown, so SIGTERM blocked until the whole run finished (A10-11).
+    global _index_task
+    task = asyncio.create_task(_index_then_compact())
+    _index_task = task
+    state.bg_tasks.add(task)
+    task.add_done_callback(state.bg_tasks.discard)
     return {"message": "Indexing started"}
+
+
+async def stop_indexing_for_shutdown(timeout: float = 20.0) -> None:
+    """Ask a running index to stop at its next file, and wait for it to do so.
+
+    Called from the lifespan shutdown before `state.bg_tasks` are cancelled, so
+    the pipeline can commit and flush instead of being cut off mid-transaction.
+    A run that outlives `timeout` is left to the caller's cancel.
+    """
+    task = _index_task
+    if task is None or task.done():
+        return
+    _, progress = ensure_indexing()
+    with progress._lock:
+        progress.is_cancelled = True
+        if progress.status == "running":
+            progress.status = "cancelling"
+    await asyncio.wait({task}, timeout=timeout)
 
 
 @router.post("/cancel")
@@ -182,6 +220,7 @@ async def progress_stream(db: DatabaseManager = Depends(get_db)):
                 "failed_files": progress.failed_files,
                 "unchanged_files": progress.unchanged_files,
                 "run_failed": progress.run_failed,
+                "run_id": progress.run_id,
                 # `last_error` is deliberately NOT on this payload. This endpoint
                 # is on the token exemption list (app/main.py:509) and the field
                 # carries exception text, which for OSError/PermissionError
@@ -233,8 +272,20 @@ async def clear_index(
     from app.state import file_tree_cache as _file_tree_cache
     from app.state import insights_cache as _insights_cache
 
-    res = await db.clear_all()
-    await lancedb_client.clear_all()
+    ensure_indexing()
+    from app.indexing.service import indexing_lock
+
+    # A run in flight finishes its tail (folder profiles, summary flush, HNSW)
+    # after a wipe and re-creates state the user just cleared. Refuse instead,
+    # and hold the same lock the run takes so none can start mid-wipe.
+    if indexing_lock.locked():
+        return JSONResponse(
+            status_code=409,
+            content={"error": "Indexing is running. Cancel it before clearing the index."},
+        )
+    async with indexing_lock:
+        res = await db.clear_all()
+        await lancedb_client.clear_all()
     clear_retrieval_cache()
     _file_tree_cache["data"] = _insights_cache["data"] = None
     return res

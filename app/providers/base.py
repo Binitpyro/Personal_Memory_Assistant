@@ -1,7 +1,23 @@
+import functools
+import ssl
 from collections.abc import AsyncGenerator
 from typing import Any, Protocol, TypedDict
 
 import httpx
+
+
+@functools.cache
+def _ssl_context() -> ssl.SSLContext:
+    return httpx.create_ssl_context()
+
+
+def new_async_client(timeout: float | httpx.Timeout) -> httpx.AsyncClient:
+    """An AsyncClient that reuses one process-wide SSL context.
+
+    httpx builds (and loads the CA bundle into) a fresh context per client, which
+    measured 28-440 ms synchronously on the event loop for every provider built.
+    """
+    return httpx.AsyncClient(timeout=timeout, verify=_ssl_context())
 
 
 class ProviderStreamError(httpx.RequestError):
@@ -50,7 +66,7 @@ class BaseProvider(Protocol):
         api_key: str | None,
         base_url: str | None,
         default_model: str | None,
-        timeout: float = 30.0,
+        timeout: float | httpx.Timeout = 30.0,
     ) -> None: ...
 
     async def validate(self) -> ValidationResult: ...

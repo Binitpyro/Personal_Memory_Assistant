@@ -2,6 +2,7 @@ import json
 import logging
 import re
 from collections.abc import AsyncGenerator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,7 @@ import keyring
 
 from app.config import settings
 from app.providers import (
+    ANTHROPIC_DEFAULT_MODEL,
     PROVIDER_REGISTRY,
     BaseProvider,
     create_provider,
@@ -65,9 +67,11 @@ LLM_UNAVAILABLE_PREFIX = "LLM unavailable"
 
 def _chain_failure_message(providers_to_try: list, last_error: object) -> str:
     """Say "All providers in fallback chain failed" only when more than one was tried."""
+    # A ReadTimeout stringifies empty, which read as "Last error: ".
+    err = str(last_error) or type(last_error).__name__
     if len(providers_to_try) == 1:
-        return f"{providers_to_try[0][0]} failed: {last_error!s}"
-    return f"All providers in fallback chain failed. Last error: {last_error!s}"
+        return f"{providers_to_try[0][0]} failed: {err}"
+    return f"All providers in fallback chain failed. Last error: {err}"
 
 
 class ProviderNotConfiguredError(Exception):
@@ -207,6 +211,7 @@ class LLMClient:
         self.lm_studio_url = settings.lm_studio_url
         self.lm_studio_model = ""
         self._oauth_token: str | None = None
+        self._oauth_expiry: datetime | None = None
         self._token_loaded = False
 
     async def _ensure_token_loaded(self):
@@ -256,6 +261,7 @@ class LLMClient:
             creds = Credentials.from_authorized_user_info(token_data)
             self._refresh_token_if_expired(creds, token_data, token_path)
             if creds.valid:
+                self._oauth_expiry = creds.expiry
                 return str(creds.token)
         except Exception as e:
             logger.warning("Failed to load OAuth token: %s", e)
@@ -420,7 +426,7 @@ Answer:
         return messages
 
     async def _resolve_provider_by_id(
-        self, pid: str, model_override: str | None = None, timeout: float = 30.0
+        self, pid: str, model_override: str | None = None, timeout: float | httpx.Timeout = 30.0
     ) -> BaseProvider:
         # Determine source
         source = "unset"
@@ -489,7 +495,7 @@ Answer:
             elif pid == "openai":
                 default_model = "gpt-4o-mini"
             elif pid == "anthropic":
-                default_model = "claude-3-5-sonnet-20241022"
+                default_model = ANTHROPIC_DEFAULT_MODEL
 
         api_key = None
         if source == "env":
@@ -498,6 +504,18 @@ Answer:
             api_key = self.provider_keys.get(pid)
 
         if pid == "gemini" and self._oauth_token and not api_key:
+            # The token is loaded once per process and lasts ~1 h; reload (which
+            # refreshes) when it is within a minute of expiring.
+            exp = self._oauth_expiry
+            # google-auth's expiry is naive UTC.
+            now = datetime.now(UTC).replace(tzinfo=None)
+            if exp is not None and exp - timedelta(seconds=60) <= now:
+                import asyncio
+
+                # A failed refresh (None) keeps the old token so the next call retries.
+                self._oauth_token = (
+                    await asyncio.to_thread(self._load_oauth_token) or self._oauth_token
+                )
             api_key = self._oauth_token
 
         # Check health for local
@@ -520,6 +538,11 @@ Answer:
                 f"API Key for {pid} is not set.", code="api_key_missing"
             )
 
+        spec = PROVIDER_REGISTRY.get(pid)
+        if spec is not None and spec.kind == "local":
+            # A local model's first token can take well over the 30 s / 10 s cloud
+            # budgets (CPU prompt eval); it is bounded by the stream deadline instead.
+            timeout = httpx.Timeout(10.0, read=float(settings.query_stream_timeout_s))
         return create_provider(
             pid, api_key=api_key, base_url=base_url, default_model=default_model, timeout=timeout
         )
@@ -528,7 +551,7 @@ Answer:
         self,
         override_provider: str | None = None,
         override_model: str | None = None,
-        timeout: float = 30.0,
+        timeout: float | httpx.Timeout = 30.0,
     ) -> BaseProvider:
         await self._ensure_token_loaded()
 

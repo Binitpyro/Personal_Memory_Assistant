@@ -6,7 +6,7 @@ from typing import Any, cast
 
 import httpx
 
-from app.providers.base import ModelInfo, ValidationResult, stream_error_for
+from app.providers.base import ModelInfo, ValidationResult, new_async_client, stream_error_for
 from app.providers.cache import validation_cache
 from app.providers.registry import ProviderSpec
 
@@ -27,7 +27,7 @@ class OpenAICompatibleProvider:
         api_key: str | None,
         base_url: str | None,
         default_model: str | None,
-        timeout: float = 30.0,
+        timeout: float | httpx.Timeout = 30.0,
     ):
         self.spec = spec
         self.api_key = api_key
@@ -39,7 +39,7 @@ class OpenAICompatibleProvider:
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=self.timeout)
+            self._client = new_async_client(self.timeout)
         return self._client
 
     def _get_headers(self) -> dict[str, str]:
@@ -300,9 +300,9 @@ class OpenAICompatibleProvider:
         async with client.stream("POST", url, headers=headers, json=payload) as resp:
             resp.raise_for_status()
             async for line in resp.aiter_lines():
-                if not line or not line.startswith("data: "):
+                if not line or not line.startswith("data:"):
                     continue
-                payload_str = line[6:].strip()
+                payload_str = line[5:].strip()
                 if payload_str == "[DONE]":
                     break
                 try:

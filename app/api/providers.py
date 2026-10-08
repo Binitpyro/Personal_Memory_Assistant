@@ -11,6 +11,7 @@ from app.api.deps import get_llm
 from app.api.models import PRIVACY_NOTICE
 from app.config import settings
 from app.providers import (
+    ANTHROPIC_DEFAULT_MODEL,
     PROVIDER_IDS,
     PROVIDER_REGISTRY,
     create_provider,
@@ -26,6 +27,15 @@ from app.settings_store import CURRENT_SCHEMA_VERSION, SettingsStore
 
 logger = logging.getLogger(__name__)
 _background_tasks: set[asyncio.Task[Any]] = set()
+
+
+async def _validate_and_close(provider: Any) -> None:
+    # validate() opens a lazy httpx client the caller owns; nothing else closes it.
+    try:
+        await provider.validate()
+    finally:
+        await provider.close()
+
 
 providers_router = APIRouter(prefix="/providers", tags=["providers"])
 
@@ -237,7 +247,7 @@ async def list_providers():
                 p_obj = create_provider(
                     pid, api_key=api_key, base_url=base_url, default_model=default_model
                 )
-                task = asyncio.create_task(p_obj.validate())
+                task = asyncio.create_task(_validate_and_close(p_obj))
                 _background_tasks.add(task)
                 task.add_done_callback(_background_tasks.discard)
             except Exception as e:
@@ -556,6 +566,6 @@ async def get_current_provider():
         elif resolved_id == "openai":
             model = "gpt-4o-mini"
         elif resolved_id == "anthropic":
-            model = "claude-3-5-sonnet-20241022"
+            model = ANTHROPIC_DEFAULT_MODEL
 
     return {"provider": resolved_id, "model": model, "source": source}

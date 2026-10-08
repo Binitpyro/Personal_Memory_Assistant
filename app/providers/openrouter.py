@@ -1,5 +1,7 @@
 from typing import cast
 
+import httpx
+
 from app.providers.base import ModelInfo
 from app.providers.openai_compat import OpenAICompatibleProvider
 from app.providers.registry import spec_of
@@ -12,7 +14,7 @@ class OpenRouterProvider(OpenAICompatibleProvider):
         api_key: str | None,
         base_url: str | None = None,
         default_model: str | None = None,
-        timeout: float = 30.0,
+        timeout: float | httpx.Timeout = 30.0,
     ):
         spec = spec_of("openrouter")
         super().__init__(

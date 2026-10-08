@@ -3,11 +3,18 @@ import logging
 from collections.abc import AsyncGenerator
 from typing import Any, cast
 
+import httpx
+
 from app.providers.base import ModelInfo, stream_error_for
 from app.providers.openai_compat import OpenAICompatibleProvider
 from app.providers.registry import spec_of
 
 logger = logging.getLogger(__name__)
+
+# The one place the default Anthropic model is named. The previous default
+# (claude-3-5-sonnet-20241022) was retired by Anthropic, so every keyed-but-unpicked
+# request 404ed.
+ANTHROPIC_DEFAULT_MODEL = "claude-sonnet-5-5"
 
 
 class AnthropicProvider(OpenAICompatibleProvider):
@@ -17,14 +24,14 @@ class AnthropicProvider(OpenAICompatibleProvider):
         api_key: str | None,
         base_url: str | None = None,
         default_model: str | None = None,
-        timeout: float = 30.0,
+        timeout: float | httpx.Timeout = 30.0,
     ):
         spec = spec_of("anthropic")
         super().__init__(
             spec,
             api_key=api_key,
             base_url=base_url,
-            default_model=default_model or "claude-3-5-sonnet-20241022",
+            default_model=default_model or ANTHROPIC_DEFAULT_MODEL,
             timeout=timeout,
         )
 
@@ -131,9 +138,9 @@ class AnthropicProvider(OpenAICompatibleProvider):
         async with client.stream("POST", url, headers=headers, json=payload) as resp:
             resp.raise_for_status()
             async for line in resp.aiter_lines():
-                if not line or not line.startswith("data: "):
+                if not line or not line.startswith("data:"):
                     continue
-                payload_str = line[6:].strip()
+                payload_str = line[5:].strip()
                 err = delta_text = None
                 try:
                     parsed = json.loads(payload_str)

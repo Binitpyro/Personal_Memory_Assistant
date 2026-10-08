@@ -6,7 +6,7 @@ from typing import Any, cast
 
 import httpx
 
-from app.providers.base import ModelInfo, ValidationResult, stream_error_for
+from app.providers.base import ModelInfo, ValidationResult, new_async_client, stream_error_for
 from app.providers.cache import validation_cache
 from app.providers.registry import spec_of
 
@@ -218,7 +218,7 @@ class OllamaProvider:
         api_key: str | None = None,
         base_url: str | None = None,
         default_model: str | None = None,
-        timeout: float = 30.0,
+        timeout: float | httpx.Timeout = 30.0,
     ):
         self.spec = spec_of("ollama")
         self.api_key = api_key
@@ -229,7 +229,7 @@ class OllamaProvider:
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=self.timeout)
+            self._client = new_async_client(self.timeout)
         return self._client
 
     async def close(self) -> None:

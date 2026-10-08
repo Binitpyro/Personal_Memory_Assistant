@@ -1,4 +1,6 @@
-from app.providers.anthropic import AnthropicProvider
+import httpx
+
+from app.providers.anthropic import ANTHROPIC_DEFAULT_MODEL, AnthropicProvider
 from app.providers.base import BaseProvider, ModelInfo, ValidationResult
 from app.providers.gemini import GeminiProvider
 from app.providers.manifest import (
@@ -17,6 +19,7 @@ from app.providers.openrouter import OpenRouterProvider
 from app.providers.registry import PROVIDER_REGISTRY, ProviderSpec, spec_of
 
 __all__ = [
+    "ANTHROPIC_DEFAULT_MODEL",
     "PROVIDER_IDS",
     "PROVIDER_REGISTRY",
     "AnthropicProvider",
@@ -69,7 +72,7 @@ def create_provider(
     api_key: str | None = None,
     base_url: str | None = None,
     default_model: str | None = None,
-    timeout: float = 30.0,
+    timeout: float | httpx.Timeout = 30.0,
 ) -> BaseProvider:
     if provider_id in _OPENAI_COMPATIBLE_DEFAULT_MODEL:
         return OpenAICompatibleProvider(

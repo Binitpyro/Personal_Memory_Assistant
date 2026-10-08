@@ -153,6 +153,12 @@ See [`.env.example`](.env.example) for all supported provider and indexing setti
 `.env` override the built-in defaults, so anything you leave commented out stays on the tuned
 default rather than falling back to something worse.
 
+**Host-header guard.** The server answers only requests whose `Host` header is `127.0.0.1`,
+`localhost`, `[::1]`, `tauri.localhost` or the value of `PMA_HOST`; anything else gets a 400.
+`PMA_ALLOWED_HOSTS` (comma-separated) adds names. It does not change where the server listens
+(`PMA_HOST` does). The guard is what stops a DNS-rebinding web page from reaching your index
+through the browser, so add only names you control.
+
 ---
 
 ## 7. OCR for Scanned Documents (optional)
@@ -186,6 +192,10 @@ Tauri is the supported desktop distribution path. Build the Windows MSI installe
 cd frontend
 npm run tauri build
 ```
+
+> **Unproven as of 2026-10-08.** The packaging configuration was corrected during the
+> failure-point audit and checked with unit tests and `cargo check`, but no MSI has been built
+> and installed from it since.
 
 `Build-Exe.bat` still creates a PyInstaller sidecar executable, but that standalone
 EXE workflow is temporarily on hold and should not be used as a current release artifact.

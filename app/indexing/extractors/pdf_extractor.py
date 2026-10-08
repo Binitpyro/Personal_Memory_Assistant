@@ -104,6 +104,16 @@ class PdfExtractor:
                             native_pages += 1
                         else:
                             blank_pages += 1
+                        # A6-16: mojibake (broken CID fonts) is useless to search
+                        # and would sit beside the OCR text. Keyed on the garbage
+                        # score, never on the OCR verdict: a clean short page with
+                        # a logo is also sent to OCR and its native text is good.
+                        if (
+                            txt
+                            and gate_cfg is not None
+                            and signal.garbage_ratio >= gate_cfg.garbage_ratio
+                        ):
+                            txt = None
                     except Exception as exc:
                         logger.debug("Gate failed on %s page %d: %s", path, idx, exc)
 

@@ -191,6 +191,12 @@ def test_content_stream_array_lengths_are_summed():
         "これは日本語のテキストです。",  # CJK is alnum, must not score as garbage
         "한국어 텍스트입니다",
         "Résumé naïve café — em-dash and accents",
+        # Combining marks and math symbols are not alnum (A6-16): these scored
+        # 0.45 / 0.39 / 0.46 / 0.58 before.
+        "भारत एक विशाल देश है। यहाँ अनेक भाषाएँ बोली जाती हैं।",
+        "தமிழ் ஒரு பழமையான மொழி. இது இந்தியாவிலும் பேசப்படுகிறது.",
+        "بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ الْحَمْدُ لِلَّهِ",
+        "∀x∈ℝ ∃y∈ℕ: x≤y ∧ ¬(y<x) ⇒ ∑∏∫∮ √(x²+y²) ≈ ∞ ≠ ∅ ⊂ ⊆ ∩ ∪ ± × ÷ ∂ ∇",  # noqa: RUF001
     ],
 )
 def test_clean_text_scores_low(text):
@@ -209,3 +215,7 @@ def test_replacement_characters_score_high():
 
 def test_control_characters_score_high():
     assert garbage_ratio("\x01\x02\x03\x04\x05") == 1.0
+
+
+def test_latin1_cid_mojibake_still_scores_high():
+    assert garbage_ratio("ÿþ#$%&'()*+ Ó¿¾½¼»º¹¸·¶µ´³²±° ¯®­¬«ª©¨§¦¥¤£¢¡") >= 0.30  # noqa: RUF001

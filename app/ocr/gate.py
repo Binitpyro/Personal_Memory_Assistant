@@ -14,6 +14,7 @@ as NATIVE. The only mitigation is an explicit Force OCR.
 from __future__ import annotations
 
 import logging
+import unicodedata
 from dataclasses import dataclass
 from typing import Any
 
@@ -63,6 +64,9 @@ def garbage_ratio(text: str) -> float:
 
     CJK passes cheaply: `str.isalnum()` is true for Han, Hiragana, Katakana
     and Hangul, so a Japanese page scores near zero rather than 1.0.
+    Combining marks (Indic vowel signs, Arabic harakat) and math symbols are
+    not alphanumeric either; counting them scored clean Hindi at 0.45, Tamil
+    at 0.39 and an equation line at 0.58, over the 0.30 threshold.
     """
     if not text:
         return 1.0
@@ -73,8 +77,12 @@ def garbage_ratio(text: str) -> float:
         if ch.isspace():
             continue
         total += 1
-        if ch == "�" or not ch.isprintable() or (not ch.isalnum() and ch not in _ALLOWED_PUNCT):
+        if ch == "�" or not ch.isprintable():
             bad += 1
+        elif not ch.isalnum() and ch not in _ALLOWED_PUNCT:
+            cat = unicodedata.category(ch)
+            if cat[0] != "M" and cat != "Sm":
+                bad += 1
 
     if total == 0:
         return 1.0

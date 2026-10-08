@@ -342,6 +342,26 @@ class TestPdfExtractorOcrGate:
         assert isinstance(result, str)
         assert "Hello from a scanned-ish page" in result
 
+    def test_a6_16_mojibake_page_text_is_dropped_but_clean_ocr_page_text_kept(
+        self, tmp_path, monkeypatch
+    ):
+        """Drop keyed on the garbage score, not the OCR verdict: the short clean
+        logo page also goes to OCR and keeps its text; clean Hindi stays native."""
+        mojibake = "ÿþ#$%&'()*+ Ó¿¾½¼»º¹¸·¶µ´³²±° ¯®­¬«ª©¨§¦¥¤£¢¡ " * 4  # noqa: RUF001
+        logo_page = "ACME Corp quarterly report"
+        hindi = "भारत एक विशाल देश है। यहाँ अनेक भाषाएँ बोली जाती हैं। " * 4
+        pages = [
+            self._page(mojibake, scanned=True),
+            self._page(logo_page, scanned=True),
+            self._page(hindi, scanned=True),
+        ]
+        items = self._run(tmp_path, pages, monkeypatch)
+
+        texts = [i for i in items if isinstance(i, str)]
+        assert texts == [logo_page, hindi]
+        assert items[-1].ocr_pages == (0, 1)
+        assert items[-1].native_pages == 1
+
 
 # ── DOCX (mocked python-docx) ─────────────────────────────────────────────────
 

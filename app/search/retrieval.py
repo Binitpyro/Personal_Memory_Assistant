@@ -1600,7 +1600,10 @@ async def stream_rag(
 
     # Phase 7: Semantic Query Cache (persistent)
     query_emb = None
-    if not history:
+    # Pinned context changes the answer but is not part of the cache scope, so a
+    # pinned query neither reads an unpinned answer nor writes one for others.
+    use_semantic_cache = not history and not forced_chunk_ids
+    if use_semantic_cache:
         try:
             query_emb = await embedding_service.embed_query(query)
             cache_hit = await lancedb_client.search_cache(
@@ -1908,7 +1911,7 @@ async def stream_rag(
         telemetry_task.add_done_callback(state.bg_tasks.discard)
 
         # Phase 7: Add to persistent semantic cache (never a failed turn's partial)
-        if not history and query_emb is not None and not stream_failed and not is_degraded:
+        if use_semantic_cache and query_emb is not None and not stream_failed and not is_degraded:
             import numpy as np
 
             task = asyncio.create_task(
@@ -1956,7 +1959,12 @@ async def stream_rag(
                 state.bg_tasks.add(telemetry_task)
                 telemetry_task.add_done_callback(state.bg_tasks.discard)
 
-                if not history and query_emb is not None and not stream_failed and not is_degraded:
+                if (
+                    use_semantic_cache
+                    and query_emb is not None
+                    and not stream_failed
+                    and not is_degraded
+                ):
                     import numpy as np
 
                     await lancedb_client.add_query_cache(

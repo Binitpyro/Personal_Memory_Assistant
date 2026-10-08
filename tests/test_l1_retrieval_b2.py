@@ -273,3 +273,85 @@ def test_rerank_turn_lock_works_across_event_loops(monkeypatch):
         results = asyncio.run(contend())
         assert len(results) == 6
         assert not any(r.get("_degraded") for r in results)
+
+
+# --- pinned context (forced_chunk_ids) never touches the persistent semantic cache -
+
+
+async def _stream_pinned(mock_db, mock_emb, monkeypatch, forced, cache_hit=None):
+    async def _missing(*_a, **_kw):
+        raise RerankerNotInstalledError("test")
+
+    monkeypatch.setattr(retrieval, "rerank", _missing)
+    file_id = await mock_db.insert_file(
+        {
+            "path": "d:/n/a.md",
+            "size": 10,
+            "modified_at": "2026-03-03T12:00:00",
+            "type": ".md",
+            "folder_tag": "n",
+            "summary": "s",
+        }
+    )
+    await mock_db.insert_chunks_bulk(
+        [
+            {
+                "file_id": file_id,
+                "start_offset": 0,
+                "end_offset": 99,
+                "text_preview": "lorem ipsum dolor sit amet " * 4,
+            }
+        ]
+    )
+    mock_db.save_query = AsyncMock(return_value=1)
+    mock_db.save_telemetry = AsyncMock()
+    lance = _challenge_lance(lambda emb: [1])
+    lance.search_cache = AsyncMock(return_value=cache_hit)
+    llm = MagicMock()
+    llm.get_model_class = MagicMock(return_value="7b_local")
+
+    async def fake_stream(*_a, **_kw):
+        yield "fresh answer"
+
+    llm.stream_answer = fake_stream
+    frames = [
+        f
+        async for f in retrieval.stream_rag(
+            "quantum entanglement?",
+            mock_db,
+            mock_emb,
+            lance,
+            llm,
+            QueryPlanner(),
+            forced_chunk_ids=forced,
+        )
+    ]
+    await asyncio.sleep(0)
+    await asyncio.gather(*list(retrieval.state.bg_tasks), return_exceptions=True)
+    return frames, lance
+
+
+@pytest.mark.asyncio
+async def test_pinned_query_does_not_read_or_write_the_semantic_cache(
+    mock_db, mock_emb, monkeypatch
+):
+    frames, lance = await _stream_pinned(
+        mock_db, mock_emb, monkeypatch, [1], cache_hit={"response_text": "UNPINNED CACHED"}
+    )
+
+    lance.search_cache.assert_not_awaited()
+    assert "UNPINNED CACHED" not in "".join(f.get("text", "") for f in frames)
+    lance.add_query_cache.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_unpinned_query_still_uses_the_semantic_cache(mock_db, mock_emb, monkeypatch):
+    # Control: the same flow with no pinned chunks reads the cache and writes to it.
+    frames, lance = await _stream_pinned(mock_db, mock_emb, monkeypatch, None)
+    lance.search_cache.assert_awaited()
+    lance.add_query_cache.assert_called_once()
+
+    frames, _ = await _stream_pinned(
+        mock_db, mock_emb, monkeypatch, None, cache_hit={"response_text": "CACHED"}
+    )
+    assert "CACHED" in "".join(f.get("text", "") for f in frames)

@@ -597,6 +597,8 @@ export function subscribeProgress(onData: (data: IndexStatus & { current_file: s
   let closed = false;
   let retries = 0;
   const MAX_RETRIES = 10;
+  const IDLE_RECONNECT_MS = 15_000;
+  let settled = false;
   const controller = new AbortController();
 
   function connect() {
@@ -612,14 +614,19 @@ export function subscribeProgress(onData: (data: IndexStatus & { current_file: s
     es.addEventListener('progress', (e) => {
       retries = 0; // reset on success
       try {
-        onData(JSON.parse(e.data));
+        const data = JSON.parse(e.data);
+        settled = data.status !== 'running' && data.status !== 'cancelling';
+        onData(data);
       } catch { /* ignore malformed */ }
     });
     es.onerror = () => {
       es?.close();
       if (!closed && retries < MAX_RETRIES) {
         retries++;
-        setTimeout(connect, 1000);
+        // The server closes the stream after one event when nothing is running, so a
+        // settled close is not an error; a 1s reconnect there polled the DB forever.
+        // ponytail: fixed idle poll; a server-pushed "run started" would remove it.
+        setTimeout(connect, settled ? IDLE_RECONNECT_MS : 1000);
       }
     };
   }
@@ -720,9 +727,10 @@ export function subscribeQuery(
       }
       buffer += decoder.decode(value, { stream: true });
       
-      // Handle Case 3: Two complete objects concatenated without \n between them (e.g. }{ )
-      buffer = buffer.replace(/\}\{/g, '}\n{');
-      
+      // The backend frames events as json.dumps(chunk) + "\n" (search.py), so split on
+      // newlines only: a '}{' can sit inside a JSON string (code, LaTeX) and rewriting it
+      // corrupted the event.
+
       const lines = buffer.split('\n');
       buffer = lines.pop() || ''; // Keep the last incomplete line in the buffer
       

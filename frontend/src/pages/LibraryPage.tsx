@@ -82,7 +82,16 @@ export function LibraryPage() {
         invalidateCorpusCaches()
         refetchHealth()
         refetchStatus()
-        setMessage({ type: 'ok', text: `Indexing complete — ${data.processed_files} files processed` })
+        if (data.run_failed) {
+          // The stream omits last_error (it is exempt from the token check); /index/status has it.
+          setMessage({ type: 'err', text: 'Indexing failed — the run stopped before completing' })
+          getIndexStatus()
+            .then((s) => s.last_error && setMessage({ type: 'err', text: `Indexing failed — ${s.last_error}` }))
+            .catch(() => {})
+        } else {
+          const failed = data.failed_files ? `, ${data.failed_files} failed` : ''
+          setMessage({ type: 'ok', text: `Indexing complete — ${data.processed_files} files processed${failed}` })
+        }
       }
     })
     return unsub

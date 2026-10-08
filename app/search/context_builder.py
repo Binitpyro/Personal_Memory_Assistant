@@ -1,5 +1,9 @@
 import functools
+import hashlib
+import logging
+import os
 import re
+from pathlib import Path
 from typing import Any
 
 from app.config import settings
@@ -9,11 +13,44 @@ try:
 except Exception:  # pragma: no cover - tiktoken is a declared dependency
     tiktoken = None  # type: ignore[assignment]
 
+logger = logging.getLogger(__name__)
+
 # None = not yet resolved, False = resolution failed, otherwise the Encoding.
 # tiktoken is a declared dependency now, so the ImportError branch above should
 # be unreachable - but get_encoding() itself can still fail on a cold cache, and
 # _token_count silently degrades to len(text)//4 when it does.
 _ENCODING: Any = None
+
+
+# tiktoken fetches cl100k_base from openaipublic.blob.core.windows.net on a cold
+# cache (CLAUDE.md 1.4). The file ships in app/assets/tiktoken under tiktoken's
+# cache name (sha1 of the blob URL), so TIKTOKEN_CACHE_DIR makes get_encoding
+# load it offline. The same path resolves inside a PyInstaller bundle, where
+# --add-data "app;app" puts it under _MEIPASS/app.
+_BUNDLED_BPE_DIR = Path(__file__).resolve().parent.parent / "assets" / "tiktoken"
+_BPE_CACHE_KEY = "9b5ad71b2ce5302211f9c61530b329a4922fc6a4"
+_BPE_SHA256 = "223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7"
+
+
+def _point_tiktoken_at_bundled_bpe() -> bool:
+    """True when get_encoding("cl100k_base") will find its file without a fetch.
+
+    A user-set TIKTOKEN_CACHE_DIR that already holds the file wins. Otherwise the
+    bundled copy is used, but only after its sha256 matches: tiktoken deletes a
+    cache file that fails its own check and then goes to the network, so a
+    line-ending-mangled checkout must be refused here, not handed over.
+    """
+    user = os.environ.get("TIKTOKEN_CACHE_DIR")
+    if user and (Path(user) / _BPE_CACHE_KEY).is_file():
+        return True
+    bundled = _BUNDLED_BPE_DIR / _BPE_CACHE_KEY
+    try:
+        ok = hashlib.sha256(bundled.read_bytes()).hexdigest() == _BPE_SHA256
+    except OSError:
+        return False
+    if ok:
+        os.environ["TIKTOKEN_CACHE_DIR"] = str(_BUNDLED_BPE_DIR)
+    return ok
 
 
 def _get_encoding() -> Any:
@@ -23,6 +60,11 @@ def _get_encoding() -> Any:
         return _ENCODING
 
     if tiktoken is None:
+        _ENCODING = False
+        return _ENCODING
+
+    if not _point_tiktoken_at_bundled_bpe():
+        logger.warning("cl100k_base BPE file not available offline; budgeting with len(text)//4")
         _ENCODING = False
         return _ENCODING
 
@@ -270,6 +312,7 @@ def _format_snippets(
     deduplicated: list[dict[str, Any]],
     remaining_tokens: int,
     head_share: float | None = None,
+    source_numbers: dict[int, int] | None = None,
 ) -> list[str]:
     if head_share is None:
         head_share = settings.context_snippet_head_share
@@ -280,7 +323,11 @@ def _format_snippets(
         if used_tokens >= remaining_tokens:
             break
 
-        snippet_id = i + 1
+        # The client numbers its source frames by position in the full retrieved
+        # list, and the prompt tells the model to cite [n]. Numbering the subset
+        # that survived dedup / cutoff / max_chunks by its own position made
+        # "[3]" name a different chunk than frame 3.
+        snippet_id = (source_numbers or {}).get(id(res), i + 1)
         path = res.get("file_path", "Unknown File")
         # `parent_text` is the widened window when parent-window expansion ran
         # (app/search/retrieval.py:attach_parent_windows); `text` is the child
@@ -478,8 +525,9 @@ def build_context(
             # Keep only top max_chunks
             deduplicated = deduplicated[:max_chunks]
 
+            source_numbers = {id(r): n for n, r in enumerate(retrieved_results, 1)}
             snippet_parts = _format_snippets(
-                deduplicated, max(0, max_tokens - used_tokens), head_share
+                deduplicated, max(0, max_tokens - used_tokens), head_share, source_numbers
             )
             context_parts.extend(snippet_parts)
 

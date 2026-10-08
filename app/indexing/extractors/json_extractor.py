@@ -1,3 +1,4 @@
+import contextlib
 import json
 import logging
 from collections.abc import Iterator
@@ -12,6 +13,10 @@ _READ_BLOCK_CHARS = 128 * 1024
 
 
 class JsonExtractor:
+    # Fragments are arbitrary windows of one document, not records: the
+    # indexer must not append a separator between them (see _get_stream).
+    yields_records = False
+
     def can_handle(self, path: Path) -> bool:
         return path.suffix.lower() == ".json"
 
@@ -38,11 +43,15 @@ class JsonExtractor:
 
             with open(path, encoding="utf-8-sig", errors="replace") as f:
                 text = f.read(max_file_size)
-            try:
-                # Prettify for better RAG context
-                yield json.dumps(json.loads(text), indent=2, ensure_ascii=False)[:200000]
-            except Exception:
-                yield text[:200000]
+            # Prettify for better RAG context; invalid (e.g. truncated) JSON stays raw.
+            with contextlib.suppress(Exception):
+                text = json.dumps(json.loads(text), indent=2, ensure_ascii=False)[:max_file_size]
+            # Not cut at a fixed 200k chars: that silently dropped the tail of a
+            # 400 KB file while a 600 KB one streamed in full. The cap is
+            # max_file_size, as for every other path. Yielded in blocks so no
+            # fragment is the size of the document.
+            for i in range(0, len(text), _READ_BLOCK_CHARS):
+                yield text[i : i + _READ_BLOCK_CHARS]
         except Exception as e:
             logger.warning("Failed to extract JSON %s: %s", path, e)
 

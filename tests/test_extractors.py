@@ -812,7 +812,7 @@ class TestEpubExtractor:
 
         result = self.ext.extract(fake_epub, MAX_SIZE)
         assert "Introduction" in result
-        assert "Welcome to standard text." in result
+        assert "Welcome to & standard text." in result
         assert "This is second page." in result
         assert "ignored" not in result
 

@@ -102,8 +102,31 @@ class CodeChunker:
             lines = _LINE_BREAK.split(text)
             line_starts = _line_start_offsets(text)
 
+            # `node.lineno` of a decorated def/class is the `def` line, and
+            # comments are not AST nodes, so decorators (`@app.post(...)`) and
+            # the comment block above a definition belonged to no chunk. The
+            # floor is the previous statement's last line, so the extension can
+            # never overlap a neighbour.
+            floors: dict[int, int] = {}
+            prev_end = 0
+            for n in tree.body:
+                floors[id(n)] = prev_end
+                prev_end = getattr(n, "end_lineno", prev_end)
+
+            def first_line(node: Any) -> int:
+                """0-based first line of ``node`` including decorators and the
+                contiguous ``#`` comment lines directly above it."""
+                first = getattr(node, "lineno", 1)
+                for dec in getattr(node, "decorator_list", []):
+                    first = min(first, dec.lineno)
+                start = first - 1
+                floor = floors.get(id(node), 0)
+                while start > floor and lines[start - 1].lstrip().startswith("#"):
+                    start -= 1
+                return start
+
             def span_of(node: Any) -> tuple[int, int]:
-                start_line = getattr(node, "lineno", 1) - 1
+                start_line = first_line(node)
                 end_line = getattr(node, "end_lineno", len(lines))
                 start = line_starts[min(start_line, len(line_starts) - 1)]
                 end = line_starts[min(end_line, len(line_starts) - 1)]
@@ -130,7 +153,7 @@ class CodeChunker:
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                     boundaries.append(node)
                 elif not isinstance(node, (ast.Import, ast.ImportFrom)):
-                    start = getattr(node, "lineno", 1) - 1
+                    start = first_line(node)
                     end = getattr(node, "end_lineno", len(lines))
                     for line_no in range(start, end):
                         module_scope_lines.add(line_no)
@@ -168,7 +191,7 @@ class CodeChunker:
                 return self._chunk_fallback(text, prefix)
 
             for node in boundaries:
-                start_line = getattr(node, "lineno", 1) - 1
+                start_line = first_line(node)
                 end_line = getattr(node, "end_lineno", len(lines))
                 node_start, node_end = span_of(node)
 

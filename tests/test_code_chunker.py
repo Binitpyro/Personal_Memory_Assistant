@@ -247,8 +247,10 @@ class TestChunkOffsets:
             # ast breaks at the lone "\r" as well; split("\n") did not, and the
             # module-scope lookup indexed past the end of the line list.
             "import os\r\r\ndef f():\r\r\n    return 1\r\r\ndef g():\r\r\n    return 2\r\r\nX = 1\r\r\n",
-            # str.splitlines breaks at the form feed; ast does not.
-            "import os\n# page\x0cbreak\ndef f():\n    return 1\ndef g():\n    return 2\nX = 1\n",
+            # str.splitlines breaks at the form feed; ast does not. The blank
+            # line keeps the comment out of def f's chunk (A1-14 attaches an
+            # adjacent leading comment block to its definition).
+            "import os\n# page\x0cbreak\n\ndef f():\n    return 1\ndef g():\n    return 2\nX = 1\n",
         ],
         ids=["cr-cr-lf", "form-feed"],
     )

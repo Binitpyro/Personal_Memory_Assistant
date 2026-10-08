@@ -191,6 +191,10 @@ class IndexingProgress:
             # _batch_index_pipeline swallowed its TaskGroup's ExceptionGroup and
             # the run still finished on "Complete".
             if self.run_failed:
+                # fail() wrote "Failed", but the tail then set phase labels
+                # ("Checkpointing the write-ahead log…") that would otherwise
+                # stay on screen indefinitely.
+                self.current_file = "Failed"
                 return
             self.current_file = (
                 "Complete"
@@ -272,6 +276,12 @@ _INCOMPLETE_SHA_STATES = ("", "ERROR", "CANCELLED", "NOCONTENT")
 #: nor tell two like-named folders apart. Empty root means the scanner could not
 #: attribute the file to any requested root.
 ScannedFile = tuple[Path, str, str]
+
+#: Ceilings on what `_rust_pre_extract` may hold in RAM at once (whole files as
+#: str). Not tunables: peak memory must not depend on corpus file sizes, and a
+#: file over these is streamed instead, which is slower but bounded.
+_PRE_EXTRACT_FILE_MAX_BYTES = 4 << 20
+_PRE_EXTRACT_GROUP_MAX_BYTES = 16 << 20
 
 
 #: UTF-16/32 byte-order marks. Text in these encodings is full of NUL bytes, so
@@ -627,7 +637,16 @@ class IndexingService:
         self.lancedb_client = lancedb_client
         self.supported_extensions = settings.extensions_set
         self.chunk_size = settings.chunk_size
-        self.chunk_overlap = settings.chunk_overlap
+        # An overlap near chunk_size makes the cursor advance ~1 char per chunk
+        # (PMA_CHUNK_OVERLAP=900 turned an 11 KB file into 4739 chunks, all
+        # embedded). Half the window is the cap; the shipped 102/1024 is far below it.
+        self.chunk_overlap = min(settings.chunk_overlap, self.chunk_size // 2)
+        if self.chunk_overlap != settings.chunk_overlap:
+            logger.warning(
+                "chunk_overlap %d capped to %d (half of chunk_size).",
+                settings.chunk_overlap,
+                self.chunk_overlap,
+            )
         self.max_file_size = settings.max_file_size_bytes
         self._concurrency = settings.index_concurrency
         # How many chunks accumulate before the embedder flushes. A multiple of
@@ -696,8 +715,14 @@ class IndexingService:
             )
 
             if not all_files:
-                with progress._lock:
-                    progress.status = "idle"
+                progress.complete()  # also replaces the stale "Scanning folders…"
+                return
+
+            # /api/index/cancel is accepted as soon as status is "running", i.e.
+            # during the scan; the reset below would otherwise clear the flag
+            # and the run would index everything anyway.
+            if progress.is_cancelled:
+                progress.complete()
                 return
 
             # Create a dedicated reader connection for the scanner / change detection
@@ -711,6 +736,10 @@ class IndexingService:
                 )
             finally:
                 await reader_conn.close()
+
+            if progress.is_cancelled:  # cancelled during change detection
+                progress.complete()
+                return
 
             progress.reset(len(files_to_index))
             with progress._lock:
@@ -735,13 +764,14 @@ class IndexingService:
                         files_to_index, offset=0, total_to_index=len(files_to_index)
                     )
 
-                if progress.is_cancelled:
-                    progress.complete()
-                    return
-
-                # Phase 1: Resolve pending GraphRAG edges
-                progress.set_current_file("Resolving code graph edges…")
-                await self.db.resolve_pending_graph_edges()
+                # A cancelled run skips edge resolution but must NOT return: files
+                # whose footers already committed hold a valid sha256 and are
+                # skipped by every later run, so returning here before
+                # _flush_file_summaries dropped their summary vectors for good.
+                if not progress.is_cancelled:
+                    # Phase 1: Resolve pending GraphRAG edges
+                    progress.set_current_file("Resolving code graph edges…")
+                    await self.db.resolve_pending_graph_edges()
             except Exception as exc:
                 # index_folders runs as an unhandled FastAPI background task, so
                 # this is the only place the failure can be recorded anywhere the
@@ -755,7 +785,12 @@ class IndexingService:
                 # pre-run results. Finishing the tail is what makes the partial
                 # work usable.
                 logger.error("Indexing run failed: %s", exc, exc_info=True)
-                progress.fail(f"{type(exc).__name__}: {exc}")
+                # A TaskGroup failure arrives as "ExceptionGroup: unhandled
+                # errors in a TaskGroup (1 sub-exception)" - say what failed.
+                cause: BaseException = exc
+                while isinstance(cause, BaseExceptionGroup) and cause.exceptions:
+                    cause = cause.exceptions[0]
+                progress.fail(f"{type(cause).__name__}: {cause}")
             finally:
                 if use_bulk_mode:
                     await self.db.exit_ingest_mode()
@@ -844,10 +879,25 @@ class IndexingService:
         if not RUST_CORE_AVAILABLE:
             return pre_extracted
 
+        # extract_text_files returns every file as one whole str, so the group's
+        # footprint is its total size, not a tunable. Files past the per-file
+        # cap, or that would push the group past the group cap, are left to the
+        # streaming reader (128 KiB windows) - section 6 boundedness invariant.
         rust_paths = []
+        group_bytes = 0
         for fp, _, _ in files_to_index:
             ext = fp.suffix.lower()
             if ext in TEXT_EXTENSIONS and ext not in [".json", ".csv"]:
+                try:
+                    size = fp.stat().st_size
+                except OSError:
+                    continue
+                if (
+                    size > _PRE_EXTRACT_FILE_MAX_BYTES
+                    or group_bytes + size > _PRE_EXTRACT_GROUP_MAX_BYTES
+                ):
+                    continue
+                group_bytes += size
                 rust_paths.append(str(fp.absolute()))
 
         if rust_paths:
@@ -1018,7 +1068,28 @@ class IndexingService:
                         return
                     for ex in EXTRACTORS:
                         if ex.can_handle(path):
-                            yield from ex.extract_stream(path, self.max_file_size)
+                            # Extractors yield one record per item (CSV row,
+                            # DOCX paragraph, slide, page) with no terminator,
+                            # and StreamChunker concatenates fragments. Without
+                            # a separator "Paris" + "name: Bob" became one FTS
+                            # token. Done here, not in the chunker or in
+                            # _extract_plain_text_stream, whose fragments are
+                            # arbitrary byte windows: a separator there would
+                            # shift chunk offsets (CLAUDE.md section 7).
+                            # Window-style extractors (JsonExtractor yields
+                            # arbitrary 128k slices of one document) opt out
+                            # with `yields_records = False`: a separator there
+                            # lands mid-token.
+                            records = getattr(ex, "yields_records", True)
+                            for item in ex.extract_stream(path, self.max_file_size):
+                                if (
+                                    records
+                                    and isinstance(item, str)
+                                    and item
+                                    and not item.endswith("\n")
+                                ):
+                                    item += "\n"
+                                yield item
                             return
                     yield from self._extract_plain_text_stream(path)
 
@@ -1216,6 +1287,14 @@ class IndexingService:
             )
 
         except Exception as e:
+            if isinstance(e, FileNotFoundError) and not header_sent:
+                # Deleted between detection and extraction (Office `~$x.docx`
+                # locks, sync-client temp files). The old path wrote a size-0
+                # "ERROR" row for it that nothing ever removed, because the path
+                # is never scanned again. There is nothing to record.
+                logger.info("File vanished before extraction, skipping: %s", path)
+                progress.update(0, current_file=path.name)
+                return
             logger.error("Streaming extraction failed for %s: %s", path, e)
             if not header_sent:
                 try:
@@ -1273,10 +1352,14 @@ class IndexingService:
             # Passing the binary gate is not enough: UTF-16 read as UTF-8 still
             # decodes to U+FFFD noise, which is the same defect one layer down.
             with open(path, encoding=_encoding_for(head), errors="replace") as f:
-                while True:
-                    chunk = f.read(128 * 1024)
+                # Same cap rust_core's reader and the extractors apply; without
+                # it .sql/.ipynb/.rtf files were embedded to EOF.
+                remaining = self.max_file_size
+                while remaining > 0:
+                    chunk = f.read(min(128 * 1024, remaining))
                     if not chunk:
                         break
+                    remaining -= len(chunk)
                     yield chunk
         except Exception:
             return
@@ -1723,8 +1806,20 @@ class IndexingService:
             logger.info("OCR produced no indexable text for %s", path.name)
             return 0
 
+        # The chunker above starts at offset 0, which collides with the file's
+        # native chunks: attach_parent_windows and the context deduper both key
+        # on (file_id, offset), so an OCR hit was stitched from - or dropped
+        # as a duplicate of - native text. Shift past everything native.
+        base_rows = await self.db.execute_query(
+            "SELECT COALESCE(MAX(end_offset), 0) FROM chunks "
+            "WHERE file_id = ? AND COALESCE(source, '') != 'ocr'",
+            (file_id,),
+        )
+        base = int(base_rows[0][0]) if base_rows else 0
         for chunk in raw_chunks:
             chunk["source"] = "ocr"
+            chunk["start_offset"] += base
+            chunk["end_offset"] += base
 
         items = [
             {"type": "chunk", "path": path, "chunk": chunk, "file_id": file_id}
@@ -1895,6 +1990,13 @@ class IndexingService:
                 }
                 for p, e in zip(profiles, embs, strict=False)
             ]
+            # Replace rather than append: this runs on every index run, no-op
+            # ones included, and appended duplicates fill the top-k=2 profile
+            # leg with copies of one folder.
+            try:
+                await self.lancedb_client.delete_summaries_by_ids([s["doc_id"] for s in summaries])
+            except Exception as e:
+                logger.warning("Could not clear stale folder profiles: %s", e)
             await self.lancedb_client.add_summaries_batch(summaries)
 
     def _extract_text_monolithic(self, path: Path) -> str:

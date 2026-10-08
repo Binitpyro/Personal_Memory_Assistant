@@ -144,8 +144,19 @@ class FolderWatcher:
     async def _watched_roots(self) -> list[str]:
         """Folders the user has actually indexed, that still exist on disk."""
         try:
+            # folder_profiles alone is not "currently indexed": removing a folder
+            # deletes its files but not its profile row, so the watcher would
+            # re-index folders the user removed. Require files still under it,
+            # at a path boundary (so `C:\x\proj` is not kept alive by
+            # `C:\x\project2`). Not LIKE: `_` and `%` in a path are wildcards.
             rows = await self._db.execute_query(
-                "SELECT folder_path FROM folder_profiles WHERE folder_path != ''"
+                "SELECT folder_path FROM folder_profiles fp WHERE folder_path != '' "
+                "AND EXISTS (SELECT 1 FROM files f "
+                "WHERE f.path = fp.folder_path "
+                "OR substr(f.path, 1, length(fp.folder_path) + 1) IN "
+                "(fp.folder_path || '\\', fp.folder_path || '/') "
+                "OR (substr(fp.folder_path, -1) IN ('\\', '/') "
+                "AND substr(f.path, 1, length(fp.folder_path)) = fp.folder_path))"
             )
         except Exception as e:
             logger.warning("Folder watcher could not read indexed folders: %s", e)

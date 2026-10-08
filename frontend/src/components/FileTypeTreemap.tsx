@@ -32,6 +32,26 @@ echarts.use([EChartsTreemap, TooltipComponent, VisualMapComponent, CanvasRendere
 /* `readChartTokens` lives in `theme.ts` so CrystalGraphTrace shares one
    implementation rather than growing a second copy that can drift. */
 
+/**
+ * ECharts resolves a string `targetNode` through getNodeById, which falls back
+ * to the node NAME when no id is set - so ProjectA/src and ProjectB/src were
+ * indistinguishable and the first match won. Give every folder below the root
+ * its full path as id, and zoom by that. The root keeps its name-derived id:
+ * its navPath segment has no fullPath until a mouse click resyncs it.
+ */
+export function assignFolderIds(nodes: any[], depth = 0): void {
+  for (const n of nodes) {
+    if (!n.children?.length) continue
+    if (depth > 0 && n.fullPath) n.id = n.fullPath
+    assignFolderIds(n.children, depth + 1)
+  }
+}
+
+/** The `targetNode` to zoom to for one navPath segment. */
+export function zoomTarget(seg: { name: string; fullPath: string | null }, index: number): string {
+  return index > 0 && seg.fullPath ? seg.fullPath : seg.name
+}
+
 function prefersReducedMotion() {
   return typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches
 }
@@ -106,6 +126,7 @@ export function FileTypeTreemap({ allFiles, activeFilter, onFilterChange, onFile
       const data = groupMode === 'type'
         ? buildTypeTree(flatFiles, getVal)
         : [buildFolderTree(flatFiles, getVal)]
+      assignFolderIds(data)
 
       return { treeData: data, totalSize: total, buildError: null }
     } catch (err) {
@@ -128,8 +149,7 @@ export function FileTypeTreemap({ allFiles, activeFilter, onFilterChange, onFile
     if (navPath.length > 1) {
       const parentIdx = navPath.length - 2
       const parentNode = navPath[parentIdx]
-      // Use name as target node for ECharts zoom action
-      instance.dispatchAction({ type: 'treemapRootToNode', targetNode: parentNode.name })
+      instance.dispatchAction({ type: 'treemapRootToNode', targetNode: zoomTarget(parentNode, parentIdx) })
       setNavPath(prev => prev.slice(0, -1))
     } else {
       handleHome()
@@ -140,7 +160,7 @@ export function FileTypeTreemap({ allFiles, activeFilter, onFilterChange, onFile
     const instance = chartRef.current?.getEchartsInstance()
     if (!instance) return
     if (index === 0) { handleHome(); return }
-    instance.dispatchAction({ type: 'treemapRootToNode', targetNode: navPath[index].name })
+    instance.dispatchAction({ type: 'treemapRootToNode', targetNode: zoomTarget(navPath[index], index) })
     setNavPath(prev => prev.slice(0, index + 1))
   }, [navPath, handleHome])
 
@@ -199,7 +219,7 @@ export function FileTypeTreemap({ allFiles, activeFilter, onFilterChange, onFile
     // happens to exist would make the model depend on the view being ready.
     const instance = chartRef.current?.getEchartsInstance()
     if (node.children?.length) {
-      instance?.dispatchAction({ type: 'treemapRootToNode', targetNode: node.name })
+      instance?.dispatchAction({ type: 'treemapRootToNode', targetNode: node.fullPath || node.name })
       setNavPath(prev => [...prev, { name: node.name, fullPath: node.fullPath ?? null }])
       setAnnouncement(`Entered ${node.name}, ${node.children.length} items`)
     } else if (node.fileData && onFileSelect) {

@@ -159,8 +159,9 @@ export class NavigationController {
         if (this.rootIndex !== -1) {
             const queue: number[] = [this.rootIndex];
             this.nodes[this.rootIndex].depth = 0;
-            while (queue.length > 0) {
-                const cur = queue.shift()!;
+            // Index pointer, not shift(): V8 shift is O(n) on a large array.
+            for (let head = 0; head < queue.length; head++) {
+                const cur = queue[head];
                 for (const c of this.nodes[cur].children) {
                     this.nodes[c].depth = this.nodes[cur].depth + 1;
                     queue.push(c);

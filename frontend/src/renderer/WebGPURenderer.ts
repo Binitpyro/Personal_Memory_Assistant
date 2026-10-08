@@ -191,6 +191,7 @@ export class WebGPURenderer {
      * behind a fault the user can no longer act on.
      */
     private deviceLost = false;
+    private tornDown = false;
 
     private rotationX = 0.5;
     private rotationY = 0.5;
@@ -219,6 +220,9 @@ export class WebGPURenderer {
         if (!adapter) throw new Error('No appropriate GPUAdapter found.');
         this.device = await adapter.requestDevice();
         this.device.lost.then(info => {
+            // destroy() resolves `lost` too (reason 'destroyed'); that is our
+            // own teardown, not a GPU loss, and must not demote the tier.
+            if (this.tornDown || info.reason === 'destroyed') return;
             this.deviceLost = true;
             console.error('[Aurora] GPU device lost:', info.message);
             this.onDeviceLost?.();
@@ -1287,8 +1291,17 @@ export class WebGPURenderer {
     }
 
     // ── Picking (unchanged from legacy — silhouette-tight) ──────────────
-    public async pick(x: number, y: number): Promise<number | null> {
-        if (!this.instanceBuffer || this.deviceLost) return null;
+    // One MAP_READ buffer serves every pick, so overlapping picks (a click
+    // during a throttled hover readback) must run one after another.
+    private pickQueue: Promise<unknown> = Promise.resolve();
+    public pick(x: number, y: number): Promise<number | null> {
+        const run = this.pickQueue.then(() => this.pickNow(x, y));
+        this.pickQueue = run.catch(() => {});
+        return run;
+    }
+
+    private async pickNow(x: number, y: number): Promise<number | null> {
+        if (!this.instanceBuffer || this.deviceLost || this.tornDown) return null;
         if (this.visibleDirty) this.rebuildInstances();
         const total = this.crystalCount + this.bubbleCount;
         if (total === 0) return null;
@@ -1427,6 +1440,7 @@ export class WebGPURenderer {
     private dot3(a: number[], b: number[]): number { return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; }
 
     public destroy(): void {
+        this.tornDown = true;
         this.sceneColor?.destroy();
         this.sceneColorPrev?.destroy();
         this.oitAccum?.destroy();

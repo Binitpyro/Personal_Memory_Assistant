@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import math
 import struct
@@ -106,6 +107,14 @@ def _python_fallback_binary(rows: list) -> bytes:
     return b"".join(parts)
 
 
+def _rust_layout(rows: list) -> bytes:
+    file_tuples = [
+        (row["path"] or "", float(row["size"] or 0), row["type"] or ".bin") for row in rows
+    ]
+    raw_buf = rust_core.get_spatial_binary(file_tuples)
+    return bytes(raw_buf) if isinstance(raw_buf, list) else raw_buf
+
+
 async def _stream_visualizer_binary_impl(extension: str | None, db: DatabaseManager):
     """
     Implementation of the binary stream for the WebGPU visualizer.
@@ -127,11 +136,9 @@ async def _stream_visualizer_binary_impl(extension: str | None, db: DatabaseMana
         _warn_if_truncated(len(rows), "binary stream")
 
         if _RUST_AVAILABLE and hasattr(rust_core, "get_spatial_binary"):
-            file_tuples = [
-                (row["path"] or "", float(row["size"] or 0), row["type"] or ".bin") for row in rows
-            ]
-            raw_buf = rust_core.get_spatial_binary(file_tuples)
-            buf = bytes(raw_buf) if isinstance(raw_buf, list) else raw_buf
+            # CPU-bound (150-iteration Barnes-Hut per folder): off the event
+            # loop so search/chat/health keep being served while it runs.
+            buf = await asyncio.to_thread(_rust_layout, rows)
         else:
             if _RUST_AVAILABLE:
                 logger.warning(

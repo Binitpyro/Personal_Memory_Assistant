@@ -122,7 +122,8 @@ if "%HAS_SONAR%"=="1" (
 
     :: Force kill any zombie SonarQube/Java processes before starting
     echo [INFO] Terminating old SonarQube Java processes...
-    powershell -Command "Stop-Process -Name java -Force -ErrorAction SilentlyContinue"
+    :: Only java launched from the SonarQube install; never other JVMs (IDEs, Gradle, ...)
+    powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='java.exe'\" | Where-Object { $_.CommandLine -like '*sonarqube*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
 
     :: Remove SonarQube locks if they exist from a previous bad shutdown
     if exist "C:\sonarqube\data\es8\node.lock" (

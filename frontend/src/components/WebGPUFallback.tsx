@@ -45,9 +45,7 @@ import {
 import { formatBytes } from '../utils/treeBuilder';
 import { WebGPURenderer } from '../renderer/WebGPURenderer';
 import { getVisualizerStream, getVisualizerMeta, type FileEntry, type VisualizerNodeMeta } from '../api';
-import { FLAG_FOLDER } from '../interaction/NavigationController';
 import type { NavigationController } from '../interaction/NavigationController';
-import { useDreamscapeStore } from '../store/dreamscapeStore';
 
 interface CachedStream {
     buffer: ArrayBuffer;
@@ -55,6 +53,17 @@ interface CachedStream {
 }
 
 const streamCache = new Map<string, CachedStream>();
+// The cache is valid for one file-tree snapshot. The tree is refetched when
+// indexing changes the corpus, which hands us a new `allFiles` object; a new
+// object clears the cache so the 3D view cannot outlive the data it drew.
+let streamCacheOwner: object | null = null;
+
+/** A fetch/parse failure of the graph data, as opposed to a GPU failure. Only
+ *  the latter may demote the render tier. */
+class DataLoadError extends Error {
+    readonly empty: boolean;
+    constructor(message: string, empty = false) { super(message); this.empty = empty; }
+}
 
 
 /** Both renderer classes conform to this shape; the hook is generic over it. */
@@ -112,11 +121,12 @@ export function resizeTarget(
 /** Progress through the pre-first-frame work. `starting` covers renderer.init()
  *  (device + pipelines + shader compilation); `streaming` covers the graph
  *  fetch, which is the half that grows with the corpus. */
-export type LoadPhase = 'starting' | 'streaming' | 'ready';
+export type LoadPhase = 'starting' | 'streaming' | 'ready' | 'failed';
 
 export const PHASE_LABEL: Record<Exclude<LoadPhase, 'ready'>, string> = {
     starting: 'Starting GPU renderer…',
     streaming: 'Loading graph…',
+    failed: 'Could not load the 3D graph.',
 };
 
 /** Largest backing-store ratio we will render at. Above this both the fragment
@@ -184,7 +194,8 @@ function useDreamscapeCanvas<R extends RendererLike>(
     wrapperRef: React.RefObject<HTMLElement | null>,
     factory: (canvas: HTMLCanvasElement) => Promise<R>,
     activeFilter: string | null | undefined,
-    onError: (msg: string) => void,
+    allFiles: Record<string, FileEntry[]>,
+    onError: (msg: string, demote?: boolean) => void,
     onNodeSelected?: (sourceIndex: number, name: string) => void,
     rendererOptions?: {
         exposure?: number;
@@ -193,6 +204,9 @@ function useDreamscapeCanvas<R extends RendererLike>(
 ) {
     const rendererRef = useRef<R | null>(null);
     const rafRef = useRef<number>(0);
+    // Read inside the init effect, which must not re-run on its identity.
+    const allFilesRef = useRef(allFiles);
+    allFilesRef.current = allFiles;
 
     // Keys currently held, integrated once per frame. NOT accumulated per
     // `keydown`: auto-repeat rate is an OS setting, so integrating repeats
@@ -225,6 +239,10 @@ function useDreamscapeCanvas<R extends RendererLike>(
     // request, ~15 render pipelines, WGSL compilation, then a stream fetch that
     // scales with corpus size - used to run behind a blank canvas.
     const [phase, setPhase] = useState<LoadPhase>('starting');
+    // Why the load failed, and whether it was merely an empty dataset.
+    const [loadError, setLoadError] = useState<{ message: string; empty: boolean } | null>(null);
+    // Bumped by Retry to re-run the init effect.
+    const [attempt, setAttempt] = useState(0);
 
     useEffect(() => {
         const canvas = canvasRef.current;
@@ -234,6 +252,7 @@ function useDreamscapeCanvas<R extends RendererLike>(
         let resizeObserver: ResizeObserver | null = null;
         let onVisibility: (() => void) | null = null;
         setPhase('starting');
+        setLoadError(null);
 
         (async () => {
             try {
@@ -275,25 +294,36 @@ function useDreamscapeCanvas<R extends RendererLike>(
                 let meta: any;
                 const cacheKey = activeFilter || 'default';
 
+                if (streamCacheOwner !== allFilesRef.current) {
+                    streamCache.clear();
+                    streamCacheOwner = allFilesRef.current;
+                }
+
                 if (streamCache.has(cacheKey)) {
                     const cached = streamCache.get(cacheKey)!;
                     buffer = cached.buffer;
                     meta = cached.meta;
                 } else {
-                    [buffer, meta] = await Promise.all([
-                        getVisualizerStream(activeFilter),
-                        getVisualizerMeta(activeFilter).catch(() => ({})),
-                    ]);
-                    if (buffer.byteLength <= 4) {
-                        throw new Error('No 3D data available or filter returned 0 results.');
-                    }
-                    // Vite dev trap: if the backend is misconfigured we might get an
-                    // HTML page instead of binary. First two bytes of '<!doctype' are
-                    // 0x3C 0x21 in ASCII. Fail loud and early rather than reading
-                    // garbage as f32s.
-                    const head = new Uint8Array(buffer, 0, 2);
-                    if (head[0] === 0x3C && head[1] === 0x21) {
-                        throw new Error('Backend returned HTML instead of binary. Check the /api/visualizer/stream route.');
+                    try {
+                        [buffer, meta] = await Promise.all([
+                            getVisualizerStream(activeFilter),
+                            getVisualizerMeta(activeFilter).catch(() => ({})),
+                        ]);
+                        if (buffer.byteLength <= 4) {
+                            throw new DataLoadError('No 3D data available or filter returned 0 results.', true);
+                        }
+                        // Vite dev trap: if the backend is misconfigured we might get an
+                        // HTML page instead of binary. First two bytes of '<!doctype' are
+                        // 0x3C 0x21 in ASCII. Fail loud and early rather than reading
+                        // garbage as f32s.
+                        const head = new Uint8Array(buffer, 0, 2);
+                        if (head[0] === 0x3C && head[1] === 0x21) {
+                            throw new Error('Backend returned HTML instead of binary. Check the /api/visualizer/stream route.');
+                        }
+                    } catch (e) {
+                        throw e instanceof DataLoadError
+                            ? e
+                            : new DataLoadError(e instanceof Error ? e.message : 'Unknown 3D data error');
                     }
                     streamCache.set(cacheKey, { buffer, meta });
                 }
@@ -315,7 +345,7 @@ function useDreamscapeCanvas<R extends RendererLike>(
                 resizeObserver = new ResizeObserver(entries => {
                     for (const e of entries) {
                         const { w, h } = canvasPixelSize(e, window.devicePixelRatio);
-                        if (w > 0 && h > 0) renderer.resize(w, h);
+                        if (w > 0 && h > 0) { renderer.resize(w, h); wakeRef.current(); }
                     }
                 });
                 const measured = resizeTarget(canvas, wrapperRef.current);
@@ -383,7 +413,18 @@ function useDreamscapeCanvas<R extends RendererLike>(
                 document.addEventListener('visibilitychange', onVisibility);
                 if (!cancelled) setPhase('ready');
             } catch (err) {
-                onError(err instanceof Error ? err.message : 'Unknown 3D init error');
+                const msg = err instanceof Error ? err.message : 'Unknown 3D init error';
+                if (err instanceof DataLoadError) {
+                    // The GPU is fine; a retry (filter change, remount) can
+                    // still succeed, so do not step the tier down.
+                    if (!cancelled) {
+                        setLoadError({ message: msg, empty: err.empty });
+                        setPhase('failed');
+                        onError(msg, false);
+                    }
+                } else {
+                    onError(msg);
+                }
             }
         })();
 
@@ -401,7 +442,7 @@ function useDreamscapeCanvas<R extends RendererLike>(
     // different buffer). We do NOT want re-init on every allFiles reference
     // change (that fires whenever InsightsPage re-renders). Include only the
     // stable dependencies.
-    }, [activeFilter, factory, onError, rendererOptions?.exposure, rendererOptions?.showOutlines]);
+    }, [activeFilter, factory, onError, attempt, rendererOptions?.exposure, rendererOptions?.showOutlines]);
 
     const onMouseDown = (e: React.MouseEvent) => {
         setDragging(true);
@@ -412,6 +453,7 @@ function useDreamscapeCanvas<R extends RendererLike>(
         if (isDragging && rendererRef.current) {
             setHover(null);
             rendererRef.current.handleMouseMove(e.clientX - lastPos.current.x, e.clientY - lastPos.current.y);
+            wakeRef.current();
             lastPos.current = { x: e.clientX, y: e.clientY };
             return;
         }
@@ -455,7 +497,12 @@ function useDreamscapeCanvas<R extends RendererLike>(
         if (dx > 5 || dy > 5) return;
 
         const rect = canvas.getBoundingClientRect();
-        const sourceIndex = await renderer.pick(e.clientX - rect.left, e.clientY - rect.top);
+        let sourceIndex: number | null;
+        try {
+            sourceIndex = await renderer.pick(e.clientX - rect.left, e.clientY - rect.top);
+        } catch {
+            return; // renderer torn down or device lost mid-pick
+        }
         if (sourceIndex === null) return;
 
         // Drill in: expand + focus camera on the clicked node.
@@ -463,29 +510,16 @@ function useDreamscapeCanvas<R extends RendererLike>(
         renderer.focusOnNode(sourceIndex);
         // Renderer needs to know its visible set is stale.
         renderer.markDirty();
+        wakeRef.current();
 
         const bc = renderer.nav.breadcrumbs;
         const name = bc[bc.length - 1]?.name ?? `#${sourceIndex}`;
         onNodeSelected?.(sourceIndex, name);
 
-        // If it's a file, add it to the dreamscape store for chat context.
-        // NavigationController has no metadata side-channel; the node's own
-        // flags are the authoritative folder/file bit (FLAG_FOLDER).
-        const node = renderer.nav.getGraphNode(sourceIndex);
-        const isFolder = ((node?.flags ?? 0) & FLAG_FOLDER) === FLAG_FOLDER;
-        
-        if (!isFolder && e.shiftKey) { // Optional: require shift-click to select? Or just any click on a file? Let's just add any clicked file.
-           // Actually, let's just add it anytime they click a file.
-           useDreamscapeStore.getState().addChunk({
-               id: sourceIndex,
-               filename: name,
-           });
-        } else if (!isFolder) {
-           useDreamscapeStore.getState().addChunk({
-               id: sourceIndex,
-               filename: name,
-           });
-        }
+        // Deliberately NOT added to the chat context here. `sourceIndex` is a
+        // visualizer tree-node index; the buffer carries no file or chunk id,
+        // and the chat path queries `chunks.id IN (...)`, so passing it
+        // force-included an unrelated document's chunk.
     };
 
 
@@ -693,6 +727,7 @@ function useDreamscapeCanvas<R extends RendererLike>(
             e.preventDefault();
             e.stopPropagation();
             rendererRef.current?.handleZoom(e.deltaY);
+            wakeRef.current();
         };
         canvas.addEventListener('wheel', onWheel, { passive: false });
         return () => canvas.removeEventListener('wheel', onWheel);
@@ -702,15 +737,17 @@ function useDreamscapeCanvas<R extends RendererLike>(
         rendererRef, onMouseDown, onMouseMove, onMouseUp, hover, setHover, phase,
         handleKeyDown, handleKeyUp, handleBlur,
         cursor, setCursor: moveCursorTo, a11yNodes, announcement, nameOf,
+        wake: () => wakeRef.current(),
+        loadError, retry: () => setAttempt(n => n + 1),
     };
 }
 
 interface CanvasInnerProps extends WebGPUFallbackProps {
     readonly tier: 'webgpu' | 'webgl2';
-    readonly onError: (msg: string) => void;
+    readonly onError: (msg: string, demote?: boolean) => void;
 }
 
-const DreamscapeCanvas: React.FC<CanvasInnerProps> = ({ activeFilter, tier, onError, exposure, showOutlines }) => {
+const DreamscapeCanvas: React.FC<CanvasInnerProps> = ({ allFiles, activeFilter, tier, onError, exposure, showOutlines }) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const wrapperRef = useRef<HTMLDivElement>(null);
     const [selection, setSelection] = useState<{ index: number, name: string } | null>(null);
@@ -732,8 +769,8 @@ const DreamscapeCanvas: React.FC<CanvasInnerProps> = ({ activeFilter, tier, onEr
     const {
         rendererRef, onMouseDown, onMouseMove, onMouseUp, hover, setHover, phase,
         handleKeyDown, handleKeyUp, handleBlur,
-        cursor, setCursor, a11yNodes, announcement,
-    } = useDreamscapeCanvas(canvasRef, wrapperRef, factory, activeFilter, onError,
+        cursor, setCursor, a11yNodes, announcement, wake, loadError, retry,
+    } = useDreamscapeCanvas(canvasRef, wrapperRef, factory, activeFilter, allFiles, onError,
             (idx, name) => setSelection({ index: idx, name }),
             { exposure, showOutlines });
 
@@ -759,6 +796,7 @@ const DreamscapeCanvas: React.FC<CanvasInnerProps> = ({ activeFilter, tier, onEr
         const last = r.nav.breadcrumbs[r.nav.breadcrumbs.length - 1];
         if (last) r.focusOnNode(last.index);
         r.markDirty();
+        wake();
         setSelection(null);
     };
 
@@ -856,8 +894,23 @@ const DreamscapeCanvas: React.FC<CanvasInnerProps> = ({ activeFilter, tier, onEr
                     role="status"
                     aria-live="polite"
                 >
-                    <div className="w-10 h-10 border-2 border-white/20 border-t-white/90 rounded-full animate-spin" />
-                    <p className="mt-4 text-white/70 font-mono text-sm">{PHASE_LABEL[phase]}</p>
+                    {phase !== 'failed' && (
+                        <div className="w-10 h-10 border-2 border-white/20 border-t-white/90 rounded-full animate-spin" />
+                    )}
+                    <p className="mt-4 text-white/70 font-mono text-sm">
+                        {phase === 'failed' && loadError?.empty ? 'No 3D data to show yet.' : PHASE_LABEL[phase]}
+                    </p>
+                    {phase === 'failed' && loadError && (
+                        <>
+                            <p className="mt-1 text-white/60 font-mono text-xs max-w-[48ch] text-center">{loadError.message}</p>
+                            <button
+                                onClick={retry}
+                                className="mt-4 px-3 h-8 border border-white/30 text-white/90 hover:text-white text-xs font-bold uppercase tracking-widest"
+                            >
+                                Retry
+                            </button>
+                        </>
+                    )}
                 </div>
             )}
 
@@ -877,6 +930,7 @@ const DreamscapeCanvas: React.FC<CanvasInnerProps> = ({ activeFilter, tier, onEr
                     if (!r) return;
                     r.nav.navigateTo(Number(id));
                     r.markDirty();
+                    wake();
                     setCursor(Number(id));
                 }}
                 onUnhandledKey={onViewKeyDown}
@@ -939,8 +993,9 @@ export const WebGPUFallback: React.FC<WebGPUFallbackProps> = ({ allFiles, active
     // array. As an inline arrow it changed identity on every parent render, so
     // an unrelated InsightsPage re-render tore down the renderer and built a
     // fresh GPUDevice — which is why a single fault used to log twice.
-    const handleError = useCallback((msg: string) => {
+    const handleError = useCallback((msg: string, demote = true) => {
         setReason(msg);
+        if (!demote) return; // data/network error: the tier is not at fault
         // If the chosen tier errors out at load-time, degrade one step.
         setStatus(prev => (prev === 'webgpu' ? 'webgl2' : 'unsupported'));
     }, []);

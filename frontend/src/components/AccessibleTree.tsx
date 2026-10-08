@@ -19,7 +19,7 @@
  * it and the focus ring vanishes. This is the skip-link pattern.
  */
 
-import { useCallback, type KeyboardEvent } from 'react';
+import { useCallback, useEffect, useRef, type KeyboardEvent } from 'react';
 
 export interface A11yNode {
     readonly id: string;
@@ -50,12 +50,14 @@ function Item({
     node,
     level,
     selectedId,
+    tabId,
     onSelect,
     onActivate,
 }: Readonly<{
     node: A11yNode;
     level: number;
     selectedId: string | null;
+    tabId: string | null;
     onSelect: (id: string) => void;
     onActivate: (id: string) => void;
 }>) {
@@ -76,7 +78,8 @@ function Item({
             // Roving tabIndex: the whole tree is ONE tab stop, and arrow keys
             // move within it. A tabIndex on every item would make Tab walk
             // thousands of files.
-            tabIndex={selected ? 0 : -1}
+            tabIndex={node.id === tabId ? 0 : -1}
+            data-node-id={node.id}
             className={selected ? 'text-primary' : undefined}
             onClick={e => {
                 e.stopPropagation();
@@ -99,6 +102,7 @@ function Item({
                             node={child}
                             level={level + 1}
                             selectedId={selectedId}
+                            tabId={tabId}
                             onSelect={onSelect}
                             onActivate={onActivate}
                         />
@@ -107,6 +111,10 @@ function Item({
             )}
         </li>
     );
+}
+
+function hasId(nodes: readonly A11yNode[], id: string | null): boolean {
+    return id !== null && nodes.some(n => n.id === id || (n.children ? hasId(n.children, id) : false));
 }
 
 export function AccessibleTree({
@@ -125,12 +133,38 @@ export function AccessibleTree({
         [onUnhandledKey],
     );
 
+    // The tab stop is the selected item when it is rendered, else the first
+    // one. `selectedId` can name a node that is not an item here (null at
+    // start, or the drilled-into folder whose children these are); keying the
+    // tab stop on it alone left the tree with none.
+    const tabId = hasId(nodes, selectedId) ? selectedId : (nodes[0]?.id ?? null);
+
+    // Focus follows the tab stop while focus is inside the tree: arrow keys move
+    // the cursor, and drilling in unmounts the focused item.
+    const treeRef = useRef<HTMLUListElement>(null);
+    const hadFocus = useRef(false);
+    useEffect(() => {
+        if (!hadFocus.current || tabId === null) return;
+        const el = Array.from(treeRef.current?.querySelectorAll<HTMLElement>('[role="treeitem"]') ?? [])
+            .find(e => e.dataset.nodeId === tabId);
+        if (el && el !== document.activeElement) el.focus();
+    });
+
     return (
         <div className="sr-only focus-within:not-sr-only focus-within:absolute focus-within:z-30 focus-within:top-2 focus-within:left-2 focus-within:max-h-[70%] focus-within:w-72 focus-within:overflow-auto focus-within:bg-surface focus-within:border focus-within:border-edge focus-within:rounded-md focus-within:p-3 focus-within:shadow-xl">
             <ul
                 role="tree"
                 aria-label={label}
+                ref={treeRef}
                 onKeyDown={onKeyDown}
+                onFocus={() => { hadFocus.current = true; }}
+                onBlur={e => {
+                    // A focused item that unmounts blurs with no new target but is
+                    // no longer connected; that is not the user leaving.
+                    if (e.target.isConnected && !treeRef.current?.contains(e.relatedTarget as Node | null)) {
+                        hadFocus.current = false;
+                    }
+                }}
                 className="list-none m-0 p-0"
             >
                 {nodes.map(n => (
@@ -139,6 +173,7 @@ export function AccessibleTree({
                         node={n}
                         level={1}
                         selectedId={selectedId}
+                        tabId={tabId}
                         onSelect={onSelect}
                         onActivate={onActivate}
                     />

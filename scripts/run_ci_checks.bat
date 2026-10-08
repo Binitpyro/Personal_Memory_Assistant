@@ -114,7 +114,7 @@ echo [6/6] Running Rust Security Checks...
 
 echo   - Checking Extraction Core (app\scanner\rust_core)
 cd app\scanner\rust_core
-call cargo clippy --message-format=json > sonar-issues.json
+call cargo clippy --all-targets --message-format=json -- -D warnings > sonar-issues.json
 if %ERRORLEVEL% NEQ 0 (
     cd ..\..\..
     echo Clippy check failed for rust_core!
@@ -136,7 +136,7 @@ cd ..\..\..
 
 echo   - Checking Desktop Shell (frontend\src-tauri)
 cd frontend\src-tauri
-call cargo clippy --message-format=json > sonar-issues.json
+call cargo clippy --all-targets --message-format=json -- -D warnings > sonar-issues.json
 if %ERRORLEVEL% NEQ 0 (
     cd ..\..
     echo Clippy check failed for src-tauri!

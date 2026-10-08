@@ -112,8 +112,11 @@ class Settings(BaseSettings):
     #
     # Documents are NOT re-embedded by this. Only the query side changes, so the
     # LanceDB chunk and summary indexes stay valid; what does go stale is the
-    # persistent semantic query cache, which stores query vectors - handled by
-    # versioning the cache scope rather than deleting rows.
+    # persistent semantic query cache, which stores query vectors. The cache scope
+    # is NOT versioned (it is 'file_type|folder_tag', plus mode/provider/model via
+    # retrieval._semantic_cache_scope) and no rows are deleted, so rows embedded
+    # without the prefix stay in the table and are matched, or missed, on cosine
+    # alone.
     #
     # Set to "" to disable and embed queries exactly like documents.
     embedding_query_prefix: str = "Represent this sentence for searching relevant passages: "

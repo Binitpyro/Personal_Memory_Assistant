@@ -76,6 +76,17 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _port_from_env(default: int) -> int:
+    raw = os.environ.get("PORT")
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        print(f"[PMA] Ignoring non-numeric PORT={raw!r}; using {default}", file=sys.stderr)
+        return default
+
+
 def run_server(args: argparse.Namespace) -> None:
     import uvicorn
 
@@ -83,7 +94,7 @@ def run_server(args: argparse.Namespace) -> None:
 
     host = args.host or settings.host
     # Tauri exports PORT (src-tauri/src/lib.rs), not PMA_PORT.
-    port = args.port or int(os.environ.get("PORT", settings.port))
+    port = args.port or _port_from_env(settings.port)
     reload = args.reload if args.reload is not None else settings.dev_mode
 
     uvicorn_kwargs: dict = {

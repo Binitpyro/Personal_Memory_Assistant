@@ -101,6 +101,7 @@ echo [Optional] Creating standalone ZIP...
 if exist "dist_readme.txt" copy "dist_readme.txt" "dist\sidecar\PMA\README.txt"
 :: Using native tar.exe (Windows 10+) for 10x-50x faster compression than PowerShell
 tar -a -c -f "dist\PMA-sidecar.zip" -C "dist\sidecar" PMA
+echo [NEXT] To bundle this sidecar into the MSI: cd frontend ^&^& npx tauri build --bundles msi --config src-tauri/tauri.bundle.conf.json
 
 :: Detect if run interactively (double-click) vs headless
 if "%IS_CI%"=="0" (

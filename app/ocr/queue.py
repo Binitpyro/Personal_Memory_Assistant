@@ -139,31 +139,45 @@ async def claim_next(
     return _row_to_queue_row(rows[0])
 
 
-async def mark_progress(db, file_path: str, pages_done: int) -> None:
+# `claimed=True` (the drain loop reporting on a row it claimed): the row is
+# `running` until it reports back, so anything else means enqueue_document
+# re-armed it while the job ran, and the new work item must survive the old
+# job's verdict. The guard is `AND (? = 0 OR status = 'running')`.
+
+
+async def mark_progress(db, file_path: str, pages_done: int, *, claimed: bool = False) -> None:
     await db.execute_write(
-        "UPDATE ocr_queue SET pages_done = ?, updated_at = datetime('now') WHERE file_path = ?",
-        (int(pages_done), file_path),
+        "UPDATE ocr_queue SET pages_done = ?, updated_at = datetime('now') "
+        "WHERE file_path = ? AND (? = 0 OR status = 'running')",
+        (int(pages_done), file_path, int(claimed)),
     )
 
 
 async def mark_done(
-    db, file_path: str, *, pages_done: int | None = None, last_error: str = ""
+    db,
+    file_path: str,
+    *,
+    pages_done: int | None = None,
+    last_error: str = "",
+    claimed: bool = False,
 ) -> None:
     if pages_done is None:
         await db.execute_write(
             "UPDATE ocr_queue SET status = 'done', last_error = ?, "
-            "updated_at = datetime('now') WHERE file_path = ?",
-            ((last_error or "")[:500], file_path),
+            "updated_at = datetime('now') WHERE file_path = ? AND (? = 0 OR status = 'running')",
+            ((last_error or "")[:500], file_path, int(claimed)),
         )
     else:
         await db.execute_write(
             "UPDATE ocr_queue SET status = 'done', pages_done = ?, last_error = ?, "
-            "updated_at = datetime('now') WHERE file_path = ?",
-            (int(pages_done), (last_error or "")[:500], file_path),
+            "updated_at = datetime('now') WHERE file_path = ? AND (? = 0 OR status = 'running')",
+            (int(pages_done), (last_error or "")[:500], file_path, int(claimed)),
         )
 
 
-async def mark_failed(db, file_path: str, error: str, *, terminal: bool) -> None:
+async def mark_failed(
+    db, file_path: str, error: str, *, terminal: bool, claimed: bool = False
+) -> None:
     """Record a failure.
 
     `terminal=False` returns the row to `pending` so the drain loop retries it;
@@ -171,8 +185,8 @@ async def mark_failed(db, file_path: str, error: str, *, terminal: bool) -> None
     """
     await db.execute_write(
         "UPDATE ocr_queue SET status = ?, last_error = ?, updated_at = datetime('now') "
-        "WHERE file_path = ?",
-        ("failed" if terminal else "pending", (error or "")[:500], file_path),
+        "WHERE file_path = ? AND (? = 0 OR status = 'running')",
+        ("failed" if terminal else "pending", (error or "")[:500], file_path, int(claimed)),
     )
 
 
@@ -193,11 +207,11 @@ async def release_claim(db, file_path: str) -> None:
     )
 
 
-async def mark_skipped(db, file_path: str, reason: str) -> None:
+async def mark_skipped(db, file_path: str, reason: str, *, claimed: bool = False) -> None:
     await db.execute_write(
         "UPDATE ocr_queue SET status = 'skipped', last_error = ?, "
-        "updated_at = datetime('now') WHERE file_path = ?",
-        ((reason or "")[:500], file_path),
+        "updated_at = datetime('now') WHERE file_path = ? AND (? = 0 OR status = 'running')",
+        ((reason or "")[:500], file_path, int(claimed)),
     )
 
 

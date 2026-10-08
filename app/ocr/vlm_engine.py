@@ -23,6 +23,8 @@ import logging
 import time
 from pathlib import Path
 
+import httpx
+
 from app.config import settings
 from app.ocr.raster_png import RasterError, render_page_from, render_page_png
 from app.ocr.types import OcrLine, OcrPage
@@ -63,6 +65,14 @@ _REFUSAL_PREFIXES = (
 
 class VlmNotConfiguredError(RuntimeError):
     """No provider/model selected, or the selection is unusable."""
+
+
+class VlmUnavailableError(RuntimeError):
+    """The provider could not be reached at all (not running, wrong port).
+
+    Distinct from a page-level failure: every later page would fail the same
+    way, and none of it is the document's fault.
+    """
 
 
 def _strip_wrapper(text: str) -> str:
@@ -169,7 +179,7 @@ async def recognize_page(path: str | Path, page_num: int, *, doc=None) -> OcrPag
     which for a multi-page document meant one full PDF parse per page.
     """
     from app.ocr.settings import vlm_selection
-    from app.providers import create_provider, env_base_url
+    from app.providers import create_provider, env_base_url, saved_base_url
     from app.providers.registry import PROVIDER_REGISTRY
     from app.providers.vision import build_vision_messages
     from app.search.llm_client import provider_leaves_device
@@ -185,7 +195,9 @@ async def recognize_page(path: str | Path, page_num: int, *, doc=None) -> OcrPag
         raise VlmNotConfiguredError(f"Unknown provider {provider_id!r}.")
 
     # Same destination gate as LLM dispatch: page images are corpus content.
-    base_url = env_base_url(provider_id) or spec.default_base_url
+    # Resolved exactly as LLM dispatch does (llm_client.py:456): a URL saved on
+    # the Providers page wins over .env, and the gate below judges that one.
+    base_url = saved_base_url(provider_id) or env_base_url(provider_id) or spec.default_base_url
     if provider_leaves_device(provider_id, base_url):
         try:
             consent = SettingsStore.read().get("llm", {}).get("cloud_privacy_consent", False)
@@ -230,6 +242,8 @@ async def recognize_page(path: str | Path, page_num: int, *, doc=None) -> OcrPag
             error="OCR_PAGE_TIMEOUT",
             elapsed_ms=int((time.time() - started) * 1000),
         )
+    except (httpx.ConnectError, httpx.ConnectTimeout, ConnectionError) as exc:
+        raise VlmUnavailableError(f"{provider_id} is not reachable at {base_url}") from exc
     except Exception as exc:
         logger.warning("VLM OCR failed on page %s: %s", page_num, exc)
         return OcrPage(

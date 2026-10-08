@@ -7,6 +7,7 @@ failure paths.
 """
 
 import contextlib
+import hashlib
 import json
 import sys
 import textwrap
@@ -85,7 +86,11 @@ def pdf_path(tmp_path):
     return p
 
 
-async def seed(db, pdf_path, pages=(0, 1, 2), sha="c" * 64):
+async def seed(db, pdf_path, pages=(0, 1, 2), sha=None):
+    # Real digest by default: _process_doc re-hashes the file and skips it when
+    # it no longer matches files.sha256 (the file changed after indexing).
+    if sha is None:
+        sha = hashlib.sha256(pdf_path.read_bytes()).hexdigest()
     path_str = str(pdf_path.absolute())
     await db.batch_insert_files(
         [
@@ -552,7 +557,7 @@ async def test_force_ocr_ignores_the_cache(mgr, mock_db, stub_env, pdf_path, mon
     # Seed the cache with text the forced run must NOT return.
     await ocr_cache.put_pages(
         mock_db,
-        "c" * 64,
+        hashlib.sha256(pdf_path.read_bytes()).hexdigest(),
         [OcrPage(page_num=0, lines=(OcrLine("stale cached text", 0.9, False),), mean_conf=0.9)],
         engine_id=mgr._active_engine_id(),
     )

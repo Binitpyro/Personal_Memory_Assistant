@@ -118,8 +118,9 @@ def _count_image_xobjects(page: Any) -> int:
 def _content_stream_bytes(page: Any) -> int:
     """Encoded length of the page's content stream(s), from the dictionary.
 
-    Reads /Length rather than measuring decoded data, so this stays O(1) and
-    never inflates a compressed bomb.
+    Never inflates a compressed bomb: it reads /Length when the dictionary has
+    one, else the length of the still-encoded bytes. pypdf strips /Length from
+    parsed streams, so for a real PDF the second is the one that answers.
     """
     try:
         contents = page.get("/Contents")
@@ -137,7 +138,7 @@ def _content_stream_bytes(page: Any) -> int:
                 length = obj.get("/Length")
                 if hasattr(length, "get_object"):
                     length = length.get_object()
-                total += int(length or 0)
+                total += int(length or len(getattr(obj, "_data", None) or b""))
             except Exception:  # nosec B112
                 continue
         return total

@@ -8,6 +8,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 HEAP_PATH = Path("data/model_heap.json")
+_OUTAGE_CODES = frozenset({"network", "provider_down", "tls_error", "cached_offline"})
 
 
 class ValidationCache:
@@ -71,7 +72,14 @@ class ValidationCache:
     def set(self, provider_id: str, base_url: str | None, api_key: str | None, val: Any) -> None:
         key_hash = self._hash_key(api_key)
         key = (provider_id, base_url, key_hash)
-        self._cache[key] = (time.time(), val)
+        # An outage verdict must not outlive the outage: with it cached, a
+        # provider started after the first failed probe stays "down" for the
+        # whole TTL with no request sent. Auth / wrong-URL failures are stable
+        # and stay cached so a bad key is not re-pinged on every page load.
+        if not (isinstance(val, dict) and val.get("error_code") in _OUTAGE_CODES):
+            self._cache[key] = (time.time(), val)
+        else:
+            self._cache.pop(key, None)
 
         # If validation succeeded and returned models, save to persistent heap
         if isinstance(val, dict) and val.get("ok") and val.get("models"):

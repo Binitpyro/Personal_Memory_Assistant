@@ -446,7 +446,6 @@ class OllamaProvider:
             payload = self._chat_payload(
                 messages, model_name, temperature, max_tokens, stream=True, think=think
             )
-            got_content = False
             async with client.stream("POST", url, json=payload) as resp:
                 resp.raise_for_status()
                 async for line in resp.aiter_lines():
@@ -463,15 +462,12 @@ class OllamaProvider:
                         logger.debug("Failed to parse Ollama stream chunk: %s", e)
                         continue
                     # An in-stream {"error": ...} line: raised outside the try so
-                    # it is not swallowed. After content, end the stream rather
-                    # than let the fallback loop join a second answer onto it.
+                    # it is not swallowed. Before content the fallback loop acts on
+                    # it; after content llm_client reports the truncation as a
+                    # provider_error instead of letting a cut answer read as whole.
                     if err:
-                        if got_content:
-                            logger.warning("Ollama stream error after content: %s", str(err)[:500])
-                            return
                         raise stream_error_for(err)
                     if content:
-                        got_content = True
                         yield content, False
                     elif thinking:
                         # Not yielded to the caller - it is reasoning, not an

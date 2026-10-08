@@ -17,7 +17,6 @@ not measured, so its tests are synthetic.
 """
 
 import json
-import logging
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -316,17 +315,18 @@ async def test_openai_compat_unrecognised_error_has_no_code_and_is_truncated():
     await provider.close()
 
 
-async def test_openai_compat_error_after_content_warns_and_ends_cleanly(caplog):
+async def test_openai_compat_error_after_content_raises_so_the_cut_answer_is_reported():
     provider = _lm_studio()
     lines = [_delta("par"), _delta("tial"), *_LMS_ERROR_LINES, _delta("never")]
+    got: list[str] = []
     with (
         patch("httpx.AsyncClient.stream", return_value=_FakeStream(lines)),
-        caplog.at_level(logging.WARNING, logger="app.providers.openai_compat"),
+        pytest.raises(ProviderStreamError),
     ):
-        got = [c async for c in provider.stream(_MSG)]
+        async for c in provider.stream(_MSG):
+            got.append(c)
 
     assert got == ["par", "tial"]
-    assert any("after content" in r.getMessage() for r in caplog.records)
     await provider.close()
 
 
@@ -379,16 +379,17 @@ async def test_ollama_error_before_content_raises_with_overflow_code_synthetic()
     await provider.close()
 
 
-async def test_ollama_error_after_content_warns_and_ends_without_replay_synthetic(caplog):
+async def test_ollama_error_after_content_raises_without_replay_synthetic():
     provider = _ollama()
     lines = [_ol_content("par"), json.dumps({"error": "model crashed"}), _ol_content("never")]
+    got: list[str] = []
     with (
         patch("httpx.AsyncClient.stream", return_value=_FakeStream(lines)) as stream,
-        caplog.at_level(logging.WARNING, logger="app.providers.ollama"),
+        pytest.raises(ProviderStreamError),
     ):
-        got = [c async for c in provider.stream(_MSG)]
+        async for c in provider.stream(_MSG):
+            got.append(c)
 
     assert got == ["par"]
     assert stream.call_count == 1
-    assert any("after content" in r.getMessage() for r in caplog.records)
     await provider.close()

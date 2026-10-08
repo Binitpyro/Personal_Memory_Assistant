@@ -96,9 +96,6 @@ class LLMGeneralSettingsPayload(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
 
-_GATED_PROVIDER_KINDS = ("cloud", "aggregator")
-
-
 @providers_router.get("/settings")
 async def get_llm_settings():
     data = await asyncio.to_thread(read_settings)
@@ -150,11 +147,12 @@ async def update_llm_settings(payload: LLMGeneralSettingsPayload):
     if payload.provider is not None:
         if payload.provider not in ("auto", *PROVIDER_IDS):
             raise HTTPException(status_code=400, detail=f"Unknown provider: {payload.provider}")
-        gated_selection = (
-            payload.provider in PROVIDER_REGISTRY
-            and PROVIDER_REGISTRY[payload.provider].kind in _GATED_PROVIDER_KINDS
-        )
-        if gated_selection and not consent:
+        selected_url = data["llm"]["per_provider"].get(payload.provider, {}).get(
+            "base_url"
+        ) or env_base_url(payload.provider)
+        # Same destination-based predicate as the dispatch gate, so a remote
+        # openai_compatible / ollama is gated and a loopback one is not.
+        if provider_leaves_device(payload.provider, selected_url) and not consent:
             raise HTTPException(
                 status_code=400,
                 detail=(
@@ -176,6 +174,10 @@ async def update_llm_settings(payload: LLMGeneralSettingsPayload):
         data["llm"]["cloud_privacy_consent"] = payload.cloud_privacy_consent
 
     await asyncio.to_thread(write_settings, data)
+    if payload.provider is not None:
+        # The running client reads its preference once; without this a switch
+        # is ignored until restart.
+        get_llm().apply_preferences(provider=payload.provider)
     return {"status": "success"}
 
 
@@ -229,7 +231,7 @@ async def list_providers():
         # gate as dispatch: validate() is only a keyed ping, but it fires on
         # every Settings page load and would reach an off-device endpoint the
         # user has not opted into.
-        consent_ok = spec.kind not in _GATED_PROVIDER_KINDS or cloud_consent
+        consent_ok = cloud_consent or not provider_leaves_device(pid, base_url)
         if last_validation is None and consent_ok and (is_set or pid in ("ollama", "lm_studio")):
             try:
                 p_obj = create_provider(
@@ -270,25 +272,33 @@ async def validate_provider(provider_id: str, payload: ValidatePayload) -> Valid
     provider_settings = per_provider.get(provider_id, {})
 
     spec = PROVIDER_REGISTRY[provider_id]
-    if base_url is not None and not spec.base_url_editable:
-        # The stored key must not follow a caller-supplied URL to another host.
-        # The UI always echoes the effective URL, so only a different one is refused.
-        effective = (
-            provider_settings.get("base_url")
-            or env_base_url(provider_id)
-            or spec.default_base_url
-            or ""
+    effective = (
+        provider_settings.get("base_url")
+        or env_base_url(provider_id)
+        or spec.default_base_url
+        or ""
+    )
+    # The stored key must not follow a caller-supplied URL to another host.
+    # The UI always echoes the effective URL, so only a different one is refused.
+    if (
+        base_url is not None
+        and not spec.base_url_editable
+        and base_url.strip().rstrip("/").lower() != effective.strip().rstrip("/").lower()
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=f"The base URL for {provider_id} is fixed and cannot be changed.",
         )
-        if base_url.strip().rstrip("/").lower() != effective.strip().rstrip("/").lower():
-            raise HTTPException(
-                status_code=400,
-                detail=f"The base URL for {provider_id} is fixed and cannot be changed.",
-            )
 
     if base_url is None:
         base_url = provider_settings.get("base_url") or env_base_url(provider_id)
+    # An editable provider may be validated against a typed URL, but the stored
+    # key must not follow it to another host: only a key the caller sent goes there.
+    use_stored_key = base_url is None or (
+        base_url.strip().rstrip("/").lower() == effective.strip().rstrip("/").lower()
+    )
 
-    if api_key is None:
+    if api_key is None and use_stored_key:
         env_key_name = f"{provider_id}_api_key"
         api_key = getattr(settings, env_key_name, None)
         if not api_key:

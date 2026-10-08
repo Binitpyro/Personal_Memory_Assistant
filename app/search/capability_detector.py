@@ -47,6 +47,15 @@ class CapabilityDetector:
                 probe_prompt, context="", history=[], skip_capability_check=True
             )
 
+            # generate_answer reports a dead provider as prose, never raises. That
+            # says nothing about the model, so it must not be cached as a verdict
+            # (it would disable <claim> support for the process lifetime).
+            from app.search.llm_client import LLM_UNAVAILABLE_PREFIX
+
+            if response.startswith(LLM_UNAVAILABLE_PREFIX):
+                logger.info("CapabilityDetector: Provider unavailable, probe not cached.")
+                return False
+
             # Simple heuristic check:
             if "<claim" in response and "sources=" in response and "</claim>" in response:
                 logger.info("CapabilityDetector: Model passed the <claim> tag probe.")
@@ -58,7 +67,6 @@ class CapabilityDetector:
                 return False
         except Exception as e:
             logger.warning("CapabilityDetector: Probe failed due to error: %s", e)
-            self._capability_cache[cache_key] = False
             return False
 
     def report_failure(self, llm_client: "LLMClient"):

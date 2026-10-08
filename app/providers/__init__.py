@@ -9,6 +9,7 @@ from app.providers.manifest import (
     get_default_chain,
     get_default_chain_async,
     is_loopback_url,
+    saved_base_url,
 )
 from app.providers.ollama import OllamaProvider
 from app.providers.openai_compat import OpenAICompatibleProvider
@@ -34,6 +35,7 @@ __all__ = [
     "get_default_chain",
     "get_default_chain_async",
     "is_loopback_url",
+    "saved_base_url",
     "spec_of",
 ]
 

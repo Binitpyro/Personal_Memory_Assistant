@@ -3,7 +3,7 @@ import logging
 from collections.abc import AsyncGenerator
 from typing import Any, cast
 
-from app.providers.base import ModelInfo
+from app.providers.base import ModelInfo, stream_error_for
 from app.providers.openai_compat import OpenAICompatibleProvider
 from app.providers.registry import spec_of
 
@@ -134,13 +134,22 @@ class AnthropicProvider(OpenAICompatibleProvider):
                 if not line or not line.startswith("data: "):
                     continue
                 payload_str = line[6:].strip()
+                err = delta_text = None
                 try:
                     parsed = json.loads(payload_str)
                     event_type = parsed.get("type")
-                    if event_type == "content_block_delta":
+                    if event_type == "error":
+                        err = parsed.get("error") or "Anthropic stream error"
+                    elif event_type == "content_block_delta":
                         delta_text = parsed.get("delta", {}).get("text")
-                        if delta_text:
-                            yield delta_text
                 except Exception as e:
                     logger.debug("Failed to parse Anthropic stream chunk: %s", e)
                     continue
+                # An in-stream `error` event (overloaded_error mid-answer). Raised
+                # outside the try so it is not swallowed; same contract as
+                # OpenAICompatibleProvider.stream: before content the fallback loop
+                # acts on it, after content llm_client reports a provider_error.
+                if err:
+                    raise stream_error_for(err)
+                if delta_text:
+                    yield delta_text

@@ -542,9 +542,10 @@ class TestEffectiveFallbackChain:
 
         assert _get_effective_fallback_chain() == ["ollama"]
 
-    def test_chain_with_nothing_configured_falls_back_to_default(self, tmp_path, monkeypatch):
-        """Otherwise a stale saved chain would leave the user with no provider."""
-        from app.providers import get_default_chain
+    def test_chain_with_nothing_configured_is_kept_not_replaced_by_default(
+        self, tmp_path, monkeypatch
+    ):
+        """The default chain holds every keyed cloud provider; never swap it in (A4-03)."""
         from app.search.llm_client import _get_effective_fallback_chain
         from app.settings_store import CURRENT_SCHEMA_VERSION
 
@@ -559,7 +560,7 @@ class TestEffectiveFallbackChain:
         monkeypatch.setattr("app.settings_store.SETTINGS_PATH", path)
         monkeypatch.setattr("app.search.llm_client.get_configured_provider_ids", lambda: [])
 
-        assert _get_effective_fallback_chain() == get_default_chain()
+        assert _get_effective_fallback_chain() == ["openai", "anthropic"]
 
     def test_stale_schema_version_is_ignored(self, tmp_path, monkeypatch):
         from app.providers import get_default_chain

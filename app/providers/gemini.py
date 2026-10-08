@@ -6,7 +6,7 @@ from typing import Any, cast
 
 import httpx
 
-from app.providers.base import ModelInfo, ValidationResult
+from app.providers.base import ModelInfo, ValidationResult, stream_error_for
 from app.providers.cache import validation_cache
 from app.providers.registry import spec_of
 
@@ -214,18 +214,27 @@ class GeminiProvider:
             resp.raise_for_status()
             async for chunk in resp.aiter_text():
                 buffer += chunk
-                buffer, new_texts = self._parse_stream_buffer(decoder, buffer)
+                buffer, new_texts, err = self._parse_stream_buffer(decoder, buffer)
                 for text in new_texts:
                     yield text
+                # An in-stream {"error": ...} object. Same contract as
+                # OpenAICompatibleProvider.stream: before content the fallback
+                # loop acts on it, after content llm_client reports a provider_error.
+                if err:
+                    raise stream_error_for(err)
 
-    def _parse_stream_buffer(self, decoder: json.JSONDecoder, buffer: str) -> tuple[str, list[str]]:
-        new_texts = []
+    def _parse_stream_buffer(
+        self, decoder: json.JSONDecoder, buffer: str
+    ) -> tuple[str, list[str], Any]:
+        new_texts: list[str] = []
         while True:
             buffer = buffer.lstrip(", \r\n\t[]")
             if not buffer:
                 break
             try:
                 data, end_idx = decoder.raw_decode(buffer)
+                if isinstance(data, dict) and data.get("error"):
+                    return buffer[end_idx:], new_texts, data["error"]
                 if isinstance(data, dict) and "candidates" in data:
                     text = (
                         data["candidates"][0].get("content", {}).get("parts", [{}])[0].get("text")
@@ -235,4 +244,4 @@ class GeminiProvider:
                 buffer = buffer[end_idx:]
             except json.JSONDecodeError:
                 break
-        return buffer, new_texts
+        return buffer, new_texts, None

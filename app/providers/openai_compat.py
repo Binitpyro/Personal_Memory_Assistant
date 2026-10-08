@@ -297,7 +297,6 @@ class OpenAICompatibleProvider:
             "stream": True,
         }
 
-        got_content = False
         async with client.stream("POST", url, headers=headers, json=payload) as resp:
             resp.raise_for_status()
             async for line in resp.aiter_lines():
@@ -316,12 +315,8 @@ class OpenAICompatibleProvider:
                 # An HTTP 200 stream can carry an error object (LM Studio on a
                 # context overflow). Raised outside the try so it is not swallowed:
                 # before content it lets the fallback loop act on it; after content
-                # a fallback would join two answers, so the stream just ends.
+                # llm_client reports the truncation as a provider_error.
                 if err:
-                    if got_content:
-                        logger.warning("Stream error after content: %s", str(err)[:500])
-                        return
                     raise stream_error_for(err)
                 if delta:
-                    got_content = True
                     yield delta

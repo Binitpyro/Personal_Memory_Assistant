@@ -42,7 +42,7 @@ Provide ONLY valid JSON output matching this schema:
 }}
 """
 
-        response = await llm.generate(prompt, temperature=0.2)
+        response = await llm.generate_raw([{"role": "user", "content": prompt}])
 
         # Parse the JSON response
         try:

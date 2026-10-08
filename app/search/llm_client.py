@@ -17,6 +17,7 @@ from app.providers import (
     get_configured_provider_ids,
     get_default_chain,
     is_loopback_url,
+    saved_base_url,
 )
 from app.search.capability_detector import capability_detector
 from app.settings_store import CURRENT_SCHEMA_VERSION, SettingsStore
@@ -41,11 +42,12 @@ def _get_effective_fallback_chain() -> list[str]:
 
     chain = [p for p in saved if p in configured]
     if not chain:
-        logger.warning(
-            "Saved fallback_chain %s has no configured providers; falling back to default order.",
-            saved,
-        )
-        return get_default_chain()
+        # Never substitute the default chain: it includes every keyed cloud
+        # provider, including ones the user left out on purpose. A saved local
+        # chain whose provider is momentarily down must fail as that provider
+        # ("Ollama is not running"), not be answered by a cloud one.
+        logger.warning("Saved fallback_chain %s has no configured providers; keeping it.", saved)
+        return list(saved)
 
     return chain
 
@@ -734,6 +736,7 @@ Answer:
             while attempt < max_attempts:
                 pid, model, to_val = providers_to_try[attempt]
                 provider_instance = None
+                emitted = False
                 try:
                     provider_instance = await self._resolve_provider_by_id(
                         pid, model, timeout=to_val
@@ -744,6 +747,7 @@ Answer:
                     async for chunk in provider_instance.stream(
                         self._build_messages(prompt, history)
                     ):
+                        emitted = True
                         full_answer += chunk
                         yield chunk
                     break
@@ -763,6 +767,18 @@ Answer:
                 finally:
                     if provider_instance:
                         await provider_instance.close()
+                # Reached only via an except above (break skips it). Part of the
+                # answer is already with the user, so another provider's full
+                # answer would be appended to it: stop and surface the error.
+                if emitted:
+                    yield json.dumps(
+                        {
+                            "control": "provider_error",
+                            "code": getattr(last_error, "code", None),
+                            "message": f"{pid} failed mid-answer: {last_error!s}"[:500],
+                        }
+                    )
+                    return
             else:
                 # A control chunk, not prose. Yielding the message as text put
                 # the error into the answer body, where it reads as content the
@@ -810,7 +826,7 @@ Answer:
 
     # Health check methods
     async def _check_ollama_health(self) -> bool:
-        provider = create_provider("ollama", base_url=self.ollama_url)
+        provider = create_provider("ollama", base_url=saved_base_url("ollama") or self.ollama_url)
         try:
             res = await provider.validate()
             return res["ok"]
@@ -820,7 +836,9 @@ Answer:
             await provider.close()
 
     async def _check_lm_studio_health(self) -> bool:
-        provider = create_provider("lm_studio", base_url=self.lm_studio_url)
+        provider = create_provider(
+            "lm_studio", base_url=saved_base_url("lm_studio") or self.lm_studio_url
+        )
         try:
             res = await provider.validate()
             return res["ok"]

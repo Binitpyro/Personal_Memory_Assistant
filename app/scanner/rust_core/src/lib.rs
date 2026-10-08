@@ -447,9 +447,17 @@ fn _initialize_spiral_positions(child_data: &mut [(usize, f32, [f32; 3])]) {
 
 
 
-/// Generates a tightly packed binary buffer for 3D visualization using Hierarchical Spherical Packing
+/// Generates a tightly packed binary buffer for 3D visualization using Hierarchical Spherical Packing.
+///
+/// The layout is CPU-bound pure Rust over owned data, so it runs with the GIL
+/// released (A8-07): holding it froze every other Python thread for the whole
+/// layout, seconds at 20k files.
 #[pyfunction]
-fn get_spatial_binary(files: Vec<(String, f32, String)>) -> PyResult<Vec<u8>> {
+fn get_spatial_binary(py: Python<'_>, files: Vec<(String, f32, String)>) -> PyResult<Vec<u8>> {
+    Ok(py.detach(move || spatial_binary(files)))
+}
+
+fn spatial_binary(files: Vec<(String, f32, String)>) -> Vec<u8> {
     let mut nodes = build_tree(files);
     
     _calculate_node_radii(&mut nodes);
@@ -475,7 +483,7 @@ fn get_spatial_binary(files: Vec<(String, f32, String)>) -> PyResult<Vec<u8>> {
     // and gpu_nodes has exactly nodes.len() * size_of::<Node>() valid bytes.
     let slice_u8 = unsafe { std::slice::from_raw_parts(gpu_nodes.as_ptr() as *const u8, gpu_nodes.len() * std::mem::size_of::<Node>()) };
     buffer.extend_from_slice(slice_u8);
-    Ok(buffer)
+    buffer
 }
 
 fn _calculate_node_radii(nodes: &mut [TreeNode]) {
@@ -554,6 +562,30 @@ fn calculate_sha256(path: &str) -> PyResult<String> {
     Ok(hex::encode(digest.as_ref()))
 }
 
+/// Decode UTF-16/32 text announced by a BOM; `None` for everything else, so
+/// UTF-8 (BOM or not) takes the unchanged path. The BOM list and its order
+/// mirror `_encoding_for` in app/indexing/service.py: the 4-byte UTF-32 BOMs are
+/// tested first because the UTF-32 LE BOM begins with the UTF-16 LE one. A
+/// trailing partial code unit (from the `max_size` cut) is dropped.
+fn _decode_bom_wide_text(buf: &[u8]) -> Option<String> {
+    if buf.starts_with(&[0xFF, 0xFE, 0, 0]) || buf.starts_with(&[0, 0, 0xFE, 0xFF]) {
+        let le = buf[0] == 0xFF;
+        return Some(buf[4..].chunks_exact(4).map(|c| {
+            let a = [c[0], c[1], c[2], c[3]];
+            let u = if le { u32::from_le_bytes(a) } else { u32::from_be_bytes(a) };
+            char::from_u32(u).unwrap_or('\u{FFFD}')
+        }).collect());
+    }
+    if buf.starts_with(&[0xFF, 0xFE]) || buf.starts_with(&[0xFE, 0xFF]) {
+        let le = buf[0] == 0xFF;
+        let units = buf[2..].chunks_exact(2).map(|c| {
+            if le { u16::from_le_bytes([c[0], c[1]]) } else { u16::from_be_bytes([c[0], c[1]]) }
+        });
+        return Some(char::decode_utf16(units).map(|r| r.unwrap_or('\u{FFFD}')).collect());
+    }
+    None
+}
+
 fn _extract_single_file(path: String, max_size: usize) -> (String, String) {
     let fallback_stub = format!("[UNREADABLE: {}]", path);
     match File::open(&path) {
@@ -563,6 +595,10 @@ fn _extract_single_file(path: String, max_size: usize) -> (String, String) {
             match file.by_ref().take(max_size as u64 + 1).read_to_end(&mut buffer) {
                 Ok(n) => {
                     if n > max_size { buffer.truncate(max_size); }
+                    // Before the NUL test: UTF-16/32 text is full of NULs (A1-11).
+                    if let Some(text) = _decode_bom_wide_text(&buffer) {
+                        return (path, text);
+                    }
                     if _is_binary_buffer(&buffer) {
                         return (path.clone(), format!("[BINARY: {}] Binary content not indexed.", path));
                     }
@@ -917,7 +953,7 @@ mod tests {
 
     #[test]
     fn test_get_spatial_binary_empty() {
-        let res = get_spatial_binary(vec![]).unwrap();
+        let res = spatial_binary(vec![]);
         assert_eq!(res.len(), 32);
     }
 
@@ -927,8 +963,101 @@ mod tests {
             ("src/main.rs".to_string(), 1000.0, "rs".to_string()),
             ("src/lib.rs".to_string(), 500.0, "rs".to_string()),
         ];
-        let res = get_spatial_binary(files).unwrap();
+        let res = spatial_binary(files);
         assert_eq!(res.len(), 4 * 32);
+    }
+
+    // ── A8-14: sibling spheres must not interpenetrate ────────────────────
+
+    fn gpu_nodes(buf: &[u8]) -> Vec<([f32; 3], f32, u32)> {
+        let f = |o: usize| f32::from_le_bytes(buf[o..o + 4].try_into().unwrap());
+        let u = |o: usize| u32::from_le_bytes(buf[o..o + 4].try_into().unwrap());
+        (0..buf.len() / 32)
+            .map(|i| ([f(i * 32), f(i * 32 + 4), f(i * 32 + 8)], f(i * 32 + 12), u(i * 32 + 16)))
+            .collect()
+    }
+
+    fn assert_siblings_disjoint(folders: usize, per_folder: usize) {
+        let mut files = Vec::new();
+        for d in 0..folders {
+            for f in 0..per_folder {
+                files.push((format!("root/dir{d}/f{f}.txt"), ((f * 37 + d * 11) % 5000) as f32, "txt".to_string()));
+            }
+        }
+        let nodes = gpu_nodes(&spatial_binary(files));
+        // Global positions: siblings share a parent, so their distance is the local one.
+        let mut checked = 0;
+        for a in 0..nodes.len() {
+            for b in a + 1..nodes.len() {
+                if nodes[a].2 != nodes[b].2 || nodes[a].2 == u32::MAX {
+                    continue;
+                }
+                let d: f32 = (0..3).map(|k| (nodes[a].0[k] - nodes[b].0[k]).powi(2)).sum::<f32>().sqrt();
+                let need = nodes[a].1 + nodes[b].1;
+                assert!(d >= need, "siblings {a},{b} overlap: dist {d} < {need}");
+                checked += 1;
+            }
+        }
+        assert!(checked >= folders * (folders - 1) / 2);
+    }
+
+    // Not under Miri: thousands of nodes through the interpreter take tens of
+    // minutes, and Miri's deliberate float non-determinism (sqrt/cos) would
+    // fail the determinism test below. Plain `cargo test` runs both.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_layout_siblings_do_not_overlap() {
+        assert_siblings_disjoint(4, 300);
+        assert_siblings_disjoint(20, 50);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_layout_is_deterministic() {
+        let files: Vec<_> = (0..120)
+            .map(|i| (format!("a/d{}/f{}.txt", i % 6, i), (i * 13 % 900) as f32, "txt".to_string()))
+            .collect();
+        assert_eq!(spatial_binary(files.clone()), spatial_binary(files));
+    }
+
+    // ── A1-11: UTF-16/32 text is text, not binary ─────────────────────────
+
+    #[test]
+    fn test_decode_bom_wide_utf16_le_be() {
+        let s = "host: alice \u{4e16}\u{1F600}";
+        let le: Vec<u8> = [0xFFu8, 0xFE].into_iter().chain(s.encode_utf16().flat_map(|u| u.to_le_bytes())).collect();
+        let be: Vec<u8> = [0xFEu8, 0xFF].into_iter().chain(s.encode_utf16().flat_map(|u| u.to_be_bytes())).collect();
+        assert_eq!(_decode_bom_wide_text(&le).unwrap(), s);
+        assert_eq!(_decode_bom_wide_text(&be).unwrap(), s);
+    }
+
+    #[test]
+    fn test_decode_bom_wide_utf32_and_truncation() {
+        let le: Vec<u8> = [0xFFu8, 0xFE, 0, 0].into_iter().chain("ab\u{1F600}".chars().flat_map(|c| (c as u32).to_le_bytes())).collect();
+        assert_eq!(_decode_bom_wide_text(&le).unwrap(), "ab\u{1F600}");
+        // A cut mid code unit drops the partial unit instead of emitting garbage.
+        assert_eq!(_decode_bom_wide_text(&[0xFF, 0xFE, b'a', 0, b'b']).unwrap(), "a");
+        assert!(_decode_bom_wide_text(b"plain utf-8").is_none());
+        assert!(_decode_bom_wide_text(b"\xEF\xBB\xBFutf8 bom").is_none());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_extract_text_files_utf16_not_binary() {
+        let temp_dir = std::env::temp_dir().join("pma_test_extract_utf16");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let f16 = temp_dir.join("ps_out.txt");
+        let bytes: Vec<u8> = [0xFFu8, 0xFE].into_iter().chain("kubernetes\r\nalice".encode_utf16().flat_map(|u| u.to_le_bytes())).collect();
+        std::fs::write(&f16, bytes).unwrap();
+        let f8 = temp_dir.join("u8.txt");
+        std::fs::write(&f8, b"\xEF\xBB\xBFplain").unwrap();
+
+        let r = extract_text_files(vec![f16.to_str().unwrap().into(), f8.to_str().unwrap().into()], 1000).unwrap();
+        assert_eq!(r[0].1, "kubernetes\r\nalice");
+        assert_eq!(r[1].1, "plain");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     // PyO3 tests removed due to PyO3 0.29 GIL API changes; tested via pytest instead.

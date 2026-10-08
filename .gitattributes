@@ -13,3 +13,7 @@ tests/eval/queries_large.json text eol=lf
 # Bundled tiktoken BPE file (A9-04): loaded only if its sha256 matches, so any
 # EOL conversion on checkout would silently disable it. Keep the bytes exact.
 app/assets/tiktoken/* -text
+
+# cmd.exe mis-parses labels and goto in LF-only batch files.
+*.bat text eol=crlf
+*.cmd text eol=crlf

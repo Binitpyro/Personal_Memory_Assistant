@@ -152,6 +152,18 @@ async def test_reembed_refuses_while_one_is_already_running(client: AsyncClient)
     assert response.status_code == 409
 
 
+@pytest.mark.asyncio
+async def test_reembed_refuses_while_indexing_is_running(client: AsyncClient):
+    """A2-04: reembed_all refuses inside the background task, so without this
+    the caller saw a 200 and a later "error" status."""
+    async with indexing_mod.indexing_lock:
+        response = await client.post("/api/index/reembed", json={"confirm": True})
+
+    assert response.status_code == 409
+    assert "Indexing is running" in response.json()["error"]
+    assert state.embedding_signature.get("reembed") != "running"
+
+
 class _PagedConn(_Conn):
     """Serves one page of chunk rows and one of summary rows, then runs dry."""
 

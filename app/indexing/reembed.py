@@ -206,11 +206,19 @@ async def reembed_all(db, emb, lance, batch_size: int = _BATCH_SIZE) -> dict[str
     SQLite mirror. ``clear_vectors_only`` touches ``chunk_embeddings`` only and
     its docstring is explicit that callers must clear LanceDB separately.
     """
-    await lance.clear_all()
-    await db.clear_vectors_only()
+    # Same lock the index run and the watcher take. A concurrent run deletes
+    # chunks mid-page (FK abort with LanceDB already dropped) or shifts the
+    # OFFSET so a batch is silently never embedded.
+    from app.indexing.service import indexing_lock
 
-    chunks, total = await _reembed_chunks(db, emb, lance, batch_size)
-    summaries = await _rebuild_summaries(db, emb, lance, batch_size)
+    if indexing_lock.locked():
+        raise ReembedError("Indexing is running; re-embed refused. Retry when it has finished.")
+    async with indexing_lock:
+        await lance.clear_all()
+        await db.clear_vectors_only()
+
+        chunks, total = await _reembed_chunks(db, emb, lance, batch_size)
+        summaries = await _rebuild_summaries(db, emb, lance, batch_size)
 
     logger.info("Re-embed complete: %d/%d chunks, %d summaries", chunks, total, summaries)
     return {"chunks": chunks, "total_chunks": total, "summaries": summaries}

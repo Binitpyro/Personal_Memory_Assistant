@@ -778,6 +778,13 @@ class IndexingService:
                 progress.new_files = new_count
                 progress.changed_files = changed_count
 
+            try:
+                await self._regate_legacy_pdfs(
+                    unique_folders, {str(fp.absolute()) for fp, _, _ in files_to_index}
+                )
+            except Exception as exc:
+                logger.warning("OCR re-gate of already-indexed PDFs failed: %s", exc)
+
             if not files_to_index:
                 await self._generate_folder_profiles(all_files, unique_folders)
                 progress.complete()
@@ -1260,6 +1267,10 @@ class IndexingService:
                         status = "nocontent"
                     elif chunks_emitted == 0 and source_size == 0:
                         status = "empty"
+                    elif meta is not None:
+                        # The OCR gate ran on this file; `_regate_legacy_pdfs`
+                        # keys on "" meaning it never did.
+                        status = "ocr_gated"
                     else:
                         status = ""
                     return sha256_result, ft_summary, meta, status
@@ -1506,12 +1517,25 @@ class IndexingService:
                 res = await self._flush_pending_chunks_sqlite(pending_chunks, active_files)
                 if res:
                     l_ids, l_embs, l_metas = res
-            if tx_open and use_tx:
-                if hasattr(self.db, "commit"):
-                    await self.db.commit()
-                tx_open = False
+            # Vectors first, SQLite commit second. The commit is what records
+            # each file's sha256, and a recorded sha256 makes later runs skip
+            # the file, so committing first left files "indexed" with no vectors
+            # whenever the add failed or the process died between the two.
+            # Chunk ids are already allocated inside the open transaction. A
+            # failed add raises into the rollback below; a failed commit
+            # removes the vectors just added, because rolled-back ids are reused.
             if l_ids:
                 await self._flush_pending_chunks_lancedb(l_ids, l_embs, l_metas)
+            if tx_open and use_tx:
+                try:
+                    if hasattr(self.db, "commit"):
+                        await self.db.commit()
+                except BaseException:
+                    if l_ids:
+                        with contextlib.suppress(Exception):
+                            await self.lancedb_client.delete_documents(l_ids)
+                    raise
+                tx_open = False
             pending_chunks.clear()
             chunks_since_commit = 0
             last_commit_time = time.monotonic()
@@ -1653,6 +1677,65 @@ class IndexingService:
         except Exception as exc:
             logger.warning("Failed to enqueue OCR for %s: %s", path_str, exc)
 
+    async def _regate_legacy_pdfs(self, unique_folders: list[Path], skip: set[str]) -> int:
+        """Run the OCR gate once over PDFs indexed before OCR was switched on.
+
+        The gate only runs during extraction, and a mixed PDF (native cover,
+        scanned body) is stored with a real digest, so `_detect_changes` skips
+        it forever and enabling OCR never reached its scanned pages. Such a row
+        has `extract_status == ""`; every PDF gated since carries "ocr_gated" (or
+        "ocr_pending"). This reads the pages again but embeds nothing, queues the
+        pages the gate flags, and marks the row so it is not read a second time.
+        `skip` is the files this run re-indexes anyway.
+        """
+        from app.ocr.settings import load_persisted_state
+
+        if not settings.ocr_enabled or settings.ocr_tier == "none":
+            load_persisted_state()
+        if not settings.ocr_enabled or settings.ocr_tier == "none":
+            return 0
+
+        bases = [f.absolute() for f in unique_folders]
+        rows = await self.db.execute_query(
+            "SELECT id, path, sha256 FROM files WHERE extract_status = '' "
+            "AND lower(path) LIKE '%.pdf' AND sha256 NOT IN ('', 'ERROR', 'CANCELLED', 'NOCONTENT')"
+        )
+        todo = [
+            (i, p, s)
+            for i, p, s in rows
+            if p not in skip and any(Path(p).is_relative_to(b) for b in bases)
+        ]
+        if not todo:
+            return 0
+        extractor = next(e for e in EXTRACTORS if e.can_handle(Path("x.pdf")))
+
+        def _gate(p: str) -> ExtractMeta | None:
+            found = None
+            for frag in extractor.extract_stream(Path(p), self.max_file_size):
+                if isinstance(frag, ExtractMeta):
+                    found = frag
+            return found
+
+        loop = asyncio.get_running_loop()
+        done = 0
+        for file_id, path, sha in todo:
+            if progress.is_cancelled:
+                break
+            progress.set_current_file(f"Checking PDFs for scanned pages ({done}/{len(todo)})…")
+            try:
+                meta = await loop.run_in_executor(_EXTRACT_EXECUTOR, _gate, path)
+            except Exception as exc:
+                logger.warning("OCR re-gate failed for %s: %s", path, exc)
+                continue
+            if meta is None:
+                continue  # gate unavailable; leave unmarked so a later run retries
+            await self._maybe_enqueue_ocr(path, {"extract_meta": meta, "sha256": sha})
+            await self.db.execute_write(
+                "UPDATE files SET extract_status = 'ocr_gated' WHERE id = ?", (file_id,)
+            )
+            done += 1
+        return done
+
     async def _flush_pending_chunks_sqlite(self, chunks: list[dict[str, Any]], active_files: dict):
         if not chunks:
             return None
@@ -1753,11 +1836,12 @@ class IndexingService:
 
     async def _flush_pending_chunks_lancedb(self, l_ids, l_embs, l_metas):
         if l_ids:
+            # No gc.collect() here: it ran a full collection on the event loop
+            # after every commit window (~100-190 ms of stalled queries and SSE
+            # on a large heap) and holds the GIL, so a worker thread does not
+            # help. Peak working set with and without it was identical on a
+            # 1500-file ingest (339.4 vs 340.3 MB, portable mode).
             await self.lancedb_client.add_documents(l_ids, l_embs, l_metas)
-
-            import gc
-
-            gc.collect()
 
     async def _delete_existing_chunks(self, file_id: int) -> None:
         old_ids = [str(cid) for cid in await self.db.get_file_chunk_ids(file_id)]

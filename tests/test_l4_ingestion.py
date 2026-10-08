@@ -565,3 +565,133 @@ async def test_a1_13_json_windows_get_no_injected_separator(tmp_path):
 
     assert "a\na" not in text
     assert "Paris\nname: Bob" in text  # record-style extractors still separated
+
+
+# --- A2-01 ---------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a2_01_failed_lancedb_add_does_not_leave_files_marked_indexed(tmp_path):
+    from app.storage.db import DatabaseManager
+    from app.vector_store.lancedb_client import LanceDBClient
+
+    corpus = tmp_path / "docs"
+    corpus.mkdir()
+    for n in ("a", "b", "c"):
+        (corpus / f"{n}.txt").write_text((f"{n}word " * 80), encoding="utf-8")
+
+    mgr = DatabaseManager(str(tmp_path / "a201.db"))
+    await mgr.init_db(schema_path="app/storage/schema.sql")
+    lance = LanceDBClient(persist_directory=str(tmp_path / "lance"))
+    real_add = lance.add_documents
+    calls = {"n": 0}
+
+    async def flaky_add(ids, embs, metas):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("disk full")
+        await real_add(ids, embs, metas)
+
+    lance.add_documents = flaky_add  # type: ignore[method-assign]
+    service = idx.IndexingService(mgr, _Emb(), lance)  # type: ignore[arg-type]
+    try:
+        idx.progress.status = "idle"
+        await service.index_folders([str(corpus)])  # run 1: the add fails once
+        idx.progress.status = "idle"
+        await service.index_folders([str(corpus)])  # run 2: must recover
+        chunk_ids = {str(r[0]) for r in await mgr.execute_query("SELECT id FROM chunks")}
+        assert chunk_ids
+        assert lance.get_all_ids() == chunk_ids
+    finally:
+        await mgr.close()
+
+
+# --- A2-04 ---------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a2_04_reembed_refuses_while_indexing_and_holds_the_lock_itself():
+    from app.indexing.reembed import ReembedError, reembed_all
+
+    cleared = []
+    during = []
+
+    class _L:
+        async def clear_all(self):
+            cleared.append(1)
+            during.append(idx.indexing_lock.locked())
+            raise RuntimeError("stop after the first write")
+
+    async with idx.indexing_lock:
+        with pytest.raises(ReembedError):
+            await reembed_all(MagicMock(), None, _L())
+    assert cleared == []  # nothing was dropped while an index run held the lock
+
+    with pytest.raises(RuntimeError, match="stop after"):
+        await reembed_all(MagicMock(), None, _L())
+    assert during == [True]  # the re-embed itself excludes index runs and the watcher
+
+
+# --- A6-13 ---------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a6_13_pdf_indexed_before_ocr_was_enabled_is_gated_later(tmp_path, monkeypatch):
+    from app.config import settings
+    from app.indexing.extractors import ExtractMeta
+    from app.indexing.extractors.pdf_extractor import PdfExtractor
+
+    state = {"meta": ExtractMeta(page_count=3, ocr_pages=()), "calls": 0}
+
+    def fake_stream(self, path, max_file_size):
+        state["calls"] += 1
+        yield "native cover page text " * 40
+        if state["meta"] is not None:
+            yield state["meta"]
+
+    monkeypatch.setattr(PdfExtractor, "extract_stream", fake_stream)
+    monkeypatch.setattr(settings, "ocr_enabled", True)
+    monkeypatch.setattr(settings, "ocr_tier", "cpu")
+
+    corpus = tmp_path / "docs"
+    corpus.mkdir()
+    (corpus / "mixed.pdf").write_bytes(b"%PDF-1.4 stand-in, the extractor is patched")
+
+    mgr, service = await _service(tmp_path)
+    try:
+        idx.progress.status = "idle"
+        await service.index_folders([str(corpus)])
+        q = "SELECT extract_status FROM files"
+        assert [r[0] for r in await mgr.execute_query(q)] == ["ocr_gated"]
+
+        # The row as an older build stored it: indexed with OCR off, so no gate ran.
+        await mgr.execute_write("UPDATE files SET extract_status = ''")
+        state["meta"] = ExtractMeta(page_count=3, ocr_pages=(1, 2))
+        before = state["calls"]
+        idx.progress.status = "idle"
+        await service.index_folders([str(corpus)])  # file unchanged -> skipped by change detection
+
+        assert state["calls"] == before + 1
+        queued = await mgr.execute_query("SELECT pages_json FROM ocr_queue")
+        assert [r[0] for r in queued] == ["[1, 2]"]
+        assert [r[0] for r in await mgr.execute_query(q)] == ["ocr_gated"]
+
+        idx.progress.status = "idle"
+        await service.index_folders([str(corpus)])
+        assert state["calls"] == before + 1  # gated once, not on every run
+    finally:
+        await mgr.close()
+
+
+# --- A9-12 ---------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a9_12_lancedb_flush_does_not_run_a_full_gc_on_the_loop(monkeypatch):
+    import gc
+
+    calls = []
+    monkeypatch.setattr(gc, "collect", lambda *a, **k: calls.append(1) or 0)
+    service = idx.IndexingService(MagicMock(), _Emb(), _Lance())
+    await service._flush_pending_chunks_lancedb(["1"], [np.zeros(2)], [{"chunk_id": "1"}])
+    assert calls == []

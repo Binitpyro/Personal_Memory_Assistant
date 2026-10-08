@@ -323,6 +323,16 @@ async def reembed_vectors(
     if state.embedding_signature.get("reembed") == "running":
         return JSONResponse(status_code=409, content={"error": "A re-embed is already running."})
 
+    from app.indexing.service import indexing_lock
+
+    # reembed_all refuses too, but only inside the background task, where the
+    # caller sees a 200 and a later "error" status. Say so up front.
+    if indexing_lock.locked():
+        return JSONResponse(
+            status_code=409,
+            content={"error": "Indexing is running. Wait for it to finish before re-embedding."},
+        )
+
     async def _run():
         from app.state import file_tree_cache as _file_tree_cache
         from app.state import insights_cache as _insights_cache

@@ -202,12 +202,19 @@ async def progress_stream(db: DatabaseManager = Depends(get_db)):
 
 @router.post("/cleanup")
 @limiter.limit("3/minute")
-async def cleanup_stale(request: Request, db: DatabaseManager = Depends(get_db)):
+async def cleanup_stale(
+    request: Request,
+    db: DatabaseManager = Depends(get_db),
+    lancedb_client=Depends(get_lancedb),
+):
     try:
+        from app.search.retrieval import clear_retrieval_cache
         from app.state import file_tree_cache as _file_tree_cache
         from app.state import insights_cache as _insights_cache
 
-        cleaned = await db.cleanup_stale_files()
+        cleaned = await db.cleanup_stale_files(lancedb_client=lancedb_client)
+        if cleaned:
+            clear_retrieval_cache()
         _file_tree_cache["data"] = _insights_cache["data"] = None
         return {"message": f"Cleaned {len(cleaned)} stale file(s).", "cleaned_paths": cleaned}
     except Exception as e:
@@ -337,28 +344,18 @@ async def remove_folder_index(
             content={"message": "No valid folder paths provided.", "chunks_removed": 0},
         )
 
-    folder = folders[0]
     try:
-        sql = """
-            SELECT c.id
-            FROM chunks c
-            JOIN files f ON c.file_id = f.id
-            WHERE f.path LIKE ? || '%'
-        """
-        rows = await db.execute_query(sql, (folder,))
-        chunk_ids_to_remove = [str(r[0]) for r in rows]
-
-        if chunk_ids_to_remove:
-            await lancedb_client.delete_documents(chunk_ids_to_remove)
-
-        await db.delete_files_by_folder_prefix(folder)
+        chunks_removed = 0
+        for folder in folders:
+            res = await db.remove_from_index(lancedb_client, folder=folder)
+            chunks_removed += res["chunks_removed"]
 
         from app.search.retrieval import clear_retrieval_cache
 
         # In-process answer/retrieval caches would otherwise keep serving the folder.
         clear_retrieval_cache()
         _file_tree_cache["data"] = _insights_cache["data"] = None
-        return {"message": f"Removed {folder}", "chunks_removed": len(chunk_ids_to_remove)}
+        return {"message": f"Removed {', '.join(folders)}", "chunks_removed": chunks_removed}
     except Exception as e:
         logger.error("Failed to remove folder: %s", e)
         return JSONResponse(status_code=500, content={"error": str(e)})

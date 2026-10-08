@@ -104,6 +104,10 @@ class LanceDBClient:
         self._table_cache: dict[str, Any] = {}
         self._connect_lock = threading.Lock()
         self._write_lock = threading.Lock()
+        # Serialises index rebuilds only. Holding _write_lock for a rebuild parked
+        # every query_cache write on it, and those threads filled the default
+        # executor, starving semantic_search for the rest of the rebuild.
+        self._index_lock = threading.Lock()
         self._cache_writes = 0
 
     def connect(self) -> None:
@@ -482,7 +486,13 @@ class LanceDBClient:
         from app.config import settings
 
         self._cache_writes += 1
-        if self._cache_writes % max(1, settings.query_cache_prune_interval) == 0:
+        # The counter restarts at 0 on every launch, so a "% interval == 0" test
+        # alone never fires for a session shorter than the interval. Prune on the
+        # first write of the process too.
+        if (
+            self._cache_writes == 1
+            or self._cache_writes % max(1, settings.query_cache_prune_interval) == 0
+        ):
             await self.prune_query_cache(settings.query_cache_max_rows)
 
     async def search_cache(
@@ -612,7 +622,10 @@ class LanceDBClient:
             loop = asyncio.get_running_loop()
 
             def _create():
-                with self._write_lock:
+                # Lance commits an append or delete made during the build
+                # independently (measured on 0.30.2: 20k rows, concurrent add and
+                # delete, no errors, counts exact), so _write_lock is not needed.
+                with self._index_lock:
                     try:
                         # Attempt to create index with replace=True to overwrite old index
                         tbl.create_index(metric="cosine", index_type="IVF_HNSW_SQ", replace=True)

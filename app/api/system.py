@@ -259,18 +259,8 @@ async def compact_db(db: DatabaseManager = Depends(get_db)):
             try:
                 # FTS optimize via aiosqlite (non-blocking in event loop terms)
                 await db.fts_optimize()
-                # VACUUM cannot run inside an active transaction and is CPU-bound.
-                # Open a separate sync connection to avoid blocking the event loop
-                # and to sidestep aiosqlite's implicit transaction wrapping.
-                import sqlite3
-
-                def _vacuum_sync():
-                    con = sqlite3.connect(db.db_path, timeout=60)
-                    con.isolation_level = None  # autocommit mode
-                    con.execute("PRAGMA incremental_vacuum(100)")
-                    con.close()
-
-                await asyncio.to_thread(_vacuum_sync)
+                # Frees every free page, in batches that release the write lock.
+                await db.incremental_vacuum()
                 from datetime import datetime
 
                 _vacuum_last_run = datetime.now(UTC).isoformat()
@@ -341,15 +331,7 @@ async def demo_seed(
         await service.index_folders([demo_folder])
         try:
             await db.fts_optimize()
-            import sqlite3
-
-            def _vacuum_sync():
-                con = sqlite3.connect(db.db_path, timeout=60)
-                con.isolation_level = None
-                con.execute("PRAGMA incremental_vacuum(100)")
-                con.close()
-
-            await asyncio.to_thread(_vacuum_sync)
+            await db.incremental_vacuum()
             logger.info("Auto-compact completed after demo indexing.")
         except Exception as e:
             logger.warning("Auto-compact after demo indexing failed: %s", e)

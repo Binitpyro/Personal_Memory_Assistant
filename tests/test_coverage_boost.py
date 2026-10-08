@@ -66,7 +66,7 @@ class FakeDB:
             raise RuntimeError("history error")
         return [{"id": 1, "question": "q", "answer": "a", "limit": limit, "created_at": "now"}]
 
-    async def cleanup_stale_files(self):
+    async def cleanup_stale_files(self, lancedb_client=None):
         if self.raise_on_cleanup:
             raise RuntimeError("cleanup error")
         return ["C:/old/file.txt"]

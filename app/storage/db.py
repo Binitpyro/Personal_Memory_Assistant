@@ -93,6 +93,24 @@ def serialize_write(func):
     return wrapper
 
 
+def _folder_match(column: str, folder: str) -> tuple[str, tuple[Any, ...]]:
+    """SQL predicate: *column* is *folder* itself or lies beneath it.
+
+    `LIKE folder || '%'` matched `proj2` and `Proj` when asked for `proj`, and
+    read `_`/`%` in the folder name as wildcards. This compares a literal prefix
+    and then demands a separator (or the end of the string) right after it.
+    Case-insensitive only on Windows, where the filesystem is.
+    """
+    base = folder.rstrip("\\/")
+    n = len(base)
+    nocase = " COLLATE NOCASE" if os.name == "nt" else ""
+    sql = (
+        f"(substr({column}, 1, ?) = ?{nocase} "  # nosec B608
+        f"AND (length({column}) = ? OR substr({column}, ?, 1) IN (?, ?)))"
+    )
+    return sql, (n, base, n, n + 1, "\\", "/")
+
+
 # Module-level so a test can shrink it. Generous rather than tight: legitimate
 # contention on a pool_size=4 pool during a bulk ingest is normal, and this is
 # meant to catch a leak, not to police slow queries.
@@ -294,7 +312,10 @@ class DatabaseManager:
                         "Database heavily fragmented (%d free pages). Running incremental vacuum.",
                         row[0],
                     )
-                    await conn.execute("PRAGMA incremental_vacuum(5000);")
+                    # incremental_vacuum frees one page per row stepped, and a bare
+                    # execute() steps none: fetch the rows or nothing is freed.
+                    async with conn.execute("PRAGMA incremental_vacuum(5000);") as cur:
+                        await cur.fetchall()
                     await conn.commit()
         except Exception as e:
             logger.warning("Failed to run startup incremental vacuum: %s", e)
@@ -817,7 +838,7 @@ class DatabaseManager:
             "INSERT OR REPLACE INTO system_state (key, value) VALUES (?, ?)",
             (key, value),
         )
-        await conn.commit()
+        await self._maybe_commit(conn)
 
     @serialize_write
     async def fts_optimize(self) -> None:
@@ -850,16 +871,36 @@ class DatabaseManager:
         await conn.commit()
         logger.info("Database maintenance completed.")
 
-    @serialize_write
     async def incremental_vacuum(self, pages: int = 1000) -> None:
-        """Run an incremental vacuum to reclaim space without locking for long periods."""
-        conn = self._get_conn()
+        """Reclaim every free page, `pages` at a time.
+
+        The write lock is released between batches, so a large reclaim never
+        holds it for long. Stops when the freelist is empty or a batch frees
+        nothing (a database not in INCREMENTAL auto_vacuum mode).
+        """
+        remaining = None
         try:
-            logger.info("Running incremental vacuum (%d pages)...", pages)
-            await conn.execute(f"PRAGMA incremental_vacuum({pages});")
-            await conn.commit()
+            logger.info("Running incremental vacuum (%d pages per batch)...", pages)
+            while True:
+                left = await self._incremental_vacuum_step(pages)
+                if left <= 0 or (remaining is not None and left >= remaining):
+                    break
+                remaining = left
         except Exception as e:
             logger.warning("Incremental vacuum failed: %s", e)
+
+    @serialize_write
+    async def _incremental_vacuum_step(self, pages: int) -> int:
+        """Free up to `pages` pages; return how many remain on the freelist."""
+        conn = self._get_conn()
+        # One page is freed per row stepped. execute() alone steps none, so the
+        # old call freed nothing no matter what N was.
+        async with conn.execute(f"PRAGMA incremental_vacuum({int(pages)});") as cur:
+            await cur.fetchall()
+        await self._maybe_commit(conn)
+        async with conn.execute("PRAGMA freelist_count;") as cur:
+            row = await cur.fetchone()
+        return int(row[0]) if row else 0
 
     @serialize_write
     async def wal_checkpoint(self) -> None:
@@ -1676,7 +1717,7 @@ class DatabaseManager:
             "UPDATE files SET usage_count = usage_count + 1 WHERE path = ?",
             (file_path,),
         )
-        await conn.commit()
+        await self._maybe_commit(conn)
 
     @serialize_write
     async def batch_increment_usage(self, file_paths: list[str]) -> None:
@@ -1704,7 +1745,7 @@ class DatabaseManager:
             + ")"
         )
         await conn.execute(sql, tuple(case_params + in_params))
-        await conn.commit()
+        await self._maybe_commit(conn)
 
     async def get_all_files(self) -> list[aiosqlite.Row]:
         """Returns all indexed files ordered by folder and path."""
@@ -1874,7 +1915,7 @@ class DatabaseManager:
             (question, answer, source_count, latency_ms),
         ) as cursor:
             row = await cursor.fetchone()
-            await conn.commit()
+            await self._maybe_commit(conn)
             return row[0] if row else 0
 
     @serialize_write
@@ -1920,7 +1961,7 @@ class DatabaseManager:
                 chunks_dropped,
             ),
         )
-        await conn.commit()
+        await self._maybe_commit(conn)
 
     async def get_query_history(self, limit: int = 20) -> list[dict[str, Any]]:
         """Return recent queries from history."""
@@ -1950,13 +1991,13 @@ class DatabaseManager:
         """Delete all entries from the query_history table."""
         conn = self._get_conn()
         await conn.execute("DELETE FROM query_history")
-        await conn.commit()
+        await self._maybe_commit(conn)
         return {"message": "Query history cleared successfully."}
 
-    @serialize_write
-    async def cleanup_stale_files(self) -> list[str]:
+    async def cleanup_stale_files(self, lancedb_client: Any = None) -> list[str]:
         """Remove index entries for files that no longer exist on disk.
 
+        Pass `lancedb_client` to drop their vectors too (see `remove_from_index`).
         Returns list of paths that were cleaned up.
         """
         cleaned: list[str] = []
@@ -1971,39 +2012,7 @@ class DatabaseManager:
                 cleaned.append(path)
                 logger.info("Cleaned stale file: %s", path)
         if stale_ids:
-            conn = self._get_conn()
-            savepoint_name = None
-            try:
-                try:
-                    await conn.execute("BEGIN IMMEDIATE")
-                except Exception as e:
-                    if "cannot start a transaction within a transaction" in str(e):
-                        savepoint_name = f"sp_{uuid.uuid4().hex}"
-                        await conn.execute(f"SAVEPOINT {savepoint_name}")
-                    else:
-                        raise
-
-                batch_size = 900
-                for i in range(0, len(stale_ids), batch_size):
-                    batch = stale_ids[i : i + batch_size]
-                    placeholders = ",".join("?" for _ in batch)
-                    await conn.execute(
-                        f"DELETE FROM files WHERE id IN ({placeholders})",  # nosec B608 # noqa: S608
-                        tuple(batch),
-                    )
-
-                if savepoint_name:
-                    await conn.execute(f"RELEASE {savepoint_name}")
-                else:
-                    await conn.commit()
-            except Exception:
-                if savepoint_name:
-                    with contextlib.suppress(Exception):
-                        await conn.execute(f"ROLLBACK TO {savepoint_name}")
-                else:
-                    with contextlib.suppress(Exception):
-                        await conn.rollback()
-                raise
+            await self.remove_from_index(lancedb_client, file_ids=stale_ids)
         return cleaned
 
     @serialize_write
@@ -2100,15 +2109,118 @@ class DatabaseManager:
         async with self._get_read_conn() as conn, conn.execute(sql, params) as cursor:
             return list(await cursor.fetchall())
 
-    @serialize_write
     async def delete_files_by_folder_prefix(self, folder: str) -> None:
-        """Delete all files (and cascading chunks) whose path starts with *folder*."""
-        conn = self._get_conn()
-        await conn.execute(
-            "DELETE FROM files WHERE path LIKE ? || '%'",
-            (folder,),
-        )
-        await conn.commit()
+        """Delete all files (and cascading chunks) at or beneath *folder*.
+
+        SQLite only. Callers that also hold vectors want `remove_from_index`.
+        """
+        await self.remove_from_index(None, folder=folder)
+
+    async def remove_from_index(
+        self,
+        lancedb_client: Any = None,
+        *,
+        folder: str | None = None,
+        file_ids: list[int] | None = None,
+    ) -> dict[str, Any]:
+        """The one way to take files out of the index.
+
+        Pass `folder` (the folder and everything beneath it, plus its folder
+        profile) and/or `file_ids` (just those files). Removes the `files` rows
+        (chunks, embeddings and FTS go with them via cascade and triggers), the
+        files' `ocr_queue` rows, the folder's `folder_profiles` rows, and - when
+        `lancedb_client` is given - the chunk vectors, the per-file summary
+        vectors (`file_<id>`) and the `folder_profile_<tag>` summary vectors.
+        `ocr_cache` is keyed on content and deliberately kept.
+
+        Chunk vectors are deleted first and a failure there aborts before any
+        SQLite row is touched, so the removal can simply be retried. Summary
+        vectors are best-effort: a stray one only mis-routes a document.
+
+        Returns ``{"paths", "files_removed", "chunks_removed"}``.
+        """
+        rows: list[Any] = []
+        async with self._get_read_conn() as conn:
+            if folder is not None:
+                clause, params = _folder_match("path", folder)
+                async with conn.execute(
+                    f"SELECT id, path FROM files WHERE {clause}",  # nosec B608 # noqa: S608
+                    params,
+                ) as cur:
+                    rows.extend(await cur.fetchall())
+            ids = {r[0] for r in rows}
+            wanted = [i for i in (file_ids or []) if i not in ids]
+            for i in range(0, len(wanted), 900):
+                batch = wanted[i : i + 900]
+                marks = ",".join("?" for _ in batch)
+                async with conn.execute(
+                    f"SELECT id, path FROM files WHERE id IN ({marks})",  # nosec B608 # noqa: S608
+                    tuple(batch),
+                ) as cur:
+                    rows.extend(await cur.fetchall())
+            all_ids = [r[0] for r in rows]
+            chunk_ids: list[str] = []
+            for i in range(0, len(all_ids), 900):
+                batch = all_ids[i : i + 900]
+                marks = ",".join("?" for _ in batch)
+                async with conn.execute(
+                    f"SELECT id FROM chunks WHERE file_id IN ({marks})",  # nosec B608 # noqa: S608
+                    tuple(batch),
+                ) as cur:
+                    chunk_ids.extend(str(c[0]) for c in await cur.fetchall())
+            profile_tags: list[str] = []
+            if folder is not None:
+                clause, params = _folder_match("folder_path", folder)
+                async with conn.execute(
+                    f"SELECT folder_tag FROM folder_profiles WHERE {clause}",  # nosec B608 # noqa: S608
+                    params,
+                ) as cur:
+                    profile_tags = [r[0] for r in await cur.fetchall()]
+
+        if lancedb_client is not None:
+            for i in range(0, len(chunk_ids), 2000):
+                await lancedb_client.delete_documents(chunk_ids[i : i + 2000])
+
+        paths = [r[1] for r in rows]
+        async with self.write_transaction() as conn:
+            for i in range(0, len(all_ids), 900):
+                batch = all_ids[i : i + 900]
+                marks = ",".join("?" for _ in batch)
+                await conn.execute(
+                    f"DELETE FROM files WHERE id IN ({marks})",  # nosec B608 # noqa: S608
+                    tuple(batch),
+                )
+            for i in range(0, len(paths), 900):
+                batch = paths[i : i + 900]
+                marks = ",".join("?" for _ in batch)
+                await conn.execute(
+                    f"DELETE FROM ocr_queue WHERE file_path IN ({marks})",  # nosec B608 # noqa: S608
+                    tuple(batch),
+                )
+            if folder is not None:
+                clause, params = _folder_match("file_path", folder)
+                await conn.execute(f"DELETE FROM ocr_queue WHERE {clause}", params)  # nosec B608 # noqa: S608
+                clause, params = _folder_match("folder_path", folder)
+                await conn.execute(f"DELETE FROM folder_profiles WHERE {clause}", params)  # nosec B608 # noqa: S608
+
+        if lancedb_client is not None:
+            # Two folders can share a tag (and so a `folder_profile_<tag>` vector);
+            # keep that vector while any profile row still wears the tag.
+            async with (
+                self._get_read_conn() as conn,
+                conn.execute("SELECT DISTINCT folder_tag FROM folder_profiles") as cur,
+            ):
+                still_used = {r[0] for r in await cur.fetchall()}
+            summary_ids = [f"file_{i}" for i in all_ids] + [
+                f"folder_profile_{t}" for t in set(profile_tags) - still_used
+            ]
+            if summary_ids:
+                try:
+                    await lancedb_client.delete_summaries_by_ids(summary_ids)
+                except Exception as exc:
+                    logger.warning("Could not remove summary vectors: %s", exc)
+
+        return {"paths": paths, "files_removed": len(all_ids), "chunks_removed": len(chunk_ids)}
 
     async def is_healthy(self) -> bool:
         """Quick DB health check - runs a trivial query."""

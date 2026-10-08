@@ -55,16 +55,21 @@ export function SearchPage() {
   });
 
   useEffect(() => {
-    let last = '';
+    let lastRun: number | undefined = -1;
     const unsubscribe = subscribeProgress((evt) => {
-      // Refresh on the transition into a settled state, not on every progress
-      // frame - those arrive continuously during a scan.
+      // Refresh once per finished run, not on every progress frame - those
+      // arrive continuously during a scan. The stream idles at a 15 s reconnect
+      // (api.ts), so a short watcher run can start and finish between two polls
+      // and both polls read "idle": a status *transition* misses it. Key on the
+      // server's per-run id instead. Only a settled frame records it: the
+      // running frames of run N already carry N, and must not hide its finish.
       const status = evt?.status ?? '';
-      if (status !== last && (status === 'completed' || status === 'idle')) {
+      const settled = status === 'completed' || status === 'idle';
+      if (settled && evt.run_id !== lastRun) {
         invalidateCache(CACHE_KEYS.fileTree);
         refetchFileTree();
+        lastRun = evt.run_id;
       }
-      last = status;
     });
     return unsubscribe;
   }, [refetchFileTree]);
@@ -236,7 +241,7 @@ export function SearchPage() {
                   <div className="max-h-64 overflow-y-auto custom-scrollbar">
                     {history.slice(0, 10).map((h: HistoryItem) => (
                       <button
-                        key={`${h.created_at}-${h.question}`}
+                        key={h.id}
                         type="button"
                         role="option"
                         aria-selected="false"

@@ -34,6 +34,7 @@ export function SettingsPage() {
       }
       invalidateCache(CACHE_KEYS.llmPreferences)
       invalidateCache(CACHE_KEYS.providersList)
+      invalidateCache(CACHE_KEYS.currentProvider)
       refetchPrefs()
       setMessage({ type: 'ok', text: 'LLM preferences saved.' })
     } catch (e) {

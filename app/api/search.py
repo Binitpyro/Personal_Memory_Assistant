@@ -4,7 +4,7 @@ import json
 import logging
 import time
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
@@ -290,6 +290,27 @@ async def query_history(limit: int = 20, db: DatabaseManager = Depends(get_db)):
         }
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+# A clicked file in the 3D view is force-included by chunk id, so the click has
+# to be resolved to ids server-side: the visualizer buffer carries tree-node
+# indices, not chunk ids (A8-06). First few chunks only - a forced chunk is
+# pinned at score 1.0 and a local model's window is small.
+_FILE_CHUNK_LIMIT = 3
+
+
+@router.get("/file-chunks")
+async def file_chunks(
+    path: str = Query(..., max_length=4096), db: DatabaseManager = Depends(get_db)
+):
+    # /visualizer/meta reports paths with "/" separators; the files table keeps
+    # the OS spelling, so look up both.
+    forward = path.replace("\\", "/")
+    ids = await db.get_chunk_ids_for_paths(
+        [forward, forward.replace("/", "\\")], per_file_limit=_FILE_CHUNK_LIMIT
+    )
+    chunk_ids = next((v for v in ids.values() if v), [])
+    return {"path": path, "chunk_ids": chunk_ids}
 
 
 @router.post("/history/clear")

@@ -29,7 +29,7 @@ export function LibraryPage() {
   const [message, setMessage] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
 
   // Pause /index/status polling while local "indexing" is true; SSE drives live progress.
-  const { data: status, refetch: refetchStatus } = useApi(getIndexStatus, {
+  const { data: status, error: statusError, refetch: refetchStatus } = useApi(getIndexStatus, {
     cacheKey: CACHE_KEYS.indexStatus,
     refetchInterval: indexing ? 0 : 10_000,
   })
@@ -234,6 +234,15 @@ export function LibraryPage() {
         <div className={`flex items-center gap-2 px-4 py-3 text-sm bg-surface border border-rule ${message.type === 'ok' ? 'text-text-primary' : 'text-error'}`}>
           <span aria-hidden className="w-2 h-2 shrink-0 bg-current" />
           {message.text}
+        </div>
+      )}
+
+      {/* A 401 or a dead backend otherwise reads as an empty, idle library, and
+          "Files 0" invites a re-index or the thought that data was wiped. */}
+      {statusError && (
+        <div role="alert" className="flex items-center gap-2 px-4 py-3 text-sm bg-surface border border-rule text-error">
+          <span aria-hidden className="w-2 h-2 shrink-0 bg-current" />
+          Can't read the index status ({statusError}). The figures below may be out of date.
         </div>
       )}
 

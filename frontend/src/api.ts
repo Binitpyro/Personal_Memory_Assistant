@@ -159,6 +159,9 @@ export interface IndexStatus {
   failed_files?: number;
   /** True when the run itself died rather than finishing. */
   run_failed?: boolean;
+  /** Counts index runs since the backend started. Only on the progress stream;
+   *  a finished run is a settled frame whose run_id is new. */
+  run_id?: number;
   /** Only on /index/status, which is token-gated - the SSE stream omits it
    *  because it is exempt from the token check and this can carry a path. */
   last_error?: string;
@@ -474,12 +477,15 @@ export const postQuery = (question: string, options: { file_type?: string, folde
     }),
   });
 
+/** Chunk ids of one indexed file, for force-including a file picked in the 3D view. */
+export const getFileChunkIds = (path: string) =>
+  json<{ path: string; chunk_ids: number[] }>(`/query/file-chunks?path=${encodeURIComponent(path)}`);
+
+/** What GET /query/history returns (app/api/search.py query_history). */
 export interface HistoryItem {
+  id: number;
   question: string;
-  answer: string;
-  source_count?: number;
-  latency_ms?: number;
-  created_at?: string;
+  timestamp?: string;
 }
 
 export const getQueryHistory = (limit = 20) =>

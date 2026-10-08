@@ -44,7 +44,8 @@ import {
 } from '../interaction/KeyboardNavigation';
 import { formatBytes } from '../utils/treeBuilder';
 import { WebGPURenderer } from '../renderer/WebGPURenderer';
-import { getVisualizerStream, getVisualizerMeta, type FileEntry, type VisualizerNodeMeta } from '../api';
+import { useDreamscapeStore } from '../store/dreamscapeStore';
+import { getVisualizerStream, getVisualizerMeta, getFileChunkIds, type FileEntry, type VisualizerNodeMeta } from '../api';
 import type { NavigationController } from '../interaction/NavigationController';
 
 interface CachedStream {
@@ -516,10 +517,18 @@ function useDreamscapeCanvas<R extends RendererLike>(
         const name = bc[bc.length - 1]?.name ?? `#${sourceIndex}`;
         onNodeSelected?.(sourceIndex, name);
 
-        // Deliberately NOT added to the chat context here. `sourceIndex` is a
-        // visualizer tree-node index; the buffer carries no file or chunk id,
-        // and the chat path queries `chunks.id IN (...)`, so passing it
-        // force-included an unrelated document's chunk.
+        // Add the clicked FILE to the chat context, resolved by path. The
+        // buffer carries only tree-node indices, never chunk ids (A8-06), so
+        // the backend maps the path to that file's own chunks.
+        const node = renderer.nav.nodes[sourceIndex];
+        const m = node ? metaRef.current[String(node.typeHash)] : undefined;
+        if (m && !m.is_folder && m.path) {
+            getFileChunkIds(m.path)
+                .then(({ chunk_ids }) => {
+                    for (const id of chunk_ids) useDreamscapeStore.getState().addChunk({ id, filename: m.name });
+                })
+                .catch(() => { /* navigation still worked; the file just isn't pinned */ });
+        }
     };
 
 

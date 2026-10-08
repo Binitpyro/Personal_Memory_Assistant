@@ -170,6 +170,7 @@ const STATIC_PRICING_HINTS: Record<string, number> = {
   'gpt-4o-mini': 0.15,
   'gpt-4o': 2.50,
   'claude-3-5-sonnet-20241022': 3.00,
+  'claude-sonnet-5-5': 3.00, // estimate: blended $/M tokens, same tier as the model it replaced as default
   'claude-3-5-haiku-20241022': 0.80,
 };
 
@@ -206,6 +207,15 @@ export function useChatStream(onHistoryUpdate: () => void) {
   useEffect(() => {
     return () => {
       if (throttleTimeoutRef.current) clearTimeout(throttleTimeoutRef.current);
+      // Leaving the page mid-answer must not leave the request open: the server
+      // keeps generating (and a cloud provider keeps billing) until it notices
+      // the disconnect, and holds one of its five query slots meanwhile.
+      const unsubscribe = unsubscribeRef.current;
+      if (unsubscribe) {
+        unsubscribeRef.current = null;
+        unsubscribe();
+        finalizeStreamRef.current?.({ stopped: true });
+      }
     };
   }, []);
 
@@ -250,10 +260,13 @@ export function useChatStream(onHistoryUpdate: () => void) {
     dispatch({ type: 'START_ASSISTANT_STREAM', payload: { id: crypto.randomUUID() } });
 
     // A failed turn leaves an empty assistant message; sending it wastes budget.
+    // PRIOR turns only: `messages` is the pre-dispatch snapshot, and the current
+    // question travels as `question`. Putting it in `history` too made every
+    // first turn look like a follow-up, so the fast path and semantic cache
+    // (both gated on empty history) never fired, and the model saw it twice.
     const historyForApi = messages
       .filter(m => m.role !== 'assistant' || m.content.trim())
       .map(m => ({ role: m.role, content: m.content }));
-    historyForApi.push({ role: 'user', content: userMessageContent });
     const boundedHistory = historyForApi
       .slice(-50)
       .map(m => ({ ...m, content: Array.from(m.content).slice(0, 10000).join('') }));
@@ -268,8 +281,17 @@ export function useChatStream(onHistoryUpdate: () => void) {
     // billed a provider the user may never have selected. `current-provider` is
     // the backend's own resolution, so prefer it over guessing from list order.
     const active = queryClient.getQueryData<{ provider: string; model: string }>([CACHE_KEYS.currentProvider]);
-    const primaryProvider = sessionModelOverride?.provider || providers?.find(p => p.is_set)?.spec.id || active?.provider || 'unknown';
-    const primaryModel = sessionModelOverride?.model || providers?.find(p => p.is_set)?.default_model || active?.model || 'unknown';
+    const keyed = providers?.find(p => p.is_set);
+    const primaryProvider = sessionModelOverride?.provider || active?.provider || keyed?.spec.id || 'unknown';
+    // /providers/current reports model:null for some providers (groq, nvidia,
+    // openrouter, lm_studio) until a default is saved. The model fallback must
+    // belong to the SAME provider as primaryProvider, or a groq answer is priced
+    // and recorded as the keyed provider's model.
+    const providerModel = (id: string) =>
+      sessionModelOverride?.provider === id ? sessionModelOverride.model
+        : active?.provider === id && active.model ? active.model
+        : providers?.find(p => p.spec.id === id)?.default_model;
+    const primaryModel = sessionModelOverride?.model || providerModel(primaryProvider) || 'unknown';
 
     let currentProviderId = primaryProvider;
     let currentModelId = primaryModel;

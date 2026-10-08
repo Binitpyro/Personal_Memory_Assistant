@@ -62,6 +62,7 @@ export function ProviderRecipes({
 
       invalidateCache(CACHE_KEYS.providerSettings);
       invalidateCache(CACHE_KEYS.llmPreferences);
+      invalidateCache(CACHE_KEYS.currentProvider);
       setLocalModels(null);
       onRecipeApplied();
     } catch (e: any) {
@@ -94,7 +95,7 @@ export function ProviderRecipes({
       title: 'Maximum Quality',
       desc: 'Best available reasoning. Costs money.',
       fallback: ['anthropic', 'openai', 'gemini'],
-      defaultModel: { provider: 'anthropic', model: 'claude-3-5-sonnet-20240620' }
+      defaultModel: { provider: 'anthropic', model: 'claude-sonnet-5-5' }
     },
     {
       id: 'fast',

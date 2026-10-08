@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { memo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -167,8 +167,11 @@ export interface MessageBubbleProps {
  * One turn in the Answer pane: a question in stock, or an answer in print with
  * what the loop reported about it. Its frames and receipt are not here — they
  * have their own panes (FramesPanel, Receipt).
+ *
+ * Memoised: the reducer keeps the identity of every message but the streaming
+ * one, so a 50 ms flush re-parses only that answer instead of the whole chat.
  */
-export function MessageBubble({ message: msg, latest = false }: Readonly<MessageBubbleProps>) {
+export const MessageBubble = memo(function MessageBubble({ message: msg, latest = false }: Readonly<MessageBubbleProps>) {
   const [annotationsOpen, setAnnotationsOpen] = useState(true);
 
   // The question, set in stock. Safelight has no avatars and no bubbles.
@@ -361,4 +364,4 @@ export function MessageBubble({ message: msg, latest = false }: Readonly<Message
       </div>
     </div>
   );
-}
+});

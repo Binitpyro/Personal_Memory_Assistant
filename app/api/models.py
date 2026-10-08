@@ -6,10 +6,11 @@ from typing import Any
 
 import httpx
 from fastapi import APIRouter, HTTPException, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from app.api.deps import get_llm
-from app.search.llm_client import ProviderNotConfiguredError
+from app.providers import PROVIDER_IDS, env_base_url
+from app.search.llm_client import ProviderNotConfiguredError, provider_leaves_device
 from app.settings_store import SettingsStore
 
 logger = logging.getLogger(__name__)
@@ -24,8 +25,15 @@ PRIVACY_NOTICE = (
 )
 
 
+_LEGACY_MODEL_PROVIDERS = {"gemini", "ollama", "lm_studio"}
+
+
 class LLMPreferences(BaseModel):
-    provider: str = "auto"  # auto | gemini | ollama | lm_studio
+    # Any registry id or "auto". A `<id>_model` key for a provider outside the
+    # legacy three (e.g. `anthropic_model`) lands in per_provider.default_model.
+    model_config = ConfigDict(extra="allow")
+
+    provider: str = "auto"
     gemini_model: str | None = None
     ollama_model: str | None = None
     lm_studio_model: str | None = None
@@ -70,10 +78,18 @@ async def set_preferences(payload: LLMPreferences, response: Response = None) ->
     if response:
         response.headers["X-Deprecated"] = "true"
     normalized_provider = (payload.provider or "auto").lower()
-    if normalized_provider not in {"auto", "gemini", "ollama", "lm_studio"}:
+    if normalized_provider != "auto" and normalized_provider not in PROVIDER_IDS:
         normalized_provider = "auto"
 
-    if normalized_provider in {"gemini"} and not payload.cloud_privacy_consent:
+    data = await asyncio.to_thread(_read_settings)
+    per_provider = data.get("llm", {}).get("per_provider", {})
+    selected_url = per_provider.get(normalized_provider, {}).get("base_url") or env_base_url(
+        normalized_provider
+    )
+    if (
+        provider_leaves_device(normalized_provider, selected_url)
+        and not payload.cloud_privacy_consent
+    ):
         raise HTTPException(
             status_code=400,
             detail=(
@@ -82,7 +98,6 @@ async def set_preferences(payload: LLMPreferences, response: Response = None) ->
             ),
         )
 
-    data = await asyncio.to_thread(_read_settings)
     # P1-1: was `data["llm"] = {...}`, replacing the whole sub-dict and
     # silently destroying sibling keys written by app/api/providers.py -
     # llm.fallback_chain (read at llm_client.py:_get_effective_fallback_chain)
@@ -97,6 +112,12 @@ async def set_preferences(payload: LLMPreferences, response: Response = None) ->
             "cloud_privacy_consent": payload.cloud_privacy_consent,
         }
     )
+    for pid in PROVIDER_IDS:
+        extra_model = (payload.model_extra or {}).get(f"{pid}_model")
+        if pid not in _LEGACY_MODEL_PROVIDERS and isinstance(extra_model, str) and extra_model:
+            data["llm"].setdefault("per_provider", {}).setdefault(
+                pid, {"base_url": None, "default_model": None}
+            )["default_model"] = extra_model
     await asyncio.to_thread(_write_settings, data)
 
     # Apply at runtime to current singleton LLM client

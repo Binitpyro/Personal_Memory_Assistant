@@ -1806,51 +1806,74 @@ async def stream_rag(
 
     full_answer = ""
     stream_failed = False
-    with Timer("llm_generation"):
-        async with aclosing(
-            llm_client.stream_answer(
-                query,
-                context,
-                history=history,
-                mode=mode,
-                override_provider=override_provider,
-                override_model=override_model,
-            )
-        ) as stream:
-            async for chunk in stream:
-                if chunk.startswith('{"control":'):
-                    try:
-                        control_data = json.loads(chunk)
-                        ctrl_type = control_data.get("control")
-                        if ctrl_type == "fallback":
-                            yield {"type": "fallback", "to": control_data.get("to")}
-                        elif ctrl_type == "usage":
-                            yield {
-                                "type": "usage",
-                                "prompt_tokens": control_data.get("prompt_tokens"),
-                                "completion_tokens": control_data.get("completion_tokens"),
-                            }
-                        elif ctrl_type == "provider_error":
-                            # Chain exhausted. Surfaced as a typed error so the UI
-                            # can offer the matching remedy - a consent failure is
-                            # one click from fixable - instead of printing the
-                            # message into the answer body.
-                            yield {
-                                "type": "error",
-                                "text": control_data.get("message", "Provider unavailable."),
-                                "code": control_data.get("code"),
-                            }
-                            # Nothing after this is an answer: stop reading,
-                            # and the annotator and the cache are skipped below.
-                            stream_failed = True
-                            break
-                    except Exception:
-                        # Fallback to normal text if JSON fails to parse
+    try:
+        with Timer("llm_generation"):
+            async with aclosing(
+                llm_client.stream_answer(
+                    query,
+                    context,
+                    history=history,
+                    mode=mode,
+                    override_provider=override_provider,
+                    override_model=override_model,
+                )
+            ) as stream:
+                async for chunk in stream:
+                    if chunk.startswith('{"control":'):
+                        try:
+                            control_data = json.loads(chunk)
+                            ctrl_type = control_data.get("control")
+                            if ctrl_type == "fallback":
+                                yield {"type": "fallback", "to": control_data.get("to")}
+                            elif ctrl_type == "usage":
+                                yield {
+                                    "type": "usage",
+                                    "prompt_tokens": control_data.get("prompt_tokens"),
+                                    "completion_tokens": control_data.get("completion_tokens"),
+                                }
+                            elif ctrl_type == "provider_error":
+                                # Chain exhausted. Surfaced as a typed error so the UI
+                                # can offer the matching remedy - a consent failure is
+                                # one click from fixable - instead of printing the
+                                # message into the answer body.
+                                yield {
+                                    "type": "error",
+                                    "text": control_data.get("message", "Provider unavailable."),
+                                    "code": control_data.get("code"),
+                                }
+                                # Nothing after this is an answer: stop reading,
+                                # and the annotator and the cache are skipped below.
+                                stream_failed = True
+                                break
+                        except Exception:
+                            # Fallback to normal text if JSON fails to parse
+                            full_answer += chunk
+                            yield {"type": "content", "text": chunk}
+                    else:
                         full_answer += chunk
                         yield {"type": "content", "text": chunk}
-                else:
-                    full_answer += chunk
-                    yield {"type": "content", "text": chunk}
+    except (asyncio.CancelledError, GeneratorExit):
+        # M-15: a stopped generation (client disconnect closes this generator;
+        # a cancelled task raises into it) never reached the save below, so the
+        # query vanished from history. Record the partial as the abandoned turn.
+        # Never cached, and not awaited: an await here can be cancelled again.
+        if full_answer.strip():
+            task = asyncio.create_task(
+                _save_abandoned_turn(
+                    db,
+                    query,
+                    full_answer,
+                    len(retrieved),
+                    round((time.perf_counter() - t_start) * 1000, 1),
+                    mode,
+                    model_class,
+                    budget,
+                    context_tokens_used,
+                )
+            )
+            state.bg_tasks.add(task)
+            task.add_done_callback(state.bg_tasks.discard)
+        raise
 
     if not full_answer.strip():
         # Nothing to annotate, cache or save. A provider_error already told the
@@ -1988,6 +2011,26 @@ async def stream_rag(
         return
     if graph_paths_text:
         yield {"type": "done", "graph_hops": graph_paths_text}
+
+
+async def _save_abandoned_turn(
+    db, query, answer, n_chunks, total_ms, mode, model_class, budget, context_tokens_used
+) -> None:
+    try:
+        query_id = await db.save_query(query, answer, n_chunks, total_ms)
+        await db.save_telemetry(
+            query_id=query_id,
+            time_to_first_token_ms=0.0,
+            mode_selected=mode,
+            model_class=model_class,
+            context_tokens_budget=budget,
+            context_tokens_used=context_tokens_used,
+            chunks_included=n_chunks,
+            chunks_dropped=0,
+            response_abandoned=True,
+        )
+    except Exception as e:
+        logger.warning("Failed to save abandoned query history: %s", e, exc_info=True)
 
 
 async def _load_query_metadata(db, inventory, project):

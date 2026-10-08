@@ -3,6 +3,7 @@
 MUST NOT IMPORT `app.*`.
 """
 
+import contextlib
 import hashlib
 import os
 
@@ -50,6 +51,7 @@ class Engine:
                 # taken from the files actually loaded, so the identity changes
                 # whenever the weights do.
                 self.model_version = f"custom-{self._override_digest(overrides)}"
+                self._correct_provider()
                 return
             except Exception:  # nosec B110
                 # A bad override must not take the engine down - the bundled
@@ -60,6 +62,19 @@ class Engine:
                 pass
 
         self._ocr = RapidOCR(**base_kwargs)
+        self._correct_provider()
+
+    def _correct_provider(self):
+        """Report the provider the detector's ORT session actually got.
+
+        `_directml_kwargs` only knows DirectML is *available*; the session falls
+        back to CPU when it cannot be created on the adapter (rapidocr just logs
+        it). Without this the stamp, the `ready` message and the cache key all
+        say DML for CPU output.
+        """
+        # Keeps the requested value if rapidocr's internal layout ever changes.
+        with contextlib.suppress(Exception):
+            self.execution_provider = self._ocr.text_det.infer.session.get_providers()[0]
 
     @staticmethod
     def _directml_kwargs():

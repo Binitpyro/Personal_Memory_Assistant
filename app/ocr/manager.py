@@ -99,6 +99,9 @@ _READ_TICK_S = 0.5
 #: provider is down or unselected", which must not spend a document's attempts.
 E_VLM_UNAVAILABLE = "VLM_UNAVAILABLE"
 _VLM_RETRY_S = 60.0
+#: Likewise not a worker code: ocr_vlm_max_pages_per_doc cut the page list short.
+#: Not a failure (no retry), but "done" must say that pages were left out.
+E_VLM_PAGE_CAP = "VLM_PAGE_CAP"
 
 
 class OcrManager:
@@ -108,6 +111,9 @@ class OcrManager:
         self.lancedb_client = lancedb_client
 
         self._proc: subprocess.Popen | None = None
+        #: settings.ocr_tier when the live worker was spawned. A worker is bound
+        #: to its tier's venv/engine, so it is not reusable after a tier switch.
+        self._worker_tier = ""
         # A readline() already submitted to the executor. Held across loop
         # iterations so a tick that times out does not queue a second read
         # behind the first - the pool has exactly one thread.
@@ -334,7 +340,23 @@ class OcrManager:
                     continue
 
                 self._idle_since = None
-                await self._process_doc(row)
+                try:
+                    await self._process_doc(row)
+                except Exception as exc:
+                    # Anything _process_doc did not map to a queue verdict would
+                    # leave the row 'running' with its attempt spent: claim_next
+                    # only reclaims rows still under max_attempts, so the final
+                    # attempt stranded the document until reset_running.
+                    self._current_file = ""
+                    with contextlib.suppress(Exception):
+                        await ocr_queue.mark_failed(
+                            self.db,
+                            row.file_path,
+                            f"internal error: {exc}",
+                            terminal=row.attempts >= settings.ocr_max_attempts,
+                            claimed=True,
+                        )
+                    raise
 
             except asyncio.CancelledError:
                 raise
@@ -435,7 +457,7 @@ class OcrManager:
             with contextlib.suppress(Exception):
                 doc_ctx.__exit__(None, None, None)
 
-        return done, ""
+        return done, E_VLM_PAGE_CAP if len(capped) < len(pages) else ""
 
     async def _retire_if_idle_long_enough(self) -> float:
         """Keep a drained worker alive briefly. Returns how long to sleep.
@@ -506,6 +528,7 @@ class OcrManager:
         path = Path(row.file_path)
         self._current_file = path.name
 
+        tier_at_start = settings.ocr_tier
         file_row = await self.db.get_file_by_path(row.file_path)
         if file_row is None:
             await ocr_queue.mark_skipped(
@@ -601,7 +624,10 @@ class OcrManager:
 
         # Outside the branch above: both the worker path and the VLM path
         # produce `fresh`, and both must be cached the same way.
-        if fresh:
+        # Not cached when the tier was switched mid-run: reset_engine_identity
+        # already ran, so the identity now in force is not the engine that
+        # produced this text. It is still indexed below.
+        if fresh and settings.ocr_tier == tier_at_start:
             # Written under whatever the engine reported, never under what the
             # stamp claimed - the run has completed by now, so a handshake has
             # happened and _engine_id reflects reality.
@@ -677,7 +703,7 @@ class OcrManager:
         # message whose two halves contradicted each other, because `missing`
         # was correctly empty.
         expected_count = len(row.pages)
-        if error_code and len(all_pages) < expected_count:
+        if error_code and error_code != E_VLM_PAGE_CAP and len(all_pages) < expected_count:
             # Document encountered a crash, OOM, or timeout mid-run.
             terminal = row.attempts >= settings.ocr_max_attempts
             reason = self._with_stderr_tail(error_code)
@@ -743,6 +769,13 @@ class OcrManager:
                 detail = f"{len(failed_pages)} of {len(all_pages)} page(s) failed"
             elif not any(p.indexable_text for p in ok_pages):
                 detail = f"no readable text in {len(ok_pages)} page(s)"
+            if error_code == E_VLM_PAGE_CAP:
+                left = [p for p in row.pages if p not in {pg.page_num for pg in all_pages}]
+                cap = (
+                    f"capped at {settings.ocr_vlm_max_pages_per_doc} pages per run "
+                    f"(ocr_vlm_max_pages_per_doc), missing pages {_format_page_ranges(left)}"
+                )
+                detail = f"{detail}; {cap}" if detail else cap
             if detail:
                 self._last_error = f"{path.name}: {detail}"
             await ocr_queue.mark_done(
@@ -787,7 +820,13 @@ class OcrManager:
             await self._retire_worker("send failed", force=True)
             return proto.E_WORKER_CRASHED
 
-        deadline = time.monotonic() + settings.ocr_doc_timeout_s
+        # Floor of ocr_doc_timeout_s, but never less than every page taking its
+        # whole page budget: a flat 600 s killed a healthy worker part-way
+        # through a long scan on every attempt. A hung page is still caught by
+        # quiet_limit below.
+        deadline = time.monotonic() + max(
+            settings.ocr_doc_timeout_s, len(pages) * settings.ocr_page_timeout_s
+        )
         # A silent worker is as bad as a dead one; page acks are the heartbeat.
         quiet_limit = settings.ocr_page_timeout_s + 15
         last_message = time.monotonic()
@@ -864,7 +903,10 @@ class OcrManager:
                 continue  # truncated tail from a kill
             if not isinstance(data, dict):
                 continue
-            page = OcrPage.from_worker_json(data, settings.ocr_conf_floor)
+            try:
+                page = OcrPage.from_worker_json(data, settings.ocr_conf_floor)
+            except (ValueError, TypeError):
+                continue  # schema-invalid record (stale worker): lose that page only
             if page.page_num >= 0:
                 pages.append(page)
         return pages
@@ -873,7 +915,9 @@ class OcrManager:
 
     async def _ensure_worker(self) -> None:
         if self._proc is not None and self._proc.poll() is None:
-            if (
+            if self._worker_tier != settings.ocr_tier:
+                await self._retire_worker("tier switch")
+            elif (
                 self._docs_since_spawn >= settings.ocr_worker_max_docs
                 or self._pages_since_spawn >= settings.ocr_worker_max_pages
             ):
@@ -883,6 +927,7 @@ class OcrManager:
 
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(_OCR_EXECUTOR, self._spawn_sync)
+        self._worker_tier = settings.ocr_tier
         # Recycling is per worker process, so its budget resets with the process.
         self._docs_since_spawn = 0
         self._pages_since_spawn = 0

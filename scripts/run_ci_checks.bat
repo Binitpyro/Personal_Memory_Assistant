@@ -57,7 +57,7 @@ echo.
 echo [2/4] Running MyPy (Type Checks)...
 call uv run mypy .
 if %ERRORLEVEL% NEQ 0 (
-    echo MyPy check failed!
+    echo MyPy check failed ^(exit !ERRORLEVEL!; -1073741819 is a native crash, not type errors^)
     goto :error
 )
 
@@ -65,7 +65,7 @@ echo.
 echo [3/4] Running Fast-Path Golden Tests...
 call uv run pytest tests/ -v --basetemp=.pytest_temp --junitxml=pytest-report.xml
 if %ERRORLEVEL% NEQ 0 (
-    echo Pytest failed!
+    echo Pytest failed ^(exit !ERRORLEVEL!; -1073741819 is a native crash, not test failures^)
     goto :error
 )
 

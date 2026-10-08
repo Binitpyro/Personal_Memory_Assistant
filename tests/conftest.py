@@ -47,6 +47,9 @@ if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 os.environ["X_LOCAL_ACCESS_TOKEN"] = "test-token"  # noqa: S105
+# The Host guard (A5-01) refuses any Host but loopback/tauri; test clients send
+# Host "test"/"testserver". Allowed through the normal setting, not a sniff.
+os.environ.setdefault("PMA_ALLOWED_HOSTS", "test,testserver")
 
 from app.api.deps import get_db, get_emb, get_lancedb, get_llm  # noqa: E402
 from app.config import settings  # noqa: E402

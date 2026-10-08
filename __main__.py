@@ -7,7 +7,7 @@ Usage
     python . --mode server          # Web server (production)
     python . --host 0.0.0.0        # Bind to all interfaces
     python . --port 9000           # Custom port
-    python . --workers 4           # Multi-worker production mode
+    python . --workers 4           # Refused: single worker only (see run_server)
 
 NOTE: The canonical desktop launcher is now Tauri v2.
       To start the full desktop app, run::
@@ -67,9 +67,7 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--host", default=None, help="Bind address (default: from config)")
     p.add_argument("--port", type=int, default=None, help="Port (default: from config)")
-    p.add_argument(
-        "--workers", type=int, default=1, help="Worker processes (prod only, default: 1)"
-    )
+    p.add_argument("--workers", type=int, default=1, help="Ignored above 1: PMA runs one worker")
     p.add_argument("--reload", action="store_true", help="Enable auto-reload (dev)")
     p.add_argument("--no-reload", dest="reload", action="store_false")
     p.set_defaults(reload=None)  # auto-detect from dev_mode
@@ -102,6 +100,10 @@ def run_server(args: argparse.Namespace) -> None:
         "host": host,
         "port": port,
         "log_level": settings.log_level.lower(),
+        # Key rate limits (app/api/limiter.py) on the socket peer. uvicorn's
+        # default (trust X-Forwarded-For from 127.0.0.1) lets a caller rotate
+        # that header to get a fresh bucket per value.
+        "proxy_headers": False,
     }
 
     # If running as a frozen PyInstaller bundle AND not spawned by Tauri, open browser
@@ -123,12 +125,20 @@ def run_server(args: argparse.Namespace) -> None:
             "*.db-wal",
             "*.db-shm",
         ]
-    elif args.workers > 1:
-        # Production multi-worker (no reload)
-        uvicorn_kwargs["workers"] = args.workers
-        uvicorn_kwargs["access_log"] = False
     else:
-        # Single production process
+        # Single production process. Never more: uvicorn does not set
+        # UVICORN_WORKER_ID, so the "worker 0 only" guards (split-brain sync,
+        # OCR, watcher) would run in every worker, and each worker would mint
+        # its own access token and 401 the others' clients. `workers=1` is
+        # explicit so WEB_CONCURRENCY cannot raise it either.
+        if args.workers > 1:
+            print(
+                f"[PMA] --workers {args.workers} is not supported (single-user local app); "
+                "running 1 worker.",
+                file=sys.stderr,
+            )
+            args.workers = 1
+        uvicorn_kwargs["workers"] = 1
         uvicorn_kwargs["access_log"] = False
 
     print(f"  PMA server -> http://{host}:{port}")

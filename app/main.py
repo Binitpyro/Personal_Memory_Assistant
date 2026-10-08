@@ -4,6 +4,7 @@ Handles API routing, dependency injection, and lifespan events.
 """
 
 import asyncio
+import contextlib
 import ctypes
 import json
 import logging
@@ -20,10 +21,11 @@ from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
+from starlette.datastructures import Headers
 
 from app import state
 from app.api.debug import router as debug_router
@@ -220,6 +222,33 @@ def _log_startup_info():
 
 @asynccontextmanager
 async def lifespan(fastapi_app: FastAPI):
+    """Run `_lifespan`, tearing down whatever it opened if startup fails.
+
+    uvicorn logs "Application startup failed" and then waits for the interpreter
+    to exit, but aiosqlite's connection threads are not daemons: a failure after
+    the DB connected (corrupt file, migration error, LanceDB open) left the
+    process alive forever, serving nothing and giving the Tauri shell no exit
+    status. Closing the DB lets uvicorn exit non-zero.
+    """
+    inner = _lifespan(fastapi_app)
+    try:
+        await inner.__aenter__()
+    except BaseException:
+        for t in list(state.bg_tasks):
+            t.cancel()
+        if state.bg_tasks:
+            await asyncio.gather(*state.bg_tasks, return_exceptions=True)
+        from app.api.deps import close_all
+
+        with contextlib.suppress(Exception):
+            await close_all()
+        raise
+    yield
+    await inner.__aexit__(None, None, None)
+
+
+@asynccontextmanager
+async def _lifespan(fastapi_app: FastAPI):
     from app.ocr.settings import load_persisted_state
 
     load_persisted_state()
@@ -322,8 +351,9 @@ async def lifespan(fastapi_app: FastAPI):
             db_manager,
             lambda: IndexingService(db_manager, get_emb(), get_lancedb()),
         )
-        watcher.start()
-        state.set_subsystem("watcher", "up")
+        # start() returns False when watcher_enabled is off; "up" would claim the
+        # corpus is being kept in sync when nothing is polling.
+        state.set_subsystem("watcher", "up" if watcher.start() else "disabled")
     except Exception as err:
         logger.warning("Folder watcher unavailable: %s", err)
         state.set_subsystem("watcher", "down", str(err))
@@ -338,7 +368,13 @@ async def lifespan(fastapi_app: FastAPI):
             logger.warning("Folder watcher shutdown failed: %s", err)
 
     # 5. Graceful Shutdown
-    # OCR first: the worker subprocess needs an explicit shutdown message and a
+    # Let an index run stop at a file boundary before its task is cancelled (A10-11).
+    # Before the OCR stop: the run's tail kicks OCR, which must still exist.
+    from app.api.indexing import stop_indexing_for_shutdown
+
+    await stop_indexing_for_shutdown()
+
+    # OCR next: the worker subprocess needs an explicit shutdown message and a
     # wait(), which cancelling its task would not deliver.
     if ocr_manager is not None:
         try:
@@ -389,13 +425,16 @@ async def _split_brain_sync(db_manager, lancedb_client, emb_svc):
 
         # Phase A: Back-fill
         conn = db_manager._get_conn()
-        async with conn.execute("SELECT COUNT(*) FROM chunk_embeddings") as cur:
-            emb_count = (await cur.fetchone())[0]
-        async with conn.execute("SELECT COUNT(*) FROM chunks") as cur:
-            chunk_count = (await cur.fetchone())[0]
+        # Any chunk without a backup embedding, not just "table empty": an
+        # interrupted back-fill leaves a partial table that must be resumed.
+        async with conn.execute(
+            "SELECT 1 FROM chunks c LEFT JOIN chunk_embeddings ce ON ce.chunk_id = c.id "
+            "WHERE ce.chunk_id IS NULL LIMIT 1"
+        ) as cur:
+            needs_backfill = await cur.fetchone() is not None
 
-        if emb_count == 0 and chunk_count > 0:
-            logger.warning("Split-brain: Running one-time back-fill migration…")
+        if needs_backfill:
+            logger.warning("Split-brain: Running back-fill for chunks without embeddings…")
             # EmbeddingService exposes wait_until_ready()/is_ready and has no
             # `.model` attribute - reading one raised AttributeError before the
             # loop ever ran, and the handler below logged it as a generic sync
@@ -449,67 +488,74 @@ async def _split_brain_sync(db_manager, lancedb_client, emb_svc):
                     break
             logger.info("Split-brain back-fill complete: %d chunk(s) embedded.", bf_total)
 
-        # Phase B: Batch-aware Differential Sync
-        max_ldb_id = await loop.run_in_executor(None, lancedb_client.get_max_id, "pma_chunks")
-        logger.info("Split-brain: Syncing missing chunks after ID %d...", max_ldb_id)
+        # Phase B: set-based differential sync. Compare id SETS, not the max id
+        # or row counts: a hole below the watermark (a LanceDB add that failed
+        # after SQLite committed) and an offsetting ghost+hole pair both hide
+        # from a max-id / count comparison.
+        # ponytail: holds LanceDB's id set in memory (as the old ghost pass did);
+        # a ranged id-scan helper in lancedb_client would bound it for huge tables.
+        ldb_ids = await loop.run_in_executor(None, lancedb_client.get_all_ids, "pma_chunks")
+        if not ldb_ids and await loop.run_in_executor(
+            None, lancedb_client.count_rows, "pma_chunks"
+        ):
+            # get_all_ids swallows its own errors and returns set(); treating that
+            # as "LanceDB is empty" would re-add every chunk as a duplicate.
+            raise RuntimeError("LanceDB id listing failed; skipping split-brain sync.")
+        logger.info(
+            "Split-brain: Syncing chunks missing from LanceDB (%d present)...", len(ldb_ids)
+        )
 
         batch_size = 5000
-        last_id = max_ldb_id
+        last_id = 0
         total_synced = 0
 
         while True:
-            sqlite_data = await db_manager.get_all_chunk_data_for_sync(
-                limit=batch_size, last_id=last_id
-            )
-            if not sqlite_data:
+            async with conn.execute(
+                "SELECT ce.chunk_id FROM chunk_embeddings ce "
+                "JOIN chunks c ON ce.chunk_id = c.id "
+                "WHERE ce.chunk_id > ? ORDER BY ce.chunk_id LIMIT ?",
+                (last_id, batch_size),
+            ) as cur:
+                id_rows = await cur.fetchall()
+            if not id_rows:
                 break
+            last_id = int(id_rows[-1][0])
+            missing = [int(r[0]) for r in id_rows if str(r[0]) not in ldb_ids]
+            # 900 stays under SQLite's historical 999 bound-variable limit.
+            for i in range(0, len(missing), 900):
+                part = missing[i : i + 900]
+                marks = ",".join("?" for _ in part)
+                async with conn.execute(
+                    "SELECT ce.chunk_id, ce.embedding, f.path, f.folder_tag "  # nosec B608 # noqa: S608
+                    "FROM chunk_embeddings ce "
+                    "JOIN chunks c ON ce.chunk_id = c.id "
+                    "JOIN files f ON c.file_id = f.id "
+                    f"WHERE ce.chunk_id IN ({marks}) ORDER BY ce.chunk_id",
+                    part,
+                ) as cur:
+                    sqlite_data = await cur.fetchall()
+                if not sqlite_data:
+                    continue
+                await lancedb_client.add_documents(
+                    [str(r[0]) for r in sqlite_data],
+                    [np.frombuffer(r[1], dtype=np.float16) for r in sqlite_data],
+                    [
+                        {"chunk_id": str(r[0]), "file_path": r[2], "folder_tag": r[3]}
+                        for r in sqlite_data
+                    ],
+                )
+                total_synced += len(sqlite_data)
 
-            m_ids = [row["chunk_id"] for row in sqlite_data]
-            m_embs = [np.frombuffer(row["embedding"], dtype=np.float16) for row in sqlite_data]
-            m_metas = [
-                {
-                    "chunk_id": row["chunk_id"],
-                    "file_path": row["file_path"],
-                    "folder_tag": row["folder_tag"],
-                }
-                for row in sqlite_data
-            ]
-            await lancedb_client.add_documents(m_ids, m_embs, m_metas)
-            total_synced += len(sqlite_data)
-            last_id = max(int(row["chunk_id"]) for row in sqlite_data)
-
-            if len(sqlite_data) < batch_size:
-                break
-
-        # Phase B.5: Clear ghost vectors (O(1) fast-path)
-        async with conn.execute("SELECT COUNT(*) FROM chunks") as cur:
-            current_chunk_count = (await cur.fetchone())[0]
-
-        ldb_count = await loop.run_in_executor(None, lancedb_client.count_rows, "pma_chunks")
-        if ldb_count != current_chunk_count:
-            logger.info(
-                "Split-brain: Row counts differ (SQLite %d vs Lance %d). Reconciling orphans...",
-                current_chunk_count,
-                ldb_count,
-            )
-            ldb_ids = await loop.run_in_executor(None, lancedb_client.get_all_ids, "pma_chunks")
-            if ldb_ids:
-                async with conn.execute("SELECT id FROM chunks") as cur:
-                    rows = await cur.fetchall()
-                    sql_ids = {str(r[0]) for r in rows}
-
-                ghost_ids = list(ldb_ids - sql_ids)
-                if ghost_ids:
-                    logger.info(
-                        "Split-brain: Removing %d ghost vectors from cache...", len(ghost_ids)
-                    )
-                    for i in range(0, len(ghost_ids), 5000):
-                        await lancedb_client.delete_documents(ghost_ids[i : i + 5000])
-        else:
-            logger.info(
-                "Split-brain: Row counts match (%d). Skipping orphan reconciliation.",
-                current_chunk_count,
-            )
+        # Phase B.5: remove ghost vectors (LanceDB ids with no chunk row). Always
+        # runs: equal row counts do not mean equal id sets.
+        if ldb_ids:
+            async with conn.execute("SELECT id FROM chunks") as cur:
+                sql_ids = {str(r[0]) for r in await cur.fetchall()}
+            ghost_ids = list(ldb_ids - sql_ids)
+            if ghost_ids:
+                logger.info("Split-brain: Removing %d ghost vectors from cache...", len(ghost_ids))
+                for i in range(0, len(ghost_ids), 5000):
+                    await lancedb_client.delete_documents(ghost_ids[i : i + 5000])
 
         state.split_brain_sync_status = "done"
         logger.info("Split-brain sync complete. %d new vectors cached.", total_synced)
@@ -539,20 +585,74 @@ async def _bg_auto_vacuum(db_manager):
 
 # ── FastAPI App Instance ──────────────────────────────────────────────
 
-app = FastAPI(title="Personal Memory Assistant", lifespan=lifespan)
+# The schema/doc UIs are unauthenticated (outside /api/), so they exist only in dev.
+app = FastAPI(
+    title="Personal Memory Assistant",
+    lifespan=lifespan,
+    docs_url="/docs" if settings.dev_mode else None,
+    redoc_url="/redoc" if settings.dev_mode else None,
+    openapi_url="/openapi.json" if settings.dev_mode else None,
+)
 app.add_middleware(GZipMiddleware, minimum_size=500)
 app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
 
+# Only the app's own origins: Vite dev/preview (5173/4173), this server's port
+# (settings.port, plus PORT which Tauri exports), and the packaged Tauri webview.
+# Any-localhost-port let a page on another local service read the injected token.
+_CORS_PORTS = {"5173", "4173", str(settings.port)}
+if os.environ.get("PORT", "").isdigit():
+    _CORS_PORTS.add(os.environ["PORT"])
+_CORS_ORIGIN_REGEX = (
+    r"^https?://(localhost|127\.0\.0\.1):(" + "|".join(sorted(_CORS_PORTS)) + r")$"
+    r"|^tauri://localhost$|^https?://tauri\.localhost$"
+)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$|^tauri://localhost$|^https?://tauri\.localhost$",
+    allow_origin_regex=_CORS_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _allowed_hosts() -> frozenset[str]:
+    hosts = {"127.0.0.1", "localhost", "tauri.localhost", "[::1]"}
+    if settings.host not in ("0.0.0.0", "::", ""):  # noqa: S104  # nosec B104 - comparison, not a bind
+        hosts.add(settings.host.lower())
+    hosts.update(h.strip().lower() for h in settings.allowed_hosts.split(",") if h.strip())
+    return frozenset(hosts)
+
+
+class _HostGuard:
+    """Reject requests whose Host header is not a name for this machine.
+
+    _serve_index hands the access token to any loopback TCP peer, and a DNS-
+    rebinding page reaches 127.0.0.1 under its own name, so the Host header is
+    the only thing that tells it apart. Starlette's TrustedHostMiddleware
+    splits on the first ':' and so mangles "[::1]:8000"; hence this.
+    """
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.allowed = _allowed_hosts()
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] in ("http", "websocket"):
+            raw = Headers(scope=scope).get("host", "").lower()
+            host = raw.split("]")[0] + "]" if raw.startswith("[") else raw.split(":")[0]
+            if host not in self.allowed:
+                if scope["type"] == "websocket":
+                    await send({"type": "websocket.close", "code": 1008})
+                else:
+                    await PlainTextResponse("Invalid host header", status_code=400)(
+                        scope, receive, send
+                    )
+                return
+        await self.inner(scope, receive, send)
 
 
 @app.middleware("http")
@@ -579,7 +679,11 @@ async def security_and_telemetry_middleware(request: Request, call_next):
             # is header-only too now, so the policy holds everywhere.
             provided_token = request.headers.get("X-Local-Access-Token")
 
-            if not provided_token or not secrets.compare_digest(provided_token, expected_token):
+            # Bytes: compare_digest raises TypeError on a str with non-ASCII
+            # characters, and Starlette decodes header bytes as latin-1.
+            if not provided_token or not secrets.compare_digest(
+                provided_token.encode("latin-1"), expected_token.encode()
+            ):
                 return JSONResponse(
                     status_code=401, content={"error": "Unauthorized local access."}
                 )
@@ -633,6 +737,11 @@ async def security_and_telemetry_middleware(request: Request, call_next):
             elapsed_ms,
         )
     return response
+
+
+# Registered after every other middleware (the decorator above included), so it is
+# outermost: a bad Host is refused before CORS or the token check see it.
+app.add_middleware(_HostGuard)
 
 
 @app.exception_handler(RequestValidationError)

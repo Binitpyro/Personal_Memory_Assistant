@@ -38,6 +38,9 @@ class Settings(BaseSettings):
 
     host: str = "127.0.0.1"
     port: int = 8000
+    # Extra Host-header values the server accepts, comma-separated (PMA_ALLOWED_HOSTS).
+    # Loopback names and `host` are always accepted; see app/main.py _HostGuard.
+    allowed_hosts: str = ""
 
     db_path: str = "data/pma_metadata.db"
     schema_path: str = "app/storage/schema.sql"

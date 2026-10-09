@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { setProviderSettings, setLLMPreferences, getLLMPreferences, validateProvider } from '../api';
+import { setProviderSettings, setLLMPreferences, getLLMPreferences, setProviderDefaultModel, validateProvider } from '../api';
 import { invalidateCache } from '../useApi';
 import { CACHE_KEYS } from '../cacheKeys'
 import { Panel } from '../components/ui';
@@ -59,6 +59,9 @@ export function ProviderRecipes({
         provider: defaultModel.provider as any,
         [`${defaultModel.provider}_model`]: model,
       });
+      // Dispatch reads per_provider.default_model before the legacy key, so a
+      // model saved on the Providers page silently beat the recipe's pick.
+      await setProviderDefaultModel(defaultModel.provider, model);
 
       invalidateCache(CACHE_KEYS.providerSettings);
       invalidateCache(CACHE_KEYS.llmPreferences);

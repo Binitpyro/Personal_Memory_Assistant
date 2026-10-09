@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { ProviderRecipes } from '../../providers/ProviderRecipes';
-import { setProviderSettings, setLLMPreferences, getLLMPreferences, validateProvider } from '../../api';
+import { setProviderSettings, setLLMPreferences, getLLMPreferences, setProviderDefaultModel, validateProvider } from '../../api';
 
 /**
  * First coverage for this component.
@@ -20,6 +20,7 @@ vi.mock('../../api', () => ({
   setProviderSettings: vi.fn(() => Promise.resolve({})),
   setLLMPreferences: vi.fn(() => Promise.resolve({})),
   getLLMPreferences: vi.fn(() => Promise.resolve({ provider: 'ollama' })),
+  setProviderDefaultModel: vi.fn(() => Promise.resolve({ status: 'success' })),
   validateProvider: vi.fn(),
 }));
 
@@ -59,6 +60,9 @@ describe('ProviderRecipes', () => {
     expect(setLLMPreferences).toHaveBeenCalledWith(
       expect.objectContaining({ provider: 'groq', groq_model: 'llama3-8b-8192' }),
     );
+    // Dispatch reads per_provider.default_model first; without this a model
+    // saved on the Providers page overrides the recipe.
+    expect(setProviderDefaultModel).toHaveBeenCalledWith('groq', 'llama3-8b-8192');
   });
 
   it('surfaces a failure inline instead of silently doing nothing', async () => {
@@ -132,6 +136,7 @@ describe('ProviderRecipes', () => {
       expect(setLLMPreferences).toHaveBeenCalledWith(
         expect.objectContaining({ provider: 'ollama', ollama_model: 'gemma2:2b' }),
       );
+      expect(setProviderDefaultModel).toHaveBeenCalledWith('ollama', 'gemma2:2b');
       expect(screen.queryByLabelText('Local model')).toBeNull();
     });
 

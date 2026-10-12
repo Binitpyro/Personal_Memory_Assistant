@@ -1259,6 +1259,15 @@ async def _maybe_run_agentic_loop(
         logger.error("Agentic loop failed (%s) - falling back to single-pass retrieval.", e)
         return None, None
 
+    # A loop that never dispatched a round has no evidence, not "no answer".
+    # Returning [] would replace single-pass retrieval with an empty context.
+    if state.iteration == 0:
+        logger.info(
+            "Agentic loop stopped before retrieving (%s) - using single-pass retrieval.",
+            state.stop_reason,
+        )
+        return None, None
+
     return state.chunks()[:k], trace_payload(state)
 
 
@@ -2072,7 +2081,9 @@ async def _gather_full_rag_inputs(
             lancedb_client=lancedb_client,
             k=k,
             near_misses=near_misses,
-            use_reranker=not (project or inventory),
+            # A3-12: no use_reranker=not (project or inventory). Those flags are
+            # substring/regex hits ("summary", "latest"), so content questions
+            # lost the cross-encoder (+0.027-0.032 nDCG on SciFact) by accident.
             query_emb=query_emb,  # P-02: pass pre-computed embedding
             keywords=keywords,
             file_type=file_type,

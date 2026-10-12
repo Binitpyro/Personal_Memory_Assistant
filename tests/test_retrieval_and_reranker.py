@@ -125,6 +125,38 @@ async def test_load_query_metadata_and_gather_full_inputs(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_project_or_inventory_intent_keeps_the_reranker(monkeypatch):
+    """A3-12: 'summary'/'latest' in a content question must not switch the
+    cross-encoder off on FULL_RAG."""
+    seen: dict = {}
+
+    async def fake_hybrid_retrieve(**kwargs):
+        seen.update(kwargs)
+        return []
+
+    class FakeDB:
+        async def get_folder_profiles_text(self):
+            return ""
+
+    class FakeLanceDB:
+        async def search_summaries(self, *args, **kwargs):
+            return {"metadatas": [[]]}
+
+    monkeypatch.setattr(retrieval, "hybrid_retrieve", fake_hybrid_retrieve)
+    await retrieval._gather_full_rag_inputs(
+        query="give me a summary of my thesis notes",
+        db=FakeDB(),
+        embedding_service=None,
+        lancedb_client=FakeLanceDB(),
+        k=3,
+        inventory=True,
+        project=True,
+        query_emb=[0.1] * 384,
+    )
+    assert seen.get("use_reranker", True) is True
+
+
+@pytest.mark.asyncio
 async def test_rerank_empty_short_circuit():
     assert await rerank("query", []) == []
 

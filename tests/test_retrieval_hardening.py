@@ -919,6 +919,48 @@ async def test_per_subquery_k_is_derived_from_budget(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("n", [1, 2, 3])
+async def test_small_model_budget_still_retrieves(monkeypatch, n):
+    """At 3b_local's 2,520 tokens, 1-3 sub-questions at k=15 used to declare
+    2,520-2,700 and stop with budget_exhausted before any retrieval (M5:
+    71 of 592 queries could start). k must be capped by the remaining budget."""
+    monkeypatch.setattr(agentic.settings, "agentic_max_iterations", 1)
+    dispatched: list[int] = []
+
+    async def retrieve(text, k):
+        dispatched.append(k)
+        return [_chunk(f"c-{text}")]
+
+    llm = MagicMock()
+    llm.generate_raw = AsyncMock(return_value=json.dumps([{"question": f"q{i}"} for i in range(n)]))
+
+    state = await agentic.run_agentic_loop(
+        "q", retrieve=retrieve, llm_client=llm, k=15, tokens_ceiling=2520
+    )
+
+    assert state.stop_reason != "budget_exhausted"
+    assert len(dispatched) == n
+
+
+@pytest.mark.asyncio
+async def test_agentic_loop_that_never_retrieves_falls_back_to_single_pass(monkeypatch):
+    """[] from a loop stopped before its first round must not replace single-pass
+    retrieval with an empty context; (None, None) makes the caller fall through."""
+    from app.search import context_builder
+
+    monkeypatch.setattr(retrieval.settings, "agentic_enabled", True)
+    monkeypatch.setattr(context_builder, "compute_context_budget", lambda *_: 1)
+    plan = MagicMock(mode=PlanMode.FULL_RAG)
+    llm = MagicMock()
+    llm.generate_raw = AsyncMock(return_value='[{"question": "q1"}]')
+
+    got, trace = await retrieval._maybe_run_agentic_loop(
+        "q", plan, MagicMock(), MagicMock(), MagicMock(), llm, 10, None, None, None
+    )
+    assert got is None and trace is None
+
+
+@pytest.mark.asyncio
 async def test_decomposition_falls_back_to_the_original_query():
     """Local models wrap or mangle JSON; that must degrade, not disable retrieval."""
     llm = MagicMock()

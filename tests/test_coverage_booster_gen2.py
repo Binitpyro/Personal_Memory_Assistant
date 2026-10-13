@@ -334,19 +334,19 @@ async def test_capability_detector(monkeypatch):
     mock_client.model = "gpt-4o"
     mock_client.ollama_model = ""
     mock_client.lm_studio_model = ""
-    mock_client.generate_answer = AsyncMock(return_value='<claim sources="[1]">True</claim>')
+    mock_client.generate_raw = AsyncMock(return_value='<claim sources="[1]">True</claim>')
     assert await detector.detect_capabilities(mock_client) is True
 
     # 3. Cache hit
     assert await detector.detect_capabilities(mock_client) is True
 
     # 4. Report failure
-    detector.report_failure(mock_client)
+    await detector.report_failure(mock_client)
     assert await detector.detect_capabilities(mock_client) is False
 
     # 5. Probe raises Exception
     detector.reset_cache()
-    mock_client.generate_answer = AsyncMock(side_effect=RuntimeError("Timeout"))
+    mock_client.generate_raw = AsyncMock(side_effect=RuntimeError("Timeout"))
     assert await detector.detect_capabilities(mock_client) is False
 
 
@@ -498,17 +498,29 @@ async def test_db_manager_duplicate_migrations_and_fragmentation(tmp_path):
         async def fetchone(self):
             return self.val
 
+    altered: list[str] = []
+    marked: list[str] = []
+
     def mock_execute(sql, *args):
+        if "INSERT OR IGNORE INTO schema_migrations" in sql:
+            marked.append(args[0][0])
+            return MockCursor(None)
         if "schema_migrations" in sql:
             return MockCursor(None)
         if "ALTER TABLE" in sql:
+            altered.append(sql)
             raise sqlite3.OperationalError("duplicate column name: sha256")
         return MockCursor(None)
 
     mock_conn.execute.side_effect = mock_execute
 
-    # This should call _apply_column_migrations and handle the duplicate column error cleanly
+    # A duplicate-column error means the column already exists: the migration must
+    # be recorded as applied, not retried every boot and not raised (A10-13: this
+    # test asserted nothing).
     await db._apply_column_migrations(mock_conn)
+    assert altered, "no ALTER TABLE was attempted"
+    assert len(marked) == len(altered)
+    assert "sha256" in marked
 
 
 @pytest.mark.asyncio
@@ -526,9 +538,18 @@ async def test_db_manager_frozen_path(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "__main__", mock_main)
 
     db = DatabaseManager(":memory:")
-    # Should resolve using mock_main._get_resource_path and succeed
-    await db.init_db("schema.sql")
-    await db.close()
+    try:
+        # Frozen builds resolve the schema through __main__._get_resource_path.
+        await db.init_db("schema.sql")
+        mock_main._get_resource_path.assert_called()
+        tables = {
+            r[0]
+            for r in await db.execute_query("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        assert {"files", "chunks"} <= tables
+    finally:
+        # An unclosed aiosqlite thread blocks interpreter exit (CLAUDE.md 8.4).
+        await db.close()
 
 
 @pytest.mark.asyncio

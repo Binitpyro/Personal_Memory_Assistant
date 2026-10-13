@@ -13,6 +13,25 @@ class CapabilityDetector:
     # of that bought nothing.
     _capability_cache: dict[str, bool] = {}  # noqa: RUF012
 
+    @staticmethod
+    async def _cache_key(llm_client: "LLMClient") -> str:
+        """Provider id + the model a request will actually use (A4-12).
+
+        The legacy key read the gemini / ollama / lm_studio fields only, so a model
+        picked through per_provider.default_model reused another model's verdict.
+        """
+        try:
+            prov = await llm_client._resolve()
+        except Exception:
+            return (
+                f"{llm_client.provider_preference}_{llm_client.model}_"
+                f"{llm_client.ollama_model}_{llm_client.lm_studio_model}"
+            )
+        try:
+            return f"{prov.spec.id}:{getattr(prov, 'default_model', None)}"
+        finally:
+            await prov.close()
+
     async def detect_capabilities(self, llm_client: "LLMClient") -> bool:
         """
         Runs a single-shot probe to determine if the selected model supports
@@ -27,7 +46,7 @@ class CapabilityDetector:
             logger.info("CapabilityDetector: Model class is 3b_local, disabling claim tags.")
             return False
 
-        cache_key = f"{llm_client.provider_preference}_{llm_client.model}_{llm_client.ollama_model}_{llm_client.lm_studio_model}"
+        cache_key = await self._cache_key(llm_client)
 
         if cache_key in self._capability_cache:
             return bool(self._capability_cache[cache_key])
@@ -42,10 +61,10 @@ class CapabilityDetector:
 
         try:
             logger.info("CapabilityDetector: Running <claim> tag probe...")
-            # We call generate_answer. Using history=[] to ensure no contamination.
-            response = await llm_client.generate_answer(
-                probe_prompt, context="", history=[], skip_capability_check=True
-            )
+            # generate_raw, not generate_answer (A4-12): the RAG template around an
+            # empty context invites "not enough information", which failed the
+            # probe and disabled <claim> tags for a model that supports them.
+            response = await llm_client.generate_raw([{"role": "user", "content": probe_prompt}])
 
             # generate_answer reports a dead provider as prose, never raises. That
             # says nothing about the model, so it must not be cached as a verdict
@@ -69,9 +88,9 @@ class CapabilityDetector:
             logger.warning("CapabilityDetector: Probe failed due to error: %s", e)
             return False
 
-    def report_failure(self, llm_client: "LLMClient"):
+    async def report_failure(self, llm_client: "LLMClient"):
         """Called when the model fails to follow the <claim> tag instructions on a real query."""
-        cache_key = f"{llm_client.provider_preference}_{llm_client.model}_{llm_client.ollama_model}_{llm_client.lm_studio_model}"
+        cache_key = await self._cache_key(llm_client)
         logger.warning(
             "CapabilityDetector: Model failed to produce <claim> tags in real query. Disabling capabilities for session."
         )

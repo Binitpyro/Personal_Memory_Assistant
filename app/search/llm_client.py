@@ -828,7 +828,7 @@ Answer:
                 if "<claim" in buffer:
                     found_claim = True
                 elif chars_checked >= 600 and not found_claim:
-                    capability_detector.report_failure(self)
+                    await capability_detector.report_failure(self)
                     supports_claims = False
 
         # Calculate completion tokens and yield final control usage packet

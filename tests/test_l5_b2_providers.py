@@ -110,11 +110,52 @@ async def test_capability_probe_does_not_cache_an_outage():
     c.provider_preference = "ollama"
     c.model = c.ollama_model = c.lm_studio_model = "m"
 
-    c.generate_answer = AsyncMock(return_value="LLM unavailable: Ollama is not running.")
+    c.generate_raw = AsyncMock(return_value="LLM unavailable: Ollama is not running.")
     assert await d.detect_capabilities(c) is False
 
-    c.generate_answer = AsyncMock(return_value='<claim sources="[1]">x</claim>')
+    c.generate_raw = AsyncMock(return_value='<claim sources="[1]">x</claim>')
     assert await d.detect_capabilities(c) is True
+    d.reset_cache()
+
+
+def _client_resolving_to(model: str):
+    prov = MagicMock()
+    prov.spec.id = "openai_compatible"
+    prov.default_model = model
+    prov.close = AsyncMock()
+    c = MagicMock()
+    c.get_model_class.return_value = "7b_local"
+    c._resolve = AsyncMock(return_value=prov)
+    return c
+
+
+@pytest.mark.asyncio
+async def test_capability_verdict_is_per_dispatched_model():
+    # A4-12: the key ignored per_provider.default_model, so switching models within
+    # one provider reused the first model's verdict.
+    d = CapabilityDetector()
+    d.reset_cache()
+    a = _client_resolving_to("model-a")
+    a.generate_raw = AsyncMock(return_value="no tags here")
+    assert await d.detect_capabilities(a) is False
+    b = _client_resolving_to("model-b")
+    b.generate_raw = AsyncMock(return_value='<claim sources="[1]">x</claim>')
+    assert await d.detect_capabilities(b) is True
+    b.generate_raw.assert_awaited_once()
+    d.reset_cache()
+
+
+@pytest.mark.asyncio
+async def test_capability_probe_bypasses_the_rag_template():
+    # A4-12: generate_answer wraps the probe in the RAG prompt with an empty
+    # context, inviting a refusal that disabled <claim> tags.
+    d = CapabilityDetector()
+    d.reset_cache()
+    c = _client_resolving_to("m")
+    c.generate_raw = AsyncMock(return_value='<claim sources="[1]">x</claim>')
+    c.generate_answer = AsyncMock(return_value="not enough information")
+    assert await d.detect_capabilities(c) is True
+    c.generate_answer.assert_not_awaited()
     d.reset_cache()
 
 

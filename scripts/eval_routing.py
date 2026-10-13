@@ -25,7 +25,14 @@ FROZEN_SHA256 = "404283b740dd153aeccbf23ff767d5f1822b21e9c9dd4440f269569290320bb
 # Held-out paraphrases written after the first planner change (M7 addendum 2).
 HELDOUT = ROOT / "tests" / "eval" / "routing_heldout.json"
 HELDOUT_SHA256 = "bfe60d022bf2dd4be1118f359ffacfd4bd55b62b24386bb5b30183fafa97b16c"
-SETS = {"main": (SET, FROZEN_SHA256), "heldout": (HELDOUT, HELDOUT_SHA256)}
+# Second held-out set, written after the second change (M7 addendum 3).
+HELDOUT2 = ROOT / "tests" / "eval" / "routing_heldout2.json"
+HELDOUT2_SHA256 = "4b4bfcf76867fec02b8862adc8ffe08566cac5d47ac314823e973aa1474c599c"
+SETS = {
+    "main": (SET, FROZEN_SHA256),
+    "heldout": (HELDOUT, HELDOUT_SHA256),
+    "heldout2": (HELDOUT2, HELDOUT2_SHA256),
+}
 
 
 def _outcome(intent: str, mode: str, intents: dict[str, bool]) -> bool:

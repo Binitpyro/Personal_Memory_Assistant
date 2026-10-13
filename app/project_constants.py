@@ -63,7 +63,8 @@ INVENTORY_RE = re.compile(
 # "new since" were all missed, so recency questions loaded no file metadata.
 LATEST_RE = re.compile(
     r"\b(?:latest|recent|recently|newest|lately|new since|last updated|last modified|"
-    r"(?:modified|changed|change|updated|edited|touched)\s+(?:last|today|yesterday|this week))\b",
+    r"(?:modified|changed|change|updated|edited|touched|index|indexed|add|added)\s+"
+    r"(?:last|today|yesterday|this week))\b",
     re.IGNORECASE,
 )
 LARGEST_RE = re.compile(
@@ -93,8 +94,18 @@ _GRAPH_PHRASES = (
 
 _GRAPH_RE = re.compile(
     r"\b(?:what calls|who calls|where is .* called|depends on|dependencies of|"
-    r"what does .* use|how is .* used|relates to|connection between|impact of)\b",
+    r"what does .* use|how is .* used|relates to|connection between|impact of|"
+    r"invoke[sd]?|callers? of|imports?|rel(?:y|ies) on|what breaks if)\b",
     re.IGNORECASE,
+)
+# kg_edges exist only for code (CodeChunker), so a graph phrase without a code
+# signal - "impact of caffeine", "how is entropy used" - only bought an extra
+# seed retrieval and rerank pass before falling through (A3-11, M7 addendum 3).
+# Case-sensitive on purpose: camelCase / PascalCase identifiers.
+_CODE_SIGNAL_RE = re.compile(
+    r"\b\w+_\w+\b|\b[a-z]+[A-Z]\w*|\b[A-Z][a-z]+[A-Z]\w*|\b[A-Z]{2,}[a-z]\w*|"
+    r"\b[A-Za-z_]\w*\.[A-Za-z_]\w*\b|\w+\(\)|"
+    r"\b(?:[Ff]unctions?|[Mm]ethods?|[Mm]odules?|[Cc]lass(?:es)?|[Cc]ode|signature)\b"
 )
 
 
@@ -118,7 +129,7 @@ def determine_query_intent(query: str) -> dict[str, bool]:
         "latest": bool(LATEST_RE.search(query)),
         "largest": bool(LARGEST_RE.search(query)),
         "metadata_intent": is_metadata_intent(query),
-        "graph": bool(_GRAPH_RE.search(query)),
+        "graph": bool(_GRAPH_RE.search(query) and _CODE_SIGNAL_RE.search(query)),
     }
 
 

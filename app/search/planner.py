@@ -122,6 +122,7 @@ class QueryPlanner:
             "pdf",
             "pdfs",
             "pma",
+            "collection",
         }
     )
 
@@ -183,8 +184,16 @@ class QueryPlanner:
             "capacity",
             "kinds",
             "types",
+            "extensions",
+            "formats",
         }
     )
+    # Ownership comparisons carry no measure word: "do I have more PDFs or docs".
+    _OWNERSHIP_RE = re.compile(r"\bdo i have (?:more|any|fewer|many)\b")
+    # "How many documents are in the Physics folder?" is inventory, but per folder:
+    # the canned total would be wrong, while file_stats carries per-folder counts,
+    # so it gets the stats and goes to RAG.
+    _FOLDER_SCOPE_RE = re.compile(r"\b(?:in|of|under|inside)\s+(?:the|my)\s+\w+\s+folder\b")
 
     # Architectural / Structural phrases ──────────────────────────────────────
     _ARCH_PHRASES = frozenset(
@@ -228,8 +237,9 @@ class QueryPlanner:
         # does the renderer use in the frame budget" answered with a canned
         # file count, because "how much" and "space" both appeared.
         words = set(re.findall(r"\w+", query_lower))
-        has_composite_inventory = bool(words & self._INVENTORY_NOUNS) and any(
-            m in query_lower if " " in m else m in words for m in self._INVENTORY_MEASURES
+        has_composite_inventory = bool(words & self._INVENTORY_NOUNS) and (
+            any(m in query_lower if " " in m else m in words for m in self._INVENTORY_MEASURES)
+            or bool(self._OWNERSHIP_RE.search(query_lower))
         )
         has_listing_intent = bool(self._LISTING_RE.search(query_lower))
         names_a_topic = bool(self._TOPIC_RE.search(query_lower))
@@ -255,6 +265,13 @@ class QueryPlanner:
                 intents=intents,
                 keywords=keywords,
             )
+
+        if (
+            (has_inventory_phrase or has_composite_inventory)
+            and not names_a_topic
+            and self._FOLDER_SCOPE_RE.search(query_lower)
+        ):
+            intents["inventory"] = True  # per-folder counts live in file_stats
 
         # 2. Specific project context fast path
         if intents["metadata_intent"] and intents["project"] and not names_external_subject:

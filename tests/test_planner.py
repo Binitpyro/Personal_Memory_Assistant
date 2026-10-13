@@ -211,3 +211,49 @@ class TestRoutingOutcomes:
     def test_trailing_about_names_no_topic(self, planner: QueryPlanner):
         plan = planner.plan("Roughly how many notes and PDFs does it know about?")
         assert plan.mode == PlanMode.FAST_METADATA
+
+
+class TestRoutingOutcomesRound2:
+    """M7 addendum 3: held-out misses and graph routing."""
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "Which file extensions do I have the most of?",
+            "Give me some stats on my collection",
+            "Do I have more PDFs or Word documents indexed?",
+        ],
+    )
+    def test_inventory_forms_load_stats(self, planner: QueryPlanner, query: str):
+        assert planner.plan(query).intents["inventory"] is True
+
+    def test_per_folder_count_gets_stats_not_the_canned_total(self, planner: QueryPlanner):
+        plan = planner.plan("How many documents are in the Physics folder?")
+        assert plan.mode == PlanMode.FULL_RAG
+        assert plan.intents["inventory"] is True
+
+    def test_index_yesterday_is_recency(self, planner: QueryPlanner):
+        assert planner.plan("What files did I index yesterday?").intents["latest"] is True
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "Which functions invoke rerank?",
+            "Show the callers of index_folders",
+            "What modules import app.config?",
+        ],
+    )
+    def test_code_graph_paraphrases_route_to_graph(self, planner: QueryPlanner, query: str):
+        assert planner.plan(query).mode == PlanMode.GRAPH_SEARCH
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "What is the impact of caffeine on sleep according to my notes?",
+            "How is entropy used in the thermodynamics lecture?",
+            "What is the connection between inflation and interest rates?",
+        ],
+    )
+    def test_graph_phrase_without_code_is_not_graph(self, planner: QueryPlanner, query: str):
+        # kg_edges exist only for code; these paid an extra rerank pass for nothing.
+        assert planner.plan(query).mode == PlanMode.FULL_RAG

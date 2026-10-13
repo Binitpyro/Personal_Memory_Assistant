@@ -170,3 +170,26 @@ async def test_select_tier_fails_for_uninstalled_tier(client, monkeypatch):
     data = res.json()
     assert data["ok"] is False
     assert data["error_code"] == "TIER_NOT_INSTALLED"
+
+
+async def test_count_pdf_pages_closes_the_reader(tmp_path, monkeypatch):
+    # An unclosed PdfReader holds the whole file plus its parsed objects in
+    # reference cycles until a gen-2 GC (same defect as pdf_extractor, c5b14c4).
+    import pypdf
+
+    from app.ocr.api import _count_pdf_pages
+
+    pdf = tmp_path / "two.pdf"
+    writer = pypdf.PdfWriter()
+    writer.add_blank_page(width=72, height=72)
+    writer.add_blank_page(width=72, height=72)
+    writer.write(pdf)
+
+    closed = []
+    real_close = pypdf.PdfReader.close
+    monkeypatch.setattr(
+        pypdf.PdfReader, "close", lambda self: (closed.append(self), real_close(self))
+    )
+
+    assert await _count_pdf_pages(pdf) == 2
+    assert len(closed) == 1

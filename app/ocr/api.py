@@ -441,7 +441,10 @@ async def _count_pdf_pages(path: Path) -> int:
         try:
             from pypdf import PdfReader
 
-            return len(PdfReader(str(path), strict=False).pages)
+            # Closed on exit: an unclosed reader holds the whole file in a BytesIO
+            # until a gen-2 GC (same defect as pdf_extractor.py, c5b14c4).
+            with PdfReader(str(path), strict=False) as reader:
+                return len(reader.pages)
         except Exception as exc:
             logger.debug("Could not count pages of %s: %s", path, exc)
             return 0

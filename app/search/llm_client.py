@@ -307,6 +307,31 @@ class LLMClient:
             return "cloud"
         return _classify_local_model(override_model or self.ollama_model)
 
+    async def get_context_window(
+        self, override_provider: str | None = None, override_model: str | None = None
+    ) -> int | None:
+        """The dispatched model's reported context window, or None if unknown.
+
+        Read from the model heap that ``validate()`` fills (no extra request beyond
+        ``_resolve``'s own health check). Unknown is not an error: the caller then
+        keeps the class ceiling, which is the behaviour before this existed.
+        """
+        from app.providers.cache import validation_cache
+
+        try:
+            prov = await self._resolve(override_provider, override_model)
+        except Exception:
+            return None
+        try:
+            model = getattr(prov, "default_model", None)
+            for m in validation_cache.get_persistent_models(prov.spec.id):
+                if model and m.get("id") in (model, f"{model}:latest"):
+                    window = m.get("context_length")
+                    return window if isinstance(window, int) and window > 0 else None
+            return None
+        finally:
+            await prov.close()
+
     def _load_runtime_preferences(self) -> None:
         # P1-1: was a direct open()/json.load() bypassing SettingsStore, so
         # it saw torn writes and ignored schema_version. SettingsStore.read()

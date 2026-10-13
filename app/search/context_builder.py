@@ -430,8 +430,16 @@ def _add_graph_paths(context_parts: list[str], text: str, max_tokens: int, used_
     return 0
 
 
-def compute_context_budget(model_class: str, history_turns: int) -> int:
-    """Adaptive context budget based on model's effective capacity."""
+def compute_context_budget(
+    model_class: str, history_turns: int, reported_window: int | None = None
+) -> int:
+    """Adaptive context budget based on model's effective capacity.
+
+    ``reported_window`` - the dispatched model's declared context length - only
+    ever lowers the class ceiling, never raises it (CLAUDE.md 8.1/8.4): a
+    custom-named 8k model guessed into 7b_local, or an 8k Groq model under the
+    100k cloud ceiling, would otherwise be handed more than it can hold.
+    """
     EFFECTIVE_CEILINGS = {  # noqa: N806
         "cloud": 100_000,
         "7b_local": 10_000,
@@ -441,6 +449,8 @@ def compute_context_budget(model_class: str, history_turns: int) -> int:
         "3b_local": settings.context_ceiling_small,
     }
     ceiling = EFFECTIVE_CEILINGS.get(model_class, 8000)
+    if reported_window and reported_window > 0:
+        ceiling = min(ceiling, reported_window)
 
     # Fixed costs
     system_prompt = 400

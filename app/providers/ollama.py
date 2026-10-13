@@ -36,8 +36,9 @@ def _reported_context_length(item: dict[str, Any]) -> int:
     value is inside `details` - so this costs no extra request. Verified against
     `/api/show` for all six models above: identical every time.
 
-    **This number is the model's declared window, NOT a budget**, and nothing in
-    the context-budget path reads it. Display and diagnostics only.
+    **This number is the model's declared window, NOT a budget.** The budget path
+    reads it only as a cap (`compute_context_budget`'s `reported_window`, which can
+    lower the class ceiling and never raise it).
 
     The reason that separation matters turned out to be different from the one
     written here first. This docstring originally cited CLAUDE.md 8.7f's ~4,099

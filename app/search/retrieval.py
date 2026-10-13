@@ -108,6 +108,17 @@ async def _append_largest_files(lines: list[str], db: DatabaseManager):
             lines.append(f"- {Path(r[0]).name} ({round(r[1] / (1024 * 1024), 2)} MB)")
 
 
+async def _reported_window(
+    llm_client: LLMClient, provider: str | None = None, model: str | None = None
+) -> int | None:
+    """Best-effort reported context window; None keeps the class ceiling."""
+    try:
+        window = await llm_client.get_context_window(provider, model)
+    except Exception:
+        return None
+    return window if isinstance(window, int) else None
+
+
 async def _get_metadata_insights(intents: dict[str, bool], db: DatabaseManager) -> str | None:
     """Newest / largest files for a recency question, or None.
 
@@ -1223,7 +1234,9 @@ async def _maybe_run_agentic_loop(
 
     try:
         ceiling = compute_context_budget(
-            llm_client.get_model_class(), len(history) if history else 0
+            llm_client.get_model_class(),
+            len(history) if history else 0,
+            await _reported_window(llm_client),
         )
         state = await run_agentic_loop(
             query,
@@ -1374,7 +1387,7 @@ async def full_rag(
 
     model_class = llm_client.get_model_class()
     history_turns = len(history) if history else 0
-    budget = compute_context_budget(model_class, history_turns)
+    budget = compute_context_budget(model_class, history_turns, await _reported_window(llm_client))
 
     # Small-to-big: ranking is done, so widen what the model sees without
     # touching what was selected.
@@ -1776,7 +1789,11 @@ async def stream_rag(
 
     model_class = llm_client.get_model_class(override_provider, override_model)
     history_turns = len(history) if history else 0
-    budget = compute_context_budget(model_class, history_turns)
+    budget = compute_context_budget(
+        model_class,
+        history_turns,
+        await _reported_window(llm_client, override_provider, override_model),
+    )
 
     # Small-to-big: ranking is done, so widen what the model sees without
     # touching what was selected.

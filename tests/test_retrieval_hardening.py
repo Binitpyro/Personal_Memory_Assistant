@@ -1207,3 +1207,91 @@ async def test_stream_rag_passes_recency_file_list_to_context(monkeypatch):
             pass
 
     assert "latest.md" in seen["metadata_insights"]
+
+
+def test_reported_window_only_lowers_the_class_ceiling():
+    from app.search.context_builder import compute_context_budget
+
+    assert compute_context_budget("7b_local", 0, 4096) == 4096 - 400 - 1000 - 80
+    assert compute_context_budget("7b_local", 0, 131_072) == compute_context_budget("7b_local", 0)
+    assert compute_context_budget("cloud", 0, 8192) < compute_context_budget("cloud", 0)
+
+
+def _budget_rag_mocks(monkeypatch, window):
+    results = [{"chunk_id": 1, "text": "t", "file_path": "d.md", "score": 0.9}]
+    monkeypatch.setattr(
+        retrieval, "_gather_full_rag_inputs", AsyncMock(return_value=(results, None, ""))
+    )
+    monkeypatch.setattr(retrieval, "_maybe_run_agentic_loop", AsyncMock(return_value=(None, None)))
+    monkeypatch.setattr(retrieval, "_check_rag_response_cache", lambda *a, **k: None)
+    monkeypatch.setattr(
+        retrieval, "_check_semantic_query_cache", AsyncMock(return_value=(None, None))
+    )
+    monkeypatch.setattr(retrieval, "_load_query_metadata", AsyncMock(return_value=([], None)))
+    monkeypatch.setattr(retrieval, "_extract_knowledge_gaps", AsyncMock(return_value=[]))
+    seen: dict = {}
+
+    def fake_build_context(*a, **k):
+        seen.update(k)
+        raise _ContextBuiltError
+
+    monkeypatch.setattr(retrieval, "build_context", fake_build_context)
+    db = MagicMock()
+    db.execute_query = AsyncMock(return_value=[])
+    planner = MagicMock()
+    planner.plan.return_value = MagicMock(
+        mode=PlanMode.FULL_RAG, intents={}, original_query="q", keywords=[]
+    )
+    llm = MagicMock()
+    llm.get_model_class.return_value = "7b_local"
+    llm.get_context_window = AsyncMock(return_value=window)
+    return db, planner, llm, seen
+
+
+@pytest.mark.asyncio
+async def test_full_rag_budget_is_capped_by_the_reported_window(monkeypatch):
+    """A custom-named 4k model lands in 7b_local by name; its 8,520 budget overflowed it."""
+    db, planner, llm, seen = _budget_rag_mocks(monkeypatch, 4096)
+    with pytest.raises(_ContextBuiltError):
+        await retrieval.full_rag("q", db, MagicMock(), MagicMock(), llm, planner)
+    assert seen["max_tokens"] == 4096 - 400 - 1000 - 80
+
+
+@pytest.mark.asyncio
+async def test_stream_rag_budget_uses_the_overridden_models_window(monkeypatch):
+    db, planner, llm, seen = _budget_rag_mocks(monkeypatch, 4096)
+    emb = MagicMock()
+    emb.embed_query = AsyncMock(return_value=[0.1] * 384)
+    lance = MagicMock()
+    lance.search_cache = AsyncMock(return_value=None)
+    with pytest.raises(_ContextBuiltError):
+        async for _ in retrieval.stream_rag(
+            "q", db, emb, lance, llm, planner, override_provider="ollama", override_model="tiny"
+        ):
+            pass
+    assert seen["max_tokens"] == 4096 - 400 - 1000 - 80
+    llm.get_context_window.assert_awaited_once_with("ollama", "tiny")
+
+
+@pytest.mark.asyncio
+async def test_get_context_window_reads_the_dispatched_models_heap_entry(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.providers.cache import validation_cache
+    from app.search.llm_client import LLMClient
+
+    prov = SimpleNamespace(
+        spec=SimpleNamespace(id="ollama"), default_model="tiny", close=AsyncMock()
+    )
+    client = LLMClient()
+    monkeypatch.setattr(client, "_resolve", AsyncMock(return_value=prov))
+    heap = [
+        {"id": "big:latest", "context_length": 131072},
+        {"id": "tiny:latest", "context_length": 4096},
+    ]
+    monkeypatch.setattr(validation_cache, "get_persistent_models", lambda pid: heap)
+
+    assert await client.get_context_window() == 4096
+    prov.close.assert_awaited()
+    prov.default_model = "unlisted"
+    assert await client.get_context_window() is None

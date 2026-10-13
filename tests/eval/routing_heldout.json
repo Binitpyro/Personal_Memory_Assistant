@@ -1,0 +1,180 @@
+{
+ "version": 1,
+ "items": [
+  {
+   "id": "h001",
+   "query": "How many files are in PMA right now?",
+   "intent": "inventory",
+   "stratum": "heldout",
+   "gold_mode": "FAST_METADATA"
+  },
+  {
+   "id": "h002",
+   "query": "What's the combined size of everything I've indexed?",
+   "intent": "inventory",
+   "stratum": "heldout",
+   "gold_mode": "FAST_METADATA"
+  },
+  {
+   "id": "h003",
+   "query": "Which file extensions do I have the most of?",
+   "intent": "inventory",
+   "stratum": "heldout",
+   "gold_mode": "FAST_METADATA"
+  },
+  {
+   "id": "h004",
+   "query": "How much have I indexed in total?",
+   "intent": "inventory",
+   "stratum": "heldout",
+   "gold_mode": "FAST_METADATA"
+  },
+  {
+   "id": "h005",
+   "query": "Give me some stats on my collection",
+   "intent": "inventory",
+   "stratum": "heldout",
+   "gold_mode": "FAST_METADATA"
+  },
+  {
+   "id": "h006",
+   "query": "Do I have more PDFs or Word documents indexed?",
+   "intent": "inventory",
+   "stratum": "heldout",
+   "gold_mode": "FAST_METADATA"
+  },
+  {
+   "id": "h007",
+   "query": "How many documents are in the Physics folder?",
+   "intent": "inventory",
+   "stratum": "heldout",
+   "gold_mode": "FAST_METADATA"
+  },
+  {
+   "id": "h008",
+   "query": "What are my indexed projects about?",
+   "intent": "project",
+   "stratum": "heldout",
+   "gold_mode": "FAST_PROJECT"
+  },
+  {
+   "id": "h009",
+   "query": "Give a short overview of each repository I've added",
+   "intent": "project",
+   "stratum": "heldout",
+   "gold_mode": "FAST_PROJECT"
+  },
+  {
+   "id": "h010",
+   "query": "What is each of my folders used for?",
+   "intent": "project",
+   "stratum": "heldout",
+   "gold_mode": "FAST_PROJECT"
+  },
+  {
+   "id": "h011",
+   "query": "Summarize what's in each project folder",
+   "intent": "project",
+   "stratum": "heldout",
+   "gold_mode": "FAST_PROJECT"
+  },
+  {
+   "id": "h012",
+   "query": "What files did I index yesterday?",
+   "intent": "recency",
+   "stratum": "heldout",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "h013",
+   "query": "Show me the most recently edited documents",
+   "intent": "recency",
+   "stratum": "heldout",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "h014",
+   "query": "Which of my files is the largest?",
+   "intent": "recency",
+   "stratum": "heldout",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "h015",
+   "query": "What's the newest thing in my library?",
+   "intent": "recency",
+   "stratum": "heldout",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "h016",
+   "query": "How many pages long is the thesis draft?",
+   "intent": "content",
+   "stratum": "heldout_trap",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "h017",
+   "query": "What is the file size limit mentioned in the upload spec?",
+   "intent": "content",
+   "stratum": "heldout_trap",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "h018",
+   "query": "How many documents does the court require for a visa appeal?",
+   "intent": "content",
+   "stratum": "heldout_trap",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "h019",
+   "query": "How much storage do I need for a 4K video project?",
+   "intent": "content",
+   "stratum": "heldout_trap",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "h020",
+   "query": "What are the most recent findings on CRISPR in my notes?",
+   "intent": "content",
+   "stratum": "heldout_trap",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "h021",
+   "query": "Give me a project overview of the bridge design assignment",
+   "intent": "content",
+   "stratum": "heldout_trap",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "h022",
+   "query": "Explain the difference between mitosis and meiosis",
+   "intent": "content",
+   "stratum": "heldout",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "h023",
+   "query": "What did the lecturer say about entropy?",
+   "intent": "content",
+   "stratum": "heldout",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "h024",
+   "query": "Which algorithm did I use for the clustering experiment?",
+   "intent": "content",
+   "stratum": "heldout",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "h025",
+   "query": "Where are my notes on the French Revolution?",
+   "intent": "content",
+   "stratum": "heldout",
+   "gold_mode": "FULL_RAG"
+  }
+ ]
+}

@@ -2,6 +2,8 @@
 
 This document consolidates all planned features, technical optimizations, and strategic research frontiers identified during the v0.0.70 architectural audit and subsequent multi-agent design sessions.
 
+> **Status check 2026-10-14 (`87f7e66`).** Items marked ✅ shipped, ❌ rejected. Unmarked items are still ideas, not commitments. Hard constraints that override this document (no bundled VLM, ~4 GB VRAM, context budget) are in `.claude/CLAUDE.md` §6. The Creative Module (Zeni) sections below are **on hold**; the XPRIZE submission was withdrawn.
+
 ---
 
 ## 1. Vision & Multimodal Intelligence (v0.0.80 Frontier)
@@ -9,8 +11,8 @@ This document consolidates all planned features, technical optimizations, and st
 
 ### ðŸ“¸ Image Intelligence
 - **CLIP-based Semantic Search**: Integrate `clip-vit-base-patch32` (ONNX) to allow natural language queries over images (e.g., "Find that database schema diagram").
-- **Visual Functional Blueprints**: Use **Moondream2** (lightweight VLM) to generate textual summaries of images, enabling standard RAG to "understand" visual content.
-- **Local OCR**: Integrate `rapidocr-onnxruntime` for high-speed, local-first text extraction from screenshots and documents.
+- ❌ **Visual Functional Blueprints via a bundled VLM (Moondream2)**: rejected on hardware grounds — PMA never ships or defaults to a VLM. A vision model the user already runs can be used (OCR Tier 3).
+- ✅ **Local OCR**: shipped — `rapidocr-onnxruntime==1.4.4` (PP-OCRv4 mobile) in a subprocess-isolated worker, plus a DirectML tier and a user-VLM tier. Off by default (`ocr_enabled=False`).
 - **Photo Billboards**: Render high-fidelity image previews as "billboards" within the 3D Crystal Dreamscape.
 
 ### ðŸŽ¥ Video Recognition
@@ -26,7 +28,7 @@ This document consolidates all planned features, technical optimizations, and st
 - **Identifier Fast-Path (`LEXICAL_FIRST`)**: Bypass embeddings for strict code identifiers, file paths, or error codes. Query SQLite FTS5 directly for 100% accuracy on OOV (Out of Vocabulary) tokens.
 - **Lite Search Mode**: A battery-saving "Lexical Only" mode that skips ONNX inference and LanceDB, using strictly SQLite FTS5.
 - **Selection-Anchored RAG**: Allow users to "lasso" nodes in the 3D graph. The backend fetches raw text for those specific `chunk_ids` directly via SQL, bypassing vector search for perfect context.
-- **1-Hop GraphRAG**: Use the `file_edges` table to deterministically fetch immediate dependencies of a file to answer "What breaks if I change this?".
+- ✅ (partly) **1-Hop GraphRAG**: shipped as `GRAPH_SEARCH` over `kg_nodes` / `kg_edges` (there is no `file_edges` table), populated by `CodeChunker` for code files only. The planner routes a question there only when it names code.
 
 ### ðŸ§  Hybrid Improvements
 - **Metadata Pre-filtering**: Use SQLite to filter by date/type/folder *before* running LanceDB similarity search to radically reduce the search space.
@@ -39,7 +41,7 @@ This document consolidates all planned features, technical optimizations, and st
 
 ### ðŸ¦€ Rust Core Offloading
 - **Rust Stream Chunker**: Port the heavy `StreamChunker` logic from Python to the Rust core using PyO3 to move string allocations and regex scanning to a native layer.
-- **Barnes-Hut Octree Layout**: Fully wire the existing O(N log N) physics algorithm into the visualization pipeline to replace the current O(NÂ²) repulsion logic.
+- ✅ **Barnes-Hut Octree Layout**: wired (`rust_core/src/lib.rs`, H-06 / P-01).
 
 ### ðŸ“¡ System Synchronization
 - **WebSocket Transition**: Replace SSE (Server-Sent Events) with WebSockets for bidirectional, zero-polling status updates and real-time indexing progress.
@@ -58,7 +60,7 @@ This document consolidates all planned features, technical optimizations, and st
 ---
 
 ## 5. Future Tech Watch (Post-v1.0)
-**Goal**: Monitor emerging technologies that fit PMA's O(1) memory constraints.
+**Goal**: Monitor emerging technologies that fit PMA's bounded-memory constraints (8 GB RAM laptop, ~4 GB VRAM).
 
 - **BM42 Learned Sparse Retrieval**: Monitor the stability of the 90MB BM42 model via FastEmbed as a potential replacement for the dense vector stack.
 - **Contextual Retrieval (LLM-Prepend)**: Evaluate the cost of using a local LLM to prepend document context to every chunk during the indexing phase for 10% higher retrieval accuracy.

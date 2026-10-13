@@ -994,7 +994,7 @@ This is a real, live Google Gemini API key in a committed file that ships inside
 
 ## CRITICAL ISSUES â€” Detailed Status
 
-> Statuses in this section are as recorded at the 2026-05-11 audit. Corrected statuses: 'Complete Fix Status Register' and 'Status update 2026-10-08' below.
+> Statuses in this section are as recorded at the 2026-05-11 audit. Corrected statuses: 'Complete Fix Status Register' and the 'Status update' sections below (2026-10-08, 2026-10-14).
 
 ---
 
@@ -1106,7 +1106,7 @@ if request.url.path.startswith("/api/") and request.method != "OPTIONS":
 
 ## HIGH ISSUES â€” Detailed Status
 
-> Statuses in this section are as recorded at the 2026-05-11 audit. Corrected statuses: 'Complete Fix Status Register' and 'Status update 2026-10-08' below.
+> Statuses in this section are as recorded at the 2026-05-11 audit. Corrected statuses: 'Complete Fix Status Register' and the 'Status update' sections below (2026-10-08, 2026-10-14).
 
 ---
 
@@ -1394,7 +1394,7 @@ sha256 = await loop.run_in_executor(_DISK_EXECUTOR, self._calculate_sha256, path
 
 ## MEDIUM ISSUES â€” Detailed Status
 
-> Statuses in this section are as recorded at the 2026-05-11 audit. Corrected statuses: 'Complete Fix Status Register' and 'Status update 2026-10-08' below.
+> Statuses in this section are as recorded at the 2026-05-11 audit. Corrected statuses: 'Complete Fix Status Register' and the 'Status update' sections below (2026-10-08, 2026-10-14).
 
 ---
 
@@ -1597,7 +1597,7 @@ except (Exception, asyncio.CancelledError) as e:
 
 ## LOW ISSUES â€” Detailed Status
 
-> Statuses in this section are as recorded at the 2026-05-11 audit. Corrected statuses: 'Complete Fix Status Register' and 'Status update 2026-10-08' below.
+> Statuses in this section are as recorded at the 2026-05-11 audit. Corrected statuses: 'Complete Fix Status Register' and the 'Status update' sections below (2026-10-08, 2026-10-14).
 
 ---
 
@@ -1926,15 +1926,30 @@ Corrections to the 2026-05-11 register above, each re-verified against the code 
 - **Mislabelled NOT FIXED, actually fixed:** C-02, C-08, H-03, H-07, H-08, H-09, H-12, H-15, H-18, M-08, M-10 and L-08 (both were Partial), M-12, L-02, L-06, L-09 (A10-16, A3-23, A4-17, A5-15, A5-16, A7-16).
 - **Mislabelled FIXED, was open:** C-04 (guard keyed on a variable uvicorn never sets) now fixed by the 1-worker clamp, 669a156 (A10-06); H-17 (portable-mode ghost vectors) now fixed, 9a7cb06 (A10-09, A1-04).
 - **Obsolete (file or feature gone):** H-04, H-05, H-11, H-13, M-06, M-11, M-13, L-01, L-10, L-16, L-21, L-22. PMA.spec, sonar-project.properties and .vscode/ exist on the dev box but are gitignored and untracked.
-- **Still open at HEAD:** M-03 (page_size no-op), M-15 (cancel during the stream loses history), L-04, L-12; H-02 is partial (memory bounded, time still O(n)).
+- **Still open at HEAD:** M-03 (page_size no-op), L-04, L-12; H-02 is partial (memory bounded, time still O(n)). M-15 was fixed after this update (76a0aae).
 - **Performance table (A9-14, A3-23):** P-03, P-06, P-07, P-08 are done; P-05 already was.
 - **URGENT-KEY:** unchanged by this update. The user has recorded the key as stale and chose to leave the lines as they are (audit A10-12, IGNORED).
+
+## Status update 2026-10-14 (HEAD 87f7e66)
+
+Everything since 669a156, committed and pushed on `UI/UX`. Per-finding table: `files/audit_fix_2026-10-07/FINAL_REPORT.md` (164 findings: 142 FIXED, 9 ALREADY-FIXED, 5 CLOSED-MEASURED, 1 RESOLVED, 1 DOCUMENTED, 1 NO-VERDICT, 1 PARTIAL, 2 NOT-REPRODUCED, 1 DECIDED-LEAVE, 1 IGNORED).
+
+- **M-15 fixed** in 76a0aae (a stopped generation stays in history). Still open from the 2026-05 register: M-03, L-04, L-12; H-02 partial.
+- **Five NOT-ADDRESSED findings fixed:** 129fb9c (A2-01, A2-04, A6-13, A9-12), 1a6d3ce (A6-16).
+- **Measurement wave M1-M7 (pre-registered, `files/audit_fix_2026-10-07/MEASUREMENT_PREREG.md`):** A9-09, A3-22, A3-14, A3-15, A9-08 (incl. the 4-core follow-up) CLOSED, nothing shipped; A3-17 no verdict.
+- **A3-12 / agentic budget:** 21ba979 - FULL_RAG always reranks; agentic k capped by the remaining budget.
+- **A9-03 / A9-10 memory:** PdfReader leaks closed (c5b14c4, c472dd8, about -55 MB); residue attributed (pymalloc arenas, SQLite caches; all pageable); README figures re-measured (e952209); bounds set by the user from measurement.
+- **A9-13:** profiler reads `/proc/self/status` on Linux (1242333).
+- **A3-08 / A3-11 routing:** frozen routing set + scorer (0f46c70), fixes 04fea0d and fd9bb2e; recency answers receive the newest / largest file list (89071dd). Main set 63 -> 98/98; second held-out set 18 -> 23/24.
+- **A4-12:** capability verdict cached per provider + dispatched model; probe bypasses the RAG template (f61247b). **A10-13:** three assertion-free tests now assert (f61247b).
+- **A8-24:** CI runs `cargo test` for src-tauri (6e58b78) - CI triggers on `main` only, so first verified on the merge PR.
+- **Not in the audit:** `get_graph_edges` CTE `UNION ALL` -> `UNION` (64768f8); context budget capped at the dispatched model's reported window (87f7e66).
 
 ---
 
 ## Priority Fix Order for Remaining Issues
 
-> Superseded 2026-10-08 by the 'Status update 2026-10-08' above: C-02, C-08, H-03, H-05 (obsolete), H-07, H-08, H-09, H-15, H-18, M-08, M-12 and M-13 (obsolete) are closed. Still open: M-15, L-12.
+> Superseded by the 'Status update' sections above: C-02, C-08, H-03, H-05 (obsolete), H-07, H-08, H-09, H-15, H-18, M-08, M-12, M-13 (obsolete) and M-15 are closed. Still open: L-12. Kept as the historical plan.
 
 
 ### Tier 1 â€” Fix This Session (Critical/Security)

@@ -1,6 +1,6 @@
 # Performance Bottlenecks and Roadmap
 
-**Last swept: 2026-09-12, branch `updates`, baseline commit `8cc4d37`.**
+**Last swept: 2026-09-12, branch `updates`, baseline commit `8cc4d37`. Baselines (section 2) and service levels (section 6) updated 2026-10-14 from the audit measurement wave, `UI/UX` at `87f7e66`.**
 
 Every number in this document is either measured — with the command that
 produced it — or explicitly labelled **unmeasured**. The previous version of this
@@ -132,8 +132,12 @@ not quote a smaller number without re-measuring.**
 
 | quantity | measured | bound | source |
 |---|---|---|---|
-| Idle / serving queries | 195.7 MB | 250 MB | CLAUDE.md §6 (2026-08-20) |
-| Ingestion, peak above idle | 535.3 MB | 1 GB | CLAUDE.md §6 (2026-08-20) |
+| Idle (models loaded) | 195.7 MB; 247-248 MB on the College corpus | 250 MB | CLAUDE.md §6 (2026-08-20; 2026-10-13) |
+| Serving queries, steady (after 50 queries) | 490-522 MB | 600 MB guard | CLAUDE.md §6 (M6, 2026-10-13) |
+| Serving queries, spike | 1.34-1.38 GB | 1.5 GB guard | CLAUDE.md §6 (M6) |
+| Ingestion, peak above idle | 535.3 MB (403 MB corpus); 567-632 MB (479 MB corpus) | 1 GB | CLAUDE.md §6 |
+| Working set 60 s after ingest | idle + 188-190 MB, all pageable | idle + 200 MB guard | CLAUDE.md §6 (`c5b14c4`, after the PdfReader leak fix) |
+| FTS query p95 at 100k chunks | 122 ms | — | A9-09, `MEASURE_*.md` (CLOSED) |
 | OCR worker, rasterization arrays | 76.3 MB @ 20 MP | 100 MB | CLAUDE.md §6 |
 | BEIR SciFact nDCG@10, reranker on | 0.70 | — | CLAUDE.md §8.3 |
 | OCR first end-to-end run | ~1.3 s/page cold, ~0.5 s/page warm | — | CLAUDE.md §8.5 |
@@ -222,8 +226,11 @@ The keyring item was re-verified there and still holds at `app/main.py:63`.
 
 ## 6. Service levels
 
-There are **no measured SLOs for this project yet.** The previous version
+There are **no latency SLOs for this project yet.** The previous version
 published five; none had a measurement behind it and they are retracted above.
+The memory rows in section 2 marked "guard" are regression guards set from
+measurement on 2026-10-14 (user decision): they catch regressions and do not
+claim the numbers are good.
 
 Setting real ones needs a defined corpus, a defined machine, and a repeatable
 harness. What exists today that could seed them:

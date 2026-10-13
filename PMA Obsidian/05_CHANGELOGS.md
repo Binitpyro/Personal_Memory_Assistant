@@ -1,14 +1,80 @@
+# Unreleased (`UI/UX`, pending merge to `main`)
+
+*Version still `0.0.72` in the manifests; no bump yet.* Delta `main..UI/UX`: **81 commits**, 2026-08-29 through 2026-10-14, on top of `main` at `d59d4e3` (merge of PR #11). All pushed. Full gate green at `87f7e66`: `run_ci_checks.bat` exit 0, pytest 1382 passed / 1 skipped / 6 deselected.
+
+## Executive summary
+
+* **Failure-point audit: 164 findings closed out.** 142 fixed with a regression test and a negative control; the rest were already fixed, refuted, measured-and-closed, or decided. Per-finding table: `PMA Obsidian/files/audit_fix_2026-10-07/FINAL_REPORT.md`; register: `04_AUDITS_AND_ISSUES.md` § "Status update 2026-10-14".
+* **Query routing is measured and fixed.** A frozen, labelled routing set (98 queries + two held-out sets) replaced guesswork: outcome 63 → 98/98, and a set written after the fix scored 23/24.
+* **Context quality for small models:** the splitter no longer cuts words, `chunk_size` is 1024 (beats 2048 by ~7σ), and Ollama no longer silently drops half of a long prompt.
+* **Memory:** two unclosed PDF readers fixed (~−55 MB); the post-ingest residue is attributed and pageable.
+* **New design system (Safelight)** and the Specimen Cabinet guard for the UI.
+
+---
+
+## 🔒 Security and desktop (audit criticals)
+
+* OCR uninstall could `rmtree` outside the OCR root via an arbitrary tier string; tier is now allow-listed and the target must resolve under the root (`31faf3f`).
+* The packaged Tauri shell could not reach the backend: CORS lacked `http://tauri.localhost`, the CSP lacked `127.0.0.1`, and `PORT` was ignored (`31faf3f`).
+* Host guard, CORS, startup ordering and split-brain fixes (`669a156`); desktop packaging, shell and 3D view (`a3d10db`); `rust_core` UTF-16/32 text, non-overlapping layout, GIL release (`833bcb3`).
+
+## 🔍 Retrieval and routing
+
+* Filters, caches, degradation and an offline tokenizer — the tiktoken BPE is bundled, so the first query needs no network (`5d7843e`).
+* Rerank lock per event loop; no answer cache for pinned chunks (`98e0ac8`). FULL_RAG always reranks; the agentic loop's k is capped by the remaining budget, so it retrieves on small models again (`21ba979`).
+* FTS overlaps the vector legs, rows capped in SQL, `query_cache` compacted (`e3922d2`).
+* **Planner routing (A3-08, A3-11):** frozen set and scorer (`0f46c70`); inventory questions load the stats they are routed for (`04fea0d`); recency questions receive the newest / largest file list, dead code since `0bea33f` (`89071dd`); round 2 — collection / format inventory, per-folder counts go to RAG with stats, graph search needs a code signal (`fd9bb2e`). Content questions wrongly sent to graph search: 5 → 0.
+* `get_graph_edges` walks the graph with `UNION`, not `UNION ALL` — a 6-clique at depth 4 read 781 rows, now ≤ 30 (`64768f8`).
+* **The context budget is capped at the dispatched model's reported window** (`87f7e66`). It only lowers the class ceiling: a custom-named small model guessed into `7b_local`, or an 8k cloud model under the 100k ceiling, no longer gets more than it holds.
+
+## 🧠 Context and chunking (measured, 2026-09)
+
+* The splitter cut words in half; fixed, and `chunk_size` → 1024 (`ef99f83`, `4debdec`). `chunk_overlap` measured and deliberately unchanged (`8d93385`).
+* Small-model head share got its own setting; the small model may read two passages of one file; the small-model ceiling was swept and left alone (`e71b460`, `1325ec8`, `42a7d68`).
+* The ranked text and the read text differed by a token (`994f561`); the two embed loops had drifted (`37d9047`).
+* Per-leg RRF denominators were added, swept, refuted and reverted (`db3996d`, `5967bad`). `rrf_k` stays 60.
+
+## 🤖 Providers
+
+* Ollama was discarding most of the context PMA built: `num_ctx` is now sized to the request (`d97c104`). The real context window is reported instead of a flat 8192 (`bd10441`).
+* A thinking model could answer with nothing; one retry with thinking off (`6268d11`).
+* NVIDIA NIM accepted any key and defaulted to a dead model (`a46de78`).
+* Consent, fallback chain, streams, portrait, default model, timeouts (`5e9128e`, `7469265`); local-AI sweep — privacy, Ollama reloads, stream outcome (`5f965d1`, `6cb1ac4`).
+* Capability verdict cached per provider + dispatched model; the probe bypasses the RAG template (`f61247b`, A4-12).
+* Recipes work for any provider and set `per_provider.default_model` so the recipe's model wins (`76a0aae`, `8207b6b`).
+
+## 📥 Ingestion, storage and OCR
+
+* Ingestion correctness and boundedness; vectors written before commit; reembed lock; OCR re-gate (`0c6a93c`, `129fb9c`).
+* Folder removal, commits, vacuum, cache prune; vanished files; ANN rebuild guard (`876a652`, `9a7cb06`).
+* OCR gate, queue races, VLM availability, hung pages, stranded rows, tier switch, deadline (`a8eaf33`, `e0bd87a`); mojibake native PDF text dropped, and Indic / Arabic / maths no longer scored as garbage (`1a6d3ce`).
+* `PdfReader` closed after extraction and in the OCR page counter (`c5b14c4`, `c472dd8`).
+
+## 🖥️ UI
+
+* Safelight design system ported (`b592e46`); Specimen Cabinet dual-theme system and its guard (`4360876`); WebGL2 sky re-graded (`3dd4e1c`).
+* Stream parsing, progress, failed runs; chat history, pins, cost, history keys; stopped generations stay in history (`f82f423`, `8a75ac9`, `76a0aae`).
+
+## 🧪 Tooling and CI
+
+* CI runs `cargo test` for `src-tauri` (`6e58b78`) — CI triggers on `main` only, so **the merge PR is its first Linux run**.
+* The gate prints exit codes for mypy and pytest crashes (`4e485fa`); Run-Tests uses the sysmon coverage core (`62ff356`); `.bat`/`.cmd` pinned to CRLF (`cfe2118`).
+* The memory profiler reads `/proc/self/status` on Linux (`1242333`).
+* Research tooling (fixtures, sweeps, the adaptive-k and tokenizer tests) under `scripts/` and `tests/eval/`; journals are gitignored.
+
+## ⚠️ Known limitations at `87f7e66`
+
+* **Existing indexes need a forced re-index** to pick up the chunk-text fixes (A1-01, A1-13, A1-14, A1-21; A1-10 needs re-OCR). The content-hash early-out skips unchanged files.
+* The MSI is not built or tested.
+* Idle working set is 247–248 MB against a 250 MB ceiling — about 2 MB of headroom.
+* Routing miss: "How big is my *whole* collection now?" goes to RAG (an adjective defeats the guard).
+* English-first retrieval: CJK is indexed but retrieves poorly (README §9.2).
+
+---
+
 # Changelog v0.0.72
 
-*Version bumped to `0.0.72` across all five manifests — `pyproject.toml:3`, `frontend/package.json:4`, `frontend/src-tauri/tauri.conf.json:4`, `frontend/src-tauri/Cargo.toml:3`, `app/scanner/rust_core/Cargo.toml:3` — plus the README badge and the `Run-Tests.bat` banner. Lockfiles regenerate from their tools. Not tagged, not released.*
-
-**Baseline: `main` at `7c16249` (2026-07-25), which is v0.0.71 as shipped.** Everything below is the delta `main..updates` — **55 commits**, 2026-07-28 through 2026-08-20, none of them released.
-
-Branch state at the time of writing, worth knowing before the next merge:
-
-- `updates` is **55 ahead** of `main` and **2 behind** it. Those two are `42d0103` (the merge of PR #9) and `7c16249` (a README update). The branches have not been merged since 2026-07-25; `7c16249`'s README improvements were brought across by hand in this cycle and extended, so a merge should take this branch's README, but the commits themselves are still unmerged.
-- `origin/updates` is at `b3cdd59` (2026-08-18). **13 commits are unpushed**, including every fix from `d56b94e` onward.
-- `main` contains no `app/ocr/` at all. The whole OCR subsystem is unreleased.
+*Released to `main` via PR #11 (`d59d4e3`, 2026-08-24).* Delta from v0.0.71 (`7c16249`): 55 commits, 2026-07-28 through 2026-08-20.
 
 ---
 

@@ -1,10 +1,10 @@
-# Project Context Master (v0.0.72 on `updates`, unreleased; v0.0.71 is what shipped)
+# Project Context Master (v0.0.72 released on `main`; `UI/UX` carries the unreleased work)
 
 Reference document for AI-assisted engineering on this repository.
 
-**Last verified against source: 2026-08-20, commit `1e4a6d0`, branch `updates`.** Anything here that a source read contradicts is stale — re-verify before acting on it.
+**Last verified against source: 2026-10-14, commit `87f7e66`, branch `UI/UX`.** Anything here that a source read contradicts is stale — re-verify before acting on it.
 
-**Branch standpoint.** The released baseline is `main` at `7c16249` (2026-07-25), which is v0.0.71. `updates` is **55 commits ahead** of it and **2 behind** — the branches have not been merged since PR #9. `main`'s README improvements were brought across by hand and extended, so a merge should take this branch's README. `origin/updates` is at `b3cdd59`; **13 commits are unpushed**. `main` contains no `app/ocr/` at all. The full delta is written up in `05_CHANGELOGS.md`.
+**Branch standpoint.** `main` is at `d59d4e3` (PR #11, 2026-08-24), which is v0.0.72. `UI/UX` is **81 commits ahead**, all pushed, merge pending; `updates` is stale since 2026-09-18. The delta is written up in `05_CHANGELOGS.md` ("Unreleased").
 
 ## 1) Project Identity
 
@@ -51,10 +51,10 @@ Backend:
 Frontend:
 
 - Modular React + TypeScript + Vite
-- TailwindCSS for glassmorphism theme
+- Tailwind CSS with the Safelight design system (`06_DESIGN_SYSTEM.md`): opaque surfaces, no radii, no glass
 - WebGPU (Moment-Based Order Independent Transparency, Compute Shader Culling, Indirect Drawing, Procedural Billboarding)
 - ECharts for advanced 2D "TreeSize" fallback
-- Lucide-React icons
+- No icon library (lucide-react removed in `b592e46`); icons are glyphs or words
 
 Desktop packaging:
 
@@ -160,7 +160,7 @@ Process summary:
 3. Incremental classification by modified_at.
 4. **Pipelined Extraction**: `Extractor -> Chunker -> Embedder -> Storer` as a continuous stream.
 5. **Universal Deep Summary**: Generates functional blueprints (AST classes/functions, PDF titles, Spreadsheet headers).
-6. **Streaming**: Indexes large files without ever holding one in memory, via Python generators. Measured 2026-08-20: **195.7 MB idle, 535.3 MB above idle at ingestion peak**. The older "fixed 60MB RAM" figure is retracted — it was never measured.
+6. **Streaming**: Indexes large files without ever holding one in memory, via Python generators. Measured figures are in section 11. The older "fixed 60MB RAM" figure is retracted — it was never measured.
 7. SQLite upsert (files, chunks, chunk_embeddings).
 8. LanceDB cache synchronization.
 9. Folder profile synthesis and embedding.
@@ -179,7 +179,8 @@ Operational characteristics:
 
 A) Deterministic path (no LLM)
 
-- trigger: inventory/project query heuristics
+- trigger: the query planner (`app/search/planner.py`): whole-collection inventory -> `FAST_METADATA`, project summary -> `FAST_PROJECT`. A measure applied to something outside the collection ("how big is the moon") or followed by a topic stays on RAG. Per-folder counts and newest / largest questions go to RAG with the file stats / file list attached.
+- routing is scored against a frozen labelled set: `tests/eval/routing_set.json` + held-out sets, `scripts/eval_routing.py`
 - sources: DB aggregate metadata and profiles
 - benefit: low latency and predictable output
 
@@ -192,7 +193,9 @@ B) Full RAG path
 - LanceDB **summary-vector** retrieval over `pma_summaries` (`rrf_summary_weight` 0.05). This leg shipped at 0.3 and cost recall against not using it at all; see `05_CHANGELOGS.md`.
 - LRU caching for retrieval results and RAG answers
 - RRF merge (`rrf_k` 60), with ties broken on chunk id so fusion is deterministic across index builds of the same corpus
-- optional cross-encoder rerank
+- cross-encoder rerank, always on FULL_RAG (5 s deadline; a timeout marks the answer degraded)
+- `GRAPH_SEARCH` only when a relationship phrase names code (identifier, `a.b`, `f()`); the graph exists only for code files
+- context budget from the model's size class, capped at the dispatched model's reported context window
 - **Structured Context Build**: Partitioned into `PROJECT ARCHITECTURE` and `IMPLEMENTATION DETAILS`.
 - LLM generation (Strict header-based auth for Gemini).
 
@@ -216,7 +219,7 @@ Settings in app/config.py (env-prefixed PMA\_):
 
 - storage: db_path, schema_path, lancedb_persist_dir, lancedb_mode (`portable` by default; `split_brain` enables the SQLite embedding backup)
 - embeddings: embedding_model (`BAAI/bge-small-en-v1.5`), embedding_batch_size (64, the row cap), **embedding_batch_char_budget** (10240 — caps `rows × width-of-widest-row`, which is what actually bounds peak memory; the row cap only ever narrows it)
-- indexing: chunk_size (512 characters), chunk_overlap, max_file_size_bytes, index_concurrency (16), supported_extensions
+- indexing: chunk_size (1024 characters), chunk_overlap (102), max_file_size_bytes, index_concurrency (16), supported_extensions
 - ocr: ocr_enabled (**False** by default), ocr_conf_floor, ocr_max_attempts, ocr_worker_idle_timeout_s, ocr_vlm_doc_timeout_s
 - llm: per-provider keys, models, base URLs and timeouts across all nine providers, plus cloud_privacy_consent
 - retrieval: rrf_fts_weight (0.4), rrf_semantic_weight (0.6), rrf_summary_weight (0.05), rrf_k (60), rrf_score_scale, retrieval_top_k (15), context_max_tokens (8000), summary_expand_chunks_per_file (5), query_stream_timeout_s (180)
@@ -231,12 +234,15 @@ Strengths:
 - **Differential Vector Sync**: High-speed boot synchronization.
 - **Reranker Preloading**: Background ONNX model load at startup.
 
-Measured budget (2026-08-20, `scripts/profile_ingest_memory.py`, `GetProcessMemoryInfo` sampled at 5 Hz — not `tracemalloc`, which cannot see the ONNX arena):
+Measured budget (Windows working set, portable mode, `scripts/profile_ingest_memory.py`, `GetProcessMemoryInfo` sampled at 5 Hz — not `tracemalloc`, which cannot see the ONNX arena). The three regression guards were set from measurement on 2026-10-14; they catch regressions, they do not claim the numbers are good:
 
 | Constraint | Kind | Measured | Bound |
 |---|---|---|---|
-| Idle / serving queries | hard ceiling | 195.7 MB | 250 MB |
-| Ingestion, peak above idle | transient cap | 535.3 MB | 1 GB |
+| Idle (models loaded) | hard ceiling | 195.7 MB; 247-248 MB on the College corpus (2026-10-13) | 250 MB |
+| Serving queries, steady | regression guard | 490-522 MB after 50 queries | 600 MB |
+| Serving queries, spike | regression guard | 1.34-1.38 GB | 1.5 GB |
+| Ingestion, peak above idle | transient cap | 535.3 MB (403 MB corpus); 567-632 MB (479 MB corpus) | 1 GB |
+| Working set 60 s after ingest | regression guard | idle + 188-190 MB (all pageable) | idle + 200 MB |
 | OCR worker rasterization arrays | hard ceiling | 76.3 MB @ 20 MP | 100 MB |
 
 Current bottlenecks:
@@ -286,7 +292,7 @@ When extending this codebase:
 
 1. Satisfy the ingestion boundedness invariant — peak must not track corpus shape.
 2. Surface `files.extract_status` in the API and Library UI; it is written but invisible.
-3. Grow the retrieval eval corpus past 12 queries / 24 documents. It is saturated at k=5 and cannot demonstrate an improvement, only a regression.
+3. Every small eval fixture (`tests/eval/corpus`, `corpus_large`, `corpus_squad`) is saturated; only composed, larger corpora can show an improvement. See `.claude/CLAUDE.md` §8.3.
 4. Implement semantic search bar in Explorer tree.
 5. Add global Tauri search shortcut (Spotlight-style).
 
@@ -313,8 +319,8 @@ Read in this order (these are the files that actually exist in this folder):
 3. `05_CHANGELOGS.md` — what changed and, more usefully, why
 4. `PERFORMANCE_BOTTLENECKS_AND_ROADMAP.md`
 5. `03_ROADMAP_AND_VISION.md`
-6. `06_DESIGN_SYSTEM.md` — the frontend design system, its measured contrast
-   table, and the constraints that bite. Read before touching anything under
+6. `06_DESIGN_SYSTEM.md` — the frontend design system (Safelight) and the
+   constraints that bite. Read before touching anything under
    `frontend/src/`.
 
 `.claude/CLAUDE.md` at the repo root carries the working rules and the current defect state. It is untracked, so it is a state file rather than history.

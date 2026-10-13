@@ -159,3 +159,55 @@ class TestRegressionGuards:
         q = "how many files"
         results = {planner.plan(q).mode for _ in range(5)}
         assert results == {PlanMode.FAST_METADATA}
+
+
+# ── M7 ROUTING FIXES (A3-08 / A3-11) ──────────────────────────────────────────
+
+
+class TestRoutingOutcomes:
+    """Each case is a mechanism measured on tests/eval/routing_set.json."""
+
+    @pytest.mark.parametrize("query", ["Show index stats", "What types of files are indexed?"])
+    def test_fast_metadata_loads_stats(self, planner: QueryPlanner, query: str):
+        # A3-08: stats load only when intents["inventory"] is set; the route must set it.
+        plan = planner.plan(query)
+        assert plan.mode == PlanMode.FAST_METADATA
+        assert plan.intents["inventory"] is True
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "How many files does the build script copy into dist?",
+            "How big is the moon compared to Earth?",
+            "How much storage does a Raft log need per entry?",
+            "Show my notes on index funds",
+            "What are my indexed projects about?",
+        ],
+    )
+    def test_measure_on_a_non_corpus_subject_is_content(self, planner: QueryPlanner, query: str):
+        assert planner.plan(query).mode == PlanMode.FULL_RAG
+
+    def test_project_phrase_about_something_else_is_not_fast_project(self, planner: QueryPlanner):
+        plan = planner.plan("Summary of project timeline risks in my PM notes")
+        assert plan.mode != PlanMode.FAST_PROJECT
+
+    def test_latest_listing_wants_files_not_a_count(self, planner: QueryPlanner):
+        plan = planner.plan("Show my latest files")
+        assert plan.mode == PlanMode.FULL_RAG
+        assert plan.intents["latest"] is True
+
+    @pytest.mark.parametrize(
+        ("query", "key"),
+        [
+            ("What did I add most recently?", "latest"),
+            ("What have I been adding lately?", "latest"),
+            ("Which files were modified last?", "latest"),
+            ("Which PDFs are the heaviest?", "largest"),
+        ],
+    )
+    def test_recency_forms_are_detected(self, planner: QueryPlanner, query: str, key: str):
+        assert planner.plan(query).intents[key] is True
+
+    def test_trailing_about_names_no_topic(self, planner: QueryPlanner):
+        plan = planner.plan("Roughly how many notes and PDFs does it know about?")
+        assert plan.mode == PlanMode.FAST_METADATA

@@ -59,11 +59,21 @@ INVENTORY_RE = re.compile(
     re.IGNORECASE,
 )
 
+# M7 routing set: "recently", "lately", "modified last", "change today" and
+# "new since" were all missed, so recency questions loaded no file metadata.
 LATEST_RE = re.compile(
-    r"\b(?:latest|recent|newest|added lately|last updated|last modified)\b", re.IGNORECASE
+    r"\b(?:latest|recent|recently|newest|lately|new since|last updated|last modified|"
+    r"(?:modified|changed|change|updated|edited|touched)\s+(?:last|today|yesterday|this week))\b",
+    re.IGNORECASE,
 )
 LARGEST_RE = re.compile(
-    r"\b(?:largest|biggest|huge|oversized|most space|taking up space)\b", re.IGNORECASE
+    r"\b(?:largest|biggest|heaviest|huge|oversized|most space|taking up space)\b", re.IGNORECASE
+)
+# Words that ask about the indexed collection as a whole: they load folder
+# profiles (cheap) without routing anywhere new.
+_PROJECT_RE = re.compile(
+    r"project|overview|summary|\b(?:codebases?|repos|repositories|workspace|my folders|"
+    r"indexed folders?)\b"
 )
 FTS5_OPERATOR_RE = re.compile(r'["*^]|\bAND\b|\bOR\b|\bNOT\b|\bNEAR\b', re.IGNORECASE)
 
@@ -104,7 +114,7 @@ def determine_query_intent(query: str) -> dict[str, bool]:
         "inventory": bool(
             LATEST_RE.search(query) or LARGEST_RE.search(query) or "how many files" in q
         ),
-        "project": "project" in q or "overview" in q or "summary" in q,
+        "project": bool(_PROJECT_RE.search(q)),
         "latest": bool(LATEST_RE.search(query)),
         "largest": bool(LARGEST_RE.search(query)),
         "metadata_intent": is_metadata_intent(query),

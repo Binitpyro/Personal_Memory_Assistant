@@ -118,13 +118,55 @@ class QueryPlanner:
             "documents",
             "item",
             "items",
+            "indexed",
+            "pdf",
+            "pdfs",
+            "pma",
         }
     )
 
     # Negative evidence. An inventory phrase followed by a topic is a content
     # question about the corpus, not a question about the corpus's size:
     # "what's in my index about kinetics" is not "what's in my index".
-    _TOPIC_MARKERS = ("about", "regarding", "concerning", "mention", "say about", "related to")
+    # A marker counts only when a topic follows it: "what does it know about?"
+    # names no topic, "what's in my index about kinetics" does.
+    _TOPIC_RE = re.compile(r"\b(?:about|regarding|concerning|mention\w*|related to)\s+\w")
+
+    # Negative evidence of a different kind: the measure is applied to something
+    # that is not the indexed collection - "how many files does *the build
+    # script* copy", "how big is *the moon*". Any determiner phrase after a
+    # verb or preposition whose head is not a corpus noun marks a content
+    # question. Without this, letting FAST_METADATA load stats (A3-08) would
+    # turn every such hijack into a live canned file count.
+    _EXTERNAL_SUBJECT_RE = re.compile(
+        r"\b(?:in|of|for|from|by|on|does|do|did|is|are|was|were)\s+"
+        r"(?:the|a|an|this|that|these|those|my|your|his|her|their|its|our)\s+(\w+)"
+    )
+    _CORPUS_NOUNS = frozenset(
+        {
+            "index",
+            "indexed",
+            "library",
+            "collection",
+            "corpus",
+            "pma",
+            "storage",
+            "disk",
+            "drive",
+            "file",
+            "files",
+            "folder",
+            "folders",
+            "document",
+            "documents",
+            "project",
+            "projects",
+            "workspace",
+            "repos",
+            "codebase",
+            "codebases",
+        }
+    )
     _INVENTORY_MEASURES = frozenset(
         {
             "how many",
@@ -139,6 +181,8 @@ class QueryPlanner:
             "stats",
             "breakdown",
             "capacity",
+            "kinds",
+            "types",
         }
     )
 
@@ -163,21 +207,13 @@ class QueryPlanner:
         }
     )
 
-    # Listing / enumeration phrases — user wants a list, not synthesis ─────────
-    _LISTING_PHRASES = frozenset(
-        {
-            "list all",
-            "show all",
-            "list my",
-            "show my",
-            "list files",
-            "show files",
-            "list folders",
-            "show folders",
-            "give me a list",
-            "what are all",
-            "enumerate",
-        }
+    # Listing / enumeration — user wants a list, not synthesis ───────────────
+    # The corpus noun must be the object of the verb: "list all indexed
+    # folders", not "show my notes on index funds".
+    _LISTING_RE = re.compile(
+        r"\b(?:list|show|enumerate|give me a list of|what are)\s+(?:(?:all|my|the|of)\s+)*"
+        # A bare "indexed" ends the object; "my indexed projects" is not a file listing.
+        r"(?:indexed\s+)?(?:files|folders|documents|indexed\b(?!\s+\w))\b"
     )
 
     def plan(self, query: str) -> QueryPlan:
@@ -195,14 +231,24 @@ class QueryPlanner:
         has_composite_inventory = bool(words & self._INVENTORY_NOUNS) and any(
             m in query_lower if " " in m else m in words for m in self._INVENTORY_MEASURES
         )
-        # Listing intent: "list/show/enumerate" + file/folder/index nouns
-        has_listing_intent = any(p in query_lower for p in self._LISTING_PHRASES) and any(
-            t in query_lower for t in ("file", "folder", "document", "index", "indexed")
+        has_listing_intent = bool(self._LISTING_RE.search(query_lower))
+        names_a_topic = bool(self._TOPIC_RE.search(query_lower))
+        names_external_subject = any(
+            w not in self._CORPUS_NOUNS for w in self._EXTERNAL_SUBJECT_RE.findall(query_lower)
         )
-        names_a_topic = any(m in query_lower for m in self._TOPIC_MARKERS)
+        # Newest/largest questions want a file list, which the canned count is not.
+        wants_file_list = intents["latest"] or intents["largest"]
         if (
-            has_inventory_phrase or has_composite_inventory or has_listing_intent
-        ) and not names_a_topic:
+            (has_inventory_phrase or has_composite_inventory or has_listing_intent)
+            and not names_a_topic
+            and not names_external_subject
+            and not wants_file_list
+        ):
+            # A3-08: file stats load only when intents["inventory"] is set, and
+            # determine_query_intent knew a narrower set of phrases than this
+            # router - so most inventory questions reached FAST_METADATA with no
+            # stats and fell through to RAG. The route is now the one decision.
+            intents["inventory"] = True
             return QueryPlan(
                 mode=PlanMode.FAST_METADATA,
                 original_query=query,
@@ -211,7 +257,7 @@ class QueryPlanner:
             )
 
         # 2. Specific project context fast path
-        if intents["metadata_intent"] and intents["project"]:
+        if intents["metadata_intent"] and intents["project"] and not names_external_subject:
             return QueryPlan(
                 mode=PlanMode.FAST_PROJECT, original_query=query, intents=intents, keywords=keywords
             )

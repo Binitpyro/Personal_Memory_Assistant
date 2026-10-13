@@ -9,6 +9,8 @@ import json
 import zipfile
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from app.config import settings
 from app.indexing.extractors import EXTRACTORS, ExtractMeta
 from app.indexing.extractors.csv_extractor import CsvExtractor
@@ -221,6 +223,28 @@ class TestPdfExtractor:
         with patch.dict("sys.modules", {"pypdf": mock_pypdf}):
             result = self.ext.extract(fake_path, MAX_SIZE)
         assert "Page 2 content" in result
+
+    @pytest.mark.parametrize("how", ["consumed", "encrypted", "abandoned"])
+    def test_reader_closed_on_every_exit(self, tmp_path, how):
+        # An unclosed PdfReader keeps the whole file plus its parsed objects in
+        # reference cycles until a gen-2 GC (M6 follow-up: ~55 MB on College).
+        fake_path = tmp_path / "doc.pdf"
+        fake_path.touch()
+        mock_pypdf = MagicMock()
+        page = MagicMock()
+        page.extract_text.return_value = "text"
+        mock_reader = MagicMock()
+        mock_reader.is_encrypted = how == "encrypted"
+        mock_reader.pages = [page, page]
+        mock_pypdf.PdfReader.return_value = mock_reader
+        with patch.dict("sys.modules", {"pypdf": mock_pypdf}):
+            gen = self.ext.extract_stream(fake_path, MAX_SIZE)
+            next(gen)
+            if how == "abandoned":
+                gen.close()
+            else:
+                list(gen)
+        mock_reader.close.assert_called_once()
 
 
 # ── PDF OCR gate integration ─────────────────────────────────────────────────

@@ -71,6 +71,10 @@ class PdfExtractor:
             logger.warning("pypdf is not installed; skipping PDF extraction for %s", path.name)
             return
 
+        # Closed in `finally`: PdfReader(path) reads the whole file into a BytesIO
+        # and its objects form reference cycles, so an unclosed reader stays
+        # resident until a gen-2 GC - ~55 MB 60 s after a College ingest (M6).
+        reader = None
         try:
             reader = PdfReader(str(path), strict=False)
             total = 0
@@ -136,6 +140,9 @@ class PdfExtractor:
                     reason="corrupt",
                 )
             return
+        finally:
+            if reader is not None:
+                reader.close()
 
         if ocr_on:
             if ocr_pages:

@@ -116,6 +116,25 @@ def _folder_match(column: str, folder: str) -> tuple[str, tuple[Any, ...]]:
 # meant to catch a leak, not to police slow queries.
 _READ_ACQUIRE_TIMEOUT_S = 30.0
 
+# Nodes within `max_depth` undirected hops of a node. UNION, not UNION ALL: the
+# join walks edges both ways, so UNION ALL re-entered visited nodes and produced
+# degree**depth rows (A -> B -> A -> ...), which the caller then joined against
+# itself twice. UNION bounds it at nodes * (depth + 1). Params: (node_id, max_depth).
+GRAPH_NEIGHBOURHOOD_CTE = """
+    WITH RECURSIVE
+        connected_nodes(id, depth) AS (
+            SELECT ? AS id, 0 AS depth
+            UNION
+            SELECT CASE
+                WHEN ke.source = cn.id THEN ke.target
+                ELSE ke.source
+            END AS id, cn.depth + 1 AS depth
+            FROM kg_edges ke
+            JOIN connected_nodes cn ON ke.source = cn.id OR ke.target = cn.id
+            WHERE cn.depth < ?
+        )
+"""
+
 
 class ReadPoolExhaustedError(RuntimeError):
     """No read connection became available within `_READ_ACQUIRE_TIMEOUT_S`.
@@ -2380,24 +2399,15 @@ class DatabaseManager:
 
     async def get_graph_edges(self, node_id: str, max_depth: int = 2) -> list[dict[str, Any]]:
         """Retrieve 1-hop and 2-hop edges for a given node using recursive CTE."""
-        query = """
-            WITH RECURSIVE
-                connected_nodes(id, depth) AS (
-                    SELECT ? AS id, 0 AS depth
-                    UNION ALL
-                    SELECT CASE
-                        WHEN ke.source = cn.id THEN ke.target
-                        ELSE ke.source
-                    END AS id, cn.depth + 1 AS depth
-                    FROM kg_edges ke
-                    JOIN connected_nodes cn ON ke.source = cn.id OR ke.target = cn.id
-                    WHERE cn.depth < ?
-                )
+        query = (
+            GRAPH_NEIGHBOURHOOD_CTE  # nosec B608 # noqa: S608 - constant SQL, values bound
+            + """
             SELECT DISTINCT e.source, e.target, e.relation, e.weight, e.properties
             FROM kg_edges e
-            JOIN connected_nodes n1 ON e.source = n1.id
-            JOIN connected_nodes n2 ON e.target = n2.id
+            WHERE e.source IN (SELECT id FROM connected_nodes)
+              AND e.target IN (SELECT id FROM connected_nodes)
         """
+        )
         async with self._get_read_conn() as conn:  # noqa: SIM117
             async with conn.execute(query, (node_id, max_depth)) as cursor:
                 rows = await cursor.fetchall()

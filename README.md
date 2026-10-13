@@ -59,7 +59,7 @@ Local-first is enforced in the code, not just claimed in the pitch.
 - **Node.js 20+**
 - **Rust Toolchain** (Latest stable)
 
-**Hardware.** PMA targets budget machines on purpose: a ~4 GB VRAM GPU (GTX 1650 / RX 580 class) and an 8 GB RAM laptop. It holds roughly 196 MB resident while serving queries (Windows working set, idle or serving, `PMA_LANCEDB_MODE=portable`, measured 2026-08-20; resident size on Linux reads higher). Bulk indexing is a bounded transient that peaked 535 MB above idle on a 403 MB document corpus under the same conditions; a 2026-10 audit read higher peaks on Linux and the return to baseline afterwards has not been re-measured.
+**Hardware.** PMA targets budget machines on purpose: a ~4 GB VRAM GPU (GTX 1650 / RX 580 class) and an 8 GB RAM laptop. It holds roughly 196-248 MB resident when idle with models loaded (Windows working set, `PMA_LANCEDB_MODE=portable`, measured 2026-08-20 and 2026-10-13; resident size on Linux reads higher). Bulk indexing is a bounded transient that peaked 535 MB above idle on a 403 MB document corpus under the same conditions (567-632 MB on a 479 MB corpus, 2026-10). It does not return all the way: 60 s after a large ingest the working set sits about 190 MB above idle, mostly allocator fragmentation and database page caches, all of which Windows can page out under memory pressure. Serving queries holds about 500 MB, with brief spikes near 1.4 GB.
 
 ### 4.2 Quick Start (Windows)
 Copy the example configuration, then choose the development workflow you need:

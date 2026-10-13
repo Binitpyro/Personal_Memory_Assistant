@@ -21,10 +21,8 @@ from app.project_constants import (
     RAG_CACHE_MAX_SIZE,
     RETRIEVAL_CACHE_MAX_SIZE,
     build_context_prefix,
-    determine_query_intent,
 )
 from app.search.context_builder import (
-    append_inventory_type_lines,
     append_project_profile_lines,
     build_context,
 )
@@ -110,42 +108,21 @@ async def _append_largest_files(lines: list[str], db: DatabaseManager):
             lines.append(f"- {Path(r[0]).name} ({round(r[1] / (1024 * 1024), 2)} MB)")
 
 
-async def _get_metadata_insights(
-    query: str,
-    db: DatabaseManager,
-    file_stats: dict[str, Any] | None,
-    folder_profiles: list[dict[str, Any]],
-) -> str | None:
-    """Gather factual metadata insights based on the user query."""
-    intent = determine_query_intent(query)
+async def _get_metadata_insights(intents: dict[str, bool], db: DatabaseManager) -> str | None:
+    """Newest / largest files for a recency question, or None.
 
-    if not (
-        intent.get("inventory")
-        or intent.get("project")
-        or intent.get("latest")
-        or intent.get("largest")
-    ):
+    Only what nothing else carries: totals reach the context as file_stats and
+    folder profiles as folder_profiles_text. This was never called before M7, so
+    "what did I add most recently?" got totals and no file names.
+    """
+    if not (intents.get("latest") or intents.get("largest")):
         return None
-
     lines: list[str] = ["=== Metadata Insights (Factual Source of Truth) ==="]
-
-    if intent["latest"]:
+    if intents.get("latest"):
         await _append_latest_files(lines, db)
-
-    if intent.get("largest"):
+    if intents.get("largest"):
         await _append_largest_files(lines, db)
-
-    if intent.get("inventory") and file_stats:
-        file_count = file_stats["total_files"]
-        size_mb = file_stats["total_size_mb"]
-        lines.append(f"Total indexed files: {file_count}. Total size: ~{size_mb} MB.")
-        append_inventory_type_lines(lines, file_stats)
-
-    if intent["project"] and folder_profiles:
-        append_project_profile_lines(lines, folder_profiles)
-
-    lines.append("=" * 50)
-    return "\n".join(lines)
+    return "\n".join(lines) if len(lines) > 1 else None
 
 
 def _build_fast_answer(
@@ -1408,6 +1385,7 @@ async def full_rag(
         max_tokens=budget,
         file_stats=file_stats,
         folder_profiles_text=folder_profiles_text,
+        metadata_insights=await _get_metadata_insights(plan.intents, db),
         graph_paths_text=graph_paths_text,
         model_class=model_class,
     )
@@ -1809,6 +1787,7 @@ async def stream_rag(
         max_tokens=budget,
         file_stats=file_stats,
         folder_profiles_text=folder_profiles_text,
+        metadata_insights=await _get_metadata_insights(plan.intents, db),
         graph_paths_text=graph_paths_text,
         model_class=model_class,
     )

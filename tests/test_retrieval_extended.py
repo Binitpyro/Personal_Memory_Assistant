@@ -125,13 +125,13 @@ async def test_determine_metadata_insights():
     ]
 
     # query with latest intent
-    res = await retrieval._get_metadata_insights("show the latest files", db, stats, profiles)
+    res = await retrieval._get_metadata_insights({"latest": True}, db)
     assert res is not None
     assert "Metadata Insights" in res
     assert "a.py" in res
 
     # query with largest intent
-    res2 = await retrieval._get_metadata_insights("what is the largest file", db, stats, profiles)
+    res2 = await retrieval._get_metadata_insights({"largest": True}, db)
     assert res2 is not None
     assert "a.py" in res2
 

@@ -456,11 +456,11 @@ async def test_get_metadata_insights_latest_and_largest():
     )
 
     # 1. Query "latest files"
-    insights = await _get_metadata_insights("what are the latest files?", db, None, [])
+    insights = await _get_metadata_insights({"latest": True}, db)
     assert "latest.py" in insights
 
     # 2. Query "largest files"
-    insights = await _get_metadata_insights("what is the biggest file?", db, None, [])
+    insights = await _get_metadata_insights({"largest": True}, db)
     assert "largest.py" in insights
     assert "10.0 MB" in insights
 

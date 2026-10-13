@@ -1098,3 +1098,112 @@ async def test_nodes_whose_chunk_id_lives_only_in_json_are_backfilled(tmp_path: 
     assert rows["orphaned_col"] == 7, "a recoverable node was left unreachable"
     assert rows["dangling"] is None, "a node pointing at a deleted chunk must stay NULL"
     assert 7 in seeds, "the back-filled node is still not reachable as a graph seed"
+
+
+# ── M7: recency questions see the newest / largest files ─────────────────────
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("intents", "expected"),
+    [
+        ({"inventory": True, "project": False, "latest": True}, "latest.md"),
+        ({"inventory": True, "project": False, "largest": True}, "largest.md"),
+        ({"inventory": False, "project": False}, None),
+    ],
+)
+async def test_full_rag_passes_recency_file_list_to_context(monkeypatch, intents, expected):
+    """_get_metadata_insights was never called, so "what did I add most recently?"
+    reached the LLM with totals and no file names."""
+    results = [{"chunk_id": 1, "text": "t", "file_path": "d.md", "score": 0.9}]
+    monkeypatch.setattr(
+        retrieval, "_gather_full_rag_inputs", AsyncMock(return_value=(results, None, ""))
+    )
+    monkeypatch.setattr(retrieval, "_check_rag_response_cache", lambda *a, **k: None)
+    monkeypatch.setattr(
+        retrieval, "_check_semantic_query_cache", AsyncMock(return_value=(None, None))
+    )
+    monkeypatch.setattr(retrieval, "_load_query_metadata", AsyncMock(return_value=([], None)))
+    seen: dict = {}
+
+    def fake_build_context(*a, **k):
+        seen.update(k)
+        return "ctx", 10
+
+    monkeypatch.setattr(retrieval, "build_context", fake_build_context)
+
+    db = MagicMock()
+
+    def fake_query(sql, *a):
+        if "ORDER BY modified_at" in sql:
+            return [("C:/n/latest.md", "2026-10-13T09:00:00")]
+        if "ORDER BY size" in sql:
+            return [("C:/n/largest.md", 3 * 1024 * 1024)]
+        return []  # attach_parent_windows: no neighbours
+
+    db.execute_query = AsyncMock(side_effect=fake_query)
+    planner = MagicMock()
+    planner.plan.return_value = MagicMock(
+        mode=PlanMode.FULL_RAG, intents=intents, original_query="q", keywords=[]
+    )
+    llm = MagicMock()
+    llm.get_model_class.return_value = "3b_local"
+    llm.generate_answer = AsyncMock(return_value="answer")
+
+    await retrieval.full_rag("q", db, MagicMock(), MagicMock(), llm, planner)
+
+    insights = seen["metadata_insights"]
+    if expected is None:
+        assert insights is None
+    else:
+        assert expected in insights
+
+
+class _ContextBuiltError(Exception):
+    pass
+
+
+@pytest.mark.asyncio
+async def test_stream_rag_passes_recency_file_list_to_context(monkeypatch):
+    """Same wiring on the streaming path, which has its own build_context call."""
+    results = [{"chunk_id": 1, "text": "t", "file_path": "d.md", "score": 0.9}]
+    monkeypatch.setattr(
+        retrieval, "_gather_full_rag_inputs", AsyncMock(return_value=(results, None, ""))
+    )
+    monkeypatch.setattr(retrieval, "_maybe_run_agentic_loop", AsyncMock(return_value=(None, None)))
+    monkeypatch.setattr(retrieval, "_load_query_metadata", AsyncMock(return_value=([], None)))
+    monkeypatch.setattr(retrieval, "_extract_knowledge_gaps", AsyncMock(return_value=[]))
+    seen: dict = {}
+
+    def fake_build_context(*a, **k):
+        seen.update(k)
+        raise _ContextBuiltError
+
+    monkeypatch.setattr(retrieval, "build_context", fake_build_context)
+
+    def fake_query(sql, *a):
+        if "ORDER BY modified_at" in sql:
+            return [("C:/n/latest.md", "2026-10-13T09:00:00")]
+        return []
+
+    db = MagicMock()
+    db.execute_query = AsyncMock(side_effect=fake_query)
+    emb = MagicMock()
+    emb.embed_query = AsyncMock(return_value=[0.1] * 384)
+    lance = MagicMock()
+    lance.search_cache = AsyncMock(return_value=None)
+    planner = MagicMock()
+    planner.plan.return_value = MagicMock(
+        mode=PlanMode.FULL_RAG,
+        intents={"inventory": True, "project": False, "latest": True},
+        original_query="q",
+        keywords=[],
+    )
+    llm = MagicMock()
+    llm.get_model_class.return_value = "3b_local"
+
+    with pytest.raises(_ContextBuiltError):
+        async for _ in retrieval.stream_rag("q", db, emb, lance, llm, planner):
+            pass
+
+    assert "latest.md" in seen["metadata_insights"]

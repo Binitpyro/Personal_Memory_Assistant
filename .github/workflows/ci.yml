@@ -138,6 +138,12 @@ jobs:
         working-directory: frontend/src-tauri
         run: cargo clippy --all-targets -- -D warnings
 
+      # A8-24: Run-Tests.bat ran these locally but CI never did. Windows-only
+      # tests are #[cfg(windows)] and skip here.
+      - name: Cargo Test (src-tauri)
+        working-directory: frontend/src-tauri
+        run: cargo test
+
       - name: Cargo Deny (src-tauri)
         working-directory: frontend/src-tauri
         run: cargo deny check

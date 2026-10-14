@@ -7,7 +7,9 @@ import pluginSecurity from 'eslint-plugin-security'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
 export default defineConfig([
-  globalIgnores(['dist']),
+  // src-tauri/target: a release build embeds the SPA there as compressed .js
+  // assets, which fail to parse and turned the gate red.
+  globalIgnores(['dist', 'src-tauri/target']),
   pluginSecurity.configs.recommended,
   {
     files: ['**/*.{ts,tsx}'],

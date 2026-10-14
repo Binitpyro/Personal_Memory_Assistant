@@ -26,7 +26,7 @@ _ENCODING: Any = None
 # cache (CLAUDE.md 1.4). The file ships in app/assets/tiktoken under tiktoken's
 # cache name (sha1 of the blob URL), so TIKTOKEN_CACHE_DIR makes get_encoding
 # load it offline. The same path resolves inside a PyInstaller bundle, where
-# --add-data "app;app" puts it under _MEIPASS/app.
+# --add-data "app/assets;app/assets" puts it under _MEIPASS/app/assets.
 _BUNDLED_BPE_DIR = Path(__file__).resolve().parent.parent / "assets" / "tiktoken"
 _BPE_CACHE_KEY = "9b5ad71b2ce5302211f9c61530b329a4922fc6a4"
 _BPE_SHA256 = "223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7"

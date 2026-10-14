@@ -215,7 +215,7 @@ export function LibraryPage() {
       <div className="flex items-center justify-between">
         <div>
           <div className="flex items-baseline gap-3">
-            <span aria-hidden className="font-mono text-[10px] tracking-[.1em] text-text-tertiary">02</span>
+            <span aria-hidden className="font-mono text-[11px] tracking-[.1em] text-text-tertiary">02</span>
             <h1 className="stock text-[28px] leading-none m-0">Library</h1>
           </div>
           <p className="text-text-secondary mt-2 text-sm">
@@ -260,7 +260,7 @@ export function LibraryPage() {
 
       {/* The standing facts, in edge type. Casing is load-bearing for
           LibraryPage.test.tsx; the caps are CSS. */}
-      <dl className="flex flex-wrap gap-x-10 gap-y-2 m-0 font-mono text-[10.5px] tracking-[.12em] uppercase">
+      <dl className="flex flex-wrap gap-x-10 gap-y-2 m-0 font-mono text-[11px] tracking-[.12em] uppercase">
         {[
           { label: 'Scan Status', value: scanStatus },
           // Most-used once the user has actually run anything; until then there

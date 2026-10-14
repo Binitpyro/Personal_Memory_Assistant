@@ -323,7 +323,7 @@ body {
 }
 .edge-type {
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: 11px;
   font-weight: 500;
   letter-spacing: .12em;
   text-transform: uppercase;
@@ -341,7 +341,7 @@ body {
   background: var(--pma-paper);
   color: var(--pma-paper-ink);
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: 11px;
   line-height: 1.5;
   -webkit-mask: linear-gradient(#000 0 0) top / 100% calc(100% - 8px) no-repeat, conic-gradient(from -45deg at bottom, #000 90deg, #0000 0) bottom / 16px 8px repeat-x;
   mask: linear-gradient(#000 0 0) top / 100% calc(100% - 8px) no-repeat, conic-gradient(from -45deg at bottom, #000 90deg, #0000 0) bottom / 16px 8px repeat-x;

@@ -145,7 +145,7 @@ const ERROR_SENTENCES: Record<string, string> = {
 /** A fault: fog, a title, what still worked. Lives in the turn that failed, so it cannot scroll away from it. */
 const StreamError = ({ error, hasContent }: Readonly<{ error: NonNullable<Message['error']>; hasContent: boolean }>) => (
   <div className="border border-warning p-3 text-sm" role="alert">
-    <span className="block font-mono text-[10.5px] font-semibold tracking-[.12em] uppercase text-warning mb-1">
+    <span className="block font-mono text-[11px] font-semibold tracking-[.12em] uppercase text-warning mb-1">
       <span aria-hidden>■ </span>{hasContent ? 'Answer cut short' : 'No answer written'}
     </span>
     {(error.code && ERROR_SENTENCES[error.code]) || error.text}

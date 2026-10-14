@@ -177,7 +177,7 @@ export function ThemeToggle({ className = '' }: Readonly<{ className?: string }>
       aria-pressed={on}
       title={on ? 'Lights on — switch to Safelight' : 'Safelight — switch to Lights on'}
       className={
-        `w-14 h-8 border font-mono text-[10px] leading-[1.15] tracking-[.1em] uppercase transition-colors ${
+        `w-14 h-8 border font-mono text-[11px] leading-[1.15] tracking-[.1em] uppercase transition-colors ${
           on ? 'border-text-primary text-text-primary' : 'border-edge text-text-tertiary hover:text-text-primary'
         } ${className}`
       }

@@ -76,7 +76,7 @@ export function InsightsPage() {
       <div className="flex items-center justify-between">
         <div>
           <div className="flex items-baseline gap-3">
-            <span aria-hidden className="font-mono text-[10px] tracking-[.1em] text-text-tertiary">04</span>
+            <span aria-hidden className="font-mono text-[11px] tracking-[.1em] text-text-tertiary">04</span>
             <h1 className="stock text-[28px] leading-none m-0">Insights</h1>
           </div>
           <p className="text-text-secondary mt-2 text-sm">

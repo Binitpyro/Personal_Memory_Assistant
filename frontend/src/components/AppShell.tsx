@@ -180,7 +180,7 @@ export function AppShell() {
               {({ isActive }) => (
                 <>
                   {isActive && <span aria-hidden className="absolute left-0 top-[15px] bottom-[15px] w-0.5 bg-plate" />}
-                  <span aria-hidden className={`font-mono text-[10px] tracking-[.1em] ${isActive ? 'text-accent' : ''}`}>
+                  <span aria-hidden className={`font-mono text-[11px] tracking-[.1em] ${isActive ? 'text-accent' : ''}`}>
                     {String(i + 1).padStart(2, '0')}
                   </span>
                   <span className="font-bold [font-stretch:70%] text-xs tracking-[.05em] uppercase">{label}</span>
@@ -211,7 +211,7 @@ export function AppShell() {
       </div>
 
       {/* ── Status bar ─────────────────────────────────────────────── */}
-      <footer className="h-7 shrink-0 flex items-center gap-[18px] px-3.5 border-t border-rule text-text-tertiary font-mono text-[10px] tracking-[.1em] uppercase whitespace-nowrap overflow-hidden">
+      <footer className="h-7 shrink-0 flex items-center gap-[18px] px-3.5 border-t border-rule text-text-tertiary font-mono text-[11px] tracking-[.1em] uppercase whitespace-nowrap overflow-hidden">
         {/* Degraded optional subsystems. A fault the user cannot see is the
             whole problem this reports, so it is never hover-gated. */}
         {downSubsystems.length > 0 && (

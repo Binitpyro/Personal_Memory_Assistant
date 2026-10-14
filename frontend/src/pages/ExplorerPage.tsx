@@ -82,7 +82,7 @@ function FolderNode({ node, depth, onSelect, selectedPath, onDeleteFolder, delet
           type="button"
           onClick={handleDelete}
           disabled={isDeleting}
-          className="tap-24 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 px-1 font-mono text-[10px] tracking-[.1em] uppercase text-text-secondary hover:text-error transition-[opacity,color] disabled:opacity-50 disabled:cursor-not-allowed mr-2"
+          className="tap-24 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 px-1 font-mono text-[11px] tracking-[.1em] uppercase text-text-secondary hover:text-error transition-[opacity,color] disabled:opacity-50 disabled:cursor-not-allowed mr-2"
           aria-label={`Delete the index for ${node.name}`}
         >
           {isDeleting ? 'Deleting…' : 'Delete'}
@@ -470,7 +470,7 @@ export function ExplorerPage() {
               numerals: it abbreviated the word directly beneath it, and no other
               page carried one. */}
           <div className="flex items-baseline gap-3">
-            <span aria-hidden className="font-mono text-[10px] tracking-[.1em] text-text-tertiary">03</span>
+            <span aria-hidden className="font-mono text-[11px] tracking-[.1em] text-text-tertiary">03</span>
             <h1 className="stock text-[28px] leading-none m-0 text-text-primary">Explorer</h1>
           </div>
           <p className="text-text-secondary mt-1 text-sm flex items-center gap-3">

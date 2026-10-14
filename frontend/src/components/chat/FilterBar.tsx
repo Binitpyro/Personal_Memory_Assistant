@@ -24,7 +24,7 @@ export function FilterBar({
 }: FilterBarProps) {
   // The ask bar's scope: what this question searches. Each select is named,
   // because its first option is a value, not a label.
-  const select = 'h-[34px] max-w-[9.5rem] bg-transparent border border-edge px-2 font-mono text-[10.5px] tracking-[.1em] uppercase text-text-primary';
+  const select = 'h-[34px] max-w-[9.5rem] bg-transparent border border-edge px-2 font-mono text-[11px] tracking-[.1em] uppercase text-text-primary';
   return (
     <div className="flex items-center gap-1.5">
       <select
@@ -72,7 +72,7 @@ export function FilterBar({
             setSelectedFolderTag('')
             setSelectedMode('')
           }}
-          className="tap-24 font-mono text-[10px] tracking-[.1em] uppercase text-text-secondary hover:text-text-primary underline underline-offset-4"
+          className="tap-24 font-mono text-[11px] tracking-[.1em] uppercase text-text-secondary hover:text-text-primary underline underline-offset-4"
         >
           Clear filters
         </button>

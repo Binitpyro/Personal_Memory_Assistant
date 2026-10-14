@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import time
 from typing import Any
 
 import keyring
@@ -334,53 +333,6 @@ async def validate_provider(provider_id: str, payload: ValidatePayload) -> Valid
     try:
         res = await provider.validate()
         return res
-    finally:
-        await provider.close()
-
-
-@providers_router.post("/{provider_id}/self_test")
-async def self_test_provider(provider_id: str):
-    if provider_id not in PROVIDER_IDS:
-        raise HTTPException(status_code=400, detail=f"Unknown provider: {provider_id}")
-
-    data = await asyncio.to_thread(read_settings)
-    data = migrate_settings_if_needed(data)
-    per_provider = data.get("llm", {}).get("per_provider", {})
-    provider_settings = per_provider.get(provider_id, {})
-    base_url = provider_settings.get("base_url") or env_base_url(provider_id)
-    default_model = provider_settings.get("default_model")
-
-    env_key_name = f"{provider_id}_api_key"
-    api_key = getattr(settings, env_key_name, None)
-    if not api_key:
-        try:
-            api_key = await asyncio.to_thread(keyring.get_password, "pma_backend", provider_id)
-        except Exception:
-            api_key = None
-
-    provider = create_provider(
-        provider_id, api_key=api_key, base_url=base_url, default_model=default_model
-    )
-
-    try:
-        test_model = default_model
-        if not test_model:
-            models = await provider.list_models()
-            if models:
-                test_model = models[0]["id"]
-            else:
-                raise HTTPException(status_code=400, detail="No models available to test.")
-
-        messages = [{"role": "user", "content": "Reply with the single word: ok"}]
-        start_time = time.time()
-
-        res = await provider.chat(messages, model=test_model, temperature=0.0, max_tokens=5)
-        latency = int((time.time() - start_time) * 1000)
-
-        ok = "ok" in res.lower()
-        return {"ok": ok, "latency_ms": latency, "response": res, "model_used": test_model}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
     finally:
         await provider.close()
 

@@ -841,7 +841,6 @@ export const validateProvider = (id: string, body: { api_key?: string | null; ba
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
   });
-export const selfTestProvider = (id: string) => json<ValidationResponse>(`/providers/${id}/self_test`, { method: 'POST' });
 export const setProviderKey = (id: string, api_key: string | null, base_url?: string | null) =>
   json<{ status: string }>(`/providers/${id}/key`, {
     method: 'PUT',

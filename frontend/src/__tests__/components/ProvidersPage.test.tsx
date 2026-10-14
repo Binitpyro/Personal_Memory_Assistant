@@ -40,7 +40,6 @@ vi.mock('../../api', () => ({
   setLLMPreferences: vi.fn(),
   getProviderSettings: vi.fn(),
   setProviderSettings: vi.fn(),
-  selfTestProvider: vi.fn(),
   validateProvider: vi.fn(),
   setProviderKey: vi.fn().mockResolvedValue({ status: 'ok' }),
   deleteProviderKey: vi.fn().mockResolvedValue({ status: 'ok' }),
@@ -147,5 +146,46 @@ describe('ProvidersPage model list', () => {
     expect(await screen.findByText('no-ctx-model')).toBeDefined();
     expect(screen.getByText('8,192 ctx')).toBeDefined();
     expect(screen.getAllByText(/ctx$/)).toHaveLength(1);
+  });
+});
+
+describe('ProvidersPage Validate All', () => {
+  const cloud = {
+    ...editable,
+    spec: { ...editable.spec, id: 'groq', display_name: 'Groq', kind: 'cloud', base_url_editable: false },
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.providers = [editable, cloud];
+    state.routingSettings = { provider: 'auto', fallback_chain: [], cloud_privacy_consent: false };
+  });
+
+  it('renders the model list after Validate All instead of crashing', async () => {
+    // It called /self_test, whose reply has no `models`, so a passing provider
+    // hit `validationResult.models.length` and took the page down.
+    vi.mocked(validateProvider).mockResolvedValue({
+      ok: true,
+      latency_ms: 5,
+      models: [{ id: 'all-model', context_length: null, pricing_hint: 0, family: 'chat' }],
+      error: null,
+      error_code: null,
+      server_time: null,
+    } as never);
+    renderWithProviders(<ProvidersPage />);
+    selectProvider();
+    fireEvent.click(screen.getByRole('button', { name: /Validate All/i }));
+
+    expect(await screen.findByText('all-model')).toBeDefined();
+    expect(validateProvider).toHaveBeenCalledWith('openai_compatible', {});
+  });
+
+  it('does not reach a cloud provider without consent', async () => {
+    vi.mocked(validateProvider).mockResolvedValue({ ok: false, latency_ms: 0, models: [] } as never);
+    renderWithProviders(<ProvidersPage />);
+    fireEvent.click(screen.getByRole('button', { name: /Validate All/i }));
+
+    await waitFor(() => expect(validateProvider).toHaveBeenCalledTimes(1));
+    expect(validateProvider).not.toHaveBeenCalledWith('groq', expect.anything());
   });
 });

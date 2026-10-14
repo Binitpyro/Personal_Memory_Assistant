@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useId } from 'react';
 import {
   getProviders,
-  selfTestProvider,
+  validateProvider,
   setLLMPreferences,
   getLLMPreferences,
   getProviderSettings,
@@ -186,8 +186,12 @@ export function ProvidersPage() {
     setIsValidatingAll(true);
     const results: Record<string, ValidationResponse> = {};
     for (const p of providers) {
+      // Same reach as the row dot: unconfigured rows show nothing, and cloud
+      // rows stay behind the consent gate dispatch uses.
+      if (!p.is_set && p.spec.kind !== 'local') continue;
+      if ((p.spec.kind === 'cloud' || p.spec.kind === 'aggregator') && !routingSettings?.cloud_privacy_consent) continue;
       try {
-        const res = await selfTestProvider(p.spec.id);
+        const res = await validateProvider(p.spec.id, {});
         results[p.spec.id] = res;
       } catch (err: any) {
         results[p.spec.id] = {
@@ -200,7 +204,7 @@ export function ProvidersPage() {
         };
       }
     }
-    setValidationStatuses(results);
+    setValidationStatuses(prev => ({ ...prev, ...results }));
     if (results[selectedId]) {
       setValidationResult(results[selectedId]);
     }

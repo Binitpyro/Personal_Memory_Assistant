@@ -14,14 +14,16 @@ import { useDreamscapeStore } from '../store/dreamscapeStore';
 import { CACHE_KEYS } from '../cacheKeys'
 
 /**
- * Ask, composed as the Safelight board draws it: the ask bar across the top,
- * then three panes — Frames (what the latest answer rests on), Answer (the
- * conversation, question in stock and answer in print) and the Receipt in its
- * printer slot. The window's grain crawls while PMA searches and writes.
+ * Ask, composed from the Safelight board: three panes — Frames (what the
+ * latest answer rests on), Answer (the conversation, question in stock and
+ * answer in print) and the Receipt in its printer slot — with the ask bar
+ * across the bottom. The window's grain crawls while PMA searches and writes.
  *
- * One deliberate departure: the board shows one answer at a time. The Answer
- * pane keeps the whole conversation, so a follow-up keeps its visible
- * context; Frames and Receipt follow the latest answer.
+ * Two deliberate departures. The board puts the ask bar across the top; users
+ * looked for it under the conversation, where every chat keeps its composer.
+ * And the board shows one answer at a time, while the Answer pane keeps the
+ * whole conversation, so a follow-up keeps its visible context; Frames and
+ * Receipt follow the latest answer.
  */
 export function SearchPage() {
   const selectedChunks = useDreamscapeStore(state => state.selectedChunks);
@@ -33,6 +35,15 @@ export function SearchPage() {
   const [selectedFileType, setSelectedFileType] = useState('');
   const [selectedFolderTag, setSelectedFolderTag] = useState('');
   const [selectedMode, setSelectedMode] = useState('');
+  // The receipt is per-answer detail, not part of the conversation, so its
+  // column is hidden until asked for. Remembered across visits.
+  const [showReceipt, setShowReceipt] = useState(() => localStorage.getItem('pma_show_receipt') === 'true');
+  const toggleReceipt = () => {
+    setShowReceipt(v => {
+      localStorage.setItem('pma_show_receipt', String(!v));
+      return !v;
+    });
+  };
 
   const { data: historyData, refetch: refetchHistory } = useApi(getQueryHistory, { cacheKey: CACHE_KEYS.queryHistory });
 
@@ -161,7 +172,136 @@ export function SearchPage() {
 
   return (
     <div className="sl-askscreen">
-      {/* The ask bar: a lamp Q., the question, its scope, the model, and the plate. */}
+      <div className={showReceipt ? 'sl-panes' : 'sl-panes sl-panes--no-receipt'}>
+        <FramesPanel
+          message={latestAnswer}
+          onForceInclude={(chunkId) => void handleSearch('', chunkId)}
+        />
+
+        <section className="sl-answerpane" aria-label="Answer">
+          <div className="sl-panehead">
+            <span>Answer</span>
+            <span className="relative flex items-center gap-4">
+              <button
+                type="button"
+                className={paneLink}
+                onClick={() => setShowHistory(v => !v)}
+                aria-expanded={showHistory}
+              >
+                {history.length} recent <span aria-hidden>▾</span>
+              </button>
+              <button type="button" className={paneLink} onClick={resetChat}>
+                <span aria-hidden>↻</span> New chat
+              </button>
+              {/* Lit and underlined while on, so its state does not depend on
+                  noticing the column appear. */}
+              <button
+                type="button"
+                className={`${paneLink} aria-pressed:text-text-primary aria-pressed:underline`}
+                onClick={toggleReceipt}
+                aria-pressed={showReceipt}
+              >
+                Receipt
+              </button>
+              {history.length > 0 && (
+                <button type="button" className={paneLink} onClick={handleClearHistory}>
+                  Clear history
+                </button>
+              )}
+              {/* A plain list of buttons, not role="listbox": a listbox promises
+                  arrow-key selection, and these are one-shot actions that Tab
+                  already reaches. */}
+              {showHistory && history.length > 0 && (
+                <div className="absolute right-0 top-full mt-2 w-[26rem] bg-raised border border-rule shadow-xl z-20 normal-case tracking-normal">
+                  <ul className="max-h-64 overflow-y-auto custom-scrollbar" aria-label="Recent questions">
+                    {history.slice(0, 10).map((h: HistoryItem) => (
+                      <li key={h.id} className="border-b border-rule last:border-none">
+                        <button
+                          type="button"
+                          className="w-full text-left px-4 py-2.5 font-sans text-sm text-text-primary hover:bg-surface truncate"
+                          onClick={() => {
+                            setQuestion(h.question);
+                            setShowHistory(false);
+                            inputRef.current?.focus();
+                          }}
+                        >
+                          {h.question}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </span>
+          </div>
+
+          {selectedChunks.length > 0 && (
+            <div className="flex flex-col gap-3 px-11 pt-5">
+              {selectedChunks.length > 0 && (
+                <div className="flex flex-wrap gap-2 items-center">
+                  <span className="font-mono text-[11px] uppercase tracking-[.12em] text-text-tertiary">Context</span>
+                  {selectedChunks.map(chunk => (
+                    <div key={chunk.id} className="flex items-center gap-1.5 px-2.5 py-1 bg-raised border border-rule text-xs text-text-primary">
+                      <span className="truncate max-w-[150px]">{chunk.filename}</span>
+                      <button
+                        type="button"
+                        onClick={() => removeChunk(chunk.id)}
+                        aria-label={`Remove ${chunk.filename} from context`}
+                        className="tap-24 hover:text-error transition-colors"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+                  <button type="button" onClick={() => clearChunks()} className={`font-mono text-[11px] uppercase tracking-[.1em] text-text-secondary ${paneLink}`}>
+                    Clear
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* `log` + polite: an answer streams in token by token, so assertive
+              would interrupt continuously. */}
+          <div className="flex-1 flex flex-col" role="log" aria-live="polite" aria-label="Conversation">
+            {messages.length === 0 ? (
+              // The answer column's idle state. Nothing is lit until a question is asked.
+              <div className="sl-answer__idle">
+                <strong className="sl-stock">Nothing developed yet.</strong>
+                <span>Type a question in the Q. bar below and press Enter.</span>
+              </div>
+            ) : (
+              <div className="sl-answer">
+                {messages.map((msg) => (
+                  <MessageBubble key={msg.id} message={msg} latest={msg.id === latestQuestionId} />
+                ))}
+                <div ref={messagesEndRef} />
+              </div>
+            )}
+          </div>
+        </section>
+
+        {showReceipt && (
+          <section className="sl-receiptpane" aria-label="Receipt">
+            <div className="sl-panehead">
+              <span>Receipt</span>
+            </div>
+            <div className="sl-receiptpane__body">
+              {/* Same condition the old metadata row used: the path is known only
+                  once sources arrive, and a stopped stream never gets one. Keyed on
+                  the answer, so each new one prints out of the slot afresh. */}
+              {latestAnswer && !latestAnswer.isStreaming && latestAnswer.mode ? (
+                <Receipt key={latestAnswer.id} msg={latestAnswer} />
+              ) : (
+                <div className="sl-receipt__slot sl-receipt__slot--idle" aria-hidden="true" />
+              )}
+            </div>
+          </section>
+        )}
+      </div>
+
+      {/* The ask bar sits under the conversation, where a chat's composer is:
+          a lamp Q., the question, its scope, the model, and the plate. */}
       <form
         className="sl-ask sl-ask--bar"
         role="search"
@@ -176,8 +316,8 @@ export function SearchPage() {
           onChange={(e) => setQuestion(e.target.value)}
           placeholder={isSearching ? 'Writing…' : 'Ask a follow-up or a new question...'}
           disabled={isSearching}
-          // The bar is a borderless line at the top edge; a caret in it is the
-          // only cue for where a chat starts. Asking is this page's one job.
+          // A caret in the bar is the first cue for where a chat starts.
+          // Asking is this page's one job.
           autoFocus
           autoComplete="off"
           spellCheck={false}
@@ -207,125 +347,6 @@ export function SearchPage() {
           </button>
         )}
       </form>
-
-      <div className="sl-panes">
-        <FramesPanel
-          message={latestAnswer}
-          onForceInclude={(chunkId) => void handleSearch('', chunkId)}
-        />
-
-        <section className="sl-answerpane" aria-label="Answer">
-          <div className="sl-panehead">
-            <span>Answer</span>
-            <span className="relative flex items-center gap-4">
-              <button
-                type="button"
-                className={paneLink}
-                onClick={() => setShowHistory(v => !v)}
-                aria-haspopup="listbox"
-                aria-expanded={showHistory}
-              >
-                {history.length} recent <span aria-hidden>▾</span>
-              </button>
-              <button type="button" className={paneLink} onClick={resetChat}>
-                <span aria-hidden>↻</span> New chat
-              </button>
-              {history.length > 0 && (
-                <button type="button" className={paneLink} onClick={handleClearHistory}>
-                  Clear history
-                </button>
-              )}
-              {showHistory && history.length > 0 && (
-                <div
-                  className="absolute right-0 top-full mt-2 w-[26rem] bg-raised border border-rule shadow-xl z-20 normal-case tracking-normal"
-                  role="listbox"
-                  aria-label="Recent questions"
-                >
-                  <div className="max-h-64 overflow-y-auto custom-scrollbar">
-                    {history.slice(0, 10).map((h: HistoryItem) => (
-                      <button
-                        key={h.id}
-                        type="button"
-                        role="option"
-                        aria-selected="false"
-                        className="w-full text-left px-4 py-2.5 font-sans text-sm text-text-primary hover:bg-surface border-b border-rule last:border-none truncate"
-                        onClick={() => {
-                          setQuestion(h.question);
-                          setShowHistory(false);
-                          inputRef.current?.focus();
-                        }}
-                      >
-                        {h.question}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </span>
-          </div>
-
-          {selectedChunks.length > 0 && (
-            <div className="flex flex-col gap-3 px-11 pt-5">
-              {selectedChunks.length > 0 && (
-                <div className="flex flex-wrap gap-2 items-center">
-                  <span className="font-mono text-[10px] uppercase tracking-[.12em] text-text-tertiary">Context</span>
-                  {selectedChunks.map(chunk => (
-                    <div key={chunk.id} className="flex items-center gap-1.5 px-2.5 py-1 bg-raised border border-rule text-xs text-text-primary">
-                      <span className="truncate max-w-[150px]">{chunk.filename}</span>
-                      <button
-                        type="button"
-                        onClick={() => removeChunk(chunk.id)}
-                        aria-label={`Remove ${chunk.filename} from context`}
-                        className="tap-24 hover:text-error transition-colors"
-                      >
-                        ✕
-                      </button>
-                    </div>
-                  ))}
-                  <button type="button" onClick={() => clearChunks()} className={`font-mono text-[10px] uppercase tracking-[.1em] text-text-secondary ${paneLink}`}>
-                    Clear
-                  </button>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* `log` + polite: an answer streams in token by token, so assertive
-              would interrupt continuously. */}
-          <div className="flex-1 flex flex-col" role="log" aria-live="polite" aria-label="Conversation">
-            {messages.length === 0 ? (
-              // The answer column's idle state. Nothing is lit until a question is asked.
-              <div className="sl-answer__idle">
-                <strong className="sl-stock">Nothing developed yet.</strong>
-                <span>Type a question in the Q. bar above and press Enter.</span>
-              </div>
-            ) : (
-              <div className="sl-answer">
-                {messages.map((msg) => (
-                  <MessageBubble key={msg.id} message={msg} latest={msg.id === latestQuestionId} />
-                ))}
-                <div ref={messagesEndRef} />
-              </div>
-            )}
-          </div>
-        </section>
-
-        <section className="sl-receiptpane" aria-label="Receipt">
-          <div className="sl-panehead">
-            <span>Receipt</span>
-          </div>
-          <div className="sl-receiptpane__body">
-            {/* Same condition the old metadata row used: the path is known only
-                once sources arrive, and a stopped stream never gets one. Keyed on
-                the answer, so each new one prints out of the slot afresh. */}
-            {latestAnswer && !latestAnswer.isStreaming && latestAnswer.mode ? (
-              <Receipt key={latestAnswer.id} msg={latestAnswer} />
-            ) : (
-              <div className="sl-receipt__slot sl-receipt__slot--idle" aria-hidden="true" />
-            )}
-          </div>
-        </section>
-      </div>
     </div>
   );
 }

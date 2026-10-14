@@ -124,8 +124,9 @@ export function ModelPicker() {
     setIsOpen(false);
   };
 
-  const handleCustomSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
+  // Not a <form>: the picker renders inside the Ask form, and a nested form's
+  // submit bubbled up and sent the typed question along with the model change.
+  const applyCustomModel = () => {
     if (customModel.trim()) {
       setSessionModelOverride({ provider: customProvider, model: customModel.trim() });
       setIsOpen(false);
@@ -202,7 +203,7 @@ export function ModelPicker() {
                 className="p-1 hover:bg-raised rounded-md text-text-secondary hover:text-text-primary text-xs transition-[color,background-color]"
                 title="Refresh model list"
               >
-                <span aria-hidden>🔄</span> Refresh
+                <span aria-hidden>↻</span> Refresh
               </button>
               <button
                 type="button"
@@ -266,7 +267,7 @@ export function ModelPicker() {
             </div>
 
             {/* Custom Model Input Form */}
-            <form onSubmit={handleCustomSubmit} className="p-3 border-t border-rule bg-raised flex items-center gap-2">
+            <div className="p-3 border-t border-rule bg-raised flex items-center gap-2">
               <label htmlFor={customProviderId} className="sr-only">
                 Provider for the custom model
               </label>
@@ -293,16 +294,24 @@ export function ModelPicker() {
                 placeholder="Or a model ID, e.g. llama3:8b…"
                 value={customModel}
                 onChange={(e) => setCustomModel(e.target.value)}
+                // Enter would otherwise implicitly submit the Ask form around us.
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    applyCustomModel();
+                  }
+                }}
                 className="flex-1 bg-raised border border-rule rounded px-2.5 py-1 text-xs text-text-primary placeholder:text-text-secondary/40"
               />
               <button
-                type="submit"
+                type="button"
+                onClick={applyCustomModel}
                 disabled={!customModel.trim()}
                 className="px-3 py-1 bg-plate hover:brightness-110 disabled:opacity-50 text-on-plate rounded text-xs font-medium transition-[filter,opacity]"
               >
                 Use
               </button>
-            </form>
+            </div>
 
             {/* Footer */}
             <div className="px-4 py-2 border-t border-rule bg-raised flex items-center justify-between text-xs text-text-secondary">

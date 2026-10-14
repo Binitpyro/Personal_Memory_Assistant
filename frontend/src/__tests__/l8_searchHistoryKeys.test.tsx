@@ -34,7 +34,9 @@ describe('A7-14: recent-question rows have unique keys', () => {
     const err = vi.spyOn(console, 'error').mockImplementation(() => {});
     renderWithProviders(<SearchPage />);
     fireEvent.click(screen.getByRole('button', { name: /recent/ }));
-    expect(within(screen.getByRole('listbox', { name: 'Recent questions' })).getAllByRole('option')).toHaveLength(2);
+    // A list of buttons, not a listbox: no listbox/option roles it cannot honour.
+    expect(screen.queryByRole('listbox')).toBeNull();
+    expect(within(screen.getByRole('list', { name: 'Recent questions' })).getAllByRole('button')).toHaveLength(2);
     const dup = err.mock.calls.filter(c => String(c[0]).includes('same key'));
     err.mockRestore();
     expect(dup).toEqual([]);

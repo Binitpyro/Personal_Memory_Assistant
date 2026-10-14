@@ -66,12 +66,46 @@ describe('SearchPage Component', () => {
     expect(screen.getByPlaceholderText('Ask a follow-up or a new question...')).toBeDefined();
   });
 
-  // The bar is a borderless line at the top; the empty chat has to say where to type.
-  it('puts the caret in the question bar and points to it while empty', () => {
+  // The empty chat has to say where to type, and the bar has to be where a
+  // chat's composer is: after the conversation, not above it.
+  it('puts the caret in the question bar, below the conversation, and points to it while empty', () => {
     renderWithProviders(<SearchPage />);
 
-    expect(document.activeElement).toBe(screen.getByRole('textbox', { name: 'Ask your files' }));
-    expect(screen.getByText(/Type a question in the Q\. bar above/)).toBeDefined();
+    const input = screen.getByRole('textbox', { name: 'Ask your files' });
+    expect(document.activeElement).toBe(input);
+    expect(screen.getByText(/Type a question in the Q\. bar below/)).toBeDefined();
+
+    const conversation = screen.getByRole('log', { name: 'Conversation' });
+    expect(conversation.compareDocumentPosition(input) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  // The model picker sits inside the ask form. Its custom-model entry used to
+  // be a nested <form>, whose submit bubbled to the ask form and sent the typed
+  // question along with the model change.
+  it('choosing a custom model does not also send the typed question', () => {
+    renderWithProviders(<SearchPage />);
+    fireEvent.change(screen.getByRole('textbox', { name: 'Ask your files' }), { target: { value: 'a question' } });
+
+    fireEvent.click(screen.getByTitle(/Change active session model/i));
+    fireEvent.change(screen.getByLabelText('Custom model ID'), { target: { value: 'llama3:8b' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Use' }));
+
+    expect(mockExecuteSearch).not.toHaveBeenCalled();
+  });
+
+  it('hides the receipt column until it is toggled on, and remembers the choice', () => {
+    localStorage.removeItem('pma_show_receipt');
+    const { unmount } = renderWithProviders(<SearchPage />);
+    expect(screen.queryByRole('region', { name: 'Receipt' })).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Receipt' }));
+    expect(screen.getByRole('region', { name: 'Receipt' })).toBeDefined();
+    expect(localStorage.getItem('pma_show_receipt')).toBe('true');
+
+    unmount();
+    renderWithProviders(<SearchPage />);
+    expect(screen.getByRole('region', { name: 'Receipt' })).toBeDefined();
+    localStorage.removeItem('pma_show_receipt');
   });
 
   it('submits query when search button is clicked', () => {

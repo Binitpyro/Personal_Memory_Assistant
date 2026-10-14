@@ -68,16 +68,18 @@
 .sl-ask__scope { display: flex; align-items: center; gap: 6px; flex: none; }
 .sl-ask__enter {
   flex: none; display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 10px; border: 0; border-radius: 0; background: var(--safe); color: var(--onsafe);
-  font-family: var(--font-edge); font-size: 10.5px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; cursor: pointer;
+  font-family: var(--font-edge); font-size: 11px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; cursor: pointer;
 }
 .sl-ask__enter:disabled { background: transparent; color: var(--ink3); box-shadow: inset 0 0 0 1px var(--line2); cursor: not-allowed; }
 .sl-ask__enter--stop { background: transparent; color: var(--ink); box-shadow: inset 0 0 0 1px var(--ink3); }
-.sl-ask--bar { flex: none; height: var(--ask-row); gap: 14px; padding: 0 16px 0 22px; border: 0; border-bottom: 1px solid var(--line); }
-/* The bar's input is the field: its focus is the ring on the input itself. */
+.sl-ask--bar { flex: none; height: var(--ask-row); gap: 14px; padding: 0 16px 0 22px; border: 0; border-top: 1px solid var(--line); }
+/* The bar's input is the field: its focus is the ring on the input itself.
+   Inset, because the input fills the bar's height: drawn outward, the ring
+   ran under the Answer pane above and the footer below and showed in pieces. */
 .sl-ask--bar:focus-within { outline: none; }
-.sl-ask--bar .sl-ask__input:focus-visible { outline: 2px solid var(--ink); outline-offset: 4px; }
+.sl-ask--bar .sl-ask__input:focus-visible { outline: 2px solid var(--ink); outline-offset: -2px; }
 .sl-ask--bar .sl-ask__q { font-size: 12px; }
-.sl-ask--bar .sl-ask__input { font-size: 19px; }
+.sl-ask--bar .sl-ask__input { font-size: 19px; padding: 0 12px; }
 .sl-ask--bar .sl-ask__enter { padding: 0 12px; }
 
 /* The model button. The board draws a lamp or leak square beside the name;
@@ -85,7 +87,7 @@
    Bounded in ink3, not line2 (1.64:1), because it is a control. */
 .sl-model {
   display: inline-flex; align-items: center; gap: 8px; height: 34px; max-width: 14rem; padding: 0 12px; flex: none; border: 1px solid var(--ink3); border-radius: 0; background: transparent; color: var(--ink); cursor: pointer;
-  font-family: var(--font-edge); font-size: 10.5px; font-weight: 500; letter-spacing: 0.1em; text-transform: uppercase; white-space: nowrap; overflow: hidden;
+  font-family: var(--font-edge); font-size: 11px; font-weight: 500; letter-spacing: 0.1em; text-transform: uppercase; white-space: nowrap; overflow: hidden;
 }
 .sl-model:hover { border-color: var(--ink); }
 .sl-model > span:first-child { overflow: hidden; text-overflow: ellipsis; }
@@ -97,28 +99,33 @@
   grid-template-columns: var(--frames-width) minmax(0, 1fr) var(--receipt-width);
   grid-template-areas: "frames answer receipt";
 }
+/* Receipt hidden, the default: the answer takes its column. */
+.sl-panes.sl-panes--no-receipt { grid-template-columns: var(--frames-width) minmax(0, 1fr); grid-template-areas: "frames answer"; }
 .sl-panes > * { min-height: 0; overflow-y: auto; }
-/* Narrow windows keep all three: the receipt drops under the frames. */
+/* Narrow windows keep all three: the receipt drops under the frames. Frames
+   narrows to 300px whether or not the receipt is shown, so toggling it does
+   not move the frames edge. */
 @media (max-width: 1180px) {
   .sl-panes { grid-template-columns: 300px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; grid-template-areas: "frames answer" "receipt answer"; }
+  .sl-panes.sl-panes--no-receipt { grid-template-columns: 300px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); grid-template-areas: "frames answer"; }
 }
 
-.sl-panehead { position: sticky; top: 0; z-index: 1; height: var(--pane-head); flex: none; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 16px; border-bottom: 1px solid var(--line); background: inherit; color: var(--ink3); font-family: var(--font-edge); font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; white-space: nowrap; }
+.sl-panehead { position: sticky; top: 0; z-index: 1; height: var(--pane-head); flex: none; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 16px; border-bottom: 1px solid var(--line); background: inherit; color: var(--ink3); font-family: var(--font-edge); font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; white-space: nowrap; }
 
 /* ── Frames ─────────────────────────────────────────────────────────────── */
 .sl-frames { grid-area: frames; display: flex; flex-direction: column; background: var(--sheet); border-right: 1px solid var(--line); }
 .sl-frames__list { margin: 0; padding: 0; list-style: none; }
-.sl-frames__empty { padding: 18px 16px; color: var(--ink3); font-family: var(--font-edge); font-size: 10px; line-height: 1.6; letter-spacing: 0.1em; text-transform: uppercase; }
+.sl-frames__empty { padding: 18px 16px; color: var(--ink3); font-family: var(--font-edge); font-size: 11px; line-height: 1.6; letter-spacing: 0.1em; text-transform: uppercase; }
 .sl-frame { background: var(--sheet); border-bottom: 1px solid var(--line); animation: sl-rise 600ms var(--ease-standard) both; animation-delay: calc(var(--i, 0) * 35ms); }
 .sl-frame__row {
   width: 100%; min-height: var(--frame-row); display: grid; grid-template-columns: 26px minmax(0, 1fr) 40px; align-items: center; gap: 0 10px;
   padding: 6px 16px; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer;
 }
 .sl-frame__row:hover, .sl-frame.is-open .sl-frame__row { background: var(--raise); }
-.sl-frame__n { font-family: var(--font-edge); font-size: 10.5px; font-weight: 500; letter-spacing: 0.06em; color: var(--ink3); }
+.sl-frame__n { font-family: var(--font-edge); font-size: 11px; font-weight: 500; letter-spacing: 0.06em; color: var(--ink3); }
 .sl-frame__file { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .sl-frame__name { font-family: var(--font-stock); font-size: 13.5px; font-weight: 500; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.sl-frame__folder { font-family: var(--font-edge); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sl-frame__folder { font-family: var(--font-edge); font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sl-frame__ev { text-align: right; font-family: var(--font-edge); font-size: 11px; font-weight: 600; color: var(--ink); }
 /* Near misses: shown, never used. ink3 keeps them readable (5.36:1). */
 .sl-frame.is-under .sl-frame__name, .sl-frame.is-under .sl-frame__ev { color: var(--ink3); }
@@ -127,14 +134,14 @@
 /* The rule between what was used and what was not: the lamp, wiping in once
    the frames have come up. */
 .sl-floor { position: relative; height: 0; border-top: 2px solid var(--safe); transform-origin: 0 50%; animation: sl-floor var(--duration-floor) var(--ease-standard) 450ms both; list-style: none; }
-.sl-floor__label { position: absolute; right: 12px; top: -10px; padding: 2px 6px; background: var(--safe); color: var(--onsafe); font-family: var(--font-edge); font-size: 10px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; white-space: nowrap; }
+.sl-floor__label { position: absolute; right: 12px; top: -10px; padding: 2px 6px; background: var(--safe); color: var(--onsafe); font-family: var(--font-edge); font-size: 11px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; white-space: nowrap; }
 @keyframes sl-floor { from { transform: scaleX(0); opacity: 0; } to { transform: none; opacity: 1; } }
 
 /* The passage, opened under its frame. */
 .sl-loupe { display: flex; flex-direction: column; gap: 10px; padding: 12px 16px 14px; background: var(--room); border-top: 1px solid var(--line); }
 .sl-loupe__quote { margin: 0; max-height: 14rem; overflow-y: auto; font-family: var(--font-print); font-size: 15px; line-height: 1.55; color: var(--ink2); white-space: pre-wrap; }
 .sl-loupe__quote mark { background: none; color: var(--ink); text-decoration: underline; text-decoration-color: var(--safe); text-decoration-thickness: 2px; text-underline-offset: 4px; }
-.sl-loupe__foot { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; color: var(--ink3); font-family: var(--font-edge); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; }
+.sl-loupe__foot { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; color: var(--ink3); font-family: var(--font-edge); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; }
 
 /* ── Answer ─────────────────────────────────────────────────────────────── */
 .sl-answerpane { grid-area: answer; position: relative; display: flex; flex-direction: column; background: var(--room); }
@@ -143,7 +150,7 @@
 .sl-answer__q--latest { font-size: 40px; line-height: 0.92; }
 .sl-answer__idle { display: flex; flex-direction: column; justify-content: center; gap: 12px; flex: 1; padding: 0 44px; }
 .sl-answer__idle strong { font-size: 48px; line-height: 0.9; color: var(--ink3); }
-.sl-answer__idle span { color: var(--ink3); font-family: var(--font-edge); font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase; }
+.sl-answer__idle span { color: var(--ink3); font-family: var(--font-edge); font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; }
 .sl-develop-in { animation: sl-rise 700ms var(--ease-standard) both; }
 @keyframes sl-rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
 
@@ -156,7 +163,7 @@
 .sl-receipt__feed { overflow: hidden; }
 .sl-receipt {
   position: relative; display: flex; flex-direction: column; gap: 8px; padding: 24px 18px 30px; background: var(--paper); color: var(--paper-ink);
-  font-family: var(--font-edge); font-size: 10.5px; line-height: 1.5; text-transform: uppercase;
+  font-family: var(--font-edge); font-size: 11px; line-height: 1.5; text-transform: uppercase;
   -webkit-mask: linear-gradient(#000 0 0) top / 100% calc(100% - 8px) no-repeat, conic-gradient(from -45deg at bottom, #000 90deg, #0000 0) bottom / 16px 8px repeat-x;
   mask: linear-gradient(#000 0 0) top / 100% calc(100% - 8px) no-repeat, conic-gradient(from -45deg at bottom, #000 90deg, #0000 0) bottom / 16px 8px repeat-x;
 }
@@ -176,7 +183,7 @@
 .sl-figures { display: flex; flex-wrap: wrap; margin: 0; border-top: 1px solid var(--line2); border-bottom: 1px solid var(--line2); }
 .sl-figure { flex: 1 1 180px; display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 22px 24px; border-left: 1px solid var(--line); min-width: 0; }
 .sl-figure:first-child { padding-left: 0; border-left: 0; }
-.sl-figure dt { color: var(--ink3); font-family: var(--font-edge); font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase; }
+.sl-figure dt { color: var(--ink3); font-family: var(--font-edge); font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; }
 .sl-figure dd { margin: 0; font-size: 64px; line-height: 0.86; font-variant-numeric: tabular-nums; color: var(--ink); overflow-wrap: anywhere; }
 .sl-figure dd small { font-size: 0.5em; color: var(--ink2); }
 
@@ -184,10 +191,10 @@
 .sl-strip__bars { position: relative; display: flex; align-items: flex-end; gap: 1px; height: 160px; padding-top: 16px; }
 .sl-strip__bar { position: relative; flex: 1 1 0; min-width: 1px; }
 .sl-strip__bar i { position: absolute; inset: 0; background: var(--ink); }
-.sl-strip__groups { display: flex; gap: 10px; color: var(--ink3); font-family: var(--font-edge); font-size: 10px; line-height: 1.5; letter-spacing: 0.1em; text-transform: uppercase; }
+.sl-strip__groups { display: flex; gap: 10px; color: var(--ink3); font-family: var(--font-edge); font-size: 11px; line-height: 1.5; letter-spacing: 0.1em; text-transform: uppercase; }
 .sl-strip__group { min-width: 0; padding-top: 8px; border-top: 1px solid var(--ink2); overflow: hidden; }
 .sl-strip__group b { display: block; color: var(--ink); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.sl-strip__note { color: var(--ink3); font-family: var(--font-edge); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; }
+.sl-strip__note { color: var(--ink3); font-family: var(--font-edge); font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; }
 
 .sl-cells { display: flex; flex-direction: column; gap: 14px; }
 .sl-cells__head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; min-width: 0; }

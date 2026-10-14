@@ -66,6 +66,14 @@ describe('SearchPage Component', () => {
     expect(screen.getByPlaceholderText('Ask a follow-up or a new question...')).toBeDefined();
   });
 
+  // The bar is a borderless line at the top; the empty chat has to say where to type.
+  it('puts the caret in the question bar and points to it while empty', () => {
+    renderWithProviders(<SearchPage />);
+
+    expect(document.activeElement).toBe(screen.getByRole('textbox', { name: 'Ask your files' }));
+    expect(screen.getByText(/Type a question in the Q\. bar above/)).toBeDefined();
+  });
+
   it('submits query when search button is clicked', () => {
     renderWithProviders(<SearchPage />);
 

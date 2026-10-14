@@ -176,6 +176,9 @@ export function SearchPage() {
           onChange={(e) => setQuestion(e.target.value)}
           placeholder={isSearching ? 'Writing…' : 'Ask a follow-up or a new question...'}
           disabled={isSearching}
+          // The bar is a borderless line at the top edge; a caret in it is the
+          // only cue for where a chat starts. Asking is this page's one job.
+          autoFocus
           autoComplete="off"
           spellCheck={false}
         />
@@ -294,7 +297,7 @@ export function SearchPage() {
               // The answer column's idle state. Nothing is lit until a question is asked.
               <div className="sl-answer__idle">
                 <strong className="sl-stock">Nothing developed yet.</strong>
-                <span>Ask, and only the frames that hold the answer come up.</span>
+                <span>Type a question in the Q. bar above and press Enter.</span>
               </div>
             ) : (
               <div className="sl-answer">

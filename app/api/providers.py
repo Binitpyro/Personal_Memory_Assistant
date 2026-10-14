@@ -234,15 +234,23 @@ async def list_providers():
             except Exception:
                 api_key = None
 
-        last_validation = validation_cache.get(pid, base_url, api_key)
+        fresh = validation_cache.get(pid, base_url, api_key)
+        # Show the last verdict while an expired one re-validates. Returning
+        # None on every TTL expiry emptied the model picker until the next
+        # fetch, since the first fetch after the expiry is the one it caches.
+        last_validation = (
+            fresh
+            if fresh is not None
+            else validation_cache.get(pid, base_url, api_key, allow_stale=True)
+        )
 
-        # Trigger background validation if no validation result is cached yet for
-        # active providers. Cloud/aggregator kinds stay behind the same consent
+        # Trigger background validation if no fresh validation result is cached
+        # for active providers. Cloud/aggregator kinds stay behind the same consent
         # gate as dispatch: validate() is only a keyed ping, but it fires on
         # every Settings page load and would reach an off-device endpoint the
         # user has not opted into.
         consent_ok = cloud_consent or not provider_leaves_device(pid, base_url)
-        if last_validation is None and consent_ok and (is_set or pid in ("ollama", "lm_studio")):
+        if fresh is None and consent_ok and (is_set or pid in ("ollama", "lm_studio")):
             try:
                 p_obj = create_provider(
                     pid, api_key=api_key, base_url=base_url, default_model=default_model

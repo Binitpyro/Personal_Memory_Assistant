@@ -45,15 +45,26 @@ class ValidationCache:
             return ""
         return hashlib.sha256(api_key.encode("utf-8")).hexdigest()
 
-    def get(self, provider_id: str, base_url: str | None, api_key: str | None) -> Any | None:
+    def get(
+        self,
+        provider_id: str,
+        base_url: str | None,
+        api_key: str | None,
+        *,
+        allow_stale: bool = False,
+    ) -> Any | None:
+        """The cached verdict, or None once it is older than the TTL.
+
+        ``allow_stale`` returns an expired verdict too, for a caller that shows
+        it while a re-validation runs. Expired entries are kept for that reason;
+        `set` replaces them, and the key space is providers x URLs x keys.
+        """
         key_hash = self._hash_key(api_key)
         key = (provider_id, base_url, key_hash)
         if key in self._cache:
             ts, val = self._cache[key]
-            if time.time() - ts < self.ttl:
+            if allow_stale or time.time() - ts < self.ttl:
                 return val
-            else:
-                del self._cache[key]
         return None
 
     def get_offline_fallback(self, provider_id: str) -> Any | None:

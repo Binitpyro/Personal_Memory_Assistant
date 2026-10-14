@@ -131,6 +131,38 @@ async def test_background_validation_closes_the_provider_it_built():
         p.close.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_list_serves_the_last_verdict_while_it_revalidates():
+    """An expired verdict is shown, not dropped, and is still re-validated.
+
+    Returning None on expiry emptied the model picker every 60 s: the first
+    fetch after the TTL is the one the picker caches.
+    """
+    verdict = {"ok": True, "models": [{"id": "gemma2-2b:latest"}]}
+    validated: list[str] = []
+
+    def fake_create(pid, **kw):
+        p = MagicMock()
+        p.validate = AsyncMock(return_value={})
+        p.close = AsyncMock()
+        validated.append(pid)
+        return p
+
+    def expired(pid, base_url, api_key, *, allow_stale=False):
+        return verdict if allow_stale and pid == "ollama" else None
+
+    with (
+        patch.object(providers_api, "create_provider", fake_create),
+        patch.object(providers_api.validation_cache, "get", side_effect=expired),
+    ):
+        listed = await providers_api.list_providers()
+        await asyncio.gather(*providers_api._background_tasks)
+
+    ollama = next(p for p in listed if p["spec"].id == "ollama")
+    assert ollama["last_validation"] == verdict
+    assert "ollama" in validated, "an expired verdict must still be re-validated"
+
+
 # --- A4-18 ------------------------------------------------------------------
 
 

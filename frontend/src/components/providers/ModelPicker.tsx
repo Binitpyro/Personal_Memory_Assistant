@@ -93,6 +93,10 @@ export function ModelPicker() {
   const flatModels: FlatModelItem[] = [];
   activeProviders.forEach((p: ProviderStatus) => {
     const isOffline = !!p.last_validation?.cached_offline;
+    // A failed validation can still carry a model list: NVIDIA NIM serves
+    // /v1/models without auth, so a bad key listed 80 unusable NIM models
+    // ahead of the working local ones and past the 30-row cap.
+    if (!p.last_validation?.ok && !isOffline) return;
     const pModels = p.last_validation?.models?.map((m: { id: string }) => m.id) || [];
     pModels.forEach((mId: string) => {
       flatModels.push({

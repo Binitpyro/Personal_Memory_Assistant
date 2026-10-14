@@ -7,6 +7,7 @@ A10-04 Knowledge Portrait calls an LLMClient method that exists
 """
 
 import json
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -76,6 +77,16 @@ def test_outage_result_is_not_cached_but_auth_failure_is():
     auth = {"ok": False, "error_code": "auth_failed", "models": []}
     cache.set("openai", "http://y", "k", auth)
     assert cache.get("openai", "http://y", "k") == auth
+
+
+def test_expired_verdict_is_kept_for_allow_stale():
+    cache = ValidationCache(ttl_seconds=60)
+    cache._persistent_heap = {}
+    verdict = {"ok": True, "models": []}
+    cache._cache[("ollama", "http://x", "")] = (time.time() - 120, verdict)
+    assert cache.get("ollama", "http://x", None) is None
+    # The plain read above must not have evicted it.
+    assert cache.get("ollama", "http://x", None, allow_stale=True) == verdict
 
 
 @pytest.mark.asyncio

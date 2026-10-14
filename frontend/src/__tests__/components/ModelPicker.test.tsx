@@ -31,8 +31,15 @@ vi.mock('../../api', () => ({
   getCurrentProvider: vi.fn().mockResolvedValue({ provider: 'ollama', model: 'gemma4-local:latest', source: 'default' }),
 }));
 
+const state = vi.hoisted(() => ({ providers: [] as unknown[] }));
+
 vi.mock('../../useApi', () => ({
-  useApi: () => ({ data: [], refetch: vi.fn(), loading: false, error: null }),
+  useApi: (_fetcher: unknown, opts?: { cacheKey?: string }) => ({
+    data: opts?.cacheKey === 'providers-list' ? state.providers : [],
+    refetch: vi.fn(),
+    loading: false,
+    error: null,
+  }),
   invalidateCache: vi.fn(),
 }));
 
@@ -45,6 +52,7 @@ vi.mock('../../context/SessionProviderContext', () => ({
 
 // jsdom has no layout engine behind <dialog>; these only need to record state.
 beforeEach(() => {
+  state.providers = [];
   HTMLDialogElement.prototype.showModal = function showModal(this: HTMLDialogElement) {
     this.open = true;
   };
@@ -99,5 +107,34 @@ describe('ModelPicker dialog lifecycle', () => {
     });
 
     expect(document.activeElement).toBe(trigger());
+  });
+});
+
+const provider = (id: string, display_name: string, last_validation: object) => ({
+  spec: { id, display_name },
+  is_set: true,
+  preview: null,
+  stored_in: 'keyring',
+  base_url: null,
+  default_model: null,
+  last_validation,
+});
+
+describe('ModelPicker model list', () => {
+  // NVIDIA NIM answers /v1/models without auth, so a provider whose key failed
+  // validation still arrives with a full model list.
+  it('lists a provider only when its validation passed or it serves a cached heap', () => {
+    state.providers = [
+      provider('nvidia_nim', 'NVIDIA NIM', { ok: false, models: [{ id: 'meta/llama2-70b' }] }),
+      provider('ollama', 'Ollama', { ok: true, models: [{ id: 'gemma2-2b:latest' }] }),
+      provider('lm_studio', 'LM Studio', { ok: false, cached_offline: true, models: [{ id: 'qwen-local' }] }),
+    ];
+    render(<ModelPicker />);
+    fireEvent.click(trigger());
+
+    const text = dialog().textContent ?? '';
+    expect(text).toContain('gemma2-2b:latest');
+    expect(text).toContain('qwen-local');
+    expect(text).not.toContain('meta/llama2-70b');
   });
 });

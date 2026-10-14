@@ -307,9 +307,11 @@ async def test_demo_seed_endpoint(client, tmp_path):
 async def test_pick_folder_mocked(client):
     # Reached only in browser dev mode -- isTauri routes around this endpoint
     # in the packaged app, so the tkinter dialog runs here and only here.
-    fake_loop = MagicMock()
-    fake_loop.run_in_executor = AsyncMock(return_value="C:/Users/test/Documents")
-    with patch("app.api.system.asyncio.get_running_loop", return_value=fake_loop):
+    # Fake tkinter, not a fake loop: patching asyncio.get_running_loop is
+    # global, and anyio's TaskGroup then creates its tasks on the mock and
+    # waits on them forever.
+    _, modules = _fake_tkinter(askdirectory_result="C:/Users/test/Documents")
+    with patch.dict("sys.modules", modules):
         response = await client.get("/api/pick/folder")
     assert response.status_code == 200
     data = response.json()
@@ -321,9 +323,7 @@ def _fake_tkinter(askdirectory_result=None, askdirectory_error=None):
     """Stand-in for tkinter, returning the mock root so a test can assert on it.
 
     _dialog imports tkinter inside the function body, so sys.modules is the
-    only place to intercept it. The other pick_folder tests mock
-    run_in_executor, which means _dialog never runs at all and neither of them
-    could have observed what it does with the root.
+    only place to intercept it.
     """
     fake_root = MagicMock()
     fake_tk = MagicMock()
@@ -369,9 +369,8 @@ async def test_pick_folder_destroys_the_tk_root_when_the_dialog_raises(client):
 async def test_pick_folder_dialog_failure(client):
     # No display / tkinter unavailable: fails closed with the same error
     # message the Tauri-context stub used to always return.
-    fake_loop = MagicMock()
-    fake_loop.run_in_executor = AsyncMock(side_effect=RuntimeError("no display"))
-    with patch("app.api.system.asyncio.get_running_loop", return_value=fake_loop):
+    # A None entry makes `import tkinter` raise ImportError.
+    with patch.dict("sys.modules", {"tkinter": None, "tkinter.filedialog": None}):
         response = await client.get("/api/pick/folder")
     assert response.status_code == 200
     data = response.json()

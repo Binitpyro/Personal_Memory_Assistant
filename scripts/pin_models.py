@@ -21,6 +21,9 @@ MODEL_SPECS: list[dict[str, Any]] = [
         "target_files": [
             "onnx/model_quantized.onnx",
             "tokenizer.json",
+            # Opt-in GPU mode: documents embed on this fp16 build in the
+            # DirectML worker; queries stay on model_quantized.onnx above.
+            "onnx/model_fp16.onnx",
         ],
     },
     {

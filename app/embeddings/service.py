@@ -127,6 +127,8 @@ class EmbeddingService:
         self.optimal_batch_size = settings.embedding_batch_size
         self._embedding_dim = 384  # Default, overwritten during load
         self.model_signature: str | None = None
+        self._gpu: Any = None  # app.embeddings.gpu.client.GpuEmbedClient, GPU mode only
+        self._gpu_error = ""
 
         # LRU cache for query embeddings to avoid redundant computation
         # float32 ndarrays, not list[float] - see embed_query for the arithmetic.
@@ -289,6 +291,44 @@ class EmbeddingService:
         self.model_signature = _compose_signature(
             r_id, rev_str, rel_key, settings.embed_chunk_prefix
         )
+        if settings.embedding_device == "gpu":
+            # Documents come from the fp16 worker while queries stay on this INT8
+            # session: a different vector set, so the index must be rebuilt when
+            # the device changes. The suffix is what trips the mismatch banner.
+            # Mixed fp16-docs/INT8-queries measured SciFact nDCG@10 0.7038 vs
+            # 0.7046 all-INT8 (MEASURE_embed_gpu.md); an fp32 query session
+            # matched the docs exactly but cost ~90 MB idle RAM.
+            self.model_signature += ":gpu-fp16"
+            self._gpu = self._make_gpu_client(model_path, expected_files)
+
+    def _make_gpu_client(self, model_path: Path, expected_files: dict[str, Any]) -> Any:
+        """The worker client, or None with the reason kept for gpu_status().
+
+        Never fails the load: without a client every batch runs on the INT8 CPU
+        session already loaded above (cos ~0.991 to fp16, same model).
+        """
+        from app.embeddings.gpu import registry
+        from app.embeddings.gpu.client import GpuEmbedClient
+
+        fp16 = model_path / registry.FP16
+        sha = (expected_files.get(registry.FP16) or {}).get("sha256")
+        if not registry.is_installed():
+            self._gpu_error = "GPU embedding is enabled but not installed."
+        elif not sha or not self._verify_onnx_checksum(fp16, sha):
+            self._gpu_error = f"{registry.FP16} is missing, unpinned or failed its checksum."
+        else:
+            return GpuEmbedClient(registry.worker_argv(), str(fp16))
+        logger.warning("%s Embedding on CPU.", self._gpu_error)
+        return None
+
+    def gpu_status(self) -> dict[str, Any] | None:
+        """None in CPU mode; otherwise the worker's state, for /embedding/gpu."""
+        if settings.embedding_device != "gpu":
+            return None
+        if self._gpu is None:
+            return {"running": False, "degraded": True, "last_error": self._gpu_error, "ep": ""}
+        status: dict[str, Any] = self._gpu.status()
+        return status
 
     def load_model(self) -> None:
         """Loads the embedding model using ONNX Runtime (blocking)."""
@@ -485,6 +525,10 @@ class EmbeddingService:
             num_batches = len(planned)
 
             out_array = np.zeros((len(unique_texts), self._embedding_dim), dtype=np.float32)
+            # A lone text is a query (embed_query) or a one-chunk file: the CPU
+            # does it in milliseconds and a worker round-trip would only add
+            # latency, or a ~3 s spawn after an idle retire.
+            gpu = self._gpu if len(unique_texts) > 1 else None
 
             for batch_no, positions in enumerate(planned, start=1):
                 if progress_callback:
@@ -497,15 +541,17 @@ class EmbeddingService:
                 attention_mask = np.array([e.attention_mask for e in encoded], dtype=np.int64)
                 token_type_ids = np.array([e.type_ids for e in encoded], dtype=np.int64)
 
-                onnx_inputs = {
-                    "input_ids": input_ids,
-                    "attention_mask": attention_mask,
-                    "token_type_ids": token_type_ids,
-                }
-
-                model_output = self._session.run(None, onnx_inputs)
-                sentence_embeddings = self._mean_pooling(model_output, attention_mask)
-                sentence_embeddings = self._normalize(sentence_embeddings)
+                # None (no GPU, or the worker failed) re-runs the batch on CPU.
+                sentence_embeddings = gpu.embed(input_ids, attention_mask) if gpu else None
+                if sentence_embeddings is None:
+                    onnx_inputs = {
+                        "input_ids": input_ids,
+                        "attention_mask": attention_mask,
+                        "token_type_ids": token_type_ids,
+                    }
+                    model_output = self._session.run(None, onnx_inputs)
+                    sentence_embeddings = self._mean_pooling(model_output, attention_mask)
+                    sentence_embeddings = self._normalize(sentence_embeddings)
 
                 # Scatter back to each text's own row - batches are no longer
                 # contiguous slices, so a slice assignment would be wrong.

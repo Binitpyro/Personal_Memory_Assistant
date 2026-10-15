@@ -81,6 +81,7 @@ pyinstaller ^
     --add-data "demo_data;demo_data" ^
     --add-data "app/ocr/worker;app/ocr/worker" ^
     --add-data "app/ocr/protocol.py;app/ocr" ^
+    --add-data "app/embeddings/gpu/worker.py;app/embeddings/gpu" ^
     --add-data "models.lock.json;." ^
     --add-binary "app/scanner/rust_core/target/release/rust_core.dll;app/scanner/rust_core/target/release" ^
     __main__.py

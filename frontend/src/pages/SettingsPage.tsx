@@ -5,6 +5,7 @@ import { CACHE_KEYS } from '../cacheKeys'
 import { LocalModelsSection } from './settings/LocalModels'
 import { LLMPreferencesSection } from './settings/LLMPreferences'
 import { OcrSection } from './settings/OcrSection'
+import { GpuEmbedSection } from './settings/GpuEmbedSection'
 import { StorageSection } from './settings/StorageSection'
 import { SplitBrainSection } from './settings/SplitBrainSection'
 import { DiagnosticsSection } from './settings/DiagnosticsSection'
@@ -116,6 +117,8 @@ export function SettingsPage() {
       />
 
       <OcrSection />
+
+      <GpuEmbedSection />
 
       <StorageSection sysInfo={sysInfo} />
 

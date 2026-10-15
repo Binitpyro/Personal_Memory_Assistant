@@ -307,6 +307,34 @@ export const setOcrEnabled = (enabled: boolean) =>
     body: JSON.stringify({ enabled }),
   });
 
+/** Opt-in GPU embedding. A device switch applies on restart and needs a re-embed. */
+export interface EmbedGpuStatus {
+  available: boolean;
+  reason: string;
+  installed: boolean;
+  installed_ep?: string | null;
+  installed_at?: string | null;
+  uv_available: boolean;
+  device_saved: 'cpu' | 'gpu';
+  device_active: 'cpu' | 'gpu';
+  worker: { running: boolean; degraded: boolean; last_error: string; ep: string } | null;
+  install: OcrInstallState;
+}
+
+export const getEmbedGpu = () => json<EmbedGpuStatus>('/embedding/gpu');
+
+export const installEmbedGpu = () =>
+  json<EmbedGpuStatus>('/embedding/gpu/install', { method: 'POST' });
+
+export const cancelEmbedGpuInstall = () =>
+  json<{ ok: boolean }>('/embedding/gpu/install/cancel', { method: 'POST' });
+
+export const setEmbedGpu = (on: boolean) =>
+  json<Partial<EmbedGpuStatus> & { ok: boolean; error_code?: string }>('/embedding/gpu/enable', {
+    method: 'POST',
+    body: JSON.stringify({ on }),
+  });
+
 export const getOcrQueue = (status?: string, limit = 50) =>
   json<{ items: OcrQueueItem[]; counts: OcrQueueCounts }>(
     `/ocr/queue?limit=${limit}${status ? `&status=${encodeURIComponent(status)}` : ''}`,

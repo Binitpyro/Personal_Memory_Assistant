@@ -40,6 +40,7 @@ from app.api.search import router as search_router
 from app.api.system import router as system_router
 from app.api.telemetry import router as telemetry_router
 from app.config import settings
+from app.embeddings.gpu.api import router as embed_gpu_router
 from app.ocr.api import router as ocr_router
 from app.project_constants import APP_VERSION
 from app.storage.db import DatabaseManager
@@ -249,9 +250,12 @@ async def lifespan(fastapi_app: FastAPI):
 
 @asynccontextmanager
 async def _lifespan(fastapi_app: FastAPI):
+    from app.embeddings.gpu.registry import load_persisted_device
     from app.ocr.settings import load_persisted_state
 
     load_persisted_state()
+    # Before get_emb() below: the device is read once, when the model loads.
+    load_persisted_device()
 
     _log_startup_info()
     loop = asyncio.get_running_loop()
@@ -766,6 +770,7 @@ api_router.include_router(system_router, tags=["system"])
 api_router.include_router(telemetry_router)
 api_router.include_router(debug_router)
 api_router.include_router(ocr_router)
+api_router.include_router(embed_gpu_router)
 
 
 @api_router.get("/health")

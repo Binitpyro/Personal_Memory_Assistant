@@ -116,6 +116,11 @@ vi.mock('../../api', () => {
     setOcrEnabled: vi.fn(),
     retryOcr: vi.fn(),
     clearOcrCache: vi.fn(),
+    // GpuEmbedSection's imports, for the same stale-factory reason as above.
+    getEmbedGpu: vi.fn(),
+    installEmbedGpu: vi.fn(),
+    cancelEmbedGpuInstall: vi.fn(),
+    setEmbedGpu: vi.fn(),
   };
 });
 

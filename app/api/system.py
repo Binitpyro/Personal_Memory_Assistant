@@ -40,6 +40,7 @@ async def get_app_config():
     return {
         "app_version": APP_VERSION,
         "embedding_model": settings.embedding_model,
+        "embedding_device": settings.embedding_device,
         "gemini_model": getattr(llm, "model", settings.gemini_model),
         "gemini_max_output_tokens": settings.gemini_max_output_tokens,
         "dev_mode": settings.dev_mode,

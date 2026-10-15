@@ -1,4 +1,5 @@
 import logging
+from typing import Literal
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings
@@ -139,6 +140,12 @@ class Settings(BaseSettings):
     embed_chunk_prefix: bool = True
     embedding_allow_download: bool = True
     embedding_allow_unpinned: bool = False
+    # Opt-in only, never auto-selected. "gpu" sends document batches to the
+    # DirectML worker (app/embeddings/gpu) on the fp16 model; queries and any
+    # fallback stay on the shipped INT8 CPU session (SciFact nDCG@10 0.7038 mixed
+    # vs 0.7046 all-INT8, MEASURE_embed_gpu.md). Switching either way changes the
+    # index signature and needs a re-embed. Read once at load.
+    embedding_device: Literal["cpu", "gpu"] = "cpu"
 
     # The reranker loader never downloads - the model must already be on disk -
     # so there is no download gate to mirror here, only the integrity gate.

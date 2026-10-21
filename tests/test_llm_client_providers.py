@@ -287,6 +287,35 @@ def test_build_prompt(patch_data_paths):
     assert "MODE INSTRUCTION (Challenge)" in prompt_challenge
 
 
+def test_build_prompt_answer_length_and_beyond_the_files(patch_data_paths):
+    client = LLMClient()
+    # Fallback template (file missing) first, then a file template.
+    for _ in range(2):
+        assert "LENGTH INSTRUCTION" not in client._build_prompt("q", "c")
+        short = client._build_prompt("q", "c", mode="explain", answer_length="short")
+        assert "LENGTH INSTRUCTION (Short)" in short and "MODE INSTRUCTION (Explain)" in short
+        assert "LENGTH INSTRUCTION (Detailed)" in client._build_prompt(
+            "q", "c", answer_length="detailed"
+        )
+        patch_data_paths["prompt"].write_text("Hello ### Context {context} ### {query}")
+
+    patch_data_paths["prompt"].unlink()
+    fallback = client._build_prompt("q", "c", supports_claims=True)
+    assert "Beyond your files (general knowledge)" in fallback
+    # scripts/eval_chunking.py detects abstention by this phrase.
+    assert "don't have enough information" in fallback
+
+
+def test_shipped_rag_prompt_allows_labelled_general_knowledge():
+    shipped = (Path(__file__).parents[1] / "prompts" / "rag_system.txt").read_text(encoding="utf-8")
+    assert "Beyond your files (general knowledge)" in shipped
+    assert "using ONLY" not in shipped
+    assert "don't have enough information" in shipped
+    # Claim injection splits on this marker and needs exactly one.
+    assert shipped.count("### Context") == 1
+    assert "{context}" in shipped and "{query}" in shipped
+
+
 @pytest.mark.asyncio
 async def test_check_ollama_health():
     from app.providers.cache import validation_cache

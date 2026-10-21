@@ -17,6 +17,8 @@ describe('FilterBar Component', () => {
         setSelectedFolderTag={setSelectedFolderTag}
         selectedMode="full_rag"
         setSelectedMode={setSelectedMode}
+        selectedLength=""
+        setSelectedLength={vi.fn()}
         fileTypeOptions={['.txt', '.py']}
         folderOptions={['docs', 'code']}
         disabled={false}
@@ -43,6 +45,8 @@ describe('FilterBar Component', () => {
         setSelectedFolderTag={vi.fn()}
         selectedMode=""
         setSelectedMode={vi.fn()}
+        selectedLength=""
+        setSelectedLength={vi.fn()}
         fileTypeOptions={[]}
         folderOptions={[]}
         disabled={false}
@@ -53,5 +57,33 @@ describe('FilterBar Component', () => {
     const values = Array.from(style.options).map((o) => o.value);
     expect(values).toEqual(['', 'explain', 'verify', 'explore', 'distill']);
     expect(screen.queryByRole('option', { name: 'Challenge' })).toBeNull();
+  });
+
+  it('offers an answer length, and Clear filters resets it', () => {
+    const setSelectedLength = vi.fn();
+    renderWithProviders(
+      <FilterBar
+        selectedFileType=""
+        setSelectedFileType={vi.fn()}
+        selectedFolderTag=""
+        setSelectedFolderTag={vi.fn()}
+        selectedMode=""
+        setSelectedMode={vi.fn()}
+        selectedLength="detailed"
+        setSelectedLength={setSelectedLength}
+        fileTypeOptions={[]}
+        folderOptions={[]}
+        disabled={false}
+      />
+    );
+
+    const length = screen.getByLabelText('Answer length') as HTMLSelectElement;
+    expect(Array.from(length.options).map((o) => o.value)).toEqual(['', 'short', 'detailed']);
+    fireEvent.change(length, { target: { value: 'short' } });
+    expect(setSelectedLength).toHaveBeenCalledWith('short');
+
+    // A length alone must surface Clear filters, and clearing must reset it.
+    fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }));
+    expect(setSelectedLength).toHaveBeenLastCalledWith('');
   });
 });

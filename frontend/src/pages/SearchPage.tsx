@@ -35,6 +35,7 @@ export function SearchPage() {
   const [selectedFileType, setSelectedFileType] = useState('');
   const [selectedFolderTag, setSelectedFolderTag] = useState('');
   const [selectedMode, setSelectedMode] = useState('');
+  const [selectedLength, setSelectedLength] = useState('');
   // The receipt is per-answer detail, not part of the conversation, so its
   // column is hidden until asked for. Remembered across visits.
   const [showReceipt, setShowReceipt] = useState(() => localStorage.getItem('pma_show_receipt') === 'true');
@@ -113,6 +114,7 @@ export function SearchPage() {
         file_type: selectedFileType || undefined,
         folder_tag: selectedFolderTag || undefined,
         mode: selectedMode || undefined,
+        answer_length: selectedLength || undefined,
         forced_chunk_id: forcedChunkId,
         selected_chunk_ids: selectedChunks.map(c => c.id),
         isRetry: !!overrideQuestion || !!forcedChunkId
@@ -121,7 +123,7 @@ export function SearchPage() {
       // A failed stream is stored on its assistant message by useChatStream and
       // rendered inside that bubble; there is no separate banner to feed.
     }
-  }, [question, isSearching, executeSearch, selectedFileType, selectedFolderTag, selectedMode, messages, selectedChunks]);
+  }, [question, isSearching, executeSearch, selectedFileType, selectedFolderTag, selectedMode, selectedLength, messages, selectedChunks]);
 
   // Native confirm()/alert() rendered as platform dialogs that do not match the
   // app's visual language, and confirm() blocks the event loop. sonner was
@@ -330,6 +332,8 @@ export function SearchPage() {
             setSelectedFolderTag={setSelectedFolderTag}
             selectedMode={selectedMode}
             setSelectedMode={setSelectedMode}
+            selectedLength={selectedLength}
+            setSelectedLength={setSelectedLength}
             fileTypeOptions={fileTypeOptions}
             folderOptions={folderOptions}
             disabled={isSearching}

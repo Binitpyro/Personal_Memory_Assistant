@@ -3,6 +3,7 @@ import contextlib
 import json
 import logging
 import time
+from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -44,8 +45,10 @@ async def _next_chunk_or_end(agen):
 class QueryRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=2000)
     file_type: str | None = Field(None, max_length=50)
-    folder_tag: str | None = Field(None, max_length=100)
+    # The Ask picker sends the indexed folder's full root path, not its basename.
+    folder_tag: str | None = Field(None, max_length=4096)
     mode: str | None = Field(None, max_length=50)
+    answer_length: Literal["short", "detailed"] | None = None
     forced_chunk_ids: list[int] | None = Field(None, max_length=500)
     override_provider: str | None = Field(None, max_length=50)
     override_model: str | None = Field(None, max_length=150)
@@ -123,6 +126,7 @@ async def query(
                 folder_tag=payload.folder_tag,
                 mode=payload.mode,
                 history=history,
+                answer_length=payload.answer_length,
             )
 
         # The history row is user-visible at GET /api/query/history, so it is
@@ -202,6 +206,7 @@ async def query_stream(
                     history=history,
                     override_provider=request.override_provider,
                     override_model=request.override_model,
+                    answer_length=request.answer_length,
                 )
 
                 while True:

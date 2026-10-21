@@ -6,6 +6,8 @@ interface FilterBarProps {
   setSelectedFolderTag: (val: string) => void;
   selectedMode: string;
   setSelectedMode: (val: string) => void;
+  selectedLength: string;
+  setSelectedLength: (val: string) => void;
   fileTypeOptions: string[];
   folderOptions: string[];
   disabled: boolean;
@@ -18,6 +20,8 @@ export function FilterBar({
   setSelectedFolderTag,
   selectedMode,
   setSelectedMode,
+  selectedLength,
+  setSelectedLength,
   fileTypeOptions,
   folderOptions,
   disabled
@@ -64,13 +68,25 @@ export function FilterBar({
         <option value="explore">Explore</option>
         <option value="distill">Distill</option>
       </select>
-      {(selectedFileType || selectedFolderTag || selectedMode) && (
+      <select
+        value={selectedLength}
+        onChange={(e) => setSelectedLength(e.target.value)}
+        aria-label="Answer length"
+        className={select}
+        disabled={disabled}
+      >
+        <option value="">Default length</option>
+        <option value="short">Short</option>
+        <option value="detailed">Detailed</option>
+      </select>
+      {(selectedFileType || selectedFolderTag || selectedMode || selectedLength) && (
         <button
           type="button"
           onClick={() => {
             setSelectedFileType('')
             setSelectedFolderTag('')
             setSelectedMode('')
+            setSelectedLength('')
           }}
           className="tap-24 font-mono text-[11px] tracking-[.1em] uppercase text-text-secondary hover:text-text-primary underline underline-offset-4"
         >

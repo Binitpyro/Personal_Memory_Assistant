@@ -244,6 +244,7 @@ export function useChatStream(onHistoryUpdate: () => void) {
       file_type?: string;
       folder_tag?: string;
       mode?: string;
+      answer_length?: string;
       forced_chunk_id?: number;
       selected_chunk_ids?: number[];
       isRetry?: boolean;
@@ -357,6 +358,7 @@ export function useChatStream(onHistoryUpdate: () => void) {
         file_type: options.file_type || null,
         folder_tag: options.folder_tag || null,
         mode: options.mode || null,
+        answer_length: options.answer_length || null,
         forced_chunk_ids: options.selected_chunk_ids && options.selected_chunk_ids.length > 0 ? options.selected_chunk_ids : (options.forced_chunk_id ? [options.forced_chunk_id] : null),
         override_provider: sessionModelOverride?.provider || null,
         override_model: sessionModelOverride?.model || null

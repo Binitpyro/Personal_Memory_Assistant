@@ -90,9 +90,42 @@ async def clear_all_query_caches(lancedb_client) -> None:
         logger.warning("Persistent semantic query cache not cleared: %s", exc)
 
 
-async def _append_latest_files(lines: list[str], db: DatabaseManager):
+def _folder_scope(folder: str | None) -> tuple[str | None, str | None]:
+    """Split the Ask folder filter into ``(folder_tag, root)``.
+
+    The picker sends the indexed folder's full root path (the keys of
+    /api/files/tree), but chunks and LanceDB rows carry only ``folder_tag``,
+    the root's basename. Comparing the two matched nothing, so picking a folder
+    always answered "no relevant documents". A bare tag (no separator) is
+    passed through for callers that still send one, with no root.
+    """
+    if folder and ("\\" in folder or "/" in folder):
+        root = folder.rstrip("\\/")
+        return re.split(r"[\\/]", root)[-1], root
+    return folder, None
+
+
+def _norm_path(path: str) -> str:
+    return path.replace("/", "\\").lower()
+
+
+def _files_scope_sql(folder_tag: str | None, root: str | None) -> tuple[str, tuple[Any, ...]]:
+    """WHERE clause restricting the files table to the Ask folder filter."""
+    if root:
+        prefix = _norm_path(root).rstrip("\\") + "\\"
+        escaped = prefix.replace("!", "!!").replace("%", "!%").replace("_", "!_")
+        return " WHERE replace(path, '/', '\\') LIKE ? ESCAPE '!'", (escaped + "%",)
+    if folder_tag:
+        return " WHERE folder_tag = ?", (folder_tag,)
+    return "", ()
+
+
+async def _append_latest_files(
+    lines: list[str], db: DatabaseManager, scope: tuple[str, tuple[Any, ...]] = ("", ())
+):
     rows = await db.execute_query(
-        "SELECT path, modified_at FROM files ORDER BY modified_at DESC LIMIT 5"
+        f"SELECT path, modified_at FROM files{scope[0]} ORDER BY modified_at DESC LIMIT 5",  # nosec B608 # noqa: S608
+        scope[1],
     )
     if rows:
         lines.append("Recently modified files:")
@@ -100,8 +133,13 @@ async def _append_latest_files(lines: list[str], db: DatabaseManager):
             lines.append(f"- {Path(r[0]).name} (last changed {r[1]})")
 
 
-async def _append_largest_files(lines: list[str], db: DatabaseManager):
-    rows = await db.execute_query("SELECT path, size FROM files ORDER BY size DESC LIMIT 5")
+async def _append_largest_files(
+    lines: list[str], db: DatabaseManager, scope: tuple[str, tuple[Any, ...]] = ("", ())
+):
+    rows = await db.execute_query(
+        f"SELECT path, size FROM files{scope[0]} ORDER BY size DESC LIMIT 5",  # nosec B608 # noqa: S608
+        scope[1],
+    )
     if rows:
         lines.append("Largest indexed files:")
         for r in rows:
@@ -119,20 +157,31 @@ async def _reported_window(
     return window if isinstance(window, int) else None
 
 
-async def _get_metadata_insights(intents: dict[str, bool], db: DatabaseManager) -> str | None:
+async def _get_metadata_insights(
+    intents: dict[str, bool],
+    db: DatabaseManager,
+    folder_tag: str | None = None,
+    root: str | None = None,
+    file_type: str | None = None,
+) -> str | None:
     """Newest / largest files for a recency question, or None.
 
     Only what nothing else carries: totals reach the context as file_stats and
     folder profiles as folder_profiles_text. This was never called before M7, so
     "what did I add most recently?" got totals and no file names.
+
+    Scoped to the folder filter; it used to list files from the whole index
+    under any filter. A file_type filter has no cheap SQL form here, so the
+    block is dropped rather than leaked.
     """
-    if not (intents.get("latest") or intents.get("largest")):
+    if file_type or not (intents.get("latest") or intents.get("largest")):
         return None
+    scope = _files_scope_sql(folder_tag, root)
     lines: list[str] = ["=== Metadata Insights (Factual Source of Truth) ==="]
     if intents.get("latest"):
-        await _append_latest_files(lines, db)
+        await _append_latest_files(lines, db, scope)
     if intents.get("largest"):
-        await _append_largest_files(lines, db)
+        await _append_largest_files(lines, db, scope)
     return "\n".join(lines) if len(lines) > 1 else None
 
 
@@ -1273,17 +1322,27 @@ async def full_rag(
     folder_tag: str | None = None,
     mode: str | None = None,
     history: list[dict[str, str]] | None = None,
+    answer_length: str | None = None,
 ) -> dict[str, Any]:
     t_start = time.perf_counter()
 
-    cached_res = _check_rag_response_cache(query, file_type, folder_tag, history, t_start, mode)
+    # Caches key on the filter as sent (a full root keeps like-named folders
+    # apart) and on the length, which changes the answer text.
+    folder_scope = folder_tag
+    folder_tag, folder_root = _folder_scope(folder_tag)
+    cache_mode = f"{mode or ''}|{answer_length}" if answer_length else mode
+    filtered = bool(file_type or folder_tag)
+
+    cached_res = _check_rag_response_cache(
+        query, file_type, folder_scope, history, t_start, cache_mode
+    )
     if cached_res:
         return cast(dict[str, Any], cached_res)
 
     query_emb = None
     if not history:
         cache_res, query_emb = await _check_semantic_query_cache(
-            query, embedding_service, lancedb_client, t_start, file_type, folder_tag, mode
+            query, embedding_service, lancedb_client, t_start, file_type, folder_scope, cache_mode
         )
         if cache_res:
             return cast(dict[str, Any], cache_res)
@@ -1299,7 +1358,11 @@ async def full_rag(
         project=project,
     )
 
-    fast_answer = _build_fast_answer(query, plan, file_stats, folder_profiles)
+    # The fast paths and the totals describe the whole index; under a filter
+    # they answered about folders the user had excluded.
+    fast_answer = None if filtered else _build_fast_answer(query, plan, file_stats, folder_profiles)
+    if filtered:
+        file_stats = None
     if fast_answer and not history:  # Skip fast-path if there's history to allow follow-ups
         source_rows = [
             {
@@ -1343,7 +1406,9 @@ async def full_rag(
             retrieved = agentic_retrieved
             file_stats = file_stats if inventory else None
             folder_profiles_text = (
-                await db.get_folder_profiles_text() if include_profiles_text else ""
+                await db.get_folder_profiles_text()
+                if include_profiles_text and not filtered
+                else ""
             )
         else:
             if plan.mode == PlanMode.GRAPH_SEARCH:
@@ -1372,8 +1437,10 @@ async def full_rag(
                 )
     retrieval_ms = round((time.perf_counter() - t_ret) * 1000, 1)
 
-    if file_type or folder_tag:
-        retrieved = _filter_retrieved_results(retrieved, file_type=file_type, folder_tag=folder_tag)
+    if filtered:
+        retrieved = _filter_retrieved_results(
+            retrieved, file_type=file_type, folder_tag=folder_tag, root=folder_root
+        )
 
     if not retrieved and not file_stats and not folder_profiles_text:
         return {
@@ -1398,7 +1465,9 @@ async def full_rag(
         max_tokens=budget,
         file_stats=file_stats,
         folder_profiles_text=folder_profiles_text,
-        metadata_insights=await _get_metadata_insights(plan.intents, db),
+        metadata_insights=await _get_metadata_insights(
+            plan.intents, db, folder_tag, folder_root, file_type
+        ),
         graph_paths_text=graph_paths_text,
         model_class=model_class,
     )
@@ -1407,7 +1476,9 @@ async def full_rag(
     _llm_error = False  # P2-4: track LLM failure explicitly
     with Timer("llm_generation"):
         try:
-            answer = await llm_client.generate_answer(query, context, history=history, mode=mode)
+            answer = await llm_client.generate_answer(
+                query, context, history=history, mode=mode, answer_length=answer_length
+            )
         except Exception as e:
             logger.error("LLM Generation failed: %s", e)
             answer = (
@@ -1458,9 +1529,9 @@ async def full_rag(
         rag_cache_key = (
             query.strip().lower(),
             file_type,
-            folder_tag,
+            folder_scope,
             hist_key,
-            mode,
+            cache_mode,
             _index_generation,
         )
         with _rag_cache_lock:
@@ -1478,7 +1549,9 @@ async def full_rag(
                     query_text=query,
                     response_text=answer,
                     timestamp=time.time(),
-                    scope=_semantic_cache_scope(lancedb_client, file_type, folder_tag, mode),
+                    scope=_semantic_cache_scope(
+                        lancedb_client, file_type, folder_scope, cache_mode
+                    ),
                 )
             )
             state.bg_tasks.add(task)
@@ -1501,6 +1574,7 @@ async def retrieve_only(
     Used for visualization modes (like Dreamscape) where reading LLM tokens is unnecessary.
     """
     t_start = time.perf_counter()
+    folder_tag, folder_root = _folder_scope(folder_tag)
 
     query_emb = await embedding_service.embed_query(query)
     plan = planner.plan(query)
@@ -1534,7 +1608,9 @@ async def retrieve_only(
         )
 
     if file_type or folder_tag:
-        retrieved = _filter_retrieved_results(retrieved, file_type=file_type, folder_tag=folder_tag)
+        retrieved = _filter_retrieved_results(
+            retrieved, file_type=file_type, folder_tag=folder_tag, root=folder_root
+        )
 
     total_ms = round((time.perf_counter() - t_start) * 1000, 1)
 
@@ -1560,9 +1636,16 @@ async def stream_rag(
     history: list[dict[str, str]] | None = None,
     override_provider: str | None = None,
     override_model: str | None = None,
+    answer_length: str | None = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """NDJSON stream events for /api/query/stream (match SearchPage chunk types)."""
     t_start = time.perf_counter()
+
+    # See full_rag: caches key on the filter as sent and on the length.
+    folder_scope = folder_tag
+    folder_tag, folder_root = _folder_scope(folder_tag)
+    cache_mode = f"{mode or ''}|{answer_length}" if answer_length else mode
+    filtered = bool(file_type or folder_tag)
 
     plan = planner.plan(query)
 
@@ -1575,7 +1658,9 @@ async def stream_rag(
         project=project,
     )
 
-    fast_answer = _build_fast_answer(query, plan, file_stats, folder_profiles)
+    fast_answer = None if filtered else _build_fast_answer(query, plan, file_stats, folder_profiles)
+    if filtered:
+        file_stats = None
     if fast_answer and not history:
         source_rows = [
             {
@@ -1610,7 +1695,12 @@ async def stream_rag(
                 query_emb,
                 threshold=0.97,
                 scope=_semantic_cache_scope(
-                    lancedb_client, file_type, folder_tag, mode, override_provider, override_model
+                    lancedb_client,
+                    file_type,
+                    folder_scope,
+                    cache_mode,
+                    override_provider,
+                    override_model,
                 ),
             )
             if cache_hit:
@@ -1656,7 +1746,9 @@ async def stream_rag(
             retrieved = agentic_retrieved
             file_stats = file_stats if inventory else None
             folder_profiles_text = (
-                await db.get_folder_profiles_text() if include_profiles_text else ""
+                await db.get_folder_profiles_text()
+                if include_profiles_text and not filtered
+                else ""
             )
         else:
             if plan.mode == PlanMode.GRAPH_SEARCH:
@@ -1759,8 +1851,14 @@ async def stream_rag(
         forced_ids = set(c["chunk_id"] for c in forced_chunks)
         retrieved = forced_chunks + [r for r in retrieved if r["chunk_id"] not in forced_ids]
 
-    if file_type or folder_tag:
-        retrieved = _filter_retrieved_results(retrieved, file_type=file_type, folder_tag=folder_tag)
+    if filtered:
+        retrieved = _filter_retrieved_results(
+            retrieved, file_type=file_type, folder_tag=folder_tag, root=folder_root
+        )
+        # Near misses are shown as sources too; they obey the same filter.
+        near_miss_chunks = _filter_retrieved_results(
+            near_miss_chunks, file_type=file_type, folder_tag=folder_tag, root=folder_root
+        )
 
     if not retrieved and not file_stats and not folder_profiles_text:
         yield {"type": "content", "text": "I couldn't find any relevant documents."}
@@ -1804,7 +1902,9 @@ async def stream_rag(
         max_tokens=budget,
         file_stats=file_stats,
         folder_profiles_text=folder_profiles_text,
-        metadata_insights=await _get_metadata_insights(plan.intents, db),
+        metadata_insights=await _get_metadata_insights(
+            plan.intents, db, folder_tag, folder_root, file_type
+        ),
         graph_paths_text=graph_paths_text,
         model_class=model_class,
     )
@@ -1821,6 +1921,7 @@ async def stream_rag(
                     mode=mode,
                     override_provider=override_provider,
                     override_model=override_model,
+                    answer_length=answer_length,
                 )
             ) as stream:
                 async for chunk in stream:
@@ -1951,8 +2052,8 @@ async def stream_rag(
                     scope=_semantic_cache_scope(
                         lancedb_client,
                         file_type,
-                        folder_tag,
-                        mode,
+                        folder_scope,
+                        cache_mode,
                         override_provider,
                         override_model,
                     ),
@@ -2003,8 +2104,8 @@ async def stream_rag(
                         scope=_semantic_cache_scope(
                             lancedb_client,
                             file_type,
-                            folder_tag,
-                            mode,
+                            folder_scope,
+                            cache_mode,
                             override_provider,
                             override_model,
                         ),
@@ -2138,7 +2239,10 @@ async def _get_top_relevant_profiles(
         return ""
 
 
-def _filter_retrieved_results(retrieved, file_type, folder_tag):
+def _filter_retrieved_results(retrieved, file_type, folder_tag, root=None):
+    # The root check is what tells two like-named folders apart: they share a
+    # folder_tag, so the tag test alone admits both.
+    root_prefix = _norm_path(root).rstrip("\\") + "\\" if root else None
     filtered = []
     for res in retrieved:
         path = res.get("file_path", "").lower()
@@ -2146,6 +2250,8 @@ def _filter_retrieved_results(retrieved, file_type, folder_tag):
         if file_type and not path.endswith(file_type.lower()):
             continue
         if folder_tag and tag != folder_tag:
+            continue
+        if root_prefix and not _norm_path(path).startswith(root_prefix):
             continue
         filtered.append(res)
     return filtered

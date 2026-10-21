@@ -268,7 +268,9 @@ async def test_full_rag_answer_cache_is_keyed_on_mode(mock_db, mock_emb, no_rera
     lance = _lancedb_over([(c, "d:/n/a.md", "n") for c in ids])
     llm = MagicMock()
     llm.get_model_class = MagicMock(return_value="7b_local")
-    llm.generate_answer = AsyncMock(side_effect=lambda q, c, history=None, mode=None: f"ans-{mode}")
+    llm.generate_answer = AsyncMock(
+        side_effect=lambda q, c, history=None, mode=None, answer_length=None: f"ans-{mode}"
+    )
 
     async def ask(mode):
         return await retrieval.full_rag(
@@ -320,3 +322,117 @@ async def test_stream_semantic_cache_scope_includes_mode_and_overrides(
 
     assert lance.search_cache.await_args.kwargs["scope"] == "||verify|ollama|m1"
     assert lance.add_query_cache.await_args.kwargs["scope"] == "||verify|ollama|m1"
+
+
+# --- Ask folder picker sends a root path, not a folder_tag -----------------------
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("D:\\Docs\\travel", ("travel", "D:\\Docs\\travel")),
+        ("/home/u/travel/", ("travel", "/home/u/travel")),
+        ("travel", ("travel", None)),
+        (None, (None, None)),
+    ],
+)
+async def test_folder_scope_splits_a_root_into_tag_and_root(value, expected):
+    assert retrieval._folder_scope(value) == expected
+
+
+async def _two_like_named_travel_folders(mock_db):
+    """d:/docs/travel and e:/old/travel share folder_tag "travel"; physics is unrelated."""
+    here = await _seed_chunks(mock_db, "d:/docs/travel/t.md", "travel", 3)
+    other = await _seed_chunks(mock_db, "e:/old/travel/x.md", "travel", 3)
+    physics = await _seed_chunks(mock_db, "d:/physics/p.md", "physics", 3)
+    return _lancedb_over(
+        [(c, "d:/docs/travel/t.md", "travel") for c in here]
+        + [(c, "e:/old/travel/x.md", "travel") for c in other]
+        + [(c, "d:/physics/p.md", "physics") for c in physics]
+    )
+
+
+async def test_stream_with_a_picked_root_path_finds_only_that_folder(
+    mock_db, mock_emb, no_reranker
+):
+    # The picker's value is the root path. Compared raw against folder_tag it
+    # matched nothing ("no relevant documents"); split to the tag alone it
+    # admitted the like-named e:/old/travel too.
+    lance = await _two_like_named_travel_folders(mock_db)
+    llm = MagicMock()
+    llm.get_model_class = MagicMock(return_value="7b_local")
+
+    async def fake_stream(*_a, **_kw):
+        yield "fine"
+
+    llm.stream_answer = fake_stream
+    mock_db.save_query = AsyncMock(return_value=1)
+    mock_db.save_telemetry = AsyncMock()
+
+    frames = [
+        f
+        async for f in retrieval.stream_rag(
+            "turbulence",
+            mock_db,
+            mock_emb,
+            lance,
+            llm,
+            QueryPlanner(),
+            folder_tag="D:\\docs\\travel",
+        )
+    ]
+    sources = next(f for f in frames if f["type"] == "sources")
+    paths = {s["file_path"] for s in sources["sources"] + sources["near_misses"]}
+    assert paths == {"d:/docs/travel/t.md"}
+
+
+async def test_query_request_accepts_a_root_path_and_only_known_lengths():
+    from pydantic import ValidationError
+
+    from app.api.search import QueryRequest
+
+    # A root path of 150 chars was a 422 at the old max_length=100.
+    req = QueryRequest(question="q", folder_tag="D:\\" + "a" * 147, answer_length="detailed")
+    assert req.answer_length == "detailed"
+    with pytest.raises(ValidationError):
+        QueryRequest(question="q", answer_length="huge")
+
+
+async def test_recency_insights_are_scoped_to_the_picked_folder(mock_db):
+    await _two_like_named_travel_folders(mock_db)
+
+    scoped = await retrieval._get_metadata_insights(
+        {"latest": True, "largest": True}, mock_db, "travel", "D:\\docs\\travel"
+    )
+    assert scoped is not None and "t.md" in scoped
+    assert "x.md" not in scoped and "p.md" not in scoped
+
+    unscoped = await retrieval._get_metadata_insights({"latest": True}, mock_db)
+    assert unscoped is not None and "p.md" in unscoped
+    assert (
+        await retrieval._get_metadata_insights({"latest": True}, mock_db, file_type=".md") is None
+    )
+
+
+async def test_answer_length_is_part_of_both_answer_cache_keys(mock_db, mock_emb, no_reranker):
+    ids = await _seed_chunks(mock_db, "d:/n/a.md", "n", 3)
+    lance = _lancedb_over([(c, "d:/n/a.md", "n") for c in ids])
+    llm = MagicMock()
+    llm.get_model_class = MagicMock(return_value="7b_local")
+    llm.generate_answer = AsyncMock(
+        side_effect=lambda q, c, history=None, mode=None, answer_length=None: f"ans-{answer_length}"
+    )
+
+    async def ask(length):
+        return await retrieval.full_rag(
+            "turbulence", mock_db, mock_emb, lance, llm, QueryPlanner(), answer_length=length
+        )
+
+    short = await ask("short")
+    detailed = await ask("detailed")
+    await asyncio.sleep(0)
+
+    assert short["answer"] == "ans-short"
+    assert detailed["answer"] == "ans-detailed", "detailed was served the short answer"
+    scopes = [c.kwargs["scope"] for c in lance.add_query_cache.await_args_list]
+    assert scopes == ["|||short||", "|||detailed||"]

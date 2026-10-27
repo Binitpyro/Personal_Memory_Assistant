@@ -121,6 +121,63 @@ def _variant_runs(
     return runs
 
 
+# A pipeline step that reuses the model's own shipped-prompt answer for the
+# query instead of calling again, so a refine arm is paired with the baseline on
+# the very draft it refines, and costs only the passes it adds.
+_BASELINE_STEP = "@baseline"
+# Prefix on a step's file: run that pass with thinking off. Measured 2026-10-27
+# on gemma4-local: a verbatim-copy pass took 6.4-7.6 s thinking and 0.7 s not,
+# for the same copied text - the reasoning, not the prompt, is the cost.
+_NOTHINK = "nothink:"
+
+
+def _load_step(step: str) -> tuple[str, bool | None]:
+    """A parsed step -> (template text or `@baseline`, think override)."""
+    if step == _BASELINE_STEP:
+        return step, None
+    if step.startswith(_NOTHINK):
+        return Path(step.removeprefix(_NOTHINK)).read_text(encoding="utf-8"), False
+    return Path(step).read_text(encoding="utf-8"), None
+
+
+def _parse_pipeline(spec: str) -> tuple[str, list[str]]:
+    """`LABEL=FILE[,FILE...]` -> (label, steps); a step is a path, `nothink:PATH`
+    or `@baseline`."""
+    label, sep, files = spec.partition("=")
+    steps = [s.strip() for s in files.split(",") if s.strip()]
+    if not sep or not label.strip() or not steps:
+        raise ValueError(f"--gen-pipeline expects LABEL=FILE[,FILE...], got {spec!r}")
+    return label.strip(), steps
+
+
+async def _run_pipeline(
+    steps: list[tuple[str, bool | None]], fields: dict[str, str], chat, baseline: dict | None
+) -> list[dict]:
+    """Run each pass in order; every template sees the previous pass as `{prev}`.
+
+    `steps` are (template text or `@baseline`, think override). Templates are
+    filled with `{context}`, `{query}`, `{shipped}` (the production prompt) and
+    `{prev}`. Each pass's text and seconds are returned so a judge can see what
+    changed.
+    """
+    import time
+
+    passes: list[dict] = []
+    prev = ""
+    for step, think in steps:
+        if step == _BASELINE_STEP:
+            if not baseline or "error" in baseline:
+                raise RuntimeError("no baseline answer to reuse for this query")
+            text, seconds = baseline["answer"], baseline["seconds"]
+        else:
+            started = time.perf_counter()
+            text = await chat(step.format(prev=prev, **fields), think)
+            seconds = round(time.perf_counter() - started, 2)
+        passes.append({"text": text, "seconds": seconds})
+        prev = text
+    return passes
+
+
 def _provenance(
     k: int,
     gen_models: list[tuple[str, str]],
@@ -335,6 +392,7 @@ async def _generation_scores(
     delivery_by_class: dict | None = None,
     prompt_suffix: str | None = None,
     suffix_label: str = "",
+    pipelines: list[tuple[str, list[tuple[str, bool | None]]]] | None = None,
 ) -> dict:
     """Score the answer the model writes from the delivered context.
 
@@ -379,7 +437,14 @@ async def _generation_scores(
     delivery_by_class = delivery_by_class or {}
     out: dict = {}
 
-    for provider_id, tag, key, suffix in _variant_runs(gen_models, prompt_suffix, suffix_label):
+    # Model-major: each model's shipped run first (a pipeline's @baseline reads
+    # it), then its variants, so a tag is cold-loaded once.
+    runs: list[tuple[str, str, str, str, list[tuple[str, bool | None]] | None]] = []
+    for pair in gen_models:
+        runs += [(*r, None) for r in _variant_runs([pair], prompt_suffix, suffix_label)]
+        runs += [(*pair, f"{pair[1]}|{label}", "", steps) for label, steps in pipelines or []]
+
+    for provider_id, tag, key, suffix, steps in runs:
         cls = _classes_for([tag], provider_id)[tag]
         fed = _fed_class(cls, context_mode)
         per_class = contexts.get(fed)
@@ -400,16 +465,43 @@ async def _generation_scores(
                 source = (CORPUS / span["file"]).read_text(encoding="utf-8")
                 reference = source[int(span["start"]) : int(span["end"])]
 
-                prompt = client._build_prompt(q.query, context, None, supports_claims=False)
-                prompt += suffix
-                started = time.perf_counter()
-                try:
-                    answer = await provider.chat(
-                        client._build_messages(prompt, None),
-                        model=tag,
-                        temperature=0.0,
-                        max_tokens=max_tokens,
+                shipped = client._build_prompt(q.query, context, None, supports_claims=False)
+                prompt = shipped + suffix
+
+                async def chat(
+                    text: str, think: bool | None = None, tag: str = tag, provider=provider
+                ) -> str:
+                    messages = client._build_messages(text, None)
+                    if think is None:
+                        reply: str = await provider.chat(
+                            messages, model=tag, temperature=0.0, max_tokens=max_tokens
+                        )
+                        return reply
+                    # BaseProvider.chat takes no `think`; the Ollama payload
+                    # builder does (it is how chat's own empty-answer retry
+                    # turns reasoning off), so a no-think pass is Ollama-only.
+                    payload = provider._chat_payload(
+                        messages, tag, 0.0, max_tokens, stream=False, think=think
                     )
+                    resp = await provider._get_client().post(
+                        f"{provider.base_url}/api/chat", json=payload
+                    )
+                    resp.raise_for_status()
+                    return str(resp.json().get("message", {}).get("content") or "")
+
+                started = time.perf_counter()
+                passes = None
+                try:
+                    if steps is None:
+                        answer = await chat(prompt)
+                    else:
+                        passes = await _run_pipeline(
+                            steps,
+                            {"context": context, "query": q.query, "shipped": shipped},
+                            chat,
+                            out.get(tag, {}).get("per_query", {}).get(q.id),
+                        )
+                        answer = passes[-1]["text"]
                 except Exception as exc:
                     # Recorded, never scored as 0.0. A provider that reports
                     # itself as a perfect miss is the failure the reranker arm
@@ -423,7 +515,13 @@ async def _generation_scores(
                     "abstained": _ABSTENTION in answer.lower(),
                     "empty": not answer.strip(),
                     "answer_chars": len(answer),
-                    "seconds": round(time.perf_counter() - started, 2),
+                    # A pipeline's time is its passes', including a reused draft's,
+                    # so seconds stays the latency a user would wait.
+                    "seconds": (
+                        round(sum(p["seconds"] for p in passes), 2)
+                        if passes
+                        else round(time.perf_counter() - started, 2)
+                    ),
                     "answer_len": q.answer_len,
                     # Kept so the answer can be graded after the run, and so a
                     # miss can be split into "not in context" vs "in context".
@@ -432,6 +530,8 @@ async def _generation_scores(
                     "context_coverage": delivered.get(q.id, {}).get("context_coverage"),
                     "context_tokens": delivered.get(q.id, {}).get("context_tokens"),
                 }
+                if passes:
+                    per_query[q.id]["passes"] = passes
         finally:
             await provider.close()
 
@@ -489,8 +589,13 @@ async def _run(
     gen_max_tokens: int,
     context_mode: str | None = None,
     prompt_suffix: Path | None = None,
+    pipeline_specs: list[str] | None = None,
 ) -> int:
     queries = harness.load_queries(QUERIES)
+    pipelines: list[tuple[str, list[tuple[str, bool | None]]]] = []
+    for spec in pipeline_specs or []:
+        label, steps = _parse_pipeline(spec)
+        pipelines.append((label, [_load_step(s) for s in steps]))
     index = await harness.EvalIndex(corpus_dir=CORPUS).build()
 
     # "cloud" stays first so payload["arms"][*]["delivery"] keeps meaning what it
@@ -513,6 +618,7 @@ async def _run(
     }
     suffix = prompt_suffix.read_text(encoding="utf-8") if prompt_suffix else None
     payload["provenance"]["generation"]["prompt_suffix"] = suffix
+    payload["provenance"]["generation"]["pipelines"] = dict(pipelines)
     try:
         chunk_total = 0
         if index.db is not None:
@@ -562,6 +668,7 @@ async def _run(
                     delivery_by_class,
                     suffix,
                     prompt_suffix.stem if prompt_suffix else "",
+                    pipelines,
                 )
                 print(_format_generation(generation))
                 print()
@@ -681,6 +788,18 @@ def main() -> int:
             "change is paired per query on one index build."
         ),
     )
+    p.add_argument(
+        "--gen-pipeline",
+        action="append",
+        default=[],
+        help=(
+            "LABEL=FILE[,FILE...], repeatable. A multi-pass answer scored as "
+            "<tag>|LABEL: each file is a template filled with {context}, {query}, "
+            "{shipped} (the production prompt) and {prev} (the previous pass), and "
+            "the last pass is the answer. '@baseline' as a step reuses the shipped "
+            "answer for that query, so a refine pass is paired on the same draft."
+        ),
+    )
     args = p.parse_args()
 
     # Module-level because _delivery_scores and _generation_scores resolve
@@ -699,6 +818,7 @@ def main() -> int:
             args.gen_max_tokens,
             args.gen_context_class,
             args.gen_prompt_suffix,
+            args.gen_pipeline,
         )
     )
 

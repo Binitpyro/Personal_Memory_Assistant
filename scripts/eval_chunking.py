@@ -59,8 +59,74 @@ QUERIES = DEFAULT_QUERIES
 # score honesty as failure and reward confabulation.
 _ABSTENTION = "don't have enough information"
 
+# Production's cloud context. The plain "cloud" class keeps the old 8,000-token
+# budget so baseline_chunking.json stays comparable; this key is the budget a
+# cloud user actually gets (compute_context_budget("cloud", 0), ~98,520 tokens).
+_CLOUD_SHIPPED = "cloud_shipped"
 
-def _provenance(k: int, gen_models: list[str], gen_max_tokens: int, gen_provider: str) -> dict:
+
+def _parse_gen_models(spec: str, default_provider: str) -> list[tuple[str, str]]:
+    """Split `--gen-models` into (provider, tag) pairs.
+
+    An entry is `provider:tag` only when the prefix is a registered provider id,
+    because Ollama tags carry colons of their own (`gemma2:2b`). Anything else
+    is a bare tag on `default_provider`, so every older command line still means
+    what it meant.
+    """
+    from app.providers.registry import PROVIDER_REGISTRY
+
+    pairs = []
+    for entry in (e.strip() for e in spec.split(",")):
+        if not entry:
+            continue
+        prefix, sep, rest = entry.partition(":")
+        if sep and prefix in PROVIDER_REGISTRY and rest:
+            pairs.append((prefix, rest))
+        else:
+            pairs.append((default_provider, entry))
+    return pairs
+
+
+def _fed_class(own_class: str, context_mode: str | None) -> str:
+    """Which context a model reads.
+
+    None keeps the old behaviour (its own class, "cloud" at the legacy budget).
+    "shipped" is the product as a user gets it: own class, but cloud at the
+    production budget. Any other value is a class every model is forced onto,
+    which holds the context fixed so only the model varies.
+    """
+    if context_mode is None:
+        return own_class
+    if context_mode == "shipped":
+        return _CLOUD_SHIPPED if own_class == "cloud" else own_class
+    return context_mode
+
+
+def _variant_runs(
+    gen_models: list[tuple[str, str]], suffix: str | None, label: str = ""
+) -> list[tuple[str, str, str, str]]:
+    """(provider, tag, result key, prompt suffix) for every generation run.
+
+    Each model runs on the shipped prompt, then - only if `suffix` is given - on
+    the shipped prompt plus it, back to back so a tag is cold-loaded once and
+    both arms read the identical context. The suffix is appended the way
+    `_build_prompt` appends a mode instruction, so it measures something the
+    product could actually ship.
+    """
+    runs = []
+    for provider_id, tag in gen_models:
+        runs.append((provider_id, tag, tag, ""))
+        if suffix:
+            runs.append((provider_id, tag, f"{tag}|{label}", f"\n\n{suffix.strip()}\n"))
+    return runs
+
+
+def _provenance(
+    k: int,
+    gen_models: list[tuple[str, str]],
+    gen_max_tokens: int,
+    context_mode: str | None = None,
+) -> dict:
     """Stamp what produced the numbers.
 
     Mirrors scripts/eval_retrieval.py. A retrieval measurement without the
@@ -94,9 +160,9 @@ def _provenance(k: int, gen_models: list[str], gen_max_tokens: int, gen_provider
             "parent_window_multiplier": settings.parent_window_multiplier,
         },
         "generation": {
-            "provider": gen_provider,
-            "models": gen_models,
-            "model_classes": _classes_for(gen_models, gen_provider),
+            "models": [f"{p}:{t}" for p, t in gen_models],
+            "model_classes": {f"{p}:{t}": _classes_for([t], p)[t] for p, t in gen_models},
+            "context_mode": context_mode,
             "max_tokens": gen_max_tokens,
             "temperature": 0.0,
             "ollama_url": settings.ollama_url,
@@ -159,10 +225,14 @@ async def _delivery_scores(
         # Retrieval is class independent, so it runs once and every class is
         # assembled from the same ranked results.
         for cls in model_classes:
-            budget = (
-                settings.context_max_tokens if cls == "cloud" else compute_context_budget(cls, 0)
-            )
-            context, tokens = build_context(results, max_tokens=budget, model_class=cls)
+            if cls == "cloud":
+                budget = settings.context_max_tokens
+            elif cls == _CLOUD_SHIPPED:
+                budget = compute_context_budget("cloud", 0)
+            else:
+                budget = compute_context_budget(cls, 0)
+            builder_class = "cloud" if cls == _CLOUD_SHIPPED else cls
+            context, tokens = build_context(results, max_tokens=budget, model_class=builder_class)
             contexts[cls][q.id] = context
             out[cls][q.id] = {
                 "context_coverage": metrics.context_answer_coverage(context, answer),
@@ -259,9 +329,12 @@ def _make_provider(provider_id: str, tag: str, timeout: float):
 async def _generation_scores(
     contexts: dict[str, dict[str, str]],
     queries,
-    model_tags: list[str],
+    gen_models: list[tuple[str, str]],
     max_tokens: int,
-    provider_id: str = "ollama",
+    context_mode: str | None = None,
+    delivery_by_class: dict | None = None,
+    prompt_suffix: str | None = None,
+    suffix_label: str = "",
 ) -> dict:
     """Score the answer the model writes from the delivered context.
 
@@ -303,16 +376,18 @@ async def _generation_scores(
     from app.search.llm_client import LLMClient
 
     client = LLMClient()
-    classes = _classes_for(model_tags, provider_id)
+    delivery_by_class = delivery_by_class or {}
     out: dict = {}
 
-    for tag in model_tags:
-        cls = classes[tag]
-        per_class = contexts.get(cls)
+    for provider_id, tag, key, suffix in _variant_runs(gen_models, prompt_suffix, suffix_label):
+        cls = _classes_for([tag], provider_id)[tag]
+        fed = _fed_class(cls, context_mode)
+        per_class = contexts.get(fed)
         if per_class is None:
-            out[tag] = {"skipped": f"no context built for model_class {cls}"}
-            print(f"--- generation {tag}: SKIPPED, no context for class {cls} ---")
+            out[key] = {"skipped": f"no context built for class {fed}"}
+            print(f"--- generation {key}: SKIPPED, no context for class {fed} ---")
             continue
+        delivered = delivery_by_class.get(fed, {})
 
         provider = _make_provider(provider_id, tag, timeout=600.0)
         per_query: dict = {}
@@ -326,6 +401,7 @@ async def _generation_scores(
                 reference = source[int(span["start"]) : int(span["end"])]
 
                 prompt = client._build_prompt(q.query, context, None, supports_claims=False)
+                prompt += suffix
                 started = time.perf_counter()
                 try:
                     answer = await provider.chat(
@@ -349,14 +425,25 @@ async def _generation_scores(
                     "answer_chars": len(answer),
                     "seconds": round(time.perf_counter() - started, 2),
                     "answer_len": q.answer_len,
+                    # Kept so the answer can be graded after the run, and so a
+                    # miss can be split into "not in context" vs "in context".
+                    "answer": answer,
+                    "reference": reference,
+                    "context_coverage": delivered.get(q.id, {}).get("context_coverage"),
+                    "context_tokens": delivered.get(q.id, {}).get("context_tokens"),
                 }
         finally:
             await provider.close()
 
         errors = sum(1 for v in per_query.values() if "error" in v)
         if errors and errors == len(per_query):
-            print(f"--- generation {tag}: FAILED, every query errored ---")
-        out[tag] = {"model_class": cls, "per_query": per_query}
+            print(f"--- generation {key}: FAILED, every query errored ---")
+        out[key] = {
+            "provider": provider_id,
+            "model_class": cls,
+            "context_class": fed,
+            "per_query": per_query,
+        }
     return out
 
 
@@ -398,9 +485,10 @@ def _format_generation(generation: dict) -> str:
 async def _run(
     k: int,
     json_out: Path | None,
-    gen_models: list[str],
+    gen_models: list[tuple[str, str]],
     gen_max_tokens: int,
-    gen_provider: str = "ollama",
+    context_mode: str | None = None,
+    prompt_suffix: Path | None = None,
 ) -> int:
     queries = harness.load_queries(QUERIES)
     index = await harness.EvalIndex(corpus_dir=CORPUS).build()
@@ -415,16 +503,16 @@ async def _run(
     # 3b_local-only setting came back with nothing to compare. Delivery is cheap
     # (retrieval runs once and every class is assembled from the same results),
     # so there is no reason to make it conditional.
-    extra = sorted(
-        ({"3b_local", "7b_local"} | set(_classes_for(gen_models, gen_provider).values()))
-        - {"cloud"}
-    )
+    fed = {_fed_class(_classes_for([t], p)[t], context_mode) for p, t in gen_models}
+    extra = sorted(({"3b_local", "7b_local"} | fed) - {"cloud"})
     model_classes = ("cloud", *extra)
 
     payload: dict = {
-        "provenance": _provenance(k, gen_models, gen_max_tokens, gen_provider),
+        "provenance": _provenance(k, gen_models, gen_max_tokens, context_mode),
         "arms": {},
     }
+    suffix = prompt_suffix.read_text(encoding="utf-8") if prompt_suffix else None
+    payload["provenance"]["generation"]["prompt_suffix"] = suffix
     try:
         chunk_total = 0
         if index.db is not None:
@@ -466,7 +554,14 @@ async def _run(
             generation: dict = {}
             if gen_models and use_reranker:
                 generation = await _generation_scores(
-                    contexts, queries, gen_models, gen_max_tokens, gen_provider
+                    contexts,
+                    queries,
+                    gen_models,
+                    gen_max_tokens,
+                    context_mode,
+                    delivery_by_class,
+                    suffix,
+                    prompt_suffix.stem if prompt_suffix else "",
                 )
                 print(_format_generation(generation))
                 print()
@@ -560,7 +655,30 @@ def main() -> int:
         help=(
             "provider for the generation arm (default ollama). A cloud id such as "
             "nvidia_nim reads its key from the app keyring and is scored as "
-            "model_class=cloud, which is a different context shape entirely."
+            "model_class=cloud, which is a different context shape entirely. "
+            "A --gen-models entry written provider:tag overrides it per model, "
+            "so a local and a cloud model can be scored on the same index build."
+        ),
+    )
+    p.add_argument(
+        "--gen-context-class",
+        default=None,
+        help=(
+            "context the generation arm reads. Unset: each model's own class "
+            "(cloud at the legacy 8,000 budget). 'shipped': own class, cloud at "
+            "the production budget. A class name (e.g. 7b_local): every model "
+            "reads that class's context, so only the model varies."
+        ),
+    )
+    p.add_argument(
+        "--gen-prompt-suffix",
+        type=Path,
+        default=None,
+        help=(
+            "file of text appended to the production prompt, as a mode instruction "
+            "is. Each model then runs twice on identical contexts: as <tag> on the "
+            "shipped prompt and as <tag>|<file stem> with the suffix, so a prompt "
+            "change is paired per query on one index build."
         ),
     )
     args = p.parse_args()
@@ -572,9 +690,16 @@ def main() -> int:
     CORPUS = args.corpus
     QUERIES = args.queries
 
-    gen_models = [m.strip() for m in args.gen_models.split(",") if m.strip()]
+    gen_models = _parse_gen_models(args.gen_models, args.gen_provider)
     return asyncio.run(
-        _run(args.k, args.json_out, gen_models, args.gen_max_tokens, args.gen_provider)
+        _run(
+            args.k,
+            args.json_out,
+            gen_models,
+            args.gen_max_tokens,
+            args.gen_context_class,
+            args.gen_prompt_suffix,
+        )
     )
 
 

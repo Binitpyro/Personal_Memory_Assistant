@@ -1945,6 +1945,18 @@ Everything since 669a156, committed and pushed on `UI/UX`. Per-finding table: `f
 - **A8-24:** CI runs `cargo test` for src-tauri (6e58b78) - CI triggers on `main` only, so first verified on the merge PR.
 - **Not in the audit:** `get_graph_edges` CTE `UNION ALL` -> `UNION` (64768f8); context budget capped at the dispatched model's reported window (87f7e66).
 
+## Status update 2026-11-02 (HEAD 2d2526b)
+
+Read-only advisor review; every item re-read at 2d2526b. Nothing fixed yet: each is a step of the v0.0.73 workstream (`files/HANDOFF_v0.0.73_2026-11-02.md`) or its queue. Gates not run.
+
+- **No installable build:** the README's MSI command omits `tauri.bundle.conf.json` (README.md:189-194; tauri.conf.json:40 `"resources": {}`; only scripts/Build-Exe.bat:113 passes it). Release workflow disabled since a1379d9; no signing config. Steps 4, 7.
+- **Privacy claim false on a fresh machine (CLAUDE.md 1.4):** README.md:45 vs config.py:141 `embedding_allow_download = True` and embeddings/service.py:396-415; Build-Exe.bat:78-86 bundles no models. Step 3.
+- **No reranker on a fresh install:** reranker.py:97-103 never downloads; retrieval.py:968-973 logs it at debug. Step 3.
+- **History over-charge:** useChatStream.ts:271-273 sends up to 50 messages; retrieval.py:1287/1456/1889 pass `len(history)`; context_builder.py:459 charges 400 each; llm_client.py:464 sends 10. 3b_local hits the 1,000 floor after 4 messages. Step 6.
+- **First run gated on an LLM:** SetupPage.tsx:291, :522-528; demo on step 2 (:551-560). Step 5.
+- **CI has never run on UI/UX:** .github/workflows/ci.yml:3-7 triggers on `main` only. Step 2.
+- **Latent, queued:** app/providers/openai_compat.py:277 returns "None" on `content: null`; retrieval.py:1088-1090 hard-codes -2.0, bypassing `agentic_evidence_score_floor`.
+
 ---
 
 ## Priority Fix Order for Remaining Issues

@@ -1,6 +1,6 @@
 # Unreleased (`UI/UX`, pending merge to `main`)
 
-*Version still `0.0.72` in the manifests; no bump yet.* Delta `main..UI/UX`: **81 commits**, 2026-08-29 through 2026-10-14, on top of `main` at `d59d4e3` (merge of PR #11). All pushed. Full gate green at `87f7e66`: `run_ci_checks.bat` exit 0, pytest 1382 passed / 1 skipped / 6 deselected.
+*Version still `0.0.72` in the manifests; no bump yet.* Delta `main..UI/UX`: **95 commits**, 2026-08-29 through 2026-10-28, on top of `main` at `d59d4e3` (merge of PR #11). All pushed. Full gate green at `87f7e66`: `run_ci_checks.bat` exit 0, pytest 1382 passed / 1 skipped / 6 deselected. Both gates last recorded green at `d45ae5a` (pytest 1404 passed); not re-run since. The 14 commits after `87f7e66` are under "Since `87f7e66`".
 
 ## Executive summary
 
@@ -62,6 +62,17 @@
 * The memory profiler reads `/proc/self/status` on Linux (`1242333`).
 * Research tooling (fixtures, sweeps, the adaptive-k and tokenizer tests) under `scripts/` and `tests/eval/`; journals are gitignored.
 
+## Since `87f7e66` (2026-10-14 through 2026-10-28)
+
+* **Ask:** the empty chat points at the question bar, which sits at the bottom; the receipt is on demand; the model picker cannot send (`c51a20c`, `db96310`). The folder filter matches the picked root, with fixes for scope leaks and answer length (`ef4f78d`).
+* **Providers:** the model picker keeps the last verdict and hides failed providers (`1f774f7`); Validate All uses `validate`, not `self_test` (`e94ad80`).
+* **Embeddings:** opt-in GPU (DirectML) embedder in a separate worker, off by default (`d45ae5a`).
+* **Desktop build:** `demo_data` bundled, sidecar data narrowed, the app built into `dist` (`1fa5aa3`).
+* **UI:** 10px and 10.5px labels raised to 11px (`75ce84a`).
+* **Tests and tooling:** tkinter faked instead of patching the global event loop (`1187f19`); ingest stage-timing profiler and in-process embed benchmark (`77fcd95`); lockfiles refreshed to patched versions (`9216da1`).
+* **Eval harness only** (`scripts/eval_chunking.py` and its test; no production change): paired multi-provider generation arms and prompt-suffix variants (`1472be2`); multi-pass generation pipelines (`2d2526b`).
+* **Docs:** brought current for the merge (`d819a52`).
+
 ## ⚠️ Known limitations at `87f7e66`
 
 * **Existing indexes need a forced re-index** to pick up the chunk-text fixes (A1-01, A1-13, A1-14, A1-21; A1-10 needs re-OCR). The content-hash early-out skips unchanged files.
@@ -69,6 +80,14 @@
 * Idle working set is 247–248 MB against a 250 MB ceiling — about 2 MB of headroom.
 * Routing miss: "How big is my *whole* collection now?" goes to RAG (an adjective defeats the guard).
 * English-first retrieval: CJK is indexed but retrieves poorly (README §9.2).
+
+## ⚠️ Found 2026-11-02 at `2d2526b` (fixes planned for v0.0.73)
+
+* `npm run tauri build`, as the README gives it, bundles no backend: only `scripts/Build-Exe.bat` passes `tauri.bundle.conf.json`. The release workflow is still disabled.
+* "No network access required at first run" (README) is false on a fresh machine: the embedder downloads from HuggingFace by default, and no models are bundled.
+* A fresh install has no reranker; it is never downloaded.
+* First run requires an LLM before the demo or any search.
+* Chat history is charged 400 tokens per message for up to 50 messages while only 10 are sent; the small class reaches the 1,000-token floor after 4 messages.
 
 ---
 

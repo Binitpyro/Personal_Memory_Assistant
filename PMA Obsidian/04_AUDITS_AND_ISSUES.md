@@ -1957,6 +1957,16 @@ Read-only advisor review; every item re-read at 2d2526b. Nothing fixed yet: each
 - **CI has never run on UI/UX:** .github/workflows/ci.yml:3-7 triggers on `main` only. Step 2.
 - **Latent, queued:** app/providers/openai_compat.py:277 returns "None" on `content: null`; retrieval.py:1088-1090 hard-codes -2.0, bypassing `agentic_evidence_score_floor`.
 
+## Status update 2026-11-03 (main 2f26d85)
+
+PR #12 merged (`UI/UX` -> `main`, merge commit 2f26d85, 2026-11-02 19:18 UTC). Its CI at 34b8352 passed: python, frontend and rust checks; CodeQL for actions, JS/TS, Python and Rust. Docs refreshed on `main` in the same pass.
+
+- **CI has run:** the 2026-11-02 "never run on UI/UX" item is closed. Two Linux-only test failures were fixed in 1a227c1.
+- **CodeQL, read from the API 2026-11-03:** 57 fixed, 49 dismissed (38 used in tests, 11 false positive), **81 open on `main`**. The open ones predate PR #12 and were never in its triage: 2 critical `py/partial-ssrf` (app/providers/gemini.py:187, tests/test_security_and_robustness.py:44); 36 high (20 rust and 13 py path injection, `py/reflective-xss` app/main.py:836, `py/clear-text-logging-sensitive-data` app/providers/openai_compat.py:171, `js/incomplete-url-scheme-check` MessageBubbleSanitize.test.tsx:47); 43 medium (24 log injection, 12 stack-trace exposure, 4 unpinned action tags, 3 missing workflow permissions). Not triaged.
+- **Fixed for CodeQL in the PR:** log injection (b290b5f, app/utils/log_safe.py), dev-script argv overrides (8ffb1e8), src-tauri test scratch dirs (39b0445, 34b8352).
+- **New: the first-run download over-fetches.** app/embeddings/service.py:409-415 and scripts/pin_models.py:97 pass `allow_patterns` that include `onnx/*`, so every ONNX build in the pinned revision is fetched: 8 files, 438.9 MiB cached for the embedder (PMA loads the 34.0 MB INT8 one) and 330.5 MiB for the reranker (23.1 MB used). v0.0.73 step 3.
+- **Docs fixed in this pass:** the README's MSI command (now scripts/Build-Exe.bat), its first-run privacy line, the reranker and Rust-toolchain notes, and the `__main__.py` docstring (its `--mode` flag does not exist).
+
 ---
 
 ## Priority Fix Order for Remaining Issues

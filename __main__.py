@@ -4,7 +4,7 @@ Entry point for ``python -m .`` or ``python __main__.py``.
 Usage
 -----
     python .                        # Web server (dev, auto-reload)
-    python . --mode server          # Web server (production)
+    python . --no-reload            # Web server without auto-reload
     python . --host 0.0.0.0        # Bind to all interfaces
     python . --port 9000           # Custom port
     python . --workers 4           # Refused: single worker only (see run_server)
@@ -13,7 +13,7 @@ NOTE: The canonical desktop launcher is now Tauri v2.
       To start the full desktop app, run::
 
           cd frontend && npm run tauri dev      # development (HMR + Python reload)
-          cd frontend && npm run tauri build    # production MSI installer
+          scripts/Build-Exe.bat                 # production MSI installer (bundles the backend)
 
       This script starts the FastAPI backend in server mode only (no window).
       Useful for backend-only development and CI.

@@ -3,11 +3,13 @@
 
 [![Version](https://img.shields.io/badge/Version-0.0.72-blue?style=flat-square)](https://github.com/Binitpyro/Personal_Memory_Assistant)
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
-[![Rust](https://img.shields.io/badge/Rust-1.77+-brown?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/Rust-1.97.1-brown?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![React](https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react&logoColor=black)](https://react.dev/)
 [![Tauri](https://img.shields.io/badge/Tauri-v2-FFC107?style=flat-square&logo=tauri&logoColor=black)](https://tauri.app/)
 
 Personal Memory Assistant (PMA) is a high-performance, local-first search and retrieval system. It indexes your documents and projects with near-zero latency, allowing you to perform semantic queries and gain structural insights without your data ever leaving your machine.
+
+What changed in each release: [`PMA Obsidian/05_CHANGELOGS.md`](PMA%20Obsidian/05_CHANGELOGS.md).
 
 ---
 
@@ -32,6 +34,7 @@ Personal Memory Assistant (PMA) is a high-performance, local-first search and re
     - **Vector Store**: LanceDB (High-performance O(1) semantic retrieval; separate tables for chunk embeddings and document-summary embeddings)
 - **Extraction**: Rust-powered parallel file walker & stream extractor
 - **Models**: ONNX Runtime and tokenizers for local embedding generation and cross-encoder reranking
+- **GPU embedding** (optional, Windows only, off by default): from **Settings**, PMA installs a DirectML runtime (about 150 MB) and the half-precision embedding model (about 67 MB) into a separate environment. Switching it on or off takes a restart and **Diagnostics → Rebuild embeddings**.
 - **OCR**: optional, off by default. Reads scanned PDFs in an isolated subprocess venv — see [§7](#7-ocr-for-scanned-documents-optional)
 - **AI Providers**: Gemini, OpenAI, Anthropic, Groq, OpenRouter, NVIDIA NIM, Ollama, LM Studio, and generic OpenAI-compatible endpoints
 - **Spatial Engine**: WebGPU-powered GPGPU compute for real-time indexing & Volumetric Visualization
@@ -42,7 +45,7 @@ Personal Memory Assistant (PMA) is a high-performance, local-first search and re
 
 Local-first is enforced in the code, not just claimed in the pitch.
 
-- **Nothing leaves your machine by default.** No telemetry, no phone-home, no network access required at first run.
+- **Your files never leave your machine by default.** No telemetry, no phone-home. At first run PMA downloads its embedding model from Hugging Face, pinned to a revision and checked against the SHA-256 digests in `models.lock.json`. The download is currently about 460 MB, because every ONNX build in that revision is fetched while only the 34 MB INT8 one is used. Set `PMA_EMBEDDING_ALLOW_DOWNLOAD=false` to forbid it (`.env.example` sets it to `true`).
 - **Cloud providers are opt-in**, and consent is checked against the *resolved destination* rather than a provider's label — a provider registered as "local" but pointed at a remote host is not exempt. PMA states plainly that free-tier cloud dispatch may use your inputs for model training before it sends anything.
 - **API keys live in the OS keyring.** A key set in `.env` overrides the keyring and is managed outside the UI.
 - **Every `/api/` route requires a local access token**, sent as the `X-Local-Access-Token` header only and compared in constant time. There is no `?token=` query fallback, so tokens never reach access logs, browser history, or `Referer`.
@@ -57,7 +60,7 @@ Local-first is enforced in the code, not just claimed in the pitch.
 ### 4.1 Prerequisites
 - **Python 3.12+** (Managed via `uv` recommended)
 - **Node.js 20+**
-- **Rust Toolchain** (Latest stable)
+- **Rust** via rustup; the toolchain is pinned to 1.97.1 in `rust-toolchain.toml`
 
 **Hardware.** PMA targets budget machines on purpose: a ~4 GB VRAM GPU (GTX 1650 / RX 580 class) and an 8 GB RAM laptop. It holds roughly 196-248 MB resident when idle with models loaded (Windows working set, `PMA_LANCEDB_MODE=portable`, measured 2026-08-20 and 2026-10-13; resident size on Linux reads higher). Bulk indexing is a bounded transient that peaked 535 MB above idle on a 403 MB document corpus under the same conditions (567-632 MB on a 479 MB corpus, 2026-10). It does not return all the way: 60 s after a large ingest the working set sits about 190 MB above idle, mostly allocator fragmentation and database page caches, all of which Windows can page out under memory pressure. Serving queries holds about 500 MB, with brief spikes near 1.4 GB.
 
@@ -70,7 +73,7 @@ Copy the example configuration, then choose the development workflow you need:
    ```
 2. **Launch browser-mode development**:
    ```powershell
-   ./scripts/StartPMA.bat       # Starts the FastAPI backend and Vite frontend
+   ./scripts/StartPMA.bat       # Backend + Vite in Windows Terminal tabs; asks for admin (NTFS fast scan)
    ```
 3. **Launch the Tauri desktop app**:
    ```powershell
@@ -82,11 +85,15 @@ Copy the example configuration, then choose the development workflow you need:
 1. **Initialize Backend**:
    ```bash
    uv sync --all-extras
-   cd app/scanner/rust_core && maturin develop --release
+   cd app/scanner/rust_core && uv run maturin develop --release   # re-run after every uv sync
    ```
 2. **Initialize Frontend**:
    ```bash
    cd frontend && npm install && npm run build
+   ```
+3. **Run** (from the repository root; the backend serves the built UI at http://127.0.0.1:8000):
+   ```bash
+   uv run python .
    ```
 
 ### 4.4 Credentials
@@ -108,7 +115,8 @@ The `scripts/` directory contains tools to automate the development lifecycle.
 | `StartPMA.bat` | Starts the FastAPI backend and Vite frontend for browser-mode development. |
 | `Run-Tests.bat` | Executes the full test suite (Python, Rust, and Frontend). |
 | `run_ci_checks.bat` | Runs the project's lint, type, test, and security checks. |
-| `Build-Exe.bat` | Builds the legacy PyInstaller sidecar executable; this standalone EXE workflow is temporarily on hold and is not a current release artifact. |
+| `Build-Exe.bat` | Builds the desktop app: frontend, PyInstaller backend (`dist\PMA-sidecar.zip`) and Windows MSI (`dist\*.msi`). See [§8](#8-packaging). |
+| `pin_models.py` | Fetches the pinned models (embedder, reranker, OCR high-accuracy weights) into the Hugging Face cache and rewrites `models.lock.json` from them. Large: it pulls every ONNX build in each pinned revision (about 770 MB for the embedder and reranker alone). |
 | `Reindex-Embeddings.bat` | Resets and regenerates the LanceDB vector store. |
 | `dev.bat` | Launches the Vite development server for the frontend. |
 
@@ -186,19 +194,19 @@ rather than seconds, so it suits a few important documents rather than a whole l
 
 ## 8. Packaging
 
-Tauri is the supported desktop distribution path. Build the Windows MSI installer with:
+Tauri is the supported desktop distribution path. After the setup in §4.3, build the Windows MSI installer with:
 
 ```powershell
-cd frontend
-npm run tauri build
+./scripts/Build-Exe.bat
 ```
 
-> **Unproven as of 2026-10-08.** The packaging configuration was corrected during the
-> failure-point audit and checked with unit tests and `cargo check`, but no MSI has been built
-> and installed from it since.
+It builds the frontend, packs the Python backend with PyInstaller into `dist\PMA-sidecar.zip`, then runs
+`npx tauri build --bundles msi --config src-tauri/tauri.bundle.conf.json`, which puts that zip inside the
+installer. The MSI lands in `dist\`, with an unbundled `dist\app\pma-desktop.exe` beside it. A bare
+`npm run tauri build` skips the bundle config, so its MSI has no backend.
 
-`Build-Exe.bat` still creates a PyInstaller sidecar executable, but that standalone
-EXE workflow is temporarily on hold and should not be used as a current release artifact.
+> **Unproven.** No MSI built this way has yet been installed and run on a clean machine. The installer bundles
+> no models: the embedder downloads on first run (see [§3](#3-privacy--security)) and the reranker is absent.
 
 ---
 
@@ -232,7 +240,7 @@ graph LR
 ```
 
 ### 9.2 Unified Search Flow
-A query planner first classifies intent into one of four modes: whole-collection inventory and project lookups bypass retrieval entirely, relationship questions that name code (an identifier, `module.attr`, `f()`) traverse the knowledge graph, and everything else runs the full RAG pipeline. Per-folder counts and newest / largest-file questions take the RAG path with the file statistics and file list attached. Routing is checked against a frozen, labelled query set (`tests/eval/routing_set.json`, `scripts/eval_routing.py`). The context budget comes from the model's size class and is capped at the model's reported context window, so a small model is never handed more than it can hold. FULL_RAG fuses three signals — keyword matching (SQLite FTS5), chunk-level semantic search, and document-summary semantic search — via **Reciprocal Rank Fusion (RRF)**, then applies a cross-encoder reranker for maximum precision. There is no score-margin bypass (that heuristic was removed as unsound): on FULL_RAG the reranker is skipped only when fewer than two candidates remain, and a 5-second deadline falls back to RRF order and marks the answer degraded.
+A query planner first classifies intent into one of four modes: whole-collection inventory and project lookups bypass retrieval entirely, relationship questions that name code (an identifier, `module.attr`, `f()`) traverse the knowledge graph, and everything else runs the full RAG pipeline. Per-folder counts and newest / largest-file questions take the RAG path with the file statistics and file list attached. Routing is checked against a frozen, labelled query set (`tests/eval/routing_set.json`, `scripts/eval_routing.py`). The context budget comes from the model's size class and is capped at the model's reported context window, so a small model is never handed more than it can hold. FULL_RAG fuses three signals — keyword matching (SQLite FTS5), chunk-level semantic search, and document-summary semantic search — via **Reciprocal Rank Fusion (RRF)**, then applies a cross-encoder reranker for maximum precision. There is no score-margin bypass (that heuristic was removed as unsound): on FULL_RAG the reranker is skipped when fewer than two candidates remain or when its model is not installed, and a 5-second deadline falls back to RRF order and marks the answer degraded. The reranker model is not downloaded automatically; the Diagnostics page shows whether it is installed.
 
 **Known limitation: English-first retrieval.** The keyword index is trigram FTS5, so query terms shorter than three characters cannot match; most Chinese and Japanese words are two characters, which leaves a CJK query with no keyword signal. The pinned embedder (`bge-small-en-v1.5`) is English-only, so the semantic legs do not cover CJK either. CJK documents are indexed but retrieve poorly; this is untested and unmeasured.
 

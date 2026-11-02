@@ -2,7 +2,7 @@
 
 Reference document for AI-assisted engineering on the frontend.
 
-**Last verified against source: 2026-10-14, `UI/UX` at `87f7e66`.** The shipped system is **Safelight**, ported in `b592e46` (2026-09-29) from the Safelight Design System artifact, which is its source of truth. Specimen Cabinet (2026-08-29, `4360876`) is superseded; its palette, typography and per-page pass are history and were removed from this document. Anything here that a source read contradicts is stale — re-verify before acting on it.
+**Last verified against source: 2026-10-14, `UI/UX` at `87f7e66`; §3's Ask row re-checked 2026-11-03 at `main` `2f26d85`.** The shipped system is **Safelight**, ported in `b592e46` (2026-09-29) from the Safelight Design System artifact, which is its source of truth. Specimen Cabinet (2026-08-29, `4360876`) is superseded; its palette, typography and per-page pass are history and were removed from this document. Anything here that a source read contradicts is stale — re-verify before acting on it.
 
 ---
 
@@ -31,7 +31,7 @@ Reference document for AI-assisted engineering on the frontend.
 |---|---|
 | A 72px numbered rail: Ask, Library, Explorer, Insights, Settings (Ask keeps the `/search` route) | `AppShell.tsx` `navItems` |
 | A 28px status bar and one film grain over the window. The grain crawls while PMA searches, writes, prints a receipt or indexes, and is frozen otherwise; pages report work through `useWorking` | `AppShell.tsx` |
-| Ask: the ask bar over **Frames \| Answer \| Receipt**. Frames lists ranked passages, the "Not used" rule and near misses; the receipt prints path, frames, timing, tokens and cost | `components/chat/FramesPanel.tsx`, `Receipt.tsx` |
+| Ask: **Frames \| Answer**, with the question bar at the bottom (`db96310`). Frames lists ranked passages, the "Not used" rule and near misses. The **Receipt** pane opens on demand (a toggle remembered in `pma_show_receipt`) and prints path, frames, timing, tokens and cost | `pages/SearchPage.tsx`, `components/chat/FramesPanel.tsx`, `Receipt.tsx` |
 | Library: a figure line, the index as a film strip, cell progress | `LibraryPage.tsx` |
 
 Scores are **truncated** to two places (`formatScore`), never rounded.

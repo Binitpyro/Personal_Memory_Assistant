@@ -1,6 +1,6 @@
-# Unreleased (`UI/UX`, pending merge to `main`)
+# Unreleased (merged to `main` via PR #12, `2f26d85`)
 
-*Version still `0.0.72` in the manifests; no bump yet.* Delta `main..UI/UX`: **95 commits**, 2026-08-29 through 2026-10-28, on top of `main` at `d59d4e3` (merge of PR #11). All pushed. Full gate green at `87f7e66`: `run_ci_checks.bat` exit 0, pytest 1382 passed / 1 skipped / 6 deselected. Both gates last recorded green at `d45ae5a` (pytest 1404 passed); not re-run since. The 14 commits after `87f7e66` are under "Since `87f7e66`".
+*Version still `0.0.72` in the manifests; no bump or tag yet.* **102 commits**, 2026-08-29 through 2026-11-03, on top of `d59d4e3` (merge of PR #11), merged to `main` by PR #12 on 2026-11-02 19:18 UTC as `2f26d85`. GitHub CI on the PR at `34b8352`, the first Linux run of these commits, passed: python, frontend and rust checks, and CodeQL for actions, JS/TS, Python and Rust. Locally, the full gate was green at `87f7e66` (pytest 1382 passed / 1 skipped / 6 deselected), and both gates were green on `2d2526b` with the uncommitted Vitest 5 bump (pytest 1426 passed). Later commits are under "Since `87f7e66`" and "Since `2d2526b`".
 
 ## Executive summary
 
@@ -57,7 +57,7 @@
 
 ## 🧪 Tooling and CI
 
-* CI runs `cargo test` for `src-tauri` (`6e58b78`) — CI triggers on `main` only, so **the merge PR is its first Linux run**.
+* CI runs `cargo test` for `src-tauri` (`6e58b78`). CI triggers on `main` only, so PR #12 was the first Linux run; it passed once `1a227c1` fixed two Windows-only test assumptions.
 * The gate prints exit codes for mypy and pytest crashes (`4e485fa`); Run-Tests uses the sysmon coverage core (`62ff356`); `.bat`/`.cmd` pinned to CRLF (`cfe2118`).
 * The memory profiler reads `/proc/self/status` on Linux (`1242333`).
 * Research tooling (fixtures, sweeps, the adaptive-k and tokenizer tests) under `scripts/` and `tests/eval/`; journals are gitignored.
@@ -73,8 +73,17 @@
 * **Eval harness only** (`scripts/eval_chunking.py` and its test; no production change): paired multi-provider generation arms and prompt-suffix variants (`1472be2`); multi-pass generation pipelines (`2d2526b`).
 * **Docs:** brought current for the merge (`d819a52`).
 
-## ⚠️ Known limitations at `87f7e66`
+## Since `2d2526b` (2026-11-02 through 2026-11-03, the PR #12 review)
 
+* **Logging:** model names, provider values and saved settings are escaped (CR/LF) before they reach a log line, so a crafted model name cannot forge a log entry (`b290b5f`, `app/utils/log_safe.py`).
+* **CodeQL findings fixed in code:** the dev scripts' unused `process.argv[2]` path overrides are gone (`8ffb1e8`); the desktop shell's tests write scratch files under `CARGO_MANIFEST_DIR/target/test-tmp`, not the system temp dir (`39b0445`, `34b8352`).
+* **Linux CI:** two tests that assumed Windows paths or a local-only corpus pass on Ubuntu (`1a227c1`); an empty commit re-ran the checks after the alert triage (`e3c4ccc`). `.coderabbit.yaml` removed (`39b0445`).
+* **Docs:** changelog and issue register brought to `2d2526b` (`ce41291`); README, this changelog and the register brought to `main` on 2026-11-03.
+
+## ⚠️ Known limitations at `2f26d85`
+
+* **81 CodeQL alerts are open on `main`**, all present before PR #12 and outside its review: 2 critical (`py/partial-ssrf` at `app/providers/gemini.py:187` and `tests/test_security_and_robustness.py:44`), 36 high (33 path injection, reflective XSS at `app/main.py:836`, clear-text logging at `app/providers/openai_compat.py:171`, one URL-scheme check in a test), 43 medium (log injection, stack-trace exposure, workflow permissions, unpinned actions). Not triaged; see `04_AUDITS_AND_ISSUES.md` "Status update 2026-11-03".
+* **The first-run download is about 460 MB:** `app/embeddings/service.py:409-415` fetches every ONNX build in the pinned revision, and PMA loads the 34 MB INT8 one.
 * **Existing indexes need a forced re-index** to pick up the chunk-text fixes (A1-01, A1-13, A1-14, A1-21; A1-10 needs re-OCR). The content-hash early-out skips unchanged files.
 * The MSI is not built or tested.
 * Idle working set is 247–248 MB against a 250 MB ceiling — about 2 MB of headroom.
@@ -83,7 +92,7 @@
 
 ## ⚠️ Found 2026-11-02 at `2d2526b` (fixes planned for v0.0.73)
 
-* `npm run tauri build`, as the README gives it, bundles no backend: only `scripts/Build-Exe.bat` passes `tauri.bundle.conf.json`. The release workflow is still disabled.
+* `npm run tauri build` bundles no backend: only `scripts/Build-Exe.bat` passes `tauri.bundle.conf.json`. The README gave that command until the 2026-11-03 docs pass. The release workflow is still disabled.
 * "No network access required at first run" (README) is false on a fresh machine: the embedder downloads from HuggingFace by default, and no models are bundled.
 * A fresh install has no reranker; it is never downloaded.
 * First run requires an LLM before the demo or any search.

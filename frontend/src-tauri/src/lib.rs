@@ -513,7 +513,9 @@ mod tests {
     /// Scratch root under this crate's gitignored target dir. A compile-time
     /// path, unlike `std::env::temp_dir`, which reads TMP/TEMP at run time.
     fn test_tmp() -> std::path::PathBuf {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join("test-tmp")
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-tmp")
     }
 
     #[test]

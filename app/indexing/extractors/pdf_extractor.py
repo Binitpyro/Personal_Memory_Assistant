@@ -71,6 +71,10 @@ class PdfExtractor:
             logger.warning("pypdf is not installed; skipping PDF extraction for %s", path.name)
             return
 
+        # Closed in `finally`: PdfReader(path) reads the whole file into a BytesIO
+        # and its objects form reference cycles, so an unclosed reader stays
+        # resident until a gen-2 GC - ~55 MB 60 s after a College ingest (M6).
+        reader = None
         try:
             reader = PdfReader(str(path), strict=False)
             total = 0
@@ -104,6 +108,16 @@ class PdfExtractor:
                             native_pages += 1
                         else:
                             blank_pages += 1
+                        # A6-16: mojibake (broken CID fonts) is useless to search
+                        # and would sit beside the OCR text. Keyed on the garbage
+                        # score, never on the OCR verdict: a clean short page with
+                        # a logo is also sent to OCR and its native text is good.
+                        if (
+                            txt
+                            and gate_cfg is not None
+                            and signal.garbage_ratio >= gate_cfg.garbage_ratio
+                        ):
+                            txt = None
                     except Exception as exc:
                         logger.debug("Gate failed on %s page %d: %s", path, idx, exc)
 
@@ -126,6 +140,9 @@ class PdfExtractor:
                     reason="corrupt",
                 )
             return
+        finally:
+            if reader is not None:
+                reader.close()
 
         if ocr_on:
             if ocr_pages:

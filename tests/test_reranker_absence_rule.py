@@ -17,7 +17,7 @@ ever asked.
 """
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -71,14 +71,30 @@ class TestDegradedIsPerAnswerNotCapability:
     async def test_timeout_is_degradation(self, monkeypatch):
         results = [_res(1), _res(2)]
 
+        seen: dict[str, float] = {}
+
         async def slow(*a, **kw):
-            await asyncio.sleep(10)
+            await asyncio.sleep(10)  # pragma: no cover - never awaited, see below
+
+        async def fake_wait_for(awaitable, timeout):
+            # An AsyncMock stood here, and a stub that never awaits the coroutine
+            # it is handed leaks it: the RuntimeWarning then surfaces under
+            # whichever later test happens to trigger the next gc pass, which is
+            # how it came to be reported against
+            # test_degraded_flag_survives_reordering_and_truncation.
+            seen["timeout"] = timeout
+            awaitable.close()
+            raise TimeoutError
 
         monkeypatch.setattr(retrieval, "rerank", slow)
-        monkeypatch.setattr(asyncio, "wait_for", AsyncMock(side_effect=TimeoutError))
+        monkeypatch.setattr(asyncio, "wait_for", fake_wait_for)
         out = await retrieval._apply_reranker_if_needed(results, "q", True, 5)
 
         assert all(r["_degraded"] for r in out)
+        # Stubbing wait_for means nothing else in the suite pins the deadline,
+        # so widening it to 500s would have passed here. It is the only bound
+        # that enforces - see the deleted advisory time_budget_ms.
+        assert seen["timeout"] == 5.0
 
     @pytest.mark.asyncio
     async def test_degraded_flag_survives_reordering_and_truncation(self, monkeypatch):

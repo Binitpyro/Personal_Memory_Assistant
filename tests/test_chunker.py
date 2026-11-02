@@ -8,6 +8,7 @@ import logging
 import time
 from unittest.mock import MagicMock
 
+import pytest
 import rust_core
 
 import app.indexing.service as service
@@ -75,10 +76,15 @@ def test_stream_chunker_pathological_input_no_hang():
     assert len(chunks) > 0
 
 
-def test_stream_chunker_loop_guard_trigger(caplog):
-    """
-    Force trigger the infinite loop guard using a custom pathological string subclass
-    and verify that it logs the guard error and terminates without hanging.
+def test_stream_chunker_lying_len_terminates_without_the_loop_guard(caplog):
+    """A pathological `str` subclass whose `__len__` lies used to stall
+    `process` until the infinite-loop guard fired and forced an exit.
+
+    The read cursor removed that failure mode rather than catching it: `_pos`
+    advances by at least one character per iteration whatever `__len__` claims,
+    so the loop terminates on its own condition. Asserting the guard stays
+    SILENT is the negative control - reinstating the buffer re-slicing makes it
+    fire again and fails this test.
     """
 
     class PathologicalString(str):
@@ -95,9 +101,13 @@ def test_stream_chunker_loop_guard_trigger(caplog):
     chunker.buffer = PathologicalString("a" * 100)
 
     with caplog.at_level(logging.ERROR):
-        _ = chunker.process("")
+        chunks = chunker.process("")
 
-    assert any("Infinite loop guard triggered" in record.message for record in caplog.records)
+    assert isinstance(chunks, list)
+    assert chunker._pos > 0, "the read cursor must advance on adversarial input"
+    assert not any(
+        "Infinite loop guard triggered" in record.message for record in caplog.records
+    ), "the cursor should terminate this input without needing the guard"
 
 
 def test_sentence_offsets_gating(monkeypatch):
@@ -151,12 +161,17 @@ def test_create_chunks_routing(monkeypatch):
     ldb = MagicMock()
     idx_service = IndexingService(db, emb, ldb)
 
-    # 1. Test markdown routing
+    # 1. Markdown routes to the SECTION-aware chunker.
+    #
+    # This assertion used to be the other way round - .md was expected to reach
+    # create_chunks, the generic sliding window - which locked in the defect
+    # CLAUDE.md 8.7 A3 describes: chunk_markdown had no caller anywhere, and the
+    # test said that was correct.
     called.clear()
     idx_service._create_chunks("some text", "test.md")
     if service.RUST_CORE_AVAILABLE:
-        assert called.get("txt") is True
-        assert not called.get("markdown")
+        assert called.get("markdown") is True
+        assert not called.get("txt")
 
     # 2. Test plain text routing
     called.clear()
@@ -175,3 +190,136 @@ def test_create_chunks_routing(monkeypatch):
     idx_service._create_chunks("def hello(): pass", "test.py")
     assert not called.get("markdown")
     assert not called.get("txt")
+
+
+def test_chunk_markdown_merges_small_sections_up_to_the_budget():
+    """chunk_size must act as a floor as well as a ceiling.
+
+    The first version applied it only as a maximum, so a section shorter than it
+    became a chunk of that length however short it was - chunk size followed
+    heading density rather than any budget. Measured consequence on a
+    heading-dense corpus: 589 chunks became 1060 and every retrieval metric moved
+    the wrong way (CLAUDE.md 8.7 A3).
+    """
+    if not service.RUST_CORE_AVAILABLE:
+        pytest.skip("rust_core not built")
+
+    # Twenty tiny sections. Un-merged that is twenty chunks of ~40 characters.
+    text = "".join(f"### Heading {i}\nA short line of body text here.\n\n" for i in range(20))
+    chunks = service.rust_core.chunk_markdown(text, 512, 51, "[MD: t.md] ")
+
+    spans = [c["end_offset"] - c["start_offset"] for c in chunks]
+    assert len(chunks) < 20, f"small sections were not merged: {len(chunks)} chunks for 20 sections"
+    # Everything except the final remainder should be a substantial fraction of
+    # the budget rather than one stray heading.
+    assert max(spans) <= 512, "a merged run exceeded the budget"
+    assert max(spans) > 200, f"merging produced nothing near the budget: spans={spans}"
+
+
+def test_chunk_markdown_span_matches_the_text_it_stores():
+    """`retrieval._chunk_body` recovers a chunk's prefix length as
+    `len(text_preview) - (end_offset - start_offset)` when stitching parent
+    windows. A span that disagrees with its own stored text silently mis-slices
+    that window, so the trim has to be reflected in the offsets."""
+    if not service.RUST_CORE_AVAILABLE:
+        pytest.skip("rust_core not built")
+
+    prefix = "[MD: t.md] "
+    text = "# Title\n\nBody one.\n\n## Second\n\nBody two is a little longer.\n\n"
+    for c in service.rust_core.chunk_markdown(text, 512, 51, prefix):
+        span = c["end_offset"] - c["start_offset"]
+        assert len(c["text_preview"]) - span == len(prefix), (
+            f"span {span} disagrees with stored text {c['text_preview']!r}"
+        )
+
+
+class TestBoundaryLookback:
+    """The sentence-snap window is a setting now, not a 100-character literal.
+
+    Why it needed to move (measured 2026-09-04 on tests/eval/corpus_squad, 48
+    real Wikipedia articles): `_find_boundary` returns `pos` unchanged when no
+    sentence or paragraph end sits inside the window, which is a blind
+    mid-sentence cut. At 100 characters that happened on ~40% of splits, and
+    -- the part that made it invisible -- the rate is flat across chunk_size
+    (39.8% at 512, 39.4% at 1024, 40.5% at 2048) because the window is absolute
+    while a sentence is ~100 characters. Halving chunk_size does not improve the
+    rate, it doubles the number of cuts, because it doubles how often you split.
+
+    `tests/eval/corpus_large` cannot show any of this: templated prose with
+    frequent blank lines cuts blind only 8.6% of the time.
+    """
+
+    @staticmethod
+    def _prose(n: int) -> str:
+        # Sentences longer than the old 100-char window, with no blank lines,
+        # which is the case the literal could not handle.
+        return " ".join(
+            f"Sentence number {i} runs on at some length so that the terminator "
+            f"lands well beyond a hundred characters from any arbitrary offset "
+            f"chosen inside it by the chunker."
+            for i in range(n)
+        )
+
+    def test_a_wider_window_reaches_a_stronger_rung(self):
+        """The window decides WHICH rung of the ladder is reachable.
+
+        This asserted `narrow == 1024` - a blind cut - until the word rung
+        landed, and then failed, which is the ladder working: 20 characters
+        cannot span one of these sentences but always contains a space. The
+        claim worth pinning is not "narrow cuts blind", it is that a wider
+        window buys a structurally stronger boundary.
+        """
+        text = self._prose(40)
+        narrow = StreamChunker._find_boundary(text, 1024, 20)
+        wide = StreamChunker._find_boundary(text, 1024, 256)
+
+        assert text[narrow - 1] == " ", "narrow window should still land on a word break"
+        assert text[narrow - 2 : narrow] != ". ", "20 chars cannot reach a sentence end here"
+        assert text[wide - 2 : wide] == ". ", "256 chars should reach a sentence end"
+        assert wide < narrow, "the stronger rung sits further back"
+
+    def test_no_split_ever_lands_inside_a_word(self):
+        """The bottom rung's whole job. 70 chunks on corpus_squad did this."""
+        text = "x" * 300 + " " + "y" * 300  # no sentence or line break anywhere
+        pos = 400
+        b = StreamChunker._find_boundary(text, pos, 256)
+        assert b < pos, "expected the space rung to fire"
+        assert text[b - 1] == " "
+        assert not (text[b - 1 : b].strip() and text[b : b + 1].strip())
+
+    def test_the_setting_reaches_the_chunker(self, monkeypatch):
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "chunk_boundary_lookback_share", 0.25)
+        assert StreamChunker(1024, 102, "").boundary_lookback == 256
+        monkeypatch.setattr(settings, "chunk_boundary_lookback_share", 0.5)
+        assert StreamChunker(1024, 102, "").boundary_lookback == 512
+
+    def test_it_never_degenerates_to_zero(self, monkeypatch):
+        """A zero lookback would make `region` empty and every split blind."""
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "chunk_boundary_lookback_share", 0.0)
+        assert StreamChunker(1024, 102, "").boundary_lookback == 1
+
+    def test_wider_lookback_cuts_mid_sentence_endings(self, monkeypatch):
+        """The end-to-end claim, on the real chunker rather than the helper."""
+        from app.config import settings
+
+        text = self._prose(400)
+
+        def ends_mid_sentence(share: float) -> float:
+            monkeypatch.setattr(settings, "chunk_boundary_lookback_share", share)
+            ch = StreamChunker(1024, 102, "")
+            chunks = ch.process(text) + ch.finalize()
+            bad = sum(1 for c in chunks if not c["text_preview"].rstrip().endswith("."))
+            return bad / len(chunks)
+
+        narrow = ends_mid_sentence(100 / 1024)
+        wide = ends_mid_sentence(0.25)
+        # Bounds, not exact rates: the narrow figure tracks this fixture's
+        # sentence length (measured 0.49 here) and a tight threshold would be
+        # brittle without testing anything more. The claim is the GAP.
+        assert wide < 0.05, f"expected 0.25 to snap nearly always, got {wide:.2f}"
+        assert narrow > 0.3, f"expected the old constant to cut blind often, got {narrow:.2f}"
+        assert narrow > wide * 5, f"narrow={narrow:.2f} wide={wide:.2f}"

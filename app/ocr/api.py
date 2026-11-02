@@ -7,7 +7,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app import state as app_state
@@ -107,7 +107,6 @@ async def list_vlm_models():
     from app.providers.registry import PROVIDER_REGISTRY
     from app.providers.vision import (
         SUGGESTED_VISION_MODELS,
-        looks_like_vision_model,
         supports_vision_messages,
     )
 
@@ -141,8 +140,16 @@ async def list_vlm_models():
             finally:
                 await provider.close()
             entry["reachable"] = True
+            # Reads the family the provider already decided rather than
+            # re-running a name heuristic on the id. Ollama derives that from
+            # the `capabilities` it reports, so this picker stops offering
+            # text-only models for page images - it was offering both Gemma 4
+            # models, which report `completion,tools,thinking` and no vision.
+            # Providers with nothing equivalent (LM Studio via openai_compat)
+            # still fall back to the heuristic inside their own list_models, so
+            # this is one derivation instead of two that could disagree.
             entry["models"] = [
-                {"id": m["id"], "vision": looks_like_vision_model(str(m["id"]))} for m in models
+                {"id": m["id"], "vision": m.get("family") == "vision"} for m in models
             ]
             any_vision = any_vision or any(m["vision"] for m in entry["models"])
         except Exception as exc:
@@ -288,7 +295,13 @@ async def uninstall(request: Request, payload: UninstallPayload | None = None):
     from app.ocr.settings import detect_installed_tier, persist_active_tier
 
     target_tier = (payload.tier if payload and payload.tier else settings.ocr_tier) or "cpu"
-    res = await registry.uninstall_tier(target_tier)
+    if (payload and payload.tier) or target_tier in registry.TIER_DEPS:
+        res = await registry.uninstall_tier(target_tier)
+        if not res["ok"]:
+            raise HTTPException(status_code=400, detail=res["error_code"])
+    else:
+        # Active tier is "vlm"/"none": it owns no venv, but the reset below must still run.
+        res = {"ok": True, "removed": []}
 
     # If the uninstalled tier was active, fall back to another installed tier or disable
     if settings.ocr_tier == target_tier or target_tier == "all":
@@ -428,7 +441,10 @@ async def _count_pdf_pages(path: Path) -> int:
         try:
             from pypdf import PdfReader
 
-            return len(PdfReader(str(path), strict=False).pages)
+            # Closed on exit: an unclosed reader holds the whole file in a BytesIO
+            # until a gen-2 GC (same defect as pdf_extractor.py, c5b14c4).
+            with PdfReader(str(path), strict=False) as reader:
+                return len(reader.pages)
         except Exception as exc:
             logger.debug("Could not count pages of %s: %s", path, exc)
             return 0

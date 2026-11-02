@@ -51,7 +51,11 @@ async def websocket_endpoint(websocket: WebSocket):
 
     provided_token = websocket.headers.get("x-local-access-token")
 
-    if not provided_token or not secrets.compare_digest(provided_token, expected_token):
+    # Bytes: compare_digest(str, str) raises TypeError on non-ASCII input. latin-1
+    # is how Starlette decodes header bytes, so the round trip is lossless.
+    if not provided_token or not secrets.compare_digest(
+        provided_token.encode("latin-1"), expected_token.encode()
+    ):
         logger.warning("Unauthorized WebSocket connection attempt refused.")
         await websocket.close(code=1008)  # Policy Violation
         return

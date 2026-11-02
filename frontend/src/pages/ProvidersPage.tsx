@@ -1,7 +1,7 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useId } from 'react';
 import {
   getProviders,
-  selfTestProvider,
+  validateProvider,
   setLLMPreferences,
   getLLMPreferences,
   getProviderSettings,
@@ -11,32 +11,21 @@ import {
 import type {
   ValidationResponse,
 } from '../api';
-import { useApi, invalidateCache } from '../useApi';
+import { toast } from 'sonner';
+import { useApi } from '../useApi';
 
-import { ProviderIcon } from '../providers/icons';
+import { Badge, Button, buttonClasses, EmptyState, Panel, Skeleton } from '../components/ui';
 import { useProviderValidation } from '../providers/useProviderValidation';
 import { validateApiKeyFormat } from '../providers/keyValidators';
 import { ProviderSparkline } from '../providers/ProviderSparkline';
 import { ProviderRecipes } from '../providers/ProviderRecipes';
 import { TourOverlay } from '../providers/TourOverlay';
-import {
-  CheckCircle2,
-  XCircle,
-  Lock,
-  Globe,
-  ArrowLeft,
-  Key,
-  RefreshCw,
-  Search,
-  Star,
-  Zap,
-} from 'lucide-react';
-import { useNavigate } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import { CACHE_KEYS } from '../cacheKeys'
 import { useOptimisticMutation } from '../useOptimisticMutation'
+import { formatCurrency, formatDateTime } from '../utils/format'
 
 export function ProvidersPage() {
-  const navigate = useNavigate();
   const { data: providers, refetch: refetchProviders, loading } = useApi(getProviders, { cacheKey: CACHE_KEYS.providersList });
   const { data: prefs, refetch: refetchPrefs } = useApi(getLLMPreferences, { cacheKey: CACHE_KEYS.llmPreferences });
   const { data: routingSettings, refetch: refetchSettings } = useApi(getProviderSettings, { cacheKey: CACHE_KEYS.providerSettings });
@@ -72,6 +61,9 @@ export function ProvidersPage() {
   };
 
   const [selectedId, setSelectedId] = useState<string>('gemini');
+  const baseUrlId = useId();
+  const apiKeyId = useId();
+  const apiKeyHelpId = useId();
   const selectedProvider = useMemo(() => {
     return providers?.find(p => p.spec.id === selectedId);
   }, [providers, selectedId]);
@@ -137,10 +129,22 @@ export function ProvidersPage() {
   const handleSave = async () => {
     setSaveError(null);
     try {
-      if (apiKey && apiKey !== '••••••••••••••••') {
-        const ok = await saveKey(apiKey);
+      const keyChanged = !!apiKey && apiKey !== '••••••••••••••••';
+      // The Base Endpoint URL was editable, was sent on Validate, and was
+      // silently dropped on Save - handleSave only ever passed the API key, so
+      // an endpoint change appeared to succeed and never persisted. Gated on
+      // base_url_editable because the backend 400s otherwise.
+      const urlChanged =
+        !!selectedProvider?.spec.base_url_editable &&
+        (baseUrl || null) !== (selectedProvider.base_url || null);
+
+      if (keyChanged || urlChanged) {
+        const ok = await saveKey(
+          keyChanged ? apiKey : null,
+          urlChanged ? (baseUrl || null) : undefined,
+        );
         if (!ok) {
-          setSaveError('Failed to verify and save the API key.');
+          setSaveError('Failed to verify and save the connection details.');
           return;
         }
       }
@@ -152,7 +156,17 @@ export function ProvidersPage() {
     }
   };
 
-  const handleDelete = async () => {
+  const handleDelete = () => {
+    // Removing a connection deletes the stored key from the OS keyring;
+    // there is no undo and no copy of it left in the app.
+    toast('Remove this connection?', {
+      description: `The stored key for ${selectedProvider?.spec.display_name ?? 'this provider'} is deleted from your keyring.`,
+      action: { label: 'Remove', onClick: () => void doDelete() },
+      cancel: { label: 'Cancel', onClick: () => {} },
+    });
+  };
+
+  const doDelete = async () => {
     setSaveError(null);
     try {
       const ok = await deleteKey();
@@ -172,8 +186,12 @@ export function ProvidersPage() {
     setIsValidatingAll(true);
     const results: Record<string, ValidationResponse> = {};
     for (const p of providers) {
+      // Same reach as the row dot: unconfigured rows show nothing, and cloud
+      // rows stay behind the consent gate dispatch uses.
+      if (!p.is_set && p.spec.kind !== 'local') continue;
+      if ((p.spec.kind === 'cloud' || p.spec.kind === 'aggregator') && !routingSettings?.cloud_privacy_consent) continue;
       try {
-        const res = await selfTestProvider(p.spec.id);
+        const res = await validateProvider(p.spec.id, {});
         results[p.spec.id] = res;
       } catch (err: any) {
         results[p.spec.id] = {
@@ -186,7 +204,7 @@ export function ProvidersPage() {
         };
       }
     }
-    setValidationStatuses(results);
+    setValidationStatuses(prev => ({ ...prev, ...results }));
     if (results[selectedId]) {
       setValidationResult(results[selectedId]);
     }
@@ -234,88 +252,97 @@ export function ProvidersPage() {
     <div className="flex-1 flex flex-col h-full bg-background overflow-hidden relative">
       <TourOverlay />
       {/* Top Header */}
-      <div className="flex items-center justify-between px-8 py-4 border-b border-primary/10 bg-white/40 backdrop-blur-md relative z-10">
+      <div className="flex items-center justify-between px-8 py-4 border-b border-rule bg-surface relative z-10">
         <div className="flex items-center gap-3">
-          <button onClick={() => navigate('/settings')} className="p-2 hover:bg-primary/5 rounded-lg transition-colors">
-            <ArrowLeft className="w-5 h-5 text-text-secondary" />
-          </button>
+          {/* Visible text leads the accessible name (WCAG 2.5.3). */}
+          <Link
+            to="/settings"
+            aria-label="Back to Settings"
+            className={buttonClasses({ variant: 'quiet', size: 'sm' })}
+          >
+            Back
+          </Link>
           <div>
-            <h1 className="text-xl font-bold tracking-tight">Intelligence Engines</h1>
+            <h1 className="stock text-[28px] leading-none m-0">Model providers</h1>
             <p className="text-xs text-text-secondary">Configure cloud providers and local model backends</p>
           </div>
         </div>
 
-        <button
+        <Button
+          variant="secondary"
           onClick={handleValidateAll}
-          disabled={isValidatingAll || loading}
-          className="glass-button !bg-primary/5 hover:!bg-primary/10 gap-2 text-sm py-2 px-4 border border-primary/20 rounded-xl"
+          disabled={loading}
+          loading={isValidatingAll}
+          icon={<span aria-hidden>↻</span>}
         >
-          <RefreshCw className={`w-4 h-4 ${isValidatingAll ? 'animate-spin' : ''}`} />
           Validate All
-        </button>
+        </Button>
       </div>
 
       {/* Main Panel */}
       <div className="flex-1 flex overflow-hidden">
         {/* Left Side: Providers list */}
-        <div id="tour-providers-list" className="w-80 border-r border-primary/10 bg-white/20 flex flex-col overflow-y-auto p-4 gap-2">
+        <div id="tour-providers-list" className="w-80 border-r border-rule bg-raised flex flex-col overflow-y-auto p-4 gap-2">
           {routingSettings && routingSettings.fallback_chain && routingSettings.fallback_chain.length > 0 && (
-            <div id="tour-fallback-router" className="glass rounded-2xl p-3 border border-primary/10 bg-white/30 flex flex-col gap-2.5 mb-2 shrink-0">
-              <div className="text-[10px] font-bold text-text-secondary uppercase tracking-wider flex items-center justify-between">
-                <span>Backup Cascade</span>
-                <span className="text-[8px] normal-case text-text-secondary/60">cascading retries</span>
+            <Panel id="tour-fallback-router" className="p-3 flex flex-col gap-2.5 mb-2 shrink-0">
+              {/* Was `text-[8px] text-text-secondary/60`: below even the mono
+                  allowance, and the alpha dropped it under its measured ratio. */}
+              <div className="font-mono text-xs tracking-widest uppercase text-text-tertiary flex items-center justify-between">
+                <span>Backup cascade</span>
+                <span className="tracking-normal normal-case">cascading retries</span>
               </div>
               <div className="flex flex-col gap-1.5">
                 {routingSettings.fallback_chain.map((providerId, index) => {
                   const p = providers?.find(prov => prov.spec.id === providerId);
                   if (!p) return null;
                   return (
-                    <div key={providerId} className="flex items-center justify-between px-2.5 py-1.5 bg-background/50 border border-white/5 rounded-xl text-xs font-semibold">
+                    <div key={providerId} className="flex items-center justify-between px-2.5 py-1.5 bg-background border border-rule rounded-sm text-xs font-medium">
                       <span className="truncate">{p.spec.display_name}</span>
                       <div className="flex items-center gap-1">
                         <button
                           disabled={index === 0}
                           onClick={() => handleMoveFallback(index, -1)}
-                          className="p-1 hover:bg-white/10 rounded disabled:opacity-30 cursor-pointer"
+                          className="tap-24 p-1 hover:bg-raised rounded-xs disabled:text-text-tertiary disabled:cursor-not-allowed cursor-pointer"
                           title="Move Up"
+                          aria-label={`Move ${p.spec.display_name} earlier in the cascade`}
                         >
-                          ▲
+                          <span aria-hidden>↑</span>
                         </button>
                         <button
                           disabled={index === routingSettings.fallback_chain.length - 1}
                           onClick={() => handleMoveFallback(index, 1)}
-                          className="p-1 hover:bg-white/10 rounded disabled:opacity-30 cursor-pointer"
+                          className="tap-24 p-1 hover:bg-raised rounded-xs disabled:text-text-tertiary disabled:cursor-not-allowed cursor-pointer"
                           title="Move Down"
+                          aria-label={`Move ${p.spec.display_name} later in the cascade`}
                         >
-                          ▼
+                          <span aria-hidden>↓</span>
                         </button>
                       </div>
                     </div>
                   );
                 })}
               </div>
-            </div>
+            </Panel>
           )}
 
           {loading && !providers && (
             Array.from({ length: 4 }).map((_, i) => (
-              <div key={i} className="w-full flex items-center gap-3 p-3.5 rounded-2xl border border-primary/5 bg-white/30 animate-pulse">
-                <div className="w-5 h-5 rounded bg-primary/10" />
+              <div key={i} className="w-full flex items-center gap-3 p-3.5 rounded-md border border-rule bg-surface">
+                <Skeleton className="w-5 h-5" />
                 <div className="flex flex-col gap-1.5 flex-1">
-                  <div className="h-3.5 bg-primary/10 rounded w-1/2" />
-                  <div className="h-2.5 bg-primary/10 rounded w-1/3" />
+                  <Skeleton className="h-3.5 w-1/2" />
+                  <Skeleton className="h-2.5 w-1/3" />
                 </div>
-                <div className="w-2.5 h-2.5 rounded-full bg-primary/10" />
+                <Skeleton className="w-2.5 h-2.5" />
               </div>
             ))
           )}
 
           {providers && providers.length === 0 && (
-            <div className="flex flex-col items-center justify-center p-6 text-center h-48 border border-dashed border-primary/20 rounded-2xl">
-              <Globe className="w-6 h-6 text-text-secondary mb-2 opacity-50" />
-              <p className="text-sm font-semibold text-text-primary">No providers found</p>
-              <p className="text-xs text-text-secondary mt-1">Unable to load intelligence engines.</p>
-            </div>
+            <EmptyState
+              title="No providers found"
+              body="The provider registry came back empty. Check that the backend is running, then try again."
+            />
           )}
 
           {providers?.map(p => {
@@ -323,7 +350,7 @@ export function ProvidersPage() {
             const validation = validationStatuses[p.spec.id];
             
             // Connection dot calculation
-            let dotColor = 'bg-zinc-400';
+            let dotColor = 'bg-text-tertiary';
             let dotShape = 'circle';
             let dotLabel = 'Not Connected';
 
@@ -339,7 +366,10 @@ export function ProvidersPage() {
                   dotLabel = 'Error';
                 }
               } else {
-                dotColor = 'bg-accent-blue animate-pulse';
+                // No infinite pulse: "configured but unvalidated" is a
+                // resting state, not an event, and a looping animation on
+                // every row was motion with nothing to communicate.
+                dotColor = 'bg-info';
                 dotShape = 'pulse';
                 dotLabel = 'Configured';
               }
@@ -348,25 +378,22 @@ export function ProvidersPage() {
             return (
               <button
                 key={p.spec.id}
+                type="button"
                 onClick={() => setSelectedId(p.spec.id)}
-                className={`w-full flex items-center justify-between p-3.5 rounded-2xl border text-left transition-all duration-200 ${
+                aria-pressed={isSelected}
+                className={`w-full flex items-center justify-between p-3.5 rounded-md border text-left transition-colors duration-150 ${
                   isSelected
-                    ? 'bg-primary/10 border-primary text-primary shadow-sm'
-                    : 'bg-white/50 border-primary/5 hover:border-primary/20 text-text-primary'
+                    ? 'bg-surface border-edge text-text-primary shadow-[inset_3px_0_0_var(--color-plate)]'
+                    : 'bg-surface border-rule hover:border-edge text-text-primary'
                 }`}
               >
                 <div className="flex items-center gap-3">
-                  <ProviderIcon id={p.spec.id} className="w-5 h-5" />
                   <div>
-                    <div className="font-semibold text-sm flex items-center gap-1.5">
+                    <div className="font-medium text-sm flex items-center gap-2">
                       {p.spec.display_name}
-                      {p.stored_in === 'env' && (
-                        <span className="text-[10px] font-mono font-bold bg-primary/10 text-primary px-1.5 py-0.5 rounded">
-                          ENV
-                        </span>
-                      )}
+                      {p.stored_in === 'env' && <Badge mono tone="accent">ENV</Badge>}
                     </div>
-                    <span className="text-[11px] text-text-secondary capitalize">{p.spec.kind}</span>
+                    <span className="text-xs text-text-secondary capitalize">{p.spec.kind}</span>
                   </div>
                 </div>
 
@@ -375,10 +402,15 @@ export function ProvidersPage() {
                   <div className="flex items-center gap-1">
                     <div
                       title={dotLabel}
-                      className={`w-2.5 h-2.5 rounded-full ${dotColor} ${
+                      aria-hidden
+                      className={`w-2.5 h-2.5 ${dotColor} ${
                         dotShape === 'triangle' ? 'clip-triangle' : ''
                       }`}
                     />
+                    {/* The dot is the only carrier of connection state, and a
+                        `title` on a non-interactive div is announced by
+                        essentially nothing. */}
+                    <span className="sr-only">{dotLabel}</span>
                   </div>
                   <ProviderSparkline providerId={p.spec.id} />
                 </div>
@@ -395,11 +427,8 @@ export function ProvidersPage() {
             <div className="max-w-2xl flex flex-col gap-6">
               {/* Header */}
               <div className="flex items-start gap-4">
-                <div className="w-12 h-12 bg-primary/10 rounded-2xl flex items-center justify-center">
-                  <ProviderIcon id={selectedProvider.spec.id} className="w-7 h-7" />
-                </div>
                 <div>
-                  <h2 className="text-xl font-bold">{selectedProvider.spec.display_name}</h2>
+                  <h2 className="font-bold [font-stretch:80%] text-xl m-0">{selectedProvider.spec.display_name}</h2>
                   <p className="text-sm text-text-secondary mt-1">
                     Connect and configure default parameters for {selectedProvider.spec.display_name}.
                   </p>
@@ -407,38 +436,45 @@ export function ProvidersPage() {
               </div>
 
               {/* URL and API Key Form */}
-              <div id="tour-connection-details" className="glass rounded-3xl p-6 border border-primary/10 bg-white/40 flex flex-col gap-5">
+              <Panel id="tour-connection-details" className="p-6 flex flex-col gap-5">
                 {/* Base URL (if editable or present) */}
                 {(selectedProvider.spec.base_url_editable || selectedProvider.spec.default_base_url) && (
                   <div className="flex flex-col gap-1.5">
-                    <label className="text-xs font-semibold text-text-secondary uppercase tracking-wider flex items-center gap-1.5">
+                    <label htmlFor={baseUrlId} className="font-mono text-xs tracking-widest uppercase text-text-tertiary flex items-center gap-1.5">
                       Base Endpoint URL
-                      {!selectedProvider.spec.base_url_editable && <Lock className="w-3.5 h-3.5 text-text-secondary/50" />}
+                      {!selectedProvider.spec.base_url_editable && <span>· fixed</span>}
                     </label>
                     <div className="relative flex items-center">
-                      <Globe className="absolute left-3.5 w-4 h-4 text-text-secondary/50" />
                       <input
-                        type="text"
+                        id={baseUrlId}
+                        type="url"
+                        inputMode="url"
+                        name="base-url"
+                        autoComplete="off"
+                        spellCheck={false}
                         disabled={!selectedProvider.spec.base_url_editable || selectedProvider.stored_in === 'env'}
                         value={baseUrl}
                         onChange={e => setBaseUrlInput(e.target.value)}
-                        className="w-full bg-background/50 border border-primary/20 rounded-xl pl-10 pr-4 py-2.5 text-sm outline-none focus:border-primary/50 disabled:opacity-60 transition-colors"
+                        className="glass-input px-4 py-2.5 text-sm"
                       />
                     </div>
                   </div>
                 )}
 
                 {(selectedProvider.spec.kind === 'cloud' || selectedProvider.spec.kind === 'aggregator') && (
-                  <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-xl text-xs text-amber-800 flex flex-col gap-2.5">
+                  <div id="cloud-consent" className="p-3 bg-surface border border-warning rounded-md text-xs text-text-primary flex flex-col gap-2.5 scroll-mt-6">
                     <div className="flex items-start gap-2">
-                      <Zap className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
                       <span>
                         <strong>Privacy Notice:</strong>{' '}
                         {routingSettings?.cloud_privacy_notice ||
                           'Free-tier cloud dispatches may use data inputs for model training/improvement per provider terms and are restricted for EEA, Switzerland, and UK users.'}
                       </span>
                     </div>
-                    <label className="flex items-center gap-2 pl-6 cursor-pointer select-none">
+                    {/* tap-24 on the LABEL, not the input: a checkbox is a
+                        replaced element and cannot carry a pseudo-element, and
+                        the label is the real target anyway. It measured 16px
+                        tall. */}
+                    <label className="tap-24 flex items-center gap-2 pl-6 cursor-pointer select-none">
                       <input
                         type="checkbox"
                         checked={!!routingSettings?.cloud_privacy_consent}
@@ -446,7 +482,7 @@ export function ProvidersPage() {
                         onChange={e => {
                           updateRoutingSettings.mutate({ cloud_privacy_consent: e.target.checked });
                         }}
-                        className="rounded border-amber-500/40"
+                        className="rounded-xs border-edge"
                       />
                       <span className="font-medium">I understand and consent to cloud data processing</span>
                     </label>
@@ -456,101 +492,106 @@ export function ProvidersPage() {
                 {/* API Key */}
                 {selectedProvider.spec.auth !== 'none' && (
                   <div className="flex flex-col gap-1.5">
-                    <label className="text-xs font-semibold text-text-secondary uppercase tracking-wider flex items-center justify-between">
-                      API Access Key
+                    {/* The "Get Key" link used to sit INSIDE the label, which
+                        nests one interactive element in another: clicking label
+                        text is meant to focus its input, and a link there does
+                        something else entirely. */}
+                    <div className="flex items-center justify-between">
+                      <label htmlFor={apiKeyId} className="font-mono text-xs tracking-widest uppercase text-text-tertiary">
+                        API Access Key
+                      </label>
                       {selectedProvider.spec.api_key_docs_url && (
                         <a
                           href={selectedProvider.spec.api_key_docs_url}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="text-[11px] font-medium text-primary hover:underline"
+                          className="tap-24 text-xs font-medium text-primary hover:underline"
                         >
                           Get Key
                         </a>
                       )}
-                    </label>
+                    </div>
                     <div className="relative flex items-center">
-                      <Key className="absolute left-3.5 w-4 h-4 text-text-secondary/50" />
                       <input
+                        id={apiKeyId}
                         type="password"
+                        name={`${selectedProvider.spec.id}-api-key`}
+                        autoComplete="off"
+                        spellCheck={false}
                         disabled={selectedProvider.stored_in === 'env'}
                         placeholder="••••••••••••••••••••"
                         value={apiKey}
                         onChange={e => setApiKeyInput(e.target.value)}
-                        className={`w-full bg-background/50 border rounded-xl pl-10 pr-4 py-2.5 text-sm outline-none transition-colors ${
-                          formatCheck.isValid ? 'border-primary/20 focus:border-primary/50' : 'border-danger focus:border-danger'
+                        aria-invalid={!formatCheck.isValid}
+                        aria-describedby={formatCheck.helperText ? apiKeyHelpId : undefined}
+                        className={`glass-input px-4 py-2.5 text-sm ${
+                          formatCheck.isValid ? '' : 'border-error'
                         }`}
                       />
                     </div>
-                    {formatCheck.helperText && (
-                      <span className="text-xs text-danger font-medium mt-1">{formatCheck.helperText}</span>
-                    )}
+                    <span id={apiKeyHelpId} className="text-xs text-error font-medium mt-1 empty:hidden" aria-live="polite">
+                      {formatCheck.helperText}
+                    </span>
                   </div>
                 )}
 
                 {/* Action buttons */}
-                <div className="flex items-center justify-between mt-2 pt-4 border-t border-primary/5">
+                <div className="flex items-center justify-between mt-2 pt-4 border-t border-rule">
                   <div>
                     {selectedProvider.stored_in === 'env' && (
                       <span className="text-xs text-text-secondary font-medium flex items-center gap-1">
-                        <Lock className="w-3.5 h-3.5" /> Managed via environment variables (.env)
+                        Managed via environment variables (.env)
                       </span>
                     )}
                   </div>
 
                   <div className="flex items-center gap-3">
                     {selectedProvider.is_set && selectedProvider.stored_in !== 'env' && (
-                      <button
-                        onClick={handleDelete}
-                        disabled={isSaving}
-                        className="px-4 py-2 text-xs font-semibold text-danger hover:bg-danger/5 rounded-xl transition-all disabled:opacity-50"
-                      >
+                      <Button variant="danger" size="sm" onClick={handleDelete} disabled={isSaving}>
                         Remove Connection
-                      </button>
+                      </Button>
                     )}
 
-                    <button
+                    <Button
+                      variant="secondary"
+                      size="sm"
                       onClick={handleValidate}
-                      disabled={isValidating || selectedProvider.stored_in === 'env' || !formatCheck.isValid}
-                      className="glass-button !bg-primary/5 border border-primary/20 text-primary hover:!bg-primary/10 px-4 py-2 rounded-xl text-xs font-semibold flex items-center gap-1.5 disabled:opacity-50"
+                      disabled={selectedProvider.stored_in === 'env' || !formatCheck.isValid}
+                      loading={isValidating}
                     >
-                      {isValidating ? (
-                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                      ) : (
-                        <Zap className="w-3.5 h-3.5" />
-                      )}
-                      Test & Validate
-                    </button>
+                      Test &amp; Validate
+                    </Button>
 
-                    <button
+                    <Button
+                      variant="plate"
+                      size="sm"
                       onClick={handleSave}
-                      disabled={isSaving || selectedProvider.stored_in === 'env' || !formatCheck.isValid}
-                      className="glass-button !bg-primary !text-white hover:opacity-90 px-5 py-2 rounded-xl text-xs font-semibold disabled:opacity-50 flex items-center gap-1.5"
+                      disabled={selectedProvider.stored_in === 'env' || !formatCheck.isValid}
+                      loading={isSaving}
                     >
-                      {isSaving && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
                       Save Configuration
-                    </button>
+                    </Button>
                   </div>
                 </div>
+                <span className="sr-only" aria-live="polite">{saveError ?? ''}</span>
                 {saveError && (
-                  <div className="text-xs font-semibold text-danger mt-1">
+                  <div className="text-xs font-medium text-error mt-1">
                     {saveError}
                   </div>
                 )}
-              </div>
+              </Panel>
 
               {/* Connection validation metrics */}
+              <span className="sr-only" aria-live="polite">
+                {validationResult ? (validationResult.ok ? 'Connection verified' : `Connection failed: ${validationResult.error ?? ''}`) : ''}
+              </span>
               {validationResult && (
-                <div className={`glass rounded-3xl p-5 border flex flex-col gap-3 transition-all duration-300 ${
-                  validationResult.ok ? 'border-success/30 bg-success/5' : 'border-danger/30 bg-danger/5'
+                <div className={`bg-surface rounded-xl p-5 border flex flex-col gap-3 transition-colors duration-200 ${
+                  validationResult.ok ? 'border-success' : 'border-error'
                 }`}>
                   <div className="flex items-center gap-2">
-                    {validationResult.ok ? (
-                      <CheckCircle2 className="w-5 h-5 text-success" />
-                    ) : (
-                      <XCircle className="w-5 h-5 text-danger" />
-                    )}
-                    <span className="font-bold text-sm">
+                    <span aria-hidden className={`w-2.5 h-2.5 shrink-0 bg-current ${validationResult.ok ? 'text-success' : 'text-error'}`} />
+                    <span className="font-medium text-sm">
                       {validationResult.ok ? 'Connection Verified' : 'Connection Failed'}
                     </span>
                   </div>
@@ -559,16 +600,16 @@ export function ProvidersPage() {
                     <div className="grid grid-cols-2 gap-4 text-xs font-medium text-text-secondary mt-1">
                       <div>Latency: <strong className="text-text-primary">{validationResult.latency_ms}ms</strong></div>
                       {validationResult.server_time && (
-                        <div>Server Date: <strong className="text-text-primary">{validationResult.server_time}</strong></div>
+                        <div>Server Date: <strong className="text-text-primary">{formatDateTime(validationResult.server_time)}</strong></div>
                       )}
                     </div>
                   ) : (
                     <div className="flex flex-col gap-2 mt-1">
-                      <p className="text-xs text-danger font-semibold">{validationResult.error}</p>
+                      <p className="text-xs text-error font-medium m-0">{validationResult.error}</p>
                       {validationResult.error_code && (
-                        <span className="text-[10px] uppercase font-mono font-bold bg-danger/10 text-danger px-2 py-0.5 rounded w-max">
-                          Error Code: {validationResult.error_code}
-                        </span>
+                        <Badge mono tone="error" className="w-max">
+                          {validationResult.error_code}
+                        </Badge>
                       )}
                     </div>
                   )}
@@ -577,23 +618,25 @@ export function ProvidersPage() {
 
               {/* Models List Dropdown / Card */}
               {validationResult?.ok && (
-                <div id="tour-model-selection" className="glass rounded-3xl p-6 border border-primary/10 bg-white/40 flex flex-col gap-4">
-                  <div className="flex items-center justify-between">
-                    <h3 className="font-bold text-sm uppercase tracking-wider text-text-secondary">Default Target Model</h3>
-                    <span className="text-xs font-medium text-primary">
-                      {validationResult.models.length} Models Found
+                <Panel id="tour-model-selection" className="p-6 flex flex-col gap-4">
+                  <div className="flex items-center justify-between border-b border-rule pb-2">
+                    <h3 className="font-bold [font-stretch:80%] text-base text-text-primary m-0">Default target model</h3>
+                    <span className="font-mono text-xs text-text-tertiary tabular-nums">
+                      {validationResult.models.length} found
                     </span>
                   </div>
 
                   {/* Search Bar */}
                   <div className="relative flex items-center">
-                    <Search className="absolute left-3.5 w-4 h-4 text-text-secondary/50" />
                     <input
-                      type="text"
-                      placeholder="Filter models by name..."
+                      type="search"
+                      spellCheck={false}
+                      autoComplete="off"
+                      aria-label="Filter models by name"
+                      placeholder="e.g. llama3…"
                       value={modelSearch}
                       onChange={e => setModelSearch(e.target.value)}
-                      className="w-full bg-background/50 border border-primary/20 rounded-xl pl-10 pr-4 py-2.5 text-xs outline-none focus:border-primary/50 transition-colors"
+                      className="glass-input px-4 py-2.5 text-xs"
                     />
                   </div>
 
@@ -606,51 +649,57 @@ export function ProvidersPage() {
                       return (
                         <div
                           key={model.id}
-                          className={`flex items-center justify-between p-3 rounded-xl border transition-all ${
+                          // A provider can return 300+ models into this
+                          // scroller. `content-visibility` lets the browser skip
+                          // layout and paint for offscreen rows without pulling
+                          // in a virtualization dependency.
+                          style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 72px' }}
+                          className={`flex items-center justify-between p-3 rounded-md border transition-colors ${
                             isDefault
-                              ? 'bg-primary/10 border-primary/30 text-primary'
-                              : 'bg-white/30 border-primary/5 hover:border-primary/10'
+                              ? 'bg-surface border-edge shadow-[inset_3px_0_0_var(--color-plate)]'
+                              : 'bg-surface border-rule hover:border-edge'
                           }`}
                         >
                           <div className="flex items-center gap-3">
                             <button
                               onClick={() => togglePin(model.id)}
-                              className="text-text-secondary hover:text-amber-400 transition-colors"
+                              aria-pressed={isPinned}
+                              aria-label={`${isPinned ? 'Unpin' : 'Pin'} ${model.id}`}
+                              className={`tap-24 edge-type transition-colors ${isPinned ? 'text-text-primary' : 'text-text-tertiary hover:text-text-primary'}`}
                             >
-                              <Star className={`w-4 h-4 ${isPinned ? 'fill-amber-400 text-amber-400' : ''}`} />
+                              {isPinned ? 'Unpin' : 'Pin'}
                             </button>
 
                             <div>
-                              <div className="text-xs font-semibold font-mono tracking-tight">{model.id}</div>
+                              <div className="text-xs font-mono tracking-tight">{model.id}</div>
                               <div className="flex items-center gap-2 mt-1.5">
-                                <span className="text-[10px] font-semibold bg-primary/10 text-primary px-1.5 py-0.5 rounded">
-                                  {model.context_length.toLocaleString()} ctx
-                                </span>
+                                {model.context_length != null && (
+                                  <Badge mono tone="accent">
+                                    {model.context_length.toLocaleString()} ctx
+                                  </Badge>
+                                )}
                                 {model.pricing_hint > 0 && (
-                                  <span className="text-[10px] font-semibold bg-emerald-400/10 text-emerald-500 px-1.5 py-0.5 rounded">
-                                    ${model.pricing_hint.toFixed(2)}/1M tok
-                                  </span>
+                                  <Badge mono tone="success">
+                                    {formatCurrency(model.pricing_hint)}/1M tok
+                                  </Badge>
                                 )}
                               </div>
                             </div>
                           </div>
 
-                          <button
+                          <Button
+                            variant={isDefault ? 'plate' : 'quiet'}
+                            size="sm"
                             onClick={() => handleSetDefaultModel(model.id)}
                             disabled={isDefault}
-                            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-                              isDefault
-                                ? 'bg-primary text-white pointer-events-none'
-                                : 'bg-primary/5 text-primary hover:bg-primary/10'
-                            }`}
                           >
                             {isDefault ? 'Default' : 'Select'}
-                          </button>
+                          </Button>
                         </div>
                       );
                     })}
                   </div>
-                </div>
+                </Panel>
               )}
             </div>
           )}

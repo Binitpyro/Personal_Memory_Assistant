@@ -2,6 +2,8 @@ import logging
 from collections.abc import Iterator
 from pathlib import Path
 
+from app.indexing.extractors._ooxml_guard import check_ooxml_archive
+
 logger = logging.getLogger(__name__)
 
 
@@ -33,6 +35,8 @@ class XlsxExtractor:
                         if total > max_file_size:
                             return
                 return
+
+            check_ooxml_archive(path)
 
             import openpyxl  # type: ignore
 

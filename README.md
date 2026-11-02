@@ -59,7 +59,7 @@ Local-first is enforced in the code, not just claimed in the pitch.
 - **Node.js 20+**
 - **Rust Toolchain** (Latest stable)
 
-**Hardware.** PMA targets budget machines on purpose: a ~4 GB VRAM GPU (GTX 1650 / RX 580 class) and an 8 GB RAM laptop. It holds roughly 196 MB resident while serving queries; bulk indexing peaks a few hundred MB above that and returns.
+**Hardware.** PMA targets budget machines on purpose: a ~4 GB VRAM GPU (GTX 1650 / RX 580 class) and an 8 GB RAM laptop. It holds roughly 196-248 MB resident when idle with models loaded (Windows working set, `PMA_LANCEDB_MODE=portable`, measured 2026-08-20 and 2026-10-13; resident size on Linux reads higher). Bulk indexing is a bounded transient that peaked 535 MB above idle on a 403 MB document corpus under the same conditions (567-632 MB on a 479 MB corpus, 2026-10). It does not return all the way: 60 s after a large ingest the working set sits about 190 MB above idle, mostly allocator fragmentation and database page caches, all of which Windows can page out under memory pressure. Serving queries holds about 500 MB, with brief spikes near 1.4 GB.
 
 ### 4.2 Quick Start (Windows)
 Copy the example configuration, then choose the development workflow you need:
@@ -153,6 +153,12 @@ See [`.env.example`](.env.example) for all supported provider and indexing setti
 `.env` override the built-in defaults, so anything you leave commented out stays on the tuned
 default rather than falling back to something worse.
 
+**Host-header guard.** The server answers only requests whose `Host` header is `127.0.0.1`,
+`localhost`, `[::1]`, `tauri.localhost` or the value of `PMA_HOST`; anything else gets a 400.
+`PMA_ALLOWED_HOSTS` (comma-separated) adds names. It does not change where the server listens
+(`PMA_HOST` does). The guard is what stops a DNS-rebinding web page from reaching your index
+through the browser, so add only names you control.
+
 ---
 
 ## 7. OCR for Scanned Documents (optional)
@@ -186,6 +192,10 @@ Tauri is the supported desktop distribution path. Build the Windows MSI installe
 cd frontend
 npm run tauri build
 ```
+
+> **Unproven as of 2026-10-08.** The packaging configuration was corrected during the
+> failure-point audit and checked with unit tests and `cargo check`, but no MSI has been built
+> and installed from it since.
 
 `Build-Exe.bat` still creates a PyInstaller sidecar executable, but that standalone
 EXE workflow is temporarily on hold and should not be used as a current release artifact.
@@ -222,7 +232,9 @@ graph LR
 ```
 
 ### 9.2 Unified Search Flow
-A query planner first classifies intent into one of four modes: fast metadata/project lookups bypass retrieval entirely, graph-intent queries traverse the knowledge graph, and everything else runs the full RAG pipeline. FULL_RAG fuses three signals — keyword matching (SQLite FTS5), chunk-level semantic search, and document-summary semantic search — via **Reciprocal Rank Fusion (RRF)**, then applies a cross-encoder reranker for maximum precision, automatically bypassed when the top result's confidence decisively clears the runner-up.
+A query planner first classifies intent into one of four modes: whole-collection inventory and project lookups bypass retrieval entirely, relationship questions that name code (an identifier, `module.attr`, `f()`) traverse the knowledge graph, and everything else runs the full RAG pipeline. Per-folder counts and newest / largest-file questions take the RAG path with the file statistics and file list attached. Routing is checked against a frozen, labelled query set (`tests/eval/routing_set.json`, `scripts/eval_routing.py`). The context budget comes from the model's size class and is capped at the model's reported context window, so a small model is never handed more than it can hold. FULL_RAG fuses three signals — keyword matching (SQLite FTS5), chunk-level semantic search, and document-summary semantic search — via **Reciprocal Rank Fusion (RRF)**, then applies a cross-encoder reranker for maximum precision. There is no score-margin bypass (that heuristic was removed as unsound): on FULL_RAG the reranker is skipped only when fewer than two candidates remain, and a 5-second deadline falls back to RRF order and marks the answer degraded.
+
+**Known limitation: English-first retrieval.** The keyword index is trigram FTS5, so query terms shorter than three characters cannot match; most Chinese and Japanese words are two characters, which leaves a CJK query with no keyword signal. The pinned embedder (`bge-small-en-v1.5`) is English-only, so the semantic legs do not cover CJK either. CJK documents are indexed but retrieve poorly; this is untested and unmeasured.
 
 ```mermaid
 graph LR
@@ -239,10 +251,8 @@ graph LR
     C --> E[RRF Ranker]
     D --> E
     N --> E
-    E --> R{Confidence Gap >= 2x?}
-    R -->|Yes: bypass| F[Context Builder]
-    R -->|No: rerank| Q[Cross-Encoder Reranker]
-    Q --> F
+    E --> Q[Cross-Encoder Reranker]
+    Q --> F[Context Builder]
     F --> L[LLM Answer]
 ```
 

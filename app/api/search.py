@@ -3,8 +3,9 @@ import contextlib
 import json
 import logging
 import time
+from typing import Literal
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
@@ -44,8 +45,10 @@ async def _next_chunk_or_end(agen):
 class QueryRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=2000)
     file_type: str | None = Field(None, max_length=50)
-    folder_tag: str | None = Field(None, max_length=100)
+    # The Ask picker sends the indexed folder's full root path, not its basename.
+    folder_tag: str | None = Field(None, max_length=4096)
     mode: str | None = Field(None, max_length=50)
+    answer_length: Literal["short", "detailed"] | None = None
     forced_chunk_ids: list[int] | None = Field(None, max_length=500)
     override_provider: str | None = Field(None, max_length=50)
     override_model: str | None = Field(None, max_length=150)
@@ -123,6 +126,7 @@ async def query(
                 folder_tag=payload.folder_tag,
                 mode=payload.mode,
                 history=history,
+                answer_length=payload.answer_length,
             )
 
         # The history row is user-visible at GET /api/query/history, so it is
@@ -202,6 +206,7 @@ async def query_stream(
                     history=history,
                     override_provider=request.override_provider,
                     override_model=request.override_model,
+                    answer_length=request.answer_length,
                 )
 
                 while True:
@@ -226,7 +231,10 @@ async def query_stream(
                     # point and left it unusable, so the next anext() raised
                     # StopAsyncIteration and the answer was silently truncated
                     # at the first 15s gap.
-                    done, _ = await asyncio.wait({pending}, timeout=_KEEPALIVE_SECONDS)
+                    done, _ = await asyncio.wait(
+                        {pending},
+                        timeout=min(_KEEPALIVE_SECONDS, max(0.0, deadline - time.monotonic())),
+                    )
 
                     if not done:
                         if await http_request.is_disconnected():
@@ -287,6 +295,27 @@ async def query_history(limit: int = 20, db: DatabaseManager = Depends(get_db)):
         }
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+# A clicked file in the 3D view is force-included by chunk id, so the click has
+# to be resolved to ids server-side: the visualizer buffer carries tree-node
+# indices, not chunk ids (A8-06). First few chunks only - a forced chunk is
+# pinned at score 1.0 and a local model's window is small.
+_FILE_CHUNK_LIMIT = 3
+
+
+@router.get("/file-chunks")
+async def file_chunks(
+    path: str = Query(..., max_length=4096), db: DatabaseManager = Depends(get_db)
+):
+    # /visualizer/meta reports paths with "/" separators; the files table keeps
+    # the OS spelling, so look up both.
+    forward = path.replace("\\", "/")
+    ids = await db.get_chunk_ids_for_paths(
+        [forward, forward.replace("/", "\\")], per_file_limit=_FILE_CHUNK_LIMIT
+    )
+    chunk_ids = next((v for v in ids.values() if v), [])
+    return {"path": path, "chunk_ids": chunk_ids}
 
 
 @router.post("/history/clear")

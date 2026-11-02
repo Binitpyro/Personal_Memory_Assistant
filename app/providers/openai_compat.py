@@ -6,11 +6,17 @@ from typing import Any, cast
 
 import httpx
 
-from app.providers.base import ModelInfo, ValidationResult
+from app.providers.base import ModelInfo, ValidationResult, new_async_client, stream_error_for
 from app.providers.cache import validation_cache
 from app.providers.registry import ProviderSpec
 
 logger = logging.getLogger(__name__)
+
+
+# How many models the auth probe may try before giving up. A retired model
+# answers 410 before the key is ever checked, so one attempt is not enough;
+# three bounds the cost of a validation that is otherwise a single GET.
+_AUTH_PROBE_MAX_MODELS = 3
 
 
 class OpenAICompatibleProvider:
@@ -21,7 +27,7 @@ class OpenAICompatibleProvider:
         api_key: str | None,
         base_url: str | None,
         default_model: str | None,
-        timeout: float = 30.0,
+        timeout: float | httpx.Timeout = 30.0,
     ):
         self.spec = spec
         self.api_key = api_key
@@ -33,7 +39,7 @@ class OpenAICompatibleProvider:
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=self.timeout)
+            self._client = new_async_client(self.timeout)
         return self._client
 
     def _get_headers(self) -> dict[str, str]:
@@ -122,6 +128,8 @@ class OpenAICompatibleProvider:
                 except Exception as parse_err:
                     result["error_code"] = "wrong_base_url"
                     result["error"] = f"Failed to parse models payload: {parse_err!s}"
+                if result["ok"] and not self.spec.models_endpoint_authenticates:
+                    await self._probe_auth(client, result)
             else:
                 self._map_http_error(resp.status_code, resp.text, result)
 
@@ -168,6 +176,54 @@ class OpenAICompatibleProvider:
 
         validation_cache.set(self.spec.id, self.base_url, self.api_key, result)
         return cast(ValidationResult, result)
+
+    async def _probe_auth(self, client: Any, result: ValidationResult) -> None:
+        """Second probe for providers whose model listing needs no key.
+
+        Sends the smallest possible completion - one token - purely to make the
+        server check the Authorization header. Without it, a provider with a
+        public catalogue reports every key as valid, including a fabricated one.
+
+        **This can only ever turn a pass into a failure, never the reverse, and
+        only on 401/403.** A timeout, a connection error, a 404 from an unexpected
+        route, a 429, a model that refuses chat - all leave the existing verdict
+        alone. The current bug is a silent false positive; trading it for a noisy
+        false negative that tells someone their working key is broken would be a
+        worse deal, so the probe is deliberately one-directional.
+        """
+        # Several candidates, because a listed model can be RETIRED and NVIDIA
+        # answers 410 Gone for those BEFORE it checks the key - measured with a
+        # deliberately invalid key, which also returns 410. A probe that stopped
+        # at the first candidate would be blinded by exactly that, and was: the
+        # configured default had been retired, so the probe learned nothing.
+        candidates: list[str] = []
+        if self.default_model:
+            candidates.append(self.default_model)
+        candidates += [m["id"] for m in result["models"] if m["id"] not in candidates]
+        if not candidates:
+            return
+
+        for model in candidates[:_AUTH_PROBE_MAX_MODELS]:
+            try:
+                resp = await client.post(
+                    f"{self.base_url}/chat/completions",
+                    headers=self._get_headers(),
+                    json={
+                        "model": model,
+                        "messages": [{"role": "user", "content": "ping"}],
+                        "max_tokens": 1,
+                    },
+                    timeout=httpx.Timeout(5.0, read=10.0),
+                )
+            except Exception:  # nosec B110 - inconclusive probe must not invent a failure
+                return
+            if resp.status_code in (401, 403):
+                result["ok"] = False
+                self._map_http_error(resp.status_code, resp.text, result)
+                return
+            if resp.status_code in (404, 410):
+                continue  # model is gone, says nothing about the key - try another
+            return  # anything else is conclusive enough to leave the verdict alone
 
     def _map_http_error(
         self, status_code: int, response_text: str, result: ValidationResult
@@ -244,16 +300,23 @@ class OpenAICompatibleProvider:
         async with client.stream("POST", url, headers=headers, json=payload) as resp:
             resp.raise_for_status()
             async for line in resp.aiter_lines():
-                if not line or not line.startswith("data: "):
+                if not line or not line.startswith("data:"):
                     continue
-                payload_str = line[6:].strip()
+                payload_str = line[5:].strip()
                 if payload_str == "[DONE]":
                     break
                 try:
                     parsed = json.loads(payload_str)
+                    err = parsed.get("error")
                     delta = parsed.get("choices", [{}])[0].get("delta", {}).get("content")
-                    if delta:
-                        yield delta
                 except Exception as e:
                     logger.debug("Failed to parse stream chunk: %s", e)
                     continue
+                # An HTTP 200 stream can carry an error object (LM Studio on a
+                # context overflow). Raised outside the try so it is not swallowed:
+                # before content it lets the fallback loop act on it; after content
+                # llm_client reports the truncation as a provider_error.
+                if err:
+                    raise stream_error_for(err)
+                if delta:
+                    yield delta

@@ -1,0 +1,191 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { screen, fireEvent, waitFor } from '@testing-library/react';
+import { ProvidersPage } from '../../pages/ProvidersPage';
+import { renderWithProviders } from '../test-utils';
+import { setProviderKey, deleteProviderKey, validateProvider } from '../../api';
+
+// TourOverlay mounts inside this page and scrolls its anchor into view; jsdom
+// does not implement scrollIntoView.
+Element.prototype.scrollIntoView = vi.fn();
+
+const state = vi.hoisted(() => ({
+  providers: [] as Record<string, unknown>[],
+  routingSettings: { provider: 'auto', fallback_chain: [], cloud_privacy_consent: true } as Record<string, unknown>,
+}));
+
+vi.mock('../../useApi', () => ({
+  useApi: vi.fn((_fn, opts) => {
+    const byKey: Record<string, unknown> = {
+      'providers-list': state.providers,
+      'llm-preferences': { provider: 'auto' },
+      'provider-settings': state.routingSettings,
+    };
+    return {
+      data: byKey[opts?.cacheKey as string],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    };
+  }),
+  invalidateCache: vi.fn(),
+}));
+
+vi.mock('../../useOptimisticMutation', () => ({
+  useOptimisticMutation: () => ({ mutate: vi.fn(), isPending: false }),
+}));
+
+vi.mock('../../api', () => ({
+  getProviders: vi.fn(),
+  getLLMPreferences: vi.fn(),
+  setLLMPreferences: vi.fn(),
+  getProviderSettings: vi.fn(),
+  setProviderSettings: vi.fn(),
+  validateProvider: vi.fn(),
+  setProviderKey: vi.fn().mockResolvedValue({ status: 'ok' }),
+  deleteProviderKey: vi.fn().mockResolvedValue({ status: 'ok' }),
+  setProviderDefaultModel: vi.fn(),
+}));
+
+/** A provider whose endpoint the user is allowed to edit. */
+const editable = {
+  spec: {
+    id: 'openai_compatible',
+    display_name: 'OpenAI-compatible',
+    kind: 'custom',
+    default_base_url: 'http://localhost:8000/v1',
+    base_url_editable: true,
+    api_key_docs_url: '',
+  },
+  is_set: true,
+  preview: 'sk-...',
+  stored_in: 'keyring',
+  base_url: 'http://localhost:8000/v1',
+  default_model: null,
+};
+
+function selectProvider() {
+  fireEvent.click(screen.getByRole('button', { name: /OpenAI-compatible/i }));
+}
+
+describe('ProvidersPage connection details', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.providers = [editable];
+    state.routingSettings = { provider: 'auto', fallback_chain: [], cloud_privacy_consent: true };
+  });
+
+  it('saves an edited Base Endpoint URL', async () => {
+    // The field was editable and was sent on Validate, but handleSave only ever
+    // passed the API key — so an endpoint change appeared to save and silently
+    // did not. The backend has accepted base_url on this route all along.
+    renderWithProviders(<ProvidersPage />);
+    selectProvider();
+
+    const url = screen.getByDisplayValue('http://localhost:8000/v1');
+    fireEvent.change(url, { target: { value: 'http://192.168.1.9:9000/v1' } });
+    fireEvent.click(screen.getByRole('button', { name: /Save Configuration/i }));
+
+    await waitFor(() =>
+      expect(setProviderKey).toHaveBeenCalledWith(
+        'openai_compatible',
+        null,
+        'http://192.168.1.9:9000/v1',
+      ),
+    );
+  });
+
+  it('does not touch the endpoint when only the key changed', async () => {
+    // Sending base_url unconditionally would overwrite a stored endpoint every
+    // time someone rotated a key.
+    renderWithProviders(<ProvidersPage />);
+    selectProvider();
+
+    const key = screen.getByDisplayValue('••••••••••••••••');
+    fireEvent.change(key, { target: { value: 'sk-newkey' } });
+    fireEvent.click(screen.getByRole('button', { name: /Save Configuration/i }));
+
+    await waitFor(() => expect(setProviderKey).toHaveBeenCalled());
+    expect(vi.mocked(setProviderKey).mock.calls[0][2]).toBeUndefined();
+  });
+
+  it('does not remove a connection on the first click', async () => {
+    // Deletes the key from the OS keyring with no undo.
+    renderWithProviders(<ProvidersPage />);
+    selectProvider();
+
+    fireEvent.click(screen.getByRole('button', { name: /Remove Connection/i }));
+
+    expect(deleteProviderKey).not.toHaveBeenCalled();
+  });
+});
+
+describe('ProvidersPage model list', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.providers = [editable];
+  });
+
+  it('renders a model whose context_length is null without crashing', async () => {
+    // LM Studio reports no context window; `null.toLocaleString()` threw and
+    // took the whole page down.
+    vi.mocked(validateProvider).mockResolvedValue({
+      ok: true,
+      latency_ms: 5,
+      models: [
+        { id: 'no-ctx-model', context_length: null, pricing_hint: 0, family: 'text' },
+        { id: 'ctx-model', context_length: 8192, pricing_hint: 0, family: 'text' },
+      ],
+      error: null,
+      error_code: null,
+      server_time: null,
+    } as never);
+    renderWithProviders(<ProvidersPage />);
+    selectProvider();
+    fireEvent.click(screen.getByRole('button', { name: /Test & Validate/i }));
+
+    expect(await screen.findByText('no-ctx-model')).toBeDefined();
+    expect(screen.getByText('8,192 ctx')).toBeDefined();
+    expect(screen.getAllByText(/ctx$/)).toHaveLength(1);
+  });
+});
+
+describe('ProvidersPage Validate All', () => {
+  const cloud = {
+    ...editable,
+    spec: { ...editable.spec, id: 'groq', display_name: 'Groq', kind: 'cloud', base_url_editable: false },
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.providers = [editable, cloud];
+    state.routingSettings = { provider: 'auto', fallback_chain: [], cloud_privacy_consent: false };
+  });
+
+  it('renders the model list after Validate All instead of crashing', async () => {
+    // It called /self_test, whose reply has no `models`, so a passing provider
+    // hit `validationResult.models.length` and took the page down.
+    vi.mocked(validateProvider).mockResolvedValue({
+      ok: true,
+      latency_ms: 5,
+      models: [{ id: 'all-model', context_length: null, pricing_hint: 0, family: 'chat' }],
+      error: null,
+      error_code: null,
+      server_time: null,
+    } as never);
+    renderWithProviders(<ProvidersPage />);
+    selectProvider();
+    fireEvent.click(screen.getByRole('button', { name: /Validate All/i }));
+
+    expect(await screen.findByText('all-model')).toBeDefined();
+    expect(validateProvider).toHaveBeenCalledWith('openai_compatible', {});
+  });
+
+  it('does not reach a cloud provider without consent', async () => {
+    vi.mocked(validateProvider).mockResolvedValue({ ok: false, latency_ms: 0, models: [] } as never);
+    renderWithProviders(<ProvidersPage />);
+    fireEvent.click(screen.getByRole('button', { name: /Validate All/i }));
+
+    await waitFor(() => expect(validateProvider).toHaveBeenCalledTimes(1));
+    expect(validateProvider).not.toHaveBeenCalledWith('groq', expect.anything());
+  });
+});

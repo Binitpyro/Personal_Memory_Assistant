@@ -116,6 +116,11 @@ vi.mock('../../api', () => {
     setOcrEnabled: vi.fn(),
     retryOcr: vi.fn(),
     clearOcrCache: vi.fn(),
+    // GpuEmbedSection's imports, for the same stale-factory reason as above.
+    getEmbedGpu: vi.fn(),
+    installEmbedGpu: vi.fn(),
+    cancelEmbedGpuInstall: vi.fn(),
+    setEmbedGpu: vi.fn(),
   };
 });
 
@@ -239,6 +244,30 @@ describe('SettingsPage Component', () => {
 
     expect(screen.getByText(/Neither Ollama nor LM Studio is currently reachable/i)).toBeDefined();
     expect(screen.getByRole('button', { name: /Check again/i })).toBeDefined();
+  });
+
+  // ── Destructive actions are confirmed ──────────────────────────────────
+  //
+  // Uninstall deletes a virtual environment and its downloaded model weights;
+  // Clear cache discards recognised text for every scanned page. Both fired on
+  // a single click with no confirmation of any kind.
+
+  it('does not uninstall an OCR tier on the first click', async () => {
+    const { uninstallOcrTier } = await import('../../api');
+
+    await renderSettings();
+    fireEvent.click(screen.getByRole('button', { name: /^Uninstall/i }));
+
+    expect(uninstallOcrTier).not.toHaveBeenCalled();
+  });
+
+  it('does not clear the OCR cache on the first click', async () => {
+    const { clearOcrCache } = await import('../../api');
+
+    await renderSettings();
+    fireEvent.click(screen.getByRole('button', { name: /Clear OCR cache/i }));
+
+    expect(clearOcrCache).not.toHaveBeenCalled();
   });
 });
 

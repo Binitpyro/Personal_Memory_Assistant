@@ -54,6 +54,10 @@ pytest-report.xml
 bandit-report.json
 sonar-issues.json
 **/sonar-issues.json
+# Sonar-Scan.bat writes these with underscores, which the two globs
+# above never matched - so both stayed tracked.
+sonar_issues.json
+sonar_output.txt
 frontend/eslint-report.json
 *.cover
 *.py,cover
@@ -218,6 +222,10 @@ static/
 # dist_readme.txt <-- Deleted
 data/lancedb/
 app/vector_store/lancedb_data/
+/lancedb_data/
+/lancedb_test_temp/
+/temp_db/
+test_pma_*.db
 
 # Jupyter etc (if you use them)
 .ipynb_checkpoints/
@@ -283,3 +291,42 @@ pma_metadata.db*
 
 # Graphify AST extraction output (local tool artifact)
 graphify-out/
+
+# BEIR corpora materialised by scripts/fetch_beir.py. SciFact alone is 5,183
+# files; it is downloadable and reproducible from the provenance recorded in the
+# queries JSON, so it does not belong in git. The queries file is generated with
+# it and would rot against a re-download.
+/tests/eval/corpus_scifact/
+/tests/eval/queries_scifact.json
+
+# research/PROGRAM.md and EDITABLE.md are tracked - they are design documents.
+# The journals are NOT: see the block at the foot of this file. This comment used
+# to say the opposite and was left stale when they were untracked on 2026-09-05.
+
+# Text materialised from a PERSONAL corpus by scripts/materialize_corpus.py.
+# Real coursework, notes and documents - it must never enter git, and the
+# ignore is added BEFORE the directory is ever written so there is no window in
+# which it could be staged by accident. The labelled query file that goes with
+# it is derived from that same private content and is ignored for the same reason.
+/tests/eval/corpus_college/
+/tests/eval/queries_college.json
+
+# SQuAD-derived corpus from scripts/fetch_squad_corpus.py. Reproducible from the
+# provenance recorded in the queries file, so it does not belong in git.
+/tests/eval/corpus_squad/
+/tests/eval/queries_squad.json
+
+# Query-type fixture from scripts/build_query_type_fixture.py: deterministic from
+# the git SHA and seed recorded in its queries file, and a second copy of the code.
+/tests/eval/corpus_qtype/
+/tests/eval/queries_qtype.json
+/Claude outputs
+
+# Autoresearch journals. Machine-generated sweep results, append-only, ~1.8 KB
+# per row and growing with every experiment - section 13's "reports land in the
+# repo root ... do not commit these" applies to them as much as to coverage.xml.
+# They stay ON DISK: `scripts/autoresearch.py --resume` reads them to skip work
+# already done, and they are the per-build numbers behind the measured claims in
+# CLAUDE.md. Untracked, not deleted.
+research/journal*.jsonl
+/research

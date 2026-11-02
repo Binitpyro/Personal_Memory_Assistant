@@ -50,6 +50,30 @@ subsystems: dict[str, dict[str, str]] = {
 }
 
 
+# Embedding-model signature, compared at boot against what the index was built
+# with. A mismatch means every stored vector is from a different vector space
+# and semantic search is quietly returning nonsense.
+#
+# Surfaced the same way as split_brain_sync_status: recorded here, emitted in
+# the health payload, rendered by the frontend. It used to exist only as a log
+# banner, which nobody sees.
+#
+# `reembed` tracks the user-initiated repair: idle | running | done | error.
+embedding_signature: dict[str, str | bool] = {
+    "stored": "",
+    "current": "",
+    "mismatch": False,
+    "reembed": "idle",
+}
+
+
+def set_embedding_signature(stored: str, current: str) -> None:
+    """Record the boot-time signature comparison."""
+    embedding_signature["stored"] = stored
+    embedding_signature["current"] = current
+    embedding_signature["mismatch"] = bool(stored) and stored != current
+
+
 def set_subsystem(name: str, state: str, detail: str = "") -> None:
     """Record a subsystem's startup outcome. Unknown names are ignored."""
     if name in subsystems:

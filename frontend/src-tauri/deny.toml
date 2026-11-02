@@ -1,5 +1,17 @@
 # deny.toml - Strict security and license policy
 
+[graph]
+# Without this, cargo-deny resolves the HOST target only, so the local gate on
+# Windows and `cargo deny check` on ubuntu-latest in CI were checking different
+# dependency graphs - the whole GTK3/webkit2gtk subtree is Linux-only and was
+# invisible here. Pinning both makes the union explicit, so a local pass is
+# evidence about CI. Darwin is deliberately absent: nothing builds it today, and
+# adding it would admit crates no gate has ever audited.
+targets = [
+    "x86_64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
+]
+
 [licenses]
 # List of explicitly allowed licenses. We enforce a strict NO AGPL/GPL rule.
 allow = [
@@ -31,17 +43,6 @@ unknown-git = "warn"
 
 [advisories]
 ignore = [
-    # Tauri GTK3 unmaintained bindings (Linux/Cross-platform)
-    "RUSTSEC-2024-0411",
-    "RUSTSEC-2024-0412",
-    "RUSTSEC-2024-0413",
-    "RUSTSEC-2024-0414",
-    "RUSTSEC-2024-0415",
-    "RUSTSEC-2024-0416",
-    "RUSTSEC-2024-0417",
-    "RUSTSEC-2024-0418",
-    "RUSTSEC-2024-0419",
-    "RUSTSEC-2024-0420",
     # Other unmaintained crates tied to current dependencies
     "RUSTSEC-2024-0370", # proc-macro-error
     "RUSTSEC-2025-0075", # unic-char-range
@@ -58,6 +59,15 @@ ignore = [
     #   RUSTSEC-2024-0429      glib      - crate present, but cargo-deny does not
     #   RUSTSEC-2026-0190      anyhow      act on these advisories' kind, so the
     #   RUSTSEC-2026-0097      rand        entries could never fire here
+    #   RUSTSEC-2024-0411..0420  the gtk-rs GTK3 bindings (gtk, gdk, atk, their
+    #                            -sys crates, gtk3-macros). RustSec WITHDREW all
+    #                            ten on 2026-08-14, and a withdrawn advisory is
+    #                            never reported, so these could not fire on any
+    #                            platform. Verified rather than assumed: gtk
+    #                            v0.18.2 and atk v0.18.2 ARE in the Linux graph
+    #                            via muda -> tauri, and the ids still matched
+    #                            nothing with the targets above pinned and
+    #                            unmaintained = "all" forced.
     # glib is still ignored in .cargo/audit.toml, where cargo-audit does report
     # it (unsound). fxhash, anyhow and rand are in neither file - cargo-audit
     # does not report them either.

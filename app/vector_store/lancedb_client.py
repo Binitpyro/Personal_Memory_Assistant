@@ -3,6 +3,7 @@ import logging
 import math
 import threading
 from collections.abc import Sequence
+from datetime import timedelta
 from functools import partial
 from typing import Any
 
@@ -103,6 +104,10 @@ class LanceDBClient:
         self._table_cache: dict[str, Any] = {}
         self._connect_lock = threading.Lock()
         self._write_lock = threading.Lock()
+        # Serialises index rebuilds only. Holding _write_lock for a rebuild parked
+        # every query_cache write on it, and those threads filled the default
+        # executor, starving semantic_search for the rest of the rebuild.
+        self._index_lock = threading.Lock()
         self._cache_writes = 0
 
     def connect(self) -> None:
@@ -183,15 +188,17 @@ class LanceDBClient:
         try:
             tbl = self._get_table(table_name)
             if tbl is not None:
-                # Use PyArrow on just the 'id' column to avoid loading metadata and vectors, fixing O(1) violation.
-                arrow_tbl = tbl.search(None).select(["id"]).to_arrow()
-                col = arrow_tbl.column("id")
-                if len(col) > 0:
-                    import pyarrow as pa
-                    import pyarrow.compute as pc  # type: ignore
+                # Stream the 'id' column in batches: memory is bounded by the batch,
+                # not the table (1M rows: 7.9 MB -> 0.5 MB Arrow peak, 6x faster).
+                import pyarrow as pa
+                import pyarrow.compute as pc  # type: ignore
 
-                    val = pc.max(col.cast(pa.int64())).as_py()
-                    return int(val) if val is not None else 0
+                best = 0
+                for batch in tbl.search(None).select(["id"]).to_batches(65536):
+                    val = pc.max(batch.column("id").cast(pa.int64())).as_py()
+                    if val is not None and val > best:
+                        best = int(val)
+                return best
         except Exception as exc:
             logger.error("Failed to get max id from %s: %s", table_name, exc)
         return 0
@@ -376,6 +383,13 @@ class LanceDBClient:
                     f"'{doc_id.replace(chr(39), chr(39) + chr(39))}'" for doc_id in ids
                 )
                 tbl.delete(f"id IN ({id_list})")
+                # Every removal of chunks (folder removal, a changed file's old
+                # rows, OCR re-index) leaves cached answers quoting text that no
+                # longer exists. A failure here must not fail the delete.
+                try:
+                    self._drop_query_cache()
+                except Exception as exc:
+                    logger.warning("query_cache not dropped after delete: %s", exc)
 
         await loop.run_in_executor(None, _delete)
 
@@ -439,6 +453,8 @@ class LanceDBClient:
         scope: str = "|",
     ) -> None:
         """Add a successful RAG response to the persistent semantic cache."""
+        if not response_text.strip():
+            return
         self.connect()
 
         if isinstance(query_emb, list):
@@ -472,7 +488,13 @@ class LanceDBClient:
         from app.config import settings
 
         self._cache_writes += 1
-        if self._cache_writes % max(1, settings.query_cache_prune_interval) == 0:
+        # The counter restarts at 0 on every launch, so a "% interval == 0" test
+        # alone never fires for a session shorter than the interval. Prune on the
+        # first write of the process too.
+        if (
+            self._cache_writes == 1
+            or self._cache_writes % max(1, settings.query_cache_prune_interval) == 0
+        ):
             await self.prune_query_cache(settings.query_cache_max_rows)
 
     async def search_cache(
@@ -542,18 +564,21 @@ class LanceDBClient:
             try:
                 with self._write_lock:
                     total = tbl.count_rows()
-                    if total <= max_rows:
-                        return 0
-                    stamps = sorted(
-                        r["timestamp"] for r in tbl.to_arrow().select(["timestamp"]).to_pylist()
-                    )
-                    cutoff = stamps[total - max_rows]
-                    tbl.delete(f"timestamp < {cutoff}")
-                    removed = int(total) - int(tbl.count_rows())
-                    try:
-                        tbl.compact_files()
-                    except Exception as e:  # pragma: no cover - version dependent
-                        logger.debug("query_cache compaction unavailable: %s", e)
+                    removed = 0
+                    if total > max_rows:
+                        stamps = sorted(
+                            r["timestamp"] for r in tbl.to_arrow().select(["timestamp"]).to_pylist()
+                        )
+                        cutoff = stamps[total - max_rows]
+                        tbl.delete(f"timestamp < {cutoff}")
+                        removed = int(total) - int(tbl.count_rows())
+                    # Every prune, not only above the cap: fragments and versions
+                    # grow per answer whatever the row count. compact_files() needs
+                    # pylance, which is not installed, so it failed into a DEBUG log
+                    # on every call. Measured 2026-09-30 at 5,000 answers: 5,000
+                    # versions, 1.09 GB, search 181 ms; after optimize() 1 version,
+                    # 8.7 MB, 11 ms. Zero retention: no reader uses old versions.
+                    tbl.optimize(cleanup_older_than=timedelta(0))
                     return removed
             except Exception as e:
                 logger.warning("query_cache prune failed: %s", e)
@@ -579,37 +604,87 @@ class LanceDBClient:
 
         def _drop():
             with self._write_lock:
-                if "query_cache" in _list_tables(db):
-                    db.drop_table("query_cache")
-                self._table_cache.pop("query_cache", None)
+                self._drop_query_cache()
 
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, _drop)
 
+    def _drop_query_cache(self) -> None:
+        """Drop the `query_cache` table. Caller holds ``_write_lock``."""
+        db = self.db
+        if db is not None and "query_cache" in _list_tables(db):
+            db.drop_table("query_cache")
+        self._table_cache.pop("query_cache", None)
+
+    # Versions kept after optimize. Zero would also delete files an in-flight
+    # search on the previous version is still reading; a minute bounds growth
+    # (one version per add/delete otherwise) without that race.
+    _VERSION_RETENTION = timedelta(minutes=1)
+    # ponytail: a delta index per run until either cap trips, then one full
+    # rebuild. Upgrade to a size-aware schedule if recall on grown tables slips.
+    _MAX_DELTA_INDICES = 8
+    _MAX_UNINDEXED_FRACTION = 0.5
+
+    def _needs_full_rebuild(self, tbl) -> bool:
+        """True when the vector index is missing or too stale to extend."""
+        try:
+            idx = next(i for i in tbl.list_indices() if "vector" in list(i.columns))
+            st = tbl.index_stats(idx.name)
+        except Exception:
+            return True
+        if st is None or not st.num_indexed_rows:
+            return True
+        return bool(
+            st.num_indices > self._MAX_DELTA_INDICES
+            or st.num_unindexed_rows > self._MAX_UNINDEXED_FRACTION * st.num_indexed_rows
+        )
+
     async def create_hnsw_index(self, table_name: str = "pma_chunks") -> None:
-        """Create HNSW index on the vector column of the specified table."""
+        """Bring the vector index of *table_name* up to date and compact the table.
+
+        Every indexing run and every OCR drain calls this, and it used to rebuild
+        the whole IVF_HNSW_SQ index each time (20k rows 10-32 s, 100k rows
+        70-150 s, all cores) even for a one-file edit or a no-op run. It now
+        rebuilds only when there is no index or it is too stale to extend;
+        otherwise `optimize()` indexes the new rows incrementally, compacts
+        fragments and prunes old versions. pma_chunks/pma_summaries gain a version
+        on every add and delete, and nothing else ever compacted them.
+        """
         self.connect()
         tbl = self._get_table(table_name)
         if tbl is not None:
             loop = asyncio.get_running_loop()
 
             def _create():
-                with self._write_lock:
-                    try:
-                        # Attempt to create index with replace=True to overwrite old index
-                        tbl.create_index(metric="cosine", index_type="IVF_HNSW_SQ", replace=True)
-                        logger.info(
-                            "LanceDB HNSW index created/updated successfully on %s", table_name
-                        )
-                    except Exception as e:
+                # Lance commits an append or delete made during the build
+                # independently (measured on 0.30.2: 20k rows, concurrent add and
+                # delete, no errors, counts exact), so _write_lock is not needed.
+                with self._index_lock:
+                    if self._needs_full_rebuild(tbl):
                         try:
-                            # Fallback if replace is not supported or fails
-                            tbl.create_index(metric="cosine", index_type="IVF_HNSW_SQ")
-                            logger.info("LanceDB HNSW index created successfully on %s", table_name)
-                        except Exception as e2:
-                            logger.error(
-                                "LanceDB HNSW index creation failed: %s (fallback %s)", e, e2
+                            # Attempt to create index with replace=True to overwrite old index
+                            tbl.create_index(
+                                metric="cosine", index_type="IVF_HNSW_SQ", replace=True
                             )
+                            logger.info(
+                                "LanceDB HNSW index created/updated successfully on %s", table_name
+                            )
+                        except Exception as e:
+                            try:
+                                # Fallback if replace is not supported or fails
+                                tbl.create_index(metric="cosine", index_type="IVF_HNSW_SQ")
+                                logger.info(
+                                    "LanceDB HNSW index created successfully on %s", table_name
+                                )
+                            except Exception as e2:
+                                logger.error(
+                                    "LanceDB HNSW index creation failed: %s (fallback %s)", e, e2
+                                )
+                    try:
+                        with self._write_lock:
+                            tbl.optimize(cleanup_older_than=self._VERSION_RETENTION)
+                    except Exception as e:
+                        logger.warning("LanceDB optimize failed on %s: %s", table_name, e)
 
             await loop.run_in_executor(None, _create)
 

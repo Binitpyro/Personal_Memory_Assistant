@@ -216,3 +216,169 @@ class TestBuildContext:
         results = [{"file_path": "x.py", "text": "some text", "score": 1.0}]
         result, _ = build_context(results, max_tokens=0)
         assert isinstance(result, str)
+
+
+# ── small-model slot budget ───────────────────────────────────────────────────
+
+
+class TestSmallModelSlotBudget:
+    """`max_chunks` for 3b_local was a function-local literal until 2026-09-03.
+
+    It is a setting now because it, and not `chunk_size`, is what bounds the
+    small model. Measured (CLAUDE.md 8.7f): at the shipped chunk_size=2048 a
+    3b_local context delivers 1,719 tokens against a 2,520 budget, so it runs out
+    of *slots* long before it runs out of budget - and a literal cannot be swept.
+
+    `context_max_chunks_small` still carries the literal it replaced, and must:
+    it was swept 3/5/8 and does not bind. `context_max_per_file_small` no longer
+    does - it was raised 1 -> 2 on 2026-09-03 on corpus_squad evidence (+0.063
+    delivered coverage at sd 0.005, disjoint ranges, flat control). So the pin
+    below asserts the CURRENT defaults with a reason for each, rather than
+    sameness with the past.
+    """
+
+    @staticmethod
+    def _results(n: int) -> list[dict]:
+        # Distinct files: _deduplicate_by_file caps per-file before max_chunks
+        # applies, so same-file rows would measure the wrong limit.
+        return [
+            {"file_path": f"f{i}.py", "text": f"body of file number {i} " * 4, "score": 1.0}
+            for i in range(n)
+        ]
+
+    @staticmethod
+    def _files_in(context: str, n: int) -> int:
+        return sum(f"f{i}.py" in context for i in range(n))
+
+    def test_slot_count_drives_how_many_chunks_survive(self, monkeypatch):
+        from app.config import settings
+
+        results = self._results(6)
+        monkeypatch.setattr(settings, "context_max_chunks_small", 1)
+        one, _ = build_context(results, max_tokens=4000, model_class="3b_local")
+        monkeypatch.setattr(settings, "context_max_chunks_small", 4)
+        four, _ = build_context(results, max_tokens=4000, model_class="3b_local")
+
+        assert self._files_in(one, 6) == 1
+        assert self._files_in(four, 6) == 4
+
+    def test_shipped_defaults_are_pinned(self):
+        from app.config import settings
+
+        # Unchanged: swept 3/5/8, does not bind (CLAUDE.md 8.7f).
+        assert settings.context_max_chunks_small == 3
+        # Raised 1 -> 2 on corpus_squad evidence (CLAUDE.md 8.7g). Saturates at
+        # 2, so 3 is not an improvement worth the file-diversity cost.
+        assert settings.context_max_per_file_small == 2
+
+    def test_per_file_cap_binds_for_the_small_class(self, monkeypatch):
+        """The pin above is worthless if the setting never reaches the dedup.
+
+        Uses results from ONE file, because `_deduplicate_by_file` is the only
+        stage this setting feeds and distinct files never exercise it - which is
+        why `_results` deliberately builds distinct ones for the slot tests.
+        """
+        from app.config import settings
+
+        same_file = [
+            {"file_path": "only.py", "text": f"passage number {i} " * 6, "score": 1.0}
+            for i in range(4)
+        ]
+        monkeypatch.setattr(settings, "context_max_per_file_small", 1)
+        one, _ = build_context(same_file, max_tokens=4000, model_class="3b_local")
+        monkeypatch.setattr(settings, "context_max_per_file_small", 3)
+        three, _ = build_context(same_file, max_tokens=4000, model_class="3b_local")
+
+        assert sum(f"passage number {i} " in one for i in range(4)) == 1
+        assert sum(f"passage number {i} " in three for i in range(4)) == 3
+
+    def test_large_class_is_unaffected_by_the_small_setting(self, monkeypatch):
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "context_max_chunks_small", 1)
+        ctx, _ = build_context(self._results(6), max_tokens=4000, model_class="7b_local")
+        assert self._files_in(ctx, 6) == 6
+
+
+class TestSnippetHeadShare:
+    """The geometric head allocation is a hard ceiling on budget use.
+
+    Three snippets each taking `share` of what remains reach at most
+    1 - (1 - share)^3 of the budget - 71.2% at the shipped 0.34. For 3b_local,
+    whose max_chunks is 3, that is every snippet, so nearly a third of its
+    context budget is unreachable. Sweeping max_chunks and max_per_file both
+    came back flat because of this (CLAUDE.md 8.7f), which is why it is a
+    setting now rather than a literal.
+    """
+
+    @staticmethod
+    def _long_results(n: int) -> list[dict]:
+        # Each snippet must be LONGER than any per-snippet budget under test, or
+        # the share never binds and the assertions pass no matter what. The first
+        # version of this used *200 (~1.5k tokens), which is under the budget at
+        # every share swept, and the leak test could not fail. Caught by its own
+        # negative control.
+        return [
+            {
+                "file_path": f"f{i}.py",
+                "text": f"sentence {i} of a long passage. " * 4000,
+                "score": 1.0,
+            }
+            for i in range(n)
+        ]
+
+    def test_raising_the_share_delivers_more_of_the_budget(self, monkeypatch):
+        from app.config import settings
+
+        results = self._long_results(3)
+        monkeypatch.setattr(settings, "context_snippet_head_share_small", 0.34)
+        _, low = build_context(results, max_tokens=2520, model_class="3b_local")
+        monkeypatch.setattr(settings, "context_snippet_head_share_small", 0.60)
+        _, high = build_context(results, max_tokens=2520, model_class="3b_local")
+
+        assert high > low, "the head share must actually move delivered tokens"
+        # 1 - 0.66^3 = 0.712. Generous bounds: _truncate_to_tokens and the
+        # per-snippet label both cost tokens, so the cap is approached, not hit.
+        assert low < 0.80 * 2520, "0.34 must leave a large part of the budget unused"
+
+    @staticmethod
+    def _files_delivered(context: str, n: int) -> int:
+        return sum(f"f{i}.py" in context for i in range(n))
+
+    def test_a_large_share_starves_the_tail_for_the_large_classes(self, monkeypatch):
+        """Token TOTAL is not the discriminator - _format_snippets always fills
+        the budget. What changes is how many snippets survive to be in it.
+        Measured: 15/15 at 0.34 and 0.5, 6/15 at 0.7, 4/15 at 0.8. That cliff is
+        why the small class has its own setting (CLAUDE.md 8.7f)."""
+        from app.config import settings
+
+        results = self._long_results(15)
+        monkeypatch.setattr(settings, "context_snippet_head_share", 0.34)
+        wide, _ = build_context(results, max_tokens=8520, model_class="7b_local")
+        monkeypatch.setattr(settings, "context_snippet_head_share", 0.8)
+        narrow, _ = build_context(results, max_tokens=8520, model_class="7b_local")
+
+        assert self._files_delivered(wide, 15) == 15
+        assert self._files_delivered(narrow, 15) < 6
+
+    def test_the_small_share_does_not_leak_into_the_large_classes(self, monkeypatch):
+        """The whole point of splitting the setting. A single global 0.7 cut
+        7b_local to 6 surviving snippets and put it one step from a 0.28 recall
+        collapse, while buying the 3B +0.098 (CLAUDE.md 8.7f)."""
+        from app.config import settings
+
+        results = self._long_results(15)
+        monkeypatch.setattr(settings, "context_snippet_head_share", 0.34)
+        monkeypatch.setattr(settings, "context_snippet_head_share_small", 0.9)
+        ctx, _ = build_context(results, max_tokens=8520, model_class="7b_local")
+
+        assert self._files_delivered(ctx, 15) == 15, "the small-class share must not reach 7b_local"
+
+    def test_defaults_are_the_swept_optima(self):
+        """Per class, and they differ for a structural reason: 3b_local has three
+        slots so nothing can be starved, while 7b_local has fifteen and loses the
+        tail. Pinned so neither constant drifts without redoing the sweep."""
+        from app.config import settings
+
+        assert settings.context_snippet_head_share_small == 0.7
+        assert settings.context_snippet_head_share == 0.34

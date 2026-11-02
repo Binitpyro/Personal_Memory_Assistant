@@ -1,0 +1,153 @@
+/**
+ * Theme resolution for the Safelight system.
+ *
+ * Two themes: `cabinet` (Safelight, dark, the default) and `paper` (Lights
+ * on, light). The values predate Safelight and are kept so a stored choice
+ * survives the redesign without migration code.
+ * `index.css` carries cabinet values on `:root`, swaps to paper under
+ * `prefers-color-scheme: light` when the user has NOT chosen, and honours an
+ * explicit `[data-theme]` in both directions.
+ *
+ * Deliberately NOT an inline <script> in index.html: `app/main.py` serves a
+ * per-request nonce CSP whose only permitted inline script is the token
+ * injection, and the built SPA is otherwise inline-script-free. Running this
+ * from the module entry keeps that property intact. The cost is a possible
+ * one-frame flash for a user whose OS scheme disagrees with their stored
+ * choice; the common cases (no choice, or choice matching the OS) do not
+ * flash, because the CSS already resolves them without JS.
+ */
+
+import { useEffect, useState } from 'react';
+
+export type Theme = 'cabinet' | 'paper';
+
+const STORAGE_KEY = 'pma_theme';
+
+/** The user's explicit choice, or null when they have never picked one. */
+export function getStoredTheme(): Theme | null {
+  try {
+    const v = localStorage.getItem(STORAGE_KEY);
+    return v === 'cabinet' || v === 'paper' ? v : null;
+  } catch {
+    // Private mode / blocked storage. Fall back to the OS.
+    return null;
+  }
+}
+
+/** What is actually on screen, whether chosen or inherited from the OS. */
+export function resolveTheme(): Theme {
+  const stored = getStoredTheme();
+  if (stored) return stored;
+  const prefersLight =
+    typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: light)').matches;
+  return prefersLight ? 'paper' : 'cabinet';
+}
+
+/** Persist a choice and apply it. */
+export function setTheme(theme: Theme): void {
+  try {
+    localStorage.setItem(STORAGE_KEY, theme);
+  } catch {
+    // Non-fatal: the attribute below still applies for this session.
+  }
+  document.documentElement.setAttribute('data-theme', theme);
+}
+
+/** Clear the choice and follow the OS again. */
+export function clearTheme(): void {
+  try {
+    localStorage.removeItem(STORAGE_KEY);
+  } catch {
+    // Non-fatal.
+  }
+  document.documentElement.removeAttribute('data-theme');
+}
+
+/**
+ * Apply the stored choice, if any, as early as the module graph allows.
+ * When there is no stored choice the attribute is left OFF on purpose, so
+ * the CSS `prefers-color-scheme` branch keeps tracking the OS live.
+ */
+export function initTheme(): void {
+  const stored = getStoredTheme();
+  if (stored) document.documentElement.setAttribute('data-theme', stored);
+}
+
+/**
+ * The live theme, for code that cannot read a CSS variable — canvas charts,
+ * mainly, which are handed literal colours rather than inheriting them.
+ *
+ * Both sources have to be watched. `setTheme` writes `data-theme` on <html>,
+ * but `initTheme` deliberately leaves that attribute OFF when the user has
+ * never chosen one, so the CSS `prefers-color-scheme` branch keeps following
+ * the OS live. A hook watching only one source is wrong half the time: it
+ * misses the toggle for a user with no stored choice, and misses an OS change
+ * for a user who has one.
+ */
+export function useTheme(): Theme {
+  const [theme, setLive] = useState<Theme>(resolveTheme);
+
+  useEffect(() => {
+    const sync = () => setLive(resolveTheme());
+
+    const observer = new MutationObserver(sync);
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ['data-theme'],
+    });
+
+    const mq =
+      typeof matchMedia === 'function' ? matchMedia('(prefers-color-scheme: light)') : null;
+    mq?.addEventListener('change', sync);
+
+    // The attribute can change between the first render and this effect.
+    sync();
+
+    return () => {
+      observer.disconnect();
+      mq?.removeEventListener('change', sync);
+    };
+  }, []);
+
+  return theme;
+}
+
+/** The token literals a canvas chart needs. */
+export interface ChartTokens {
+  surface: string;
+  raised: string;
+  bg: string;
+  rule: string;
+  edge: string;
+  text: string;
+  text2: string;
+  text3: string;
+  accent: string;
+  plate: string;
+}
+
+/**
+ * Resolve the `--pma-*` palette to literals, for the canvas charts described
+ * above. Fallbacks are the cabinet values, matching `index.css`'s `:root`.
+ *
+ * Read at option-build time, never at module scope: a module-level read would
+ * snapshot whichever theme happened to be active on first import and never
+ * update. Pair it with `useTheme()` in the memo deps so the option is rebuilt
+ * when the theme changes — the hook is what makes this function re-run.
+ */
+export function readChartTokens(): ChartTokens {
+  const cs = getComputedStyle(document.documentElement);
+  const v = (name: string, fallback: string) => cs.getPropertyValue(name).trim() || fallback;
+  return {
+    surface: v('--pma-surface', '#131211'),
+    raised: v('--pma-raised', '#1B1918'),
+    bg: v('--pma-bg', '#0B0A0A'),
+    rule: v('--pma-rule', '#2B2826'),
+    edge: v('--pma-edge', '#8F8883'),
+    text: v('--pma-text', '#EFEBE7'),
+    text2: v('--pma-text-2', '#B8B1AB'),
+    text3: v('--pma-text-3', '#8F8883'),
+    accent: v('--pma-accent', '#F04A30'),
+    plate: v('--pma-plate', '#F04A30'),
+  };
+}

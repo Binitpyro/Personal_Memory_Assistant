@@ -6,6 +6,7 @@ containing XHTML/HTML content, which is the EPUB format spec. This is
 permissive-license-safe and works for all standard EPUBs (2.x and 3.x).
 """
 
+import html
 import logging
 import posixpath
 import re
@@ -19,8 +20,12 @@ logger = logging.getLogger(__name__)
 
 _SCRIPT_STYLE_RE = re.compile(r"<(script|style)\b[^>]*>.*?</\1\s*>", re.IGNORECASE | re.DOTALL)
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
-_NAMED_ENTITY_RE = re.compile(r"&[a-zA-Z]+;")
-_NUMERIC_ENTITY_RE = re.compile(r"&#\d+;")
+# Inline markup sits inside a word ("<b>W</b>ord"); replacing it with a space
+# split the word. Block-level tags still become a space.
+_INLINE_TAG_RE = re.compile(
+    r"</?(?:a|abbr|b|cite|code|em|font|i|mark|small|span|strong|sub|sup|u)\b[^>]*>",
+    re.IGNORECASE,
+)
 _WHITESPACE_RE = re.compile(r"\s+")
 _MAX_ENTRY_READ_BYTES = 10_000_000
 _MAX_CUMULATIVE_DECOMPRESSED_SIZE = 100 * 1024 * 1024
@@ -188,9 +193,11 @@ class EpubExtractor:
                             # for malformed input.
                             text = _SCRIPT_STYLE_RE.sub(" ", raw_html)
                             # Strip XML/HTML tags and collapse whitespace
+                            text = _INLINE_TAG_RE.sub("", text)
                             text = _HTML_TAG_RE.sub(" ", text)
-                            text = _NAMED_ENTITY_RE.sub(" ", text)
-                            text = _NUMERIC_ENTITY_RE.sub(" ", text)
+                            # Decoded, after tags are gone so an escaped "&lt;b&gt;"
+                            # stays text. Was a space: "Don&#8217;t" -> "Don t".
+                            text = html.unescape(text)
                             text = _WHITESPACE_RE.sub(" ", text).strip()
 
                             if len(text) > 50:

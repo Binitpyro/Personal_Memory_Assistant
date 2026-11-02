@@ -2,6 +2,7 @@ import { useReducer, useCallback, useRef, useEffect } from 'react';
 import { subscribeQuery, type QueryStreamChunk, type QuerySource, type ProviderStatus, type TraceEvent } from '../api';
 import { useSessionProvider } from '../context/SessionProviderContext';
 import { queryClient } from '../queryClient';
+import { CACHE_KEYS } from '../cacheKeys';
 
 export interface Message {
   id: string; // generated using crypto.randomUUID()
@@ -14,8 +15,11 @@ export interface Message {
   /** Set when the user stopped generation. The partial answer is kept. */
   stopped?: boolean;
   mode?: 'fast_path' | 'full_rag' | 'degraded_rag' | 'cached';
+  /** The prompt mode the user chose, echoed back. A different axis to `mode`. */
+  query_mode?: string;
   graph_hops?: string;
   contradictions_found?: boolean;
+  contradiction_sources?: (string | number)[];
   knowledge_gaps?: string[];
   pattern_annotations?: string[];
   trace?: TraceEvent[];
@@ -24,6 +28,8 @@ export interface Message {
   completion_tokens?: number;
   cost?: number;
   isEstimatedCost?: boolean;
+  /** Why this turn failed. Rendered inside the bubble, below any partial answer. */
+  error?: { text: string; code?: string };
 }
 
 type ChatAction =
@@ -31,13 +37,13 @@ type ChatAction =
   | { type: 'START_ASSISTANT_STREAM'; payload: { id: string } }
   | { type: 'APPEND_STREAM'; payload: { text: string } }
   | { type: 'FINISH_STREAM'; payload: { graph_hops?: string; stopped?: boolean } }
-  | { type: 'SET_FAST_PATH'; payload: { content: string; sources?: QuerySource[]; latency_ms?: number; graph_hops?: string } }
-  | { type: 'SET_SOURCES'; payload: { sources: QuerySource[]; near_misses: QuerySource[]; latency_ms: number; mode: 'fast_path' | 'full_rag' | 'degraded_rag' | 'cached'; graph_hops?: string; contradictions_found?: boolean; knowledge_gaps?: string[] } }
+  | { type: 'SET_FAST_PATH'; payload: { content: string; sources?: QuerySource[]; latency_ms?: number; query_mode?: string; graph_hops?: string } }
+  | { type: 'SET_SOURCES'; payload: { sources: QuerySource[]; near_misses: QuerySource[]; latency_ms: number; mode: 'fast_path' | 'full_rag' | 'degraded_rag' | 'cached'; query_mode?: string; graph_hops?: string; contradictions_found?: boolean; contradiction_sources?: (string | number)[]; knowledge_gaps?: string[] } }
   | { type: 'SET_METADATA'; payload: { pattern_annotations?: string[] } }
   | { type: 'SET_TRACE'; payload: { trace: TraceEvent[] } }
   | { type: 'SET_FALLBACK'; payload: { to: string } }
   | { type: 'SET_USAGE'; payload: { prompt_tokens: number; completion_tokens: number; cost: number; isEstimatedCost: boolean } }
-  | { type: 'SET_ERROR'; payload: { text: string } }
+  | { type: 'SET_ERROR'; payload: { text: string; code?: string } }
   | { type: 'RESET' };
 
 function chatReducer(state: Message[], action: ChatAction): Message[] {
@@ -76,6 +82,7 @@ function chatReducer(state: Message[], action: ChatAction): Message[] {
           sources: action.payload.sources || last.sources,
           latency_ms: action.payload.latency_ms || last.latency_ms,
           mode: 'fast_path',
+          query_mode: action.payload.query_mode ?? last.query_mode,
           graph_hops: action.payload.graph_hops || last.graph_hops
         }];
       }
@@ -90,8 +97,10 @@ function chatReducer(state: Message[], action: ChatAction): Message[] {
           near_misses: action.payload.near_misses,
           latency_ms: action.payload.latency_ms,
           mode: action.payload.mode,
+          query_mode: action.payload.query_mode,
           graph_hops: action.payload.graph_hops,
           contradictions_found: action.payload.contradictions_found,
+          contradiction_sources: action.payload.contradiction_sources,
           knowledge_gaps: action.payload.knowledge_gaps
         }];
       }
@@ -140,7 +149,11 @@ function chatReducer(state: Message[], action: ChatAction): Message[] {
     case 'SET_ERROR': {
         const last = state.at(-1);
         if (last?.role === 'assistant') {
-            return [...state.slice(0, -1), { ...last, isStreaming: false }];
+            return [...state.slice(0, -1), {
+              ...last,
+              isStreaming: false,
+              error: { text: action.payload.text, code: action.payload.code },
+            }];
         }
         return state;
     }
@@ -157,6 +170,7 @@ const STATIC_PRICING_HINTS: Record<string, number> = {
   'gpt-4o-mini': 0.15,
   'gpt-4o': 2.50,
   'claude-3-5-sonnet-20241022': 3.00,
+  'claude-sonnet-5-5': 3.00, // estimate: blended $/M tokens, same tier as the model it replaced as default
   'claude-3-5-haiku-20241022': 0.80,
 };
 
@@ -178,7 +192,7 @@ function calculateCost(
 
 export function useChatStream(onHistoryUpdate: () => void) {
   const [messages, dispatch] = useReducer(chatReducer, []);
-  const { sessionModelOverride, addSessionCost } = useSessionProvider();
+  const { sessionModelOverride, addSessionCost, recordModelUse } = useSessionProvider();
   
   const streamBufferRef = useRef('');
   const lastUpdateRef = useRef(0);
@@ -193,6 +207,15 @@ export function useChatStream(onHistoryUpdate: () => void) {
   useEffect(() => {
     return () => {
       if (throttleTimeoutRef.current) clearTimeout(throttleTimeoutRef.current);
+      // Leaving the page mid-answer must not leave the request open: the server
+      // keeps generating (and a cloud provider keeps billing) until it notices
+      // the disconnect, and holds one of its five query slots meanwhile.
+      const unsubscribe = unsubscribeRef.current;
+      if (unsubscribe) {
+        unsubscribeRef.current = null;
+        unsubscribe();
+        finalizeStreamRef.current?.({ stopped: true });
+      }
     };
   }, []);
 
@@ -221,6 +244,7 @@ export function useChatStream(onHistoryUpdate: () => void) {
       file_type?: string;
       folder_tag?: string;
       mode?: string;
+      answer_length?: string;
       forced_chunk_id?: number;
       selected_chunk_ids?: number[];
       isRetry?: boolean;
@@ -236,16 +260,39 @@ export function useChatStream(onHistoryUpdate: () => void) {
     dispatch({ type: 'ADD_USER_MESSAGE', payload: { id: crypto.randomUUID(), content: userMessageContent } });
     dispatch({ type: 'START_ASSISTANT_STREAM', payload: { id: crypto.randomUUID() } });
 
-    const historyForApi = messages.map(m => ({ role: m.role, content: m.content }));
-    historyForApi.push({ role: 'user', content: userMessageContent });
+    // A failed turn leaves an empty assistant message; sending it wastes budget.
+    // PRIOR turns only: `messages` is the pre-dispatch snapshot, and the current
+    // question travels as `question`. Putting it in `history` too made every
+    // first turn look like a follow-up, so the fast path and semantic cache
+    // (both gated on empty history) never fired, and the model saw it twice.
+    const historyForApi = messages
+      .filter(m => m.role !== 'assistant' || m.content.trim())
+      .map(m => ({ role: m.role, content: m.content }));
+    const boundedHistory = historyForApi
+      .slice(-50)
+      .map(m => ({ ...m, content: Array.from(m.content).slice(0, 10000).join('') }));
     
     let currentSources: QuerySource[] = [];
     let currentLatency = 0;
 
     // Resolve initial active provider and model
     const providers = queryClient.getQueryData<ProviderStatus[]>(['providers-list']);
-    const primaryProvider = sessionModelOverride?.provider || providers?.find(p => p.is_set)?.spec.id || 'gemini';
-    const primaryModel = sessionModelOverride?.model || providers?.find(p => p.is_set)?.default_model || 'default-model';
+    // Cost attribution only — these are not routing, the backend resolves that.
+    // The tail fallbacks were the literals 'gemini' / 'default-model', which
+    // billed a provider the user may never have selected. `current-provider` is
+    // the backend's own resolution, so prefer it over guessing from list order.
+    const active = queryClient.getQueryData<{ provider: string; model: string }>([CACHE_KEYS.currentProvider]);
+    const keyed = providers?.find(p => p.is_set);
+    const primaryProvider = sessionModelOverride?.provider || active?.provider || keyed?.spec.id || 'unknown';
+    // /providers/current reports model:null for some providers (groq, nvidia,
+    // openrouter, lm_studio) until a default is saved. The model fallback must
+    // belong to the SAME provider as primaryProvider, or a groq answer is priced
+    // and recorded as the keyed provider's model.
+    const providerModel = (id: string) =>
+      sessionModelOverride?.provider === id ? sessionModelOverride.model
+        : active?.provider === id && active.model ? active.model
+        : providers?.find(p => p.spec.id === id)?.default_model;
+    const primaryModel = sessionModelOverride?.model || providerModel(primaryProvider) || 'unknown';
 
     let currentProviderId = primaryProvider;
     let currentModelId = primaryModel;
@@ -270,6 +317,13 @@ export function useChatStream(onHistoryUpdate: () => void) {
           type: 'FINISH_STREAM',
           payload: { graph_hops: opts.graph_hops, stopped: opts.stopped }
         });
+
+        // Exactly once per delivered answer. `finalize` is idempotent via
+        // `settled` and is not reached on the error path, so a stream that
+        // failed never counts as a use — but a stopped one does, because the
+        // model did run. Recorded here rather than beside addSessionCost,
+        // which skips zero-cost (i.e. every local) model.
+        recordModelUse(currentProviderId, currentModelId);
 
         // A stopped or dropped stream never delivers the usage packet.
         if (!receivedUsage) {
@@ -300,10 +354,11 @@ export function useChatStream(onHistoryUpdate: () => void) {
 
       unsubscribeRef.current = subscribeQuery({
         question: userMsg,
-        history: historyForApi,
+        history: boundedHistory,
         file_type: options.file_type || null,
         folder_tag: options.folder_tag || null,
         mode: options.mode || null,
+        answer_length: options.answer_length || null,
         forced_chunk_ids: options.selected_chunk_ids && options.selected_chunk_ids.length > 0 ? options.selected_chunk_ids : (options.forced_chunk_id ? [options.forced_chunk_id] : null),
         override_provider: sessionModelOverride?.provider || null,
         override_model: sessionModelOverride?.model || null
@@ -313,13 +368,28 @@ export function useChatStream(onHistoryUpdate: () => void) {
           settled = true;
           unsubscribeRef.current = null;
           finalizeStreamRef.current = null;
-          dispatch({ type: 'SET_ERROR', payload: { text: chunk.text || 'Search failed' } });
-          reject(new Error(chunk.text || 'Search failed'));
+          // The 50 ms throttle may still hold tokens the model did stream; land
+          // them first so the bubble's "cut short" title matches what it shows.
+          if (throttleTimeoutRef.current) {
+            clearTimeout(throttleTimeoutRef.current);
+            throttleTimeoutRef.current = null;
+          }
+          flushStreamBuffer();
+          dispatch({ type: 'SET_ERROR', payload: { text: chunk.text || 'Search failed', code: chunk.code } });
+          // Carry the machine-readable reason onto the Error so the page can
+          // offer the matching remedy. A consent failure is one click from
+          // fixable; a bare message is not.
+          const streamError = new Error(chunk.text || 'Search failed');
+          if (chunk.code) (streamError as Error & { code?: string }).code = chunk.code;
+          reject(streamError);
           return;
         }
 
         if (chunk.type === 'fallback') {
-          currentProviderId = chunk.to || 'openai';
+          // Was `|| 'openai'`, which invented a provider the request may never
+          // have touched. That now feeds the usage tally, so a wrong guess is
+          // recorded as fact; keeping the current id is the honest fallback.
+          currentProviderId = chunk.to || currentProviderId;
           const fallbackProviderStatus = providers?.find(p => p.spec.id === currentProviderId);
           currentModelId = fallbackProviderStatus?.default_model || 'default-model';
           dispatch({ type: 'SET_FALLBACK', payload: { to: currentProviderId } });
@@ -353,8 +423,10 @@ export function useChatStream(onHistoryUpdate: () => void) {
               near_misses: chunk.near_misses || [],
               latency_ms: currentLatency,
               mode: (chunk.mode as any) || 'full_rag',
+              query_mode: chunk.query_mode,
               graph_hops: chunk.graph_hops,
               contradictions_found: chunk.contradictions_found,
+              contradiction_sources: chunk.contradiction_sources,
               knowledge_gaps: chunk.knowledge_gaps
             }
           });
@@ -371,6 +443,7 @@ export function useChatStream(onHistoryUpdate: () => void) {
               content: chunk.answer || chunk.text || '',
               sources: chunk.sources || currentSources,
               latency_ms: chunk.latency_ms || currentLatency,
+              query_mode: chunk.query_mode,
               graph_hops: chunk.graph_hops
             }
           });

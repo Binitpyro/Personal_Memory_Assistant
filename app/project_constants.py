@@ -59,11 +59,22 @@ INVENTORY_RE = re.compile(
     re.IGNORECASE,
 )
 
+# M7 routing set: "recently", "lately", "modified last", "change today" and
+# "new since" were all missed, so recency questions loaded no file metadata.
 LATEST_RE = re.compile(
-    r"\b(?:latest|recent|newest|added lately|last updated|last modified)\b", re.IGNORECASE
+    r"\b(?:latest|recent|recently|newest|lately|new since|last updated|last modified|"
+    r"(?:modified|changed|change|updated|edited|touched|index|indexed|add|added)\s+"
+    r"(?:last|today|yesterday|this week))\b",
+    re.IGNORECASE,
 )
 LARGEST_RE = re.compile(
-    r"\b(?:largest|biggest|huge|oversized|most space|taking up space)\b", re.IGNORECASE
+    r"\b(?:largest|biggest|heaviest|huge|oversized|most space|taking up space)\b", re.IGNORECASE
+)
+# Words that ask about the indexed collection as a whole: they load folder
+# profiles (cheap) without routing anywhere new.
+_PROJECT_RE = re.compile(
+    r"project|overview|summary|\b(?:codebases?|repos|repositories|workspace|my folders|"
+    r"indexed folders?)\b"
 )
 FTS5_OPERATOR_RE = re.compile(r'["*^]|\bAND\b|\bOR\b|\bNOT\b|\bNEAR\b', re.IGNORECASE)
 
@@ -83,8 +94,18 @@ _GRAPH_PHRASES = (
 
 _GRAPH_RE = re.compile(
     r"\b(?:what calls|who calls|where is .* called|depends on|dependencies of|"
-    r"what does .* use|how is .* used|relates to|connection between|impact of)\b",
+    r"what does .* use|how is .* used|relates to|connection between|impact of|"
+    r"invoke[sd]?|callers? of|imports?|rel(?:y|ies) on|what breaks if)\b",
     re.IGNORECASE,
+)
+# kg_edges exist only for code (CodeChunker), so a graph phrase without a code
+# signal - "impact of caffeine", "how is entropy used" - only bought an extra
+# seed retrieval and rerank pass before falling through (A3-11, M7 addendum 3).
+# Case-sensitive on purpose: camelCase / PascalCase identifiers.
+_CODE_SIGNAL_RE = re.compile(
+    r"\b\w+_\w+\b|\b[a-z]+[A-Z]\w*|\b[A-Z][a-z]+[A-Z]\w*|\b[A-Z]{2,}[a-z]\w*|"
+    r"\b[A-Za-z_]\w*\.[A-Za-z_]\w*\b|\w+\(\)|"
+    r"\b(?:[Ff]unctions?|[Mm]ethods?|[Mm]odules?|[Cc]lass(?:es)?|[Cc]ode|signature)\b"
 )
 
 
@@ -104,11 +125,11 @@ def determine_query_intent(query: str) -> dict[str, bool]:
         "inventory": bool(
             LATEST_RE.search(query) or LARGEST_RE.search(query) or "how many files" in q
         ),
-        "project": "project" in q or "overview" in q or "summary" in q,
+        "project": bool(_PROJECT_RE.search(q)),
         "latest": bool(LATEST_RE.search(query)),
         "largest": bool(LARGEST_RE.search(query)),
         "metadata_intent": is_metadata_intent(query),
-        "graph": bool(_GRAPH_RE.search(query)),
+        "graph": bool(_GRAPH_RE.search(query) and _CODE_SIGNAL_RE.search(query)),
     }
 
 
@@ -183,3 +204,35 @@ KEY_NAMES = {
     "docker-compose.yml",
 }
 KEY_EXTS = {".sln", ".csproj", UNITY_SCENE_EXT}
+
+
+# Chunk text conventions
+#
+# `text_preview` as stored is `build_context_prefix(path) + body`. That prefix is
+# for display and FTS: it is identical for every chunk of a file and differs only
+# by filename across the corpus, so it carries no ranking signal - the same
+# argument summarizer.summary_embedding_text records for the summary leg.
+#
+# It lives here rather than in app/indexing/ because app/search/retrieval.py has
+# to strip it and must not import the indexer; app/indexing/service.py's own lazy
+# imports exist to keep that edge out of the module graph.
+def build_context_prefix(file_path: str) -> str:
+    """The ``[EXT: name] `` tag every chunker prepends to ``text_preview``."""
+    p = Path(file_path)
+    return f"[{p.suffix.lstrip('.').upper() or 'file'}: {p.name}] "
+
+
+def chunk_embedding_text(text_preview: str, file_path: str, keep_prefix: bool) -> str:
+    """What the embedder sees, which is not what storage holds.
+
+    Mirrors ``summarizer.summary_embedding_text`` one layer down: the stored
+    string is for display, FTS and offset arithmetic; this is for the vector.
+    Storage is never rewritten, so FTS keeps its filename tokens and every
+    ``start_offset``/``end_offset`` stays valid.
+
+    ``keep_prefix`` is a parameter rather than a settings read so this module
+    keeps importing nothing but the standard library.
+    """
+    if keep_prefix:
+        return text_preview
+    return text_preview.removeprefix(build_context_prefix(file_path))

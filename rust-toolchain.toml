@@ -1,0 +1,36 @@
+# Pins the Rust toolchain for every crate in this repo (rust_core and src-tauri).
+#
+# Why this exists, since CLAUDE.md §4 spent a long time claiming it already did:
+# there was no pin. `frontend/src-tauri/Cargo.toml` declares
+# `rust-version = "1.77.2"`, but that is an MSRV *floor* inherited from Tauri v2
+# — cargo refuses an older toolchain and says nothing about a newer one.
+# `app/scanner/rust_core` declared nothing at all, and CI installed
+# `dtolnay/rust-toolchain@stable`, i.e. whatever stable happened to be that day.
+#
+# Two things that buys:
+#
+#   1. CI cannot go red from a Rust release. `cargo clippy -- -D warnings` runs in
+#      the gate, so a new stable adding one lint turns the build red with no code
+#      change. CLAUDE.md §13 already records two local/CI divergences (bandit
+#      severity, mypy platform) that cost real time; this is the same class.
+#   2. Reproducible artifacts. PMA ships a compiled PyO3 wheel and a Tauri binary,
+#      so "which compiler built this" is a distribution question, not just a dev
+#      convenience.
+#
+# 1.97.1 is simply what this machine was already building and passing on when the
+# pin was introduced (2026-09-02) — it is not a researched choice, and there is no
+# known reason it must be this version rather than a later one. Bumping it is a
+# deliberate act: change it here, re-run both gates, and update §4.
+#
+# `components` matters and is not decoration. CI declares `components: clippy`
+# against the toolchain the action installs; once this file redirects cargo to a
+# different toolchain, clippy has to be declared *here* or the gate's clippy step
+# finds nothing.
+#
+# Miri is unaffected: `scripts/Run-Tests.bat` invokes `cargo +nightly miri`, and an
+# explicit `+toolchain` overrides this file.
+
+[toolchain]
+channel = "1.97.1"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

@@ -55,15 +55,31 @@ class _Counters(ctypes.Structure):
 _MB = 1024.0 * 1024.0
 
 
+def _proc_status_reader(status: Path = Path("/proc/self/status")):
+    """Linux: (VmRSS, VmHWM) in MB. RSS is not a Windows working set - section 6
+    says never compare the two - so numbers from here are their own baseline."""
+
+    def read() -> tuple[float, float]:
+        kb = {}
+        for line in status.read_text().splitlines():
+            key, _, value = line.partition(":")
+            if key in ("VmRSS", "VmHWM"):
+                kb[key] = int(value.split()[0])
+        return kb.get("VmRSS", 0) / 1024.0, kb.get("VmHWM", 0) / 1024.0
+
+    return read
+
+
 def _make_reader():
-    """Return a callable giving (current_ws_mb, peak_ws_mb), or None off Windows.
+    """Return a callable giving (current_ws_mb, peak_ws_mb), or None if unsupported.
 
     restype/argtypes are load-bearing, not decoration. GetCurrentProcess returns
     the pseudo handle (HANDLE)-1; with the default 32-bit int restype it is
     truncated, the call fails, and a plausible-looking 0.0 comes back instead.
     """
     if sys.platform != "win32":
-        return None
+        status = Path("/proc/self/status")
+        return _proc_status_reader(status) if status.exists() else None
     kernel32 = ctypes.WinDLL("kernel32")
     psapi = ctypes.WinDLL("psapi")
     kernel32.GetCurrentProcess.restype = wintypes.HANDLE
@@ -181,8 +197,10 @@ def _apply_ablation(mode: str, emb, lancedb) -> None:
 async def profile(corpus: Path, split_domains: bool, interval_s: float, ablate: str) -> int:
     read = _make_reader()
     if read is None:
-        print("This profiler is Windows-only (GetProcessMemoryInfo).", file=sys.stderr)
+        print("This profiler needs Windows or Linux /proc/self/status.", file=sys.stderr)
         return 2
+    if sys.platform != "win32":
+        print("Linux: figures are RSS (VmRSS/VmHWM), not a Windows working set.", file=sys.stderr)
 
     ladder: list[tuple[str, float]] = []
 

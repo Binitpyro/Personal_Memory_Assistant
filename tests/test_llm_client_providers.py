@@ -7,8 +7,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
+from app.providers import create_provider
 from app.providers.gemini import GeminiProvider
-from app.providers.lm_studio import LMStudioProvider
 from app.providers.ollama import OllamaProvider
 
 # 1. Mock the optional ollama library before import
@@ -287,6 +287,35 @@ def test_build_prompt(patch_data_paths):
     assert "MODE INSTRUCTION (Challenge)" in prompt_challenge
 
 
+def test_build_prompt_answer_length_and_beyond_the_files(patch_data_paths):
+    client = LLMClient()
+    # Fallback template (file missing) first, then a file template.
+    for _ in range(2):
+        assert "LENGTH INSTRUCTION" not in client._build_prompt("q", "c")
+        short = client._build_prompt("q", "c", mode="explain", answer_length="short")
+        assert "LENGTH INSTRUCTION (Short)" in short and "MODE INSTRUCTION (Explain)" in short
+        assert "LENGTH INSTRUCTION (Detailed)" in client._build_prompt(
+            "q", "c", answer_length="detailed"
+        )
+        patch_data_paths["prompt"].write_text("Hello ### Context {context} ### {query}")
+
+    patch_data_paths["prompt"].unlink()
+    fallback = client._build_prompt("q", "c", supports_claims=True)
+    assert "Beyond your files (general knowledge)" in fallback
+    # scripts/eval_chunking.py detects abstention by this phrase.
+    assert "don't have enough information" in fallback
+
+
+def test_shipped_rag_prompt_allows_labelled_general_knowledge():
+    shipped = (Path(__file__).parents[1] / "prompts" / "rag_system.txt").read_text(encoding="utf-8")
+    assert "Beyond your files (general knowledge)" in shipped
+    assert "using ONLY" not in shipped
+    assert "don't have enough information" in shipped
+    # Claim injection splits on this marker and needs exactly one.
+    assert shipped.count("### Context") == 1
+    assert "{context}" in shipped and "{query}" in shipped
+
+
 @pytest.mark.asyncio
 async def test_check_ollama_health():
     from app.providers.cache import validation_cache
@@ -426,6 +455,63 @@ async def test_a_local_provider_on_loopback_is_still_ungated(monkeypatch):
     await provider.close()
 
 
+@pytest.mark.parametrize(
+    ("base_url", "leaves"),
+    [
+        ("https://llm.example.com/v1", True),
+        ("http://192.168.1.50:8080/v1", True),
+        ("http://127.0.0.1:8080/v1", False),
+        ("http://localhost:8080/v1", False),
+        (None, False),
+        ("", False),
+    ],
+)
+def test_openai_compatible_leaves_device_only_when_aimed_off_box(base_url, leaves):
+    """kind="custom" was exempt whatever its URL, so a remote endpoint got the
+    corpus with no consent. Unset is not gated: with no URL nothing can be sent."""
+    from app.search.llm_client import provider_leaves_device
+
+    assert provider_leaves_device("openai_compatible", base_url) is leaves
+
+
+def _custom_settings(base_url: str) -> dict:
+    return {
+        "llm": {
+            "per_provider": {"openai_compatible": {"base_url": base_url}},
+            "cloud_privacy_consent": False,
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_remote_openai_compatible_endpoint_needs_consent(monkeypatch):
+    from app.search.llm_client import ProviderNotConfiguredError
+
+    client = LLMClient()
+    # A key is present, so without the gate this would resolve and dispatch.
+    client.provider_keys["openai_compatible"] = "sk-test"
+    monkeypatch.setattr(
+        "app.search.llm_client.SettingsStore.read",
+        lambda: _custom_settings("https://llm.example.com/v1"),
+    )
+    with pytest.raises(ProviderNotConfiguredError) as exc:
+        await client._resolve_provider_by_id("openai_compatible")
+    assert exc.value.code == "cloud_consent_required"
+
+
+@pytest.mark.asyncio
+async def test_a_loopback_openai_compatible_endpoint_is_ungated(monkeypatch):
+    client = LLMClient()
+    client.provider_keys["openai_compatible"] = "sk-test"
+    monkeypatch.setattr(
+        "app.search.llm_client.SettingsStore.read",
+        lambda: _custom_settings("http://127.0.0.1:8080/v1"),
+    )
+    provider = await client._resolve_provider_by_id("openai_compatible")
+    assert provider is not None
+    await provider.close()
+
+
 class TestEffectiveFallbackChain:
     """`_get_effective_fallback_chain()` decides which providers get tried.
 
@@ -485,9 +571,10 @@ class TestEffectiveFallbackChain:
 
         assert _get_effective_fallback_chain() == ["ollama"]
 
-    def test_chain_with_nothing_configured_falls_back_to_default(self, tmp_path, monkeypatch):
-        """Otherwise a stale saved chain would leave the user with no provider."""
-        from app.providers import get_default_chain
+    def test_chain_with_nothing_configured_is_kept_not_replaced_by_default(
+        self, tmp_path, monkeypatch
+    ):
+        """The default chain holds every keyed cloud provider; never swap it in (A4-03)."""
         from app.search.llm_client import _get_effective_fallback_chain
         from app.settings_store import CURRENT_SCHEMA_VERSION
 
@@ -502,7 +589,7 @@ class TestEffectiveFallbackChain:
         monkeypatch.setattr("app.settings_store.SETTINGS_PATH", path)
         monkeypatch.setattr("app.search.llm_client.get_configured_provider_ids", lambda: [])
 
-        assert _get_effective_fallback_chain() == get_default_chain()
+        assert _get_effective_fallback_chain() == ["openai", "anthropic"]
 
     def test_stale_schema_version_is_ignored(self, tmp_path, monkeypatch):
         from app.providers import get_default_chain
@@ -699,7 +786,7 @@ async def test_stream_ollama():
 
 @pytest.mark.asyncio
 async def test_call_lm_studio_success():
-    provider = LMStudioProvider(api_key=None, base_url="http://lmstudio", default_model="phi3")
+    provider = create_provider("lm_studio", base_url="http://lmstudio", default_model="phi3")
 
     mock_resp = MagicMock()
     mock_resp.status_code = 200
@@ -768,7 +855,7 @@ async def test_stream_gemini_error():
 
 @pytest.mark.asyncio
 async def test_stream_lm_studio_success():
-    provider = LMStudioProvider(api_key=None, base_url="http://lmstudio", default_model="phi3")
+    provider = create_provider("lm_studio", base_url="http://lmstudio", default_model="phi3")
 
     mock_resp = MagicMock()
     mock_resp.status_code = 200
@@ -790,7 +877,7 @@ async def test_stream_lm_studio_success():
 
 @pytest.mark.asyncio
 async def test_stream_lm_studio_error():
-    provider = LMStudioProvider(api_key=None, base_url="http://lmstudio", default_model="phi3")
+    provider = create_provider("lm_studio", base_url="http://lmstudio", default_model="phi3")
 
     mock_resp = httpx.Response(
         500, text="Internal Server Error", request=httpx.Request("POST", "http://lmstudio")
@@ -855,3 +942,59 @@ async def test_stream_answer_monitoring():
             results.append(chunk)
 
         mock_report.assert_called_once_with(client)
+
+
+# ── Chain exhaustion is a typed event, not answer text ───────────────────────
+
+
+async def _drain(gen):
+    return [c async for c in gen]
+
+
+async def test_chain_exhaustion_yields_a_control_chunk_not_prose():
+    """The consent failure used to arrive as the answer itself.
+
+    `stream_answer` yielded "Streaming error: All providers ..." as a plain
+    chunk, so a first-run user who onboarded with a cloud key and no consent
+    got that sentence rendered in the answer bubble as though the model had
+    written it - with no affordance for fixing it. It is a control chunk now,
+    carrying the machine-readable reason.
+    """
+    from app.search.llm_client import LLMClient, ProviderNotConfiguredError
+
+    client = LLMClient()
+
+    with (
+        patch.object(LLMClient, "_ensure_token_loaded", new=AsyncMock()),
+        patch.object(
+            LLMClient,
+            "_resolve_provider_by_id",
+            new=AsyncMock(
+                side_effect=ProviderNotConfiguredError(
+                    "Cloud privacy consent required before using provider gemini.",
+                    code="cloud_consent_required",
+                )
+            ),
+        ),
+        patch(
+            "app.search.llm_client._get_effective_fallback_chain_async",
+            new=AsyncMock(return_value=["gemini"]),
+        ),
+        patch(
+            "app.search.capability_detector.capability_detector.detect_capabilities",
+            new=AsyncMock(return_value=False),
+        ),
+    ):
+        chunks = await _drain(client.stream_answer("q", "ctx"))
+
+    assert chunks, "expected at least one chunk"
+    control = [json.loads(c) for c in chunks if c.startswith('{"control":')]
+    assert control, f"no control chunk emitted; got {chunks!r}"
+    err = [c for c in control if c.get("control") == "provider_error"]
+    assert err, f"no provider_error control chunk; got {control!r}"
+    assert err[0]["code"] == "cloud_consent_required"
+
+    # The regression itself: nothing may reach the user as bare prose.
+    assert not [c for c in chunks if not c.startswith('{"control":')], (
+        f"error leaked into the answer body as text: {chunks!r}"
+    )

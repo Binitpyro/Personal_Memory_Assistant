@@ -190,6 +190,60 @@ def test_common_parent_prefix_preserves_the_host_separator():
 
 
 @pytest.mark.asyncio
+async def test_visualizer_queries_agree_under_the_node_cap(mock_db):
+    """Both visualizer queries must bound to the SAME row set.
+
+    They used to select the whole `files` table with no LIMIT. Adding a cap is
+    only safe if both endpoints order and limit identically: the meta sidecar
+    joins to the binary buffer by hash_tree_path(path), so two different subsets
+    would drop nodes from the join instead of raising.
+
+    Reverting either query's ORDER BY / LIMIT makes this fail.
+    """
+    from app.config import settings
+    from app.insights import visualizer
+
+    for i in range(1, 13):
+        await mock_db.execute_write(
+            "INSERT INTO files (id, path, type, size, folder_tag, usage_count, modified_at) "
+            "VALUES (?, ?, '.py', 100, 'tag', 0, 'now')",
+            (i, f"proj/f{i:02d}.py"),
+        )
+
+    cap = 5
+    original = settings.visualizer_max_nodes
+    settings.visualizer_max_nodes = cap
+    try:
+        # Appending the module's own clause constant is the point of the test -
+        # the limit is a bound parameter, so there is nothing to inject.
+        binary_rows = await mock_db.execute_query(
+            "SELECT id, path FROM files" + visualizer._ORDER_AND_LIMIT,  # nosec B608 # noqa: S608
+            (cap,),
+        )
+        meta_rows = await mock_db.execute_query(
+            "SELECT path, type FROM files" + visualizer._ORDER_AND_LIMIT,  # nosec B608 # noqa: S608
+            (cap,),
+        )
+
+        assert len(binary_rows) == cap, "the cap must actually bind"
+        assert [r["path"] for r in binary_rows] == [r["path"] for r in meta_rows], (
+            "the two visualizer queries returned different rows; the meta join would drop nodes"
+        )
+
+        capped = await visualizer._stream_visualizer_binary_impl(None, mock_db)
+        settings.visualizer_max_nodes = original
+        uncapped = await visualizer._stream_visualizer_binary_impl(None, mock_db)
+    finally:
+        settings.visualizer_max_nodes = original
+
+    # 32 bytes per node. The node count is not the row count - the layout
+    # synthesises a node per ancestor folder plus a root - so the property to
+    # assert is that the cap actually shrank the response, not an exact size.
+    assert len(capped.body) % 32 == 0 and len(uncapped.body) % 32 == 0
+    assert len(capped.body) < len(uncapped.body), "the node cap did not bind the binary stream"
+
+
+@pytest.mark.asyncio
 async def test_visualizer_binary_stream_endpoint(client, mock_db):
     # Populate mock_db
     await mock_db.execute_write(

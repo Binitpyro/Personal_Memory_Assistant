@@ -1,15 +1,16 @@
 import asyncio
 import logging
-import time
 from typing import Any
 
 import keyring
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Extra
+from pydantic import BaseModel, ConfigDict
 
+from app.api.deps import get_llm
 from app.api.models import PRIVACY_NOTICE
 from app.config import settings
 from app.providers import (
+    ANTHROPIC_DEFAULT_MODEL,
     PROVIDER_IDS,
     PROVIDER_REGISTRY,
     create_provider,
@@ -20,10 +21,20 @@ from app.providers.base import ValidationResult
 from app.providers.cache import validation_cache
 from app.providers.launcher import get_launch_status
 from app.providers.launcher import launch as launch_local_provider
+from app.search.llm_client import provider_leaves_device
 from app.settings_store import CURRENT_SCHEMA_VERSION, SettingsStore
 
 logger = logging.getLogger(__name__)
 _background_tasks: set[asyncio.Task[Any]] = set()
+
+
+async def _validate_and_close(provider: Any) -> None:
+    # validate() opens a lazy httpx client the caller owns; nothing else closes it.
+    try:
+        await provider.validate()
+    finally:
+        await provider.close()
+
 
 providers_router = APIRouter(prefix="/providers", tags=["providers"])
 
@@ -72,16 +83,14 @@ class ValidatePayload(BaseModel):
     api_key: str | None = None
     base_url: str | None = None
 
-    class Config:
-        extra = Extra.ignore
+    model_config = ConfigDict(extra="ignore")
 
 
 class SetKeyPayload(BaseModel):
     api_key: str | None = None
     base_url: str | None = None
 
-    class Config:
-        extra = Extra.ignore
+    model_config = ConfigDict(extra="ignore")
 
 
 class SetDefaultModelPayload(BaseModel):
@@ -93,11 +102,7 @@ class LLMGeneralSettingsPayload(BaseModel):
     fallback_chain: list[str] | None = None
     cloud_privacy_consent: bool | None = None
 
-    class Config:
-        extra = Extra.ignore
-
-
-_GATED_PROVIDER_KINDS = ("cloud", "aggregator")
+    model_config = ConfigDict(extra="ignore")
 
 
 @providers_router.get("/settings")
@@ -108,12 +113,35 @@ async def get_llm_settings():
     saved_chain = llm.get("fallback_chain")
     if data.get("schema_version") != CURRENT_SCHEMA_VERSION:
         saved_chain = None
+    chain = saved_chain or await get_default_chain_async()
+    consent = llm.get("cloud_privacy_consent", False)
     return {
         "provider": llm.get("provider", "auto"),
-        "fallback_chain": saved_chain or await get_default_chain_async(),
-        "cloud_privacy_consent": llm.get("cloud_privacy_consent", False),
+        "fallback_chain": chain,
+        "cloud_privacy_consent": consent,
         "cloud_privacy_notice": PRIVACY_NOTICE,
+        "consent_required": _consent_required(llm, chain, consent),
     }
+
+
+def _consent_required(llm: dict, chain: list[str], consent: bool) -> bool:
+    """Would the next dispatch be refused for want of consent?
+
+    Onboarding could store a cloud API key and finish without ever asking for
+    consent, leaving `auto` to resolve to that provider and every query to fail
+    in the dispatch gate. This is what the UI reads to offer the remedy up
+    front, so it calls the same `provider_leaves_device` predicate the gate
+    does - keying on the resolved base_url, not on the provider's kind.
+    """
+    if consent:
+        return False
+    preference = llm.get("provider", "auto")
+    effective = chain if preference == "auto" else [preference]
+    per_provider = llm.get("per_provider", {})
+    return any(
+        provider_leaves_device(pid, per_provider.get(pid, {}).get("base_url") or env_base_url(pid))
+        for pid in effective
+    )
 
 
 @providers_router.put("/settings")
@@ -126,11 +154,14 @@ async def update_llm_settings(payload: LLMGeneralSettingsPayload):
         consent = payload.cloud_privacy_consent
 
     if payload.provider is not None:
-        gated_selection = (
-            payload.provider in PROVIDER_REGISTRY
-            and PROVIDER_REGISTRY[payload.provider].kind in _GATED_PROVIDER_KINDS
-        )
-        if gated_selection and not consent:
+        if payload.provider not in ("auto", *PROVIDER_IDS):
+            raise HTTPException(status_code=400, detail=f"Unknown provider: {payload.provider}")
+        selected_url = data["llm"]["per_provider"].get(payload.provider, {}).get(
+            "base_url"
+        ) or env_base_url(payload.provider)
+        # Same destination-based predicate as the dispatch gate, so a remote
+        # openai_compatible / ollama is gated and a loopback one is not.
+        if provider_leaves_device(payload.provider, selected_url) and not consent:
             raise HTTPException(
                 status_code=400,
                 detail=(
@@ -152,6 +183,10 @@ async def update_llm_settings(payload: LLMGeneralSettingsPayload):
         data["llm"]["cloud_privacy_consent"] = payload.cloud_privacy_consent
 
     await asyncio.to_thread(write_settings, data)
+    if payload.provider is not None:
+        # The running client reads its preference once; without this a switch
+        # is ignored until restart.
+        get_llm().apply_preferences(provider=payload.provider)
     return {"status": "success"}
 
 
@@ -198,20 +233,28 @@ async def list_providers():
             except Exception:
                 api_key = None
 
-        last_validation = validation_cache.get(pid, base_url, api_key)
+        fresh = validation_cache.get(pid, base_url, api_key)
+        # Show the last verdict while an expired one re-validates. Returning
+        # None on every TTL expiry emptied the model picker until the next
+        # fetch, since the first fetch after the expiry is the one it caches.
+        last_validation = (
+            fresh
+            if fresh is not None
+            else validation_cache.get(pid, base_url, api_key, allow_stale=True)
+        )
 
-        # Trigger background validation if no validation result is cached yet for
-        # active providers. Cloud/aggregator kinds stay behind the same consent
+        # Trigger background validation if no fresh validation result is cached
+        # for active providers. Cloud/aggregator kinds stay behind the same consent
         # gate as dispatch: validate() is only a keyed ping, but it fires on
         # every Settings page load and would reach an off-device endpoint the
         # user has not opted into.
-        consent_ok = spec.kind not in _GATED_PROVIDER_KINDS or cloud_consent
-        if last_validation is None and consent_ok and (is_set or pid in ("ollama", "lm_studio")):
+        consent_ok = cloud_consent or not provider_leaves_device(pid, base_url)
+        if fresh is None and consent_ok and (is_set or pid in ("ollama", "lm_studio")):
             try:
                 p_obj = create_provider(
                     pid, api_key=api_key, base_url=base_url, default_model=default_model
                 )
-                task = asyncio.create_task(p_obj.validate())
+                task = asyncio.create_task(_validate_and_close(p_obj))
                 _background_tasks.add(task)
                 task.add_done_callback(_background_tasks.discard)
             except Exception as e:
@@ -245,10 +288,34 @@ async def validate_provider(provider_id: str, payload: ValidatePayload) -> Valid
     per_provider = data.get("llm", {}).get("per_provider", {})
     provider_settings = per_provider.get(provider_id, {})
 
+    spec = PROVIDER_REGISTRY[provider_id]
+    effective = (
+        provider_settings.get("base_url")
+        or env_base_url(provider_id)
+        or spec.default_base_url
+        or ""
+    )
+    # The stored key must not follow a caller-supplied URL to another host.
+    # The UI always echoes the effective URL, so only a different one is refused.
+    if (
+        base_url is not None
+        and not spec.base_url_editable
+        and base_url.strip().rstrip("/").lower() != effective.strip().rstrip("/").lower()
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=f"The base URL for {provider_id} is fixed and cannot be changed.",
+        )
+
     if base_url is None:
         base_url = provider_settings.get("base_url") or env_base_url(provider_id)
+    # An editable provider may be validated against a typed URL, but the stored
+    # key must not follow it to another host: only a key the caller sent goes there.
+    use_stored_key = base_url is None or (
+        base_url.strip().rstrip("/").lower() == effective.strip().rstrip("/").lower()
+    )
 
-    if api_key is None:
+    if api_key is None and use_stored_key:
         env_key_name = f"{provider_id}_api_key"
         api_key = getattr(settings, env_key_name, None)
         if not api_key:
@@ -266,53 +333,6 @@ async def validate_provider(provider_id: str, payload: ValidatePayload) -> Valid
     try:
         res = await provider.validate()
         return res
-    finally:
-        await provider.close()
-
-
-@providers_router.post("/{provider_id}/self_test")
-async def self_test_provider(provider_id: str):
-    if provider_id not in PROVIDER_IDS:
-        raise HTTPException(status_code=400, detail=f"Unknown provider: {provider_id}")
-
-    data = await asyncio.to_thread(read_settings)
-    data = migrate_settings_if_needed(data)
-    per_provider = data.get("llm", {}).get("per_provider", {})
-    provider_settings = per_provider.get(provider_id, {})
-    base_url = provider_settings.get("base_url") or env_base_url(provider_id)
-    default_model = provider_settings.get("default_model")
-
-    env_key_name = f"{provider_id}_api_key"
-    api_key = getattr(settings, env_key_name, None)
-    if not api_key:
-        try:
-            api_key = await asyncio.to_thread(keyring.get_password, "pma_backend", provider_id)
-        except Exception:
-            api_key = None
-
-    provider = create_provider(
-        provider_id, api_key=api_key, base_url=base_url, default_model=default_model
-    )
-
-    try:
-        test_model = default_model
-        if not test_model:
-            models = await provider.list_models()
-            if models:
-                test_model = models[0]["id"]
-            else:
-                raise HTTPException(status_code=400, detail="No models available to test.")
-
-        messages = [{"role": "user", "content": "Reply with the single word: ok"}]
-        start_time = time.time()
-
-        res = await provider.chat(messages, model=test_model, temperature=0.0, max_tokens=5)
-        latency = int((time.time() - start_time) * 1000)
-
-        ok = "ok" in res.lower()
-        return {"ok": ok, "latency_ms": latency, "response": res, "model_used": test_model}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
     finally:
         await provider.close()
 
@@ -386,6 +406,12 @@ async def set_provider_key(provider_id: str, payload: SetKeyPayload):
             raise HTTPException(
                 status_code=500, detail=f"Failed to write to OS keyring: {e!s}"
             ) from e
+        # The running client caches keys from first use; without this the old
+        # key keeps being sent until restart.
+        llm = get_llm()
+        llm.provider_keys[provider_id] = payload.api_key
+        if provider_id == "gemini":
+            llm.api_key = payload.api_key
 
     if payload.base_url is not None:
         spec = PROVIDER_REGISTRY[provider_id]
@@ -419,6 +445,11 @@ async def delete_provider_key(provider_id: str):
         await asyncio.to_thread(keyring.delete_password, "pma_backend", provider_id)
     except Exception as e:
         logger.debug("Failed to delete key for %s from keyring: %s", provider_id, e)
+
+    llm = get_llm()
+    llm.provider_keys.pop(provider_id, None)
+    if provider_id == "gemini":
+        llm.api_key = None
 
     validation_cache.clear()
     return {"status": "success"}
@@ -495,6 +526,6 @@ async def get_current_provider():
         elif resolved_id == "openai":
             model = "gpt-4o-mini"
         elif resolved_id == "anthropic":
-            model = "claude-3-5-sonnet-20241022"
+            model = ANTHROPIC_DEFAULT_MODEL
 
     return {"provider": resolved_id, "model": model, "source": source}

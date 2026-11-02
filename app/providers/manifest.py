@@ -8,6 +8,7 @@ import keyring
 
 from app.config import settings
 from app.providers.registry import DEFAULT_CHAIN_ORDER, PROVIDER_REGISTRY
+from app.settings_store import SettingsStore
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +99,20 @@ def env_base_url(provider_id: str) -> str | None:
     return None
 
 
+def saved_base_url(provider_id: str) -> str | None:
+    """Base URL saved on the Providers page (llm.per_provider.<id>.base_url), if any.
+
+    Dispatch reads this before the .env value, so anything that probes "is this
+    provider up" has to aim at it too or it reports on a different server than
+    the one the request will go to.
+    """
+    try:
+        saved = SettingsStore.read().get("llm", {}).get("per_provider", {}).get(provider_id, {})
+        return str(saved["base_url"]) if saved.get("base_url") else None
+    except Exception:  # nosec B110
+        return None
+
+
 def get_configured_provider_ids() -> list[str]:
     """
     Dynamically returns all currently configured provider IDs.
@@ -111,7 +126,7 @@ def get_configured_provider_ids() -> list[str]:
             continue
 
         if pid in ("ollama", "lm_studio"):
-            url = getattr(settings, f"{pid}_url", None)
+            url = saved_base_url(pid) or getattr(settings, f"{pid}_url", None)
             if url and is_local_endpoint_reachable(url):
                 configured.append(pid)
             continue

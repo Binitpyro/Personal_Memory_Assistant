@@ -6,11 +6,213 @@ from typing import Any, cast
 
 import httpx
 
-from app.providers.base import ModelInfo, ValidationResult
+from app.providers.base import ModelInfo, ValidationResult, new_async_client, stream_error_for
 from app.providers.cache import validation_cache
 from app.providers.registry import spec_of
+from app.utils.log_safe import log_safe
 
 logger = logging.getLogger(__name__)
+
+# Used only when Ollama does not report a window for a model. Ollama has carried
+# `details.context_length` in /api/tags for a long time, but an older server or a
+# hand-built manifest may omit it, and a listing that drops the model entirely
+# would be worse than one carrying a conservative number.
+_FALLBACK_CONTEXT_LENGTH = 8192
+
+
+def _reported_context_length(item: dict[str, Any]) -> int:
+    """The model's real context window, as Ollama reports it.
+
+    This was the literal 8192 for **every** model until 2026-09-04, which is
+    wrong for most of them and is rendered to the user at
+    `frontend/src/pages/ProvidersPage.tsx:700` as "N ctx" - so someone picking a
+    model for long documents was shown 8,192 for a 131,072-token model. Measured
+    on this machine:
+
+        gemma4-local       131072      qwen-coder-local     32768
+        gemma4-12B-local   262144      gemma2-2b             8192
+        glm-ocr            131072      nomic-embed-text      2048
+
+    Read from the `/api/tags` response that `list_models` already fetches - the
+    value is inside `details` - so this costs no extra request. Verified against
+    `/api/show` for all six models above: identical every time.
+
+    **This number is the model's declared window, NOT a budget.** The budget path
+    reads it only as a cap (`compute_context_budget`'s `reported_window`, which can
+    lower the class ceiling and never raise it).
+
+    The reason that separation matters turned out to be different from the one
+    written here first. This docstring originally cited CLAUDE.md 8.7f's ~4,099
+    truncation on `gemma2-2b` as proof that a declared window can be 2x what a
+    model honours. **That reading is retracted** - see `_required_num_ctx`: the
+    4,096 cliff is Ollama's own default `num_ctx`, reproduced identically on
+    `gemma4-local` with its 131,072-token window, so it was never a property of
+    the model or of this number.
+
+    What survives is the narrower and still sufficient point: the declared window
+    says what the model was trained for, not what this machine can serve. Section
+    6 targets ~4GB VRAM, and a 262,144-token window is a fact about the 12B, not
+    about the hardware underneath it.
+    """
+    raw = (item.get("details") or {}).get("context_length")
+    if isinstance(raw, int) and raw > 0:
+        return raw
+    return _FALLBACK_CONTEXT_LENGTH
+
+
+# Ollama's own default context window. Measured on this machine 2026-09-04, not
+# recalled: a prompt of ~4,000 tokens is ingested whole (prompt_eval_count 4015)
+# and ~4,200 collapses to 2051 - so the cliff is 4096, and past it Ollama
+# discards roughly HALF the prompt rather than just the overflow.
+_OLLAMA_DEFAULT_NUM_CTX = 4096
+
+# Chars per token. Deliberately low: CLAUDE.md section 6 measured 5.09 for this
+# corpus, so dividing by 4 OVER-estimates the token count. Over-estimating costs
+# a slightly larger KV cache; under-estimating silently loses context, which is
+# the bug this exists to prevent.
+_CHARS_PER_TOKEN = 4
+
+# Room for the chat template, role markers and any tool preamble Ollama wraps
+# around the messages - `prompt_eval_count` ran ~15 tokens above the raw content
+# in every measurement above.
+_NUM_CTX_HEADROOM = 256
+
+
+def _required_num_ctx(messages: list[dict[str, Any]], max_tokens: int) -> int:
+    """How large Ollama's context window must be for this request.
+
+    **PMA never set `num_ctx`, and Ollama's default silently discarded most of a
+    long prompt.** Measured against a live server on 2026-09-04 with
+    `gemma4-local`, whose declared window is 131,072:
+
+        ~6,000-token prompt, num_ctx unset   -> prompt_eval_count = 2051
+        ~6,000-token prompt, num_ctx=16384   -> prompt_eval_count = 6015
+
+    So `compute_context_budget` would hand `7b_local` an 8,520-token budget,
+    `build_context` would fill it, and Ollama would throw most of it away before
+    the model saw a word of it. The class with the LARGEST budget was the one
+    losing the most.
+
+    **This retracts a claim.** CLAUDE.md 8.7f recorded `gemma2-2b` truncating at
+    ~4,099 tokens "head first" and read that as a property of the model. It is
+    not: `gemma4-local` behaves identically despite a 131,072-token declared
+    window, because the limit belongs to the *server default*, not the model.
+
+    Sized to the request rather than maxed out, because `num_ctx` sizes the KV
+    cache and section 6 targets a ~4GB VRAM machine. Left unset below the default
+    so short prompts allocate exactly what they do today.
+
+    Not clamped to the model's declared window: every chat model here declares at
+    least 8,192 and PMA's largest local ceiling is 10,000, so the clamp cannot
+    bind. Revisit if a ceiling ever exceeds a declared window.
+    """
+    chars = sum(len(str(m.get("content") or "")) for m in messages)
+    return chars // _CHARS_PER_TOKEN + max_tokens + _NUM_CTX_HEADROOM
+
+
+# Ollama reloads the model on ANY num_ctx change (measured ~4 s gemma2, ~7.8 s
+# gemma4 per call), and `_required_num_ctx` differs on every request, so answer
+# and annotator calls each reloaded. Sizes are therefore bucketed to 8192 and a
+# per-(server, model) high-water mark keeps later, smaller requests on the window
+# already loaded. The mark is capped (a 7b ceiling of 10,000 + 4096 + 256) so one
+# oversized request cannot ratchet VRAM up for everyone; such a request is sent at
+# its own bucket and never raises the mark. Process-local, bounded to 64 keys.
+_NUM_CTX_HW: dict[tuple[str, str], int] = {}
+_HW_CAP = 16384
+_HW_MAX_KEYS = 64
+_BUCKET = 8192
+# Keys already warned about a num_ctx above the model's reported window (F5b).
+_NUM_CTX_WARNED: set[tuple[str, str]] = set()
+
+
+def _warn_if_over_window(key: tuple[str, str], num_ctx: int) -> None:
+    """One WARNING per (server, model) when num_ctx exceeds its reported window.
+
+    Ollama clamps to the model's window, so the prompt tail may be silently
+    truncated. Reads the in-memory heap `validate()` fills; silent when the model
+    was never validated (unknown window).
+    """
+    if key in _NUM_CTX_WARNED:
+        return
+    model = key[1]
+    window = next(
+        (
+            m.get("context_length")
+            for m in validation_cache.get_persistent_models("ollama")
+            if m.get("id") in (model, f"{model}:latest")
+        ),
+        None,
+    )
+    if not isinstance(window, int) or num_ctx <= window:
+        return
+    if len(_NUM_CTX_WARNED) < _HW_MAX_KEYS:
+        _NUM_CTX_WARNED.add(key)
+    logger.warning(
+        "Ollama model %s: num_ctx %d exceeds its reported context window %s; the prompt "
+        "may be silently truncated.",
+        log_safe(model),
+        num_ctx,
+        log_safe(window),
+    )
+
+
+def _resolve_num_ctx(base_url: str | None, model_name: str, required: int) -> int | None:
+    """The num_ctx to send, or None to leave it at Ollama's default."""
+    key = (base_url or "", model_name)
+    hw = _NUM_CTX_HW.get(key, 0)
+    if required > _OLLAMA_DEFAULT_NUM_CTX:
+        bucketed = -(-required // _BUCKET) * _BUCKET
+        num_ctx = max(bucketed, hw)
+        if hw < bucketed <= _HW_CAP and (key in _NUM_CTX_HW or len(_NUM_CTX_HW) < _HW_MAX_KEYS):
+            _NUM_CTX_HW[key] = bucketed
+            logger.info(
+                "Ollama num_ctx high-water for %s raised to %d", log_safe(model_name), bucketed
+            )
+    elif hw:
+        num_ctx = hw
+    else:
+        return None
+    _warn_if_over_window(key, num_ctx)
+    return num_ctx
+
+
+def _family(item: dict[str, Any]) -> str:
+    """Whether this model can read an image, from Ollama rather than its name.
+
+    `/api/tags` reports a `capabilities` list per model, in the response
+    `list_models` already fetches - so this is authoritative and costs nothing.
+
+    It replaces `looks_like_vision_model`, a substring match over a fragment list
+    that includes `"gemma4"`. Measured against the live server on 2026-09-04, that
+    heuristic was **wrong in the dangerous direction** on two of six models here:
+
+        glm-ocr            vision,completion,tools      guessed vision   correct
+        gemma4-local       completion,tools,thinking    guessed vision   FALSE POSITIVE
+        gemma4-12B-local   completion,tools,thinking    guessed vision   FALSE POSITIVE
+        gemma2-2b          completion                   guessed chat     correct
+        qwen-coder-local   completion                   guessed chat     correct
+        nomic-embed-text   embedding                    guessed chat     correct
+
+    `looks_like_vision_model`'s own docstring names why a false positive is the
+    costly one: "silently running OCR through a text-only model produces
+    confident hallucinated page text that lands in the search index". The OCR
+    Tier 3 picker (`app/ocr/api.py`) is built from this, so both Gemma 4 models
+    were being offered as vision models for page images they cannot read.
+
+    The heuristic stays as the fallback for an older server that reports no
+    capabilities at all, and remains the only option for providers that expose
+    nothing equivalent - LM Studio goes through `openai_compat`, which has no
+    such field.
+    """
+    from app.providers.vision import looks_like_vision_model
+
+    caps = item.get("capabilities")
+    if isinstance(caps, list) and caps:
+        if "vision" in caps:
+            return "vision"
+        # nomic-embed-text reports ["embedding"]: it cannot answer a chat turn.
+        return "chat" if "completion" in caps else "embedding"
+    return "vision" if looks_like_vision_model(str(item.get("name") or "")) else "chat"
 
 
 class OllamaProvider:
@@ -20,7 +222,7 @@ class OllamaProvider:
         api_key: str | None = None,
         base_url: str | None = None,
         default_model: str | None = None,
-        timeout: float = 30.0,
+        timeout: float | httpx.Timeout = 30.0,
     ):
         self.spec = spec_of("ollama")
         self.api_key = api_key
@@ -31,7 +233,7 @@ class OllamaProvider:
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=self.timeout)
+            self._client = new_async_client(self.timeout)
         return self._client
 
     async def close(self) -> None:
@@ -47,8 +249,6 @@ class OllamaProvider:
         resp.raise_for_status()
         data = resp.json()
 
-        from app.providers.vision import looks_like_vision_model
-
         models = []
         for item in data.get("models", []):
             name = item.get("name")
@@ -59,9 +259,9 @@ class OllamaProvider:
                 models.append(
                     {
                         "id": name,
-                        "context_length": 8192,
+                        "context_length": _reported_context_length(item),
                         "pricing_hint": 0.0,
-                        "family": "vision" if looks_like_vision_model(name) else "chat",
+                        "family": _family(item),
                     }
                 )
         return cast(list[ModelInfo], models)
@@ -123,6 +323,32 @@ class OllamaProvider:
         validation_cache.set(self.spec.id, self.base_url, self.api_key, result)
         return result
 
+    def _chat_payload(
+        self,
+        messages: list[dict[str, Any]],
+        model_name: str,
+        temperature: float,
+        max_tokens: int,
+        *,
+        stream: bool,
+        think: bool | None = None,
+    ) -> dict[str, Any]:
+        options: dict[str, Any] = {"temperature": temperature, "num_predict": max_tokens}
+        num_ctx = _resolve_num_ctx(
+            self.base_url, model_name, _required_num_ctx(messages, max_tokens)
+        )
+        if num_ctx is not None:
+            options["num_ctx"] = num_ctx
+        payload: dict[str, Any] = {
+            "model": model_name,
+            "messages": messages,
+            "stream": stream,
+            "options": options,
+        }
+        if think is not None:
+            payload["think"] = think
+        return payload
+
     async def chat(
         self,
         messages: list[dict[str, Any]],
@@ -131,21 +357,72 @@ class OllamaProvider:
         temperature: float = 0.2,
         max_tokens: int = 4096,
     ) -> str:
+        """Ask the model and return its answer text.
+
+        **A thinking model can spend the whole `num_predict` budget reasoning and
+        return an EMPTY `content`.** Ollama puts the reasoning in a separate
+        `message.thinking` field, which this provider does not use and the UI
+        never shows, so before 2026-09-04 the user simply got a blank answer with
+        no error to explain it. Measured on this machine: 13 of 100 eval queries
+        on `gemma4-local` at chunk_size=2048 (CLAUDE.md 8.7h).
+
+        Reproduced directly - a 6,000-character RAG prompt at `num_predict=256`
+        returns `content=''`, `thinking=1113 chars`, `done_reason='length'`,
+        while the identical request with `think: false` returns 1,271 characters
+        of real answer inside the same budget.
+
+        So the recovery is one retry with thinking off. Deliberately a RECOVERY
+        and not a blanket `think: false`: reasoning measured fine at the shipped
+        chunk_size=1024 (zero empties, 0.9133 answer-recall), and turning it off
+        everywhere would change behaviour that currently works on the strength of
+        no evidence at all. This path only fires where the answer is already lost.
+
+        `think` is safe to send to models that do not support it - verified
+        against `gemma2-2b`, which accepts it and answers normally.
+        """
         client = self._get_client()
         url = f"{self.base_url}/api/chat"
         model_name = model or self.default_model
 
-        payload = {
-            "model": model_name,
-            "messages": messages,
-            "stream": False,
-            "options": {"temperature": temperature, "num_predict": max_tokens},
-        }
-
-        resp = await client.post(url, json=payload)
+        resp = await client.post(
+            url,
+            json=self._chat_payload(messages, model_name, temperature, max_tokens, stream=False),
+        )
         resp.raise_for_status()
         data = resp.json()
-        return str(data["message"]["content"])
+        content = str(data.get("message", {}).get("content") or "")
+        if content:
+            return content
+
+        # Only retry the diagnosable case. An empty answer with no reasoning
+        # behind it is the model's own choice and repeating the call would just
+        # cost another round trip to get the same nothing.
+        thinking = str(data.get("message", {}).get("thinking") or "")
+        if not thinking:
+            logger.warning(
+                "Ollama model %s returned empty content (done_reason=%s) and no reasoning; "
+                "not retrying.",
+                log_safe(model_name),
+                log_safe(data.get("done_reason")),
+            )
+            return ""
+
+        logger.warning(
+            "Ollama model %s spent its %s-token budget reasoning (%d chars of thinking, "
+            "done_reason=%s) and returned no answer. Retrying once with think=false.",
+            log_safe(model_name),
+            log_safe(max_tokens),
+            len(thinking),
+            log_safe(data.get("done_reason")),
+        )
+        retry = await client.post(
+            url,
+            json=self._chat_payload(
+                messages, model_name, temperature, max_tokens, stream=False, think=False
+            ),
+        )
+        retry.raise_for_status()
+        return str(retry.json().get("message", {}).get("content") or "")
 
     async def stream(
         self,
@@ -155,29 +432,70 @@ class OllamaProvider:
         temperature: float = 0.2,
         max_tokens: int = 4096,
     ) -> AsyncGenerator[str, None]:
+        """Stream the model's answer.
+
+        Carries the same thinking-model failure `chat` documents: reasoning
+        arrives as `message.thinking` and is not answer text, so a model that
+        exhausts its budget reasoning streams nothing at all and the user watches
+        an empty response complete successfully. Recovered the same way - if the
+        stream produced no content and reasoning was seen, replay it once with
+        `think: false`.
+        """
         client = self._get_client()
         url = f"{self.base_url}/api/chat"
         model_name = model or self.default_model
 
-        payload = {
-            "model": model_name,
-            "messages": messages,
-            "stream": True,
-            "options": {"temperature": temperature, "num_predict": max_tokens},
-        }
-
-        async with client.stream("POST", url, json=payload) as resp:
-            resp.raise_for_status()
-            async for line in resp.aiter_lines():
-                if not line:
-                    continue
-                try:
-                    parsed = json.loads(line)
-                    content = parsed.get("message", {}).get("content")
+        async def _once(think: bool | None) -> AsyncGenerator[tuple[str, bool], None]:
+            """Yield (text, is_thinking) for one pass over the stream."""
+            payload = self._chat_payload(
+                messages, model_name, temperature, max_tokens, stream=True, think=think
+            )
+            async with client.stream("POST", url, json=payload) as resp:
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    if not line:
+                        continue
+                    try:
+                        parsed = json.loads(line)
+                        err = parsed.get("error")
+                        msg = parsed.get("message", {})
+                        content = msg.get("content")
+                        thinking = msg.get("thinking")
+                        done = parsed.get("done", False)
+                    except Exception as e:
+                        logger.debug("Failed to parse Ollama stream chunk: %s", e)
+                        continue
+                    # An in-stream {"error": ...} line: raised outside the try so
+                    # it is not swallowed. Before content the fallback loop acts on
+                    # it; after content llm_client reports the truncation as a
+                    # provider_error instead of letting a cut answer read as whole.
+                    if err:
+                        raise stream_error_for(err)
                     if content:
-                        yield content
-                    if parsed.get("done", False):
+                        yield content, False
+                    elif thinking:
+                        # Not yielded to the caller - it is reasoning, not an
+                        # answer - but recorded so the retry can be gated on
+                        # having actually seen some.
+                        yield "", True
+                    if done:
                         break
-                except Exception as e:
-                    logger.debug("Failed to parse Ollama stream chunk: %s", e)
-                    continue
+
+        produced = thought = False
+        async for text, is_thinking in _once(None):
+            if is_thinking:
+                thought = True
+                continue
+            produced = True
+            yield text
+
+        if produced or not thought:
+            return
+
+        logger.warning(
+            "Ollama model %s streamed only reasoning and no answer. Replaying with think=false.",
+            model_name,
+        )
+        async for text, is_thinking in _once(False):
+            if not is_thinking:
+                yield text

@@ -36,6 +36,18 @@ export async function initTauriConnection() {
 
 // â”€â”€ API Wrappers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+/**
+ * FastAPI bodies: HTTPException is `{"detail": "..."}`, a 422 is
+ * `{"error": "Validation error", "detail": [{"msg": ...}, ...]}`.
+ */
+export function httpErrorMessage(body: any, status: number): string {
+  if (Array.isArray(body?.detail)) {
+    const msgs = body.detail.map((d: { msg?: string }) => d.msg).filter(Boolean).join('; ');
+    return `${body.error ?? 'Validation error'}: ${msgs}`;
+  }
+  return body?.detail ?? body?.error ?? `HTTP ${status}`;
+}
+
 /** Basic fetch wrapper for JSON responses */
 export async function json<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
   const headers: Record<string, string> = {
@@ -47,7 +59,7 @@ export async function json<T>(endpoint: string, options: RequestInit = {}): Prom
   const res = await fetch(`${ENDPOINT}/api${endpoint}`, { ...options, headers });
   if (!res.ok) {
     const body = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(body.error || `HTTP ${res.status}`);
+    throw new Error(httpErrorMessage(body, res.status));
   }
   return res.json() as Promise<T>;
 }
@@ -71,9 +83,51 @@ export interface HealthResponse {
    * 'unknown' means startup has not been attempted, which is not 'down'.
    */
   subsystems?: Record<string, { state: 'up' | 'down' | 'disabled' | 'unknown'; detail: string }>;
+  /**
+   * Boot-time comparison of the index's embedding signature against the live
+   * model. A mismatch means every stored vector came from a different vector
+   * space, so semantic search is quietly wrong. It used to exist only as a log
+   * banner nobody reads.
+   */
+  embedding_signature?: {
+    stored: string;
+    current: string;
+    mismatch: boolean;
+    reembed: 'idle' | 'running' | 'done' | 'error';
+  };
 }
 
 export const getHealth = () => json<HealthResponse>('/health');
+
+/**
+ * Per-stage latency percentiles. The endpoint has existed since the metrics
+ * tracker landed and had no frontend caller at all, so every p50/p95/p99 the
+ * app measured was unreachable.
+ */
+export interface StageMetrics {
+  avg: number;
+  p50: number;
+  p95: number;
+  p99: number;
+  max: number;
+  count: number;
+}
+
+export const getMetrics = () => json<Record<string, StageMetrics>>('/system/metrics');
+
+/**
+ * Rebuild every vector. Requires explicit confirmation server-side too: this is
+ * the repair for an embedding-model change, and wiring it to run automatically
+ * would make a config change a destructive wipe on every boot.
+ *
+ * Leaves files, chunks, the FTS index and query history untouched.
+ */
+export const reembedVectors = () =>
+  json<{ message: string; status: string }>('/index/reembed', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ confirm: true }),
+  });
 
 export interface AppConfig {
   app_version: string
@@ -105,6 +159,9 @@ export interface IndexStatus {
   failed_files?: number;
   /** True when the run itself died rather than finishing. */
   run_failed?: boolean;
+  /** Counts index runs since the backend started. Only on the progress stream;
+   *  a finished run is a settled frame whose run_id is new. */
+  run_id?: number;
   /** Only on /index/status, which is token-gated - the SSE stream omits it
    *  because it is exempt from the token check and this can carry a path. */
   last_error?: string;
@@ -141,6 +198,13 @@ export interface OcrStatus {
   ep?: string | null;
   /** Non-empty when the running engine disagrees with the install stamp. */
   engine_mismatch?: string;
+  /* Returned by /api/ocr/status all along, but absent from this type and so
+     unreachable from the UI. Diagnostics renders them. */
+  model_version?: string;
+  installed_at?: string;
+  protocol?: string;
+  docs_this_session?: number;
+  stderr_tail?: string[];
 }
 
 export interface OcrInstallState {
@@ -243,6 +307,34 @@ export const setOcrEnabled = (enabled: boolean) =>
     body: JSON.stringify({ enabled }),
   });
 
+/** Opt-in GPU embedding. A device switch applies on restart and needs a re-embed. */
+export interface EmbedGpuStatus {
+  available: boolean;
+  reason: string;
+  installed: boolean;
+  installed_ep?: string | null;
+  installed_at?: string | null;
+  uv_available: boolean;
+  device_saved: 'cpu' | 'gpu';
+  device_active: 'cpu' | 'gpu';
+  worker: { running: boolean; degraded: boolean; last_error: string; ep: string } | null;
+  install: OcrInstallState;
+}
+
+export const getEmbedGpu = () => json<EmbedGpuStatus>('/embedding/gpu');
+
+export const installEmbedGpu = () =>
+  json<EmbedGpuStatus>('/embedding/gpu/install', { method: 'POST' });
+
+export const cancelEmbedGpuInstall = () =>
+  json<{ ok: boolean }>('/embedding/gpu/install/cancel', { method: 'POST' });
+
+export const setEmbedGpu = (on: boolean) =>
+  json<Partial<EmbedGpuStatus> & { ok: boolean; error_code?: string }>('/embedding/gpu/enable', {
+    method: 'POST',
+    body: JSON.stringify({ on }),
+  });
+
 export const getOcrQueue = (status?: string, limit = 50) =>
   json<{ items: OcrQueueItem[]; counts: OcrQueueCounts }>(
     `/ocr/queue?limit=${limit}${status ? `&status=${encodeURIComponent(status)}` : ''}`,
@@ -304,7 +396,7 @@ export const cancelIndexing = () =>
   });
 
 export const removeFolderIndex = (folders: string[]) =>
-  json<{ message: string }>('/index/folder/remove', {
+  json<{ message: string; chunks_removed: number }>('/index/folder/remove', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ folders }),
@@ -413,12 +505,15 @@ export const postQuery = (question: string, options: { file_type?: string, folde
     }),
   });
 
+/** Chunk ids of one indexed file, for force-including a file picked in the 3D view. */
+export const getFileChunkIds = (path: string) =>
+  json<{ path: string; chunk_ids: number[] }>(`/query/file-chunks?path=${encodeURIComponent(path)}`);
+
+/** What GET /query/history returns (app/api/search.py query_history). */
 export interface HistoryItem {
+  id: number;
   question: string;
-  answer: string;
-  source_count?: number;
-  latency_ms?: number;
-  created_at?: string;
+  timestamp?: string;
 }
 
 export const getQueryHistory = (limit = 20) =>
@@ -536,6 +631,8 @@ export function subscribeProgress(onData: (data: IndexStatus & { current_file: s
   let closed = false;
   let retries = 0;
   const MAX_RETRIES = 10;
+  const IDLE_RECONNECT_MS = 15_000;
+  let settled = false;
   const controller = new AbortController();
 
   function connect() {
@@ -551,14 +648,19 @@ export function subscribeProgress(onData: (data: IndexStatus & { current_file: s
     es.addEventListener('progress', (e) => {
       retries = 0; // reset on success
       try {
-        onData(JSON.parse(e.data));
+        const data = JSON.parse(e.data);
+        settled = data.status !== 'running' && data.status !== 'cancelling';
+        onData(data);
       } catch { /* ignore malformed */ }
     });
     es.onerror = () => {
       es?.close();
       if (!closed && retries < MAX_RETRIES) {
         retries++;
-        setTimeout(connect, 1000);
+        // The server closes the stream after one event when nothing is running, so a
+        // settled close is not an error; a 1s reconnect there polled the DB forever.
+        // ponytail: fixed idle poll; a server-pushed "run started" would remove it.
+        setTimeout(connect, settled ? IDLE_RECONNECT_MS : 1000);
       }
     };
   }
@@ -601,12 +703,23 @@ export interface QueryStreamChunk {
   retrieval_ms?: number;
   graph_hops?: string;
   contradictions_found?: boolean;
+  /** Chunk ids the conflict was detected in, so the banner can name them. */
+  contradiction_sources?: (string | number)[];
   knowledge_gaps?: string[];
   pattern_annotations?: string[];
   trace?: TraceEvent[];
   to?: string;
   prompt_tokens?: number;
   completion_tokens?: number;
+  /** Machine-readable reason on `type: 'error'`, e.g. 'cloud_consent_required'. */
+  code?: string;
+  /**
+   * The prompt mode the user picked (explain|verify|explore|distill|challenge).
+   * Distinct from `mode`, which is the retrieval path the backend took. They
+   * used to collide on one field, so the selected mode was overwritten and
+   * never reached the UI.
+   */
+  query_mode?: string;
 }
 
 
@@ -627,7 +740,10 @@ export function subscribeQuery(
     body: JSON.stringify(payload),
     signal: controller.signal
   }).then(async (response) => {
-    if (!response.ok) throw new Error('Stream request failed');
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(httpErrorMessage(body, response.status));
+    }
     const reader = response.body?.getReader();
     if (!reader) return;
 
@@ -645,9 +761,10 @@ export function subscribeQuery(
       }
       buffer += decoder.decode(value, { stream: true });
       
-      // Handle Case 3: Two complete objects concatenated without \n between them (e.g. }{ )
-      buffer = buffer.replace(/\}\{/g, '}\n{');
-      
+      // The backend frames events as json.dumps(chunk) + "\n" (search.py), so split on
+      // newlines only: a '}{' can sit inside a JSON string (code, LaTeX) and rewriting it
+      // corrupted the event.
+
       const lines = buffer.split('\n');
       buffer = lines.pop() || ''; // Keep the last incomplete line in the buffer
       
@@ -713,13 +830,8 @@ export interface ProviderSpec {
   base_url_editable: boolean;
   auth: 'bearer' | 'x-api-key' | 'x-goog-api-key' | 'none';
   models_endpoint: string;
-  models_parser: string;
   api_key_pattern: string | null;
   api_key_docs_url: string;
-  supports_streaming: boolean;
-  supports_tools: boolean;
-  supports_vision: boolean;
-  supported_features: string[];
 }
 
 export interface ProviderStatus {
@@ -735,7 +847,7 @@ export interface ProviderStatus {
 
 export interface ModelInfo {
   id: string;
-  context_length: number;
+  context_length: number | null;
   pricing_hint: number;
   family: string;
 }
@@ -757,12 +869,13 @@ export const validateProvider = (id: string, body: { api_key?: string | null; ba
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
   });
-export const selfTestProvider = (id: string) => json<ValidationResponse>(`/providers/${id}/self_test`, { method: 'POST' });
-export const setProviderKey = (id: string, api_key: string) =>
+export const setProviderKey = (id: string, api_key: string | null, base_url?: string | null) =>
   json<{ status: string }>(`/providers/${id}/key`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ api_key })
+    // base_url is omitted rather than sent as null when untouched, so saving a
+    // key never clears a previously stored endpoint.
+    body: JSON.stringify(base_url === undefined ? { api_key } : { api_key, base_url })
   });
 export const deleteProviderKey = (id: string) => json<{ status: string }>(`/providers/${id}/key`, { method: 'DELETE' });
 export const setProviderDefaultModel = (id: string, model: string) =>
@@ -771,7 +884,18 @@ export const setProviderDefaultModel = (id: string, model: string) =>
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ model })
   });
-export const getCurrentProvider = () => json<{ provider: string; model: string }>('/providers/current');
+/**
+ * The provider/model the backend will actually dispatch to.
+ *
+ * Resolves `provider` preference first, then walks `fallback_chain` — the same
+ * order `llm_client.py` routes on — so this is the only honest answer to "which
+ * model is selected". `source` is env | keyring | default | unset.
+ *
+ * Prefer this over reading a provider-specific config field: the Library card
+ * used `AppConfig.gemini_model`, which named Gemini no matter who was serving.
+ */
+export const getCurrentProvider = () =>
+  json<{ provider: string; model: string; source: string }>('/providers/current');
 
 /** Whether PMA can start this provider itself (Ollama / LM Studio only). */
 export interface ProviderLaunchStatus {
@@ -806,6 +930,12 @@ export interface ProviderRoutingSettings {
   fallback_chain: string[];
   cloud_privacy_consent?: boolean;
   cloud_privacy_notice?: string;
+  /**
+   * Server-computed: would the next dispatch be refused for want of consent?
+   * Derived from the same predicate as the backend gate, so this cannot drift
+   * from what actually happens when the user asks a question.
+   */
+  consent_required?: boolean;
 }
 
 export const getProviderSettings = () => json<ProviderRoutingSettings>('/providers/settings');

@@ -27,6 +27,8 @@ from app.indexing.folder_profiler import (
 from app.indexing.summarizer import generate_deep_summary, summary_embedding_text
 from app.project_constants import (
     TEXT_EXTENSIONS,
+    build_context_prefix,
+    chunk_embedding_text,
 )
 from app.scanner.scanner import scan_folder as fast_scan
 from app.storage.db import DatabaseManager
@@ -126,6 +128,9 @@ class IndexingProgress:
         self.is_cancelled = False
         self.last_error = ""
         self.run_failed = False
+        # Bumped once per index_folders run (not by reset(), which a run calls
+        # twice). The UI keys "a run finished" on it; counters can repeat.
+        self.run_id = 0
 
     def reset(self, total_files: int, initial_status: str = "running"):
         with self._lock:
@@ -189,6 +194,10 @@ class IndexingProgress:
             # _batch_index_pipeline swallowed its TaskGroup's ExceptionGroup and
             # the run still finished on "Complete".
             if self.run_failed:
+                # fail() wrote "Failed", but the tail then set phase labels
+                # ("Checkpointing the write-ahead log…") that would otherwise
+                # stay on screen indefinitely.
+                self.current_file = "Failed"
                 return
             self.current_file = (
                 "Complete"
@@ -264,12 +273,33 @@ _STUB_STATUS = {
 _INCOMPLETE_SHA_STATES = ("", "ERROR", "CANCELLED", "NOCONTENT")
 
 
+def _path_is_gone(path: str) -> bool:
+    """True only when the OS says the path does not exist.
+
+    `os.path.exists` is False on ANY OSError, so a PermissionError or an ACL
+    change would read as "deleted" and drop the file's index rows and vectors.
+    """
+    try:
+        os.stat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return True
+    except OSError:
+        return False
+    return False
+
+
 #: One scanned file: its path, the basename of the indexed folder it came from,
 #: and that folder's full path. The root is carried separately because
 #: `folder_tag` is only the basename and so cannot be turned back into a path,
 #: nor tell two like-named folders apart. Empty root means the scanner could not
 #: attribute the file to any requested root.
 ScannedFile = tuple[Path, str, str]
+
+#: Ceilings on what `_rust_pre_extract` may hold in RAM at once (whole files as
+#: str). Not tunables: peak memory must not depend on corpus file sizes, and a
+#: file over these is streamed instead, which is slower but bounded.
+_PRE_EXTRACT_FILE_MAX_BYTES = 4 << 20
+_PRE_EXTRACT_GROUP_MAX_BYTES = 16 << 20
 
 
 #: UTF-16/32 byte-order marks. Text in these encodings is full of NUL bytes, so
@@ -367,42 +397,169 @@ def shutdown_executors() -> None:
     _EXTRACT_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pma-extract")
 
 
+# Extensions whose chunker needs the WHOLE file rather than a stream.
+#
+# Reviving the dispatcher that CLAUDE.md 8.7 A2/A3 found dead. Deliberately not
+# "everything": routing all types through `_create_chunks` would send PDFs and
+# office documents to `CodeChunker._chunk_fallback`, a blind character split
+# with no sentence snapping at all, which is strictly worse than the
+# StreamChunker they use today. Only the types with a genuinely better chunker
+# move:
+#
+#   code     -> CodeChunker, syntax-aware, and the only producer of kg_nodes /
+#               kg_edges, so this is also what finally populates the knowledge
+#               graph (A4)
+# .txt/.log stay streamed: rust_core.create_chunks is the same sliding window
+# StreamChunker already runs, so switching them would trade streaming for
+# nothing.
+#
+# **Markdown was tried here twice and measured worse both times, so it is NOT
+# routed.** `rust_core.chunk_markdown` is section-aware, which sounds like a
+# clear win for prose and is not on this corpus.
+#
+# First attempt: it applied `chunk_size` only as a MAXIMUM, so a section shorter
+# than the budget became a chunk that short and chunk size followed heading
+# density. 589 chunks -> 1060, document nDCG 0.891 -> 0.80, answer coverage
+# 0.597 -> 0.542.
+#
+# That defect is now fixed in Rust - adjacent sections merge up to the budget,
+# and the stored span finally matches the trimmed text it describes. Re-measured
+# at chunk_size=2048 it is no longer catastrophic and is still worse:
+#
+#     chunks           140 -> 137   (fine)
+#     answer coverage  1.000 -> 1.000   (tied, saturated)
+#     chunk precision  0.163 -> 0.100   (clearly worse)
+#     document nDCG    0.94 -> 0.91 with the reranker on
+#
+# Merged runs join unrelated subsections - a parameter entry with a worked
+# example - so each chunk is less topically focused than the sliding window's
+# uniform, sentence-snapped output. Coverage cannot show this because it is
+# already saturated; precision can, and does.
+#
+# So A3 stays open deliberately. The function is better than it was and is
+# exercised by tests; routing prose to it needs a corpus where section
+# boundaries carry more signal than they do here.
+_CODE_EXTENSIONS = frozenset({".py", ".js", ".ts", ".jsx", ".tsx", ".rs"})
+_WHOLE_TEXT_EXTENSIONS = _CODE_EXTENSIONS
+
+
 class StreamChunker:
-    """Helper to process a stream of text fragments into properly sized chunks."""
+    """Helper to process a stream of text fragments into properly sized chunks.
+
+    The split-point search is a separator cascade modelled on LangChain's
+    ``RecursiveCharacterTextSplitter`` (langchain_text_splitters 1.1.2,
+    ``character.py::_split_text``), read as a reference and reimplemented rather
+    than depended on - section 6's dependency policy wants a measured bottleneck
+    before a library, and this is one function.
+
+    **One deliberate divergence, and it is the reason this is not a port.**
+    LangChain chooses ONE separator for the entire document - the first rung its
+    ``re.search`` finds anywhere - and then ``_merge_splits`` packs pieces up to
+    the budget. Every boundary therefore lands on that separator even when doing
+    so badly under-fills a chunk: with 600-character paragraphs against a 1024
+    budget only one paragraph fits, so chunks run at 59% and chunk size tracks
+    document structure instead of the budget. **That is precisely the failure
+    CLAUDE.md 8.7b measured and rejected for ``chunk_markdown``** - chunk
+    precision 0.163 -> 0.100 when section boundaries drove the size.
+
+    Searching only ``[pos - lookback, pos]`` avoids it for free: the lookback IS
+    a minimum-fill floor, 75% of the budget at the shipped share of 0.25. A
+    structural boundary wins when one is conveniently placed, and a weaker
+    boundary is accepted rather than shrinking the chunk.
+    """
+
+    # Priority ladder for `_find_boundary`, highest first. The top and bottom
+    # rungs are LangChain's defaults; the sentence and clause rungs between them
+    # are this codebase's, kept because prose splits better on a sentence end
+    # than on an arbitrary space.
+    #
+    # The bottom rungs are what this list was missing, and they are not
+    # cosmetic. Measured on tests/eval/corpus_squad, chunk_size=1024,
+    # lookback=256:
+    #
+    #      7 rungs (before)   blind cuts 6.13%   MID-WORD 3.67%  (70 chunks)
+    #     11 rungs (now)      blind cuts 0.63%   MID-WORD 0.00%  (0)
+    #
+    # With no word rung a failed search cuts at `pos`, which lands INSIDE A WORD
+    # and hands the embedder a split token. LangChain's ladder ends with a space
+    # and then the empty string for exactly this reason.
+    #
+    # No Markdown rung on purpose. Heading-first chunking was built, measured
+    # worse twice and reverted (8.7b, A3); adding it here needs its own
+    # evidence, not a reference implementation's say-so.
+    _SEPARATORS: tuple[str, ...] = (
+        "\n\n",
+        "\n",
+        ". ",
+        "! ",
+        "? ",
+        ".\n",
+        "!\n",
+        "?\n",
+        "; ",
+        ", ",
+        " ",
+    )
+
+    # How far the read cursor may run ahead of the buffer start before the
+    # consumed prefix is dropped. Compaction is the only string copy left in
+    # `process`, and it is taken only once the cursor has passed half the
+    # buffer, so each copy discards at least as much as it moves and the total
+    # across a fragment is O(n) - not O(n) per emitted chunk, which is what
+    # re-slicing the buffer on every iteration used to cost.
+    _COMPACT_MIN_CHARS = 1 << 16
 
     def __init__(self, chunk_size: int, chunk_overlap: int, prefix: str):
         self.chunk_size = chunk_size if chunk_size > 0 else 500
         self.chunk_overlap = min(max(0, chunk_overlap), self.chunk_size - 1)
+        # Scaled off chunk_size rather than the 100-character literal this
+        # used to carry. That constant left ~40% of boundaries on real prose
+        # falling mid-sentence at EVERY chunk size, because 100 characters is
+        # often less than one sentence of Wikipedia-grade text. See
+        # settings.chunk_boundary_lookback_share.
+        self.boundary_lookback = max(
+            1, int(self.chunk_size * settings.chunk_boundary_lookback_share)
+        )
         self.prefix = prefix
         self.buffer = ""
         self.total_offset = 0
+        # Read cursor into `buffer`. The unconsumed text is always
+        # `buffer[_pos:]` - nothing may read `buffer` from index 0 and assume it
+        # is the head of the stream.
+        self._pos = 0
 
     def process(self, text_fragment: str) -> list[dict[str, Any]]:
         self.buffer += text_fragment
         chunks = []
 
-        max_iters = len(self.buffer) + 2
+        max_iters = (len(self.buffer) - self._pos) + 2
         iters = 0
-        while len(self.buffer) > self.chunk_size:
+        while (len(self.buffer) - self._pos) > self.chunk_size:
             iters += 1
             if iters > max_iters:
                 logger.error(
                     "Infinite loop guard triggered in StreamChunker.process! Forcing exit."
                 )
                 break
-            prev_len = len(self.buffer)
+            prev_pos = self._pos
 
-            # Find a good split point in the current window
-            raw_end = self.chunk_size
+            # Find a good split point in the current window. The lookback is
+            # clamped to the window so the search can never reach back behind
+            # the cursor into text already emitted - with the shipped share
+            # (0.25) it never could, but the share is a setting.
+            raw_end = self._pos + self.chunk_size
             # Use simple sentence snapping for streaming
-            end = self._find_boundary(self.buffer, raw_end)
+            end = self._find_boundary(
+                self.buffer, raw_end, min(self.boundary_lookback, self.chunk_size)
+            )
 
-            chunk_text = self.buffer[:end]
+            chunk_len = end - self._pos
+            chunk_text = self.buffer[self._pos : end]
             preview = self.prefix + chunk_text
             chunks.append(
                 {
                     "start_offset": self.total_offset,
-                    "end_offset": self.total_offset + end,
+                    "end_offset": self.total_offset + chunk_len,
                     "text_preview": preview,
                     "sentence_offsets": "[]"
                     if os.environ.get("PMA_SENTENCE_OFFSETS", "0") == "0"
@@ -412,30 +569,41 @@ class StreamChunker:
             )
 
             # Advance
-            overlap_start = max(0, end - self.chunk_overlap)
+            overlap_start = max(0, chunk_len - self.chunk_overlap)
             if overlap_start <= 0:
                 overlap_start = 1
-            self.buffer = self.buffer[overlap_start:]
+            self._pos += overlap_start
             self.total_offset += overlap_start
 
-            if len(self.buffer) >= prev_len:
-                # Force shrink buffer to guarantee progress and break infinite loops
-                self.buffer = self.buffer[1:]
+            if self._pos <= prev_pos:
+                # Unreachable - `overlap_start` is >= 1 by construction directly
+                # above, so the cursor is strictly monotonic. Kept as the same
+                # belt-and-braces the string-slicing version carried, where a
+                # zero-width advance genuinely could stall.
+                self._pos = prev_pos + 1
                 self.total_offset += 1
-                if len(self.buffer) == 0:
+                if self._pos >= len(self.buffer):
                     break
+
+            # Drop the consumed prefix once it is both large and the majority of
+            # the buffer, so a single huge fragment cannot keep a fully-consumed
+            # head resident for the length of the run.
+            if self._pos >= self._COMPACT_MIN_CHARS and self._pos * 2 >= len(self.buffer):
+                self.buffer = self.buffer[self._pos :]
+                self._pos = 0
 
         return chunks
 
     def finalize(self) -> list[dict[str, Any]]:
         """Process any remaining text in the buffer."""
         chunks = []
-        if self.buffer.strip():
-            preview = self.prefix + self.buffer
+        remainder = self.buffer[self._pos :]
+        if remainder.strip():
+            preview = self.prefix + remainder
             chunks.append(
                 {
                     "start_offset": self.total_offset,
-                    "end_offset": self.total_offset + len(self.buffer),
+                    "end_offset": self.total_offset + len(remainder),
                     "text_preview": preview,
                     "sentence_offsets": "[]"
                     if os.environ.get("PMA_SENTENCE_OFFSETS", "0") == "0"
@@ -444,17 +612,34 @@ class StreamChunker:
                 }
             )
         self.buffer = ""
+        self._pos = 0
         return chunks
 
     @staticmethod
-    def _find_boundary(text: str, pos: int) -> int:
-        # Simplified boundary finding for streaming
-        search_start = max(0, pos - 100)
-        region = text[search_start:pos]
-        for delim in ["\n\n", ". ", "! ", "? ", ".\n", "!\n", "?\n"]:
-            idx = region.rfind(delim)
+    def _find_boundary(text: str, pos: int, lookback: int = 100) -> int:
+        """Back up from `pos` to the nearest sentence or paragraph end.
+
+        Returns `pos` UNCHANGED when the window holds no boundary, which is a
+        blind mid-sentence cut. That is not a rare case on real prose: at the
+        100-character literal this used to hardcode, it returned unchanged for
+        ~40% of splits on `tests/eval/corpus_squad`, and the rate barely moves
+        with chunk_size (39.8% at 512, 39.4% at 1024, 40.5% at 2048) because
+        the window is absolute while a sentence is ~100 characters. Callers
+        pass `chunk_size * settings.chunk_boundary_lookback_share`; the
+        default only keeps the old two-argument signature working.
+
+        Rungs are tried by TYPE in priority order and the LAST occurrence of the
+        winning type is taken, so a paragraph break beats a sentence end sitting
+        closer to `pos`. See `_SEPARATORS` for the ladder and its provenance.
+        """
+        floor = max(0, pos - lookback)
+        for delim in StreamChunker._SEPARATORS:
+            # rfind over a range rather than slicing: same answer, no copy, and
+            # a match must fit entirely inside [floor, pos), so the boundary
+            # returned can never exceed pos.
+            idx = text.rfind(delim, floor, pos)
             if idx != -1:
-                return search_start + idx + len(delim)
+                return idx + len(delim)
         return pos
 
 
@@ -470,7 +655,16 @@ class IndexingService:
         self.lancedb_client = lancedb_client
         self.supported_extensions = settings.extensions_set
         self.chunk_size = settings.chunk_size
-        self.chunk_overlap = settings.chunk_overlap
+        # An overlap near chunk_size makes the cursor advance ~1 char per chunk
+        # (PMA_CHUNK_OVERLAP=900 turned an 11 KB file into 4739 chunks, all
+        # embedded). Half the window is the cap; the shipped 102/1024 is far below it.
+        self.chunk_overlap = min(settings.chunk_overlap, self.chunk_size // 2)
+        if self.chunk_overlap != settings.chunk_overlap:
+            logger.warning(
+                "chunk_overlap %d capped to %d (half of chunk_size).",
+                settings.chunk_overlap,
+                self.chunk_overlap,
+            )
         self.max_file_size = settings.max_file_size_bytes
         self._concurrency = settings.index_concurrency
         # How many chunks accumulate before the embedder flushes. A multiple of
@@ -483,7 +677,13 @@ class IndexingService:
         # Read here rather than at import time: the eval harness mutates the
         # global settings object.
         self._embed_flush_threshold = max(1, settings.embedding_batch_size * 4)
-        self.code_chunker = CodeChunker(max_tokens=512)
+        # Derived, not 512. `CodeChunker` computes max_chars = max_tokens * 4,
+        # so a literal 512 pinned code chunks at 2048 characters regardless of
+        # chunk_size. CLAUDE.md 8.7 A6 recorded the two chunkers disagreeing 4x
+        # as a defect and treated chunk_size=2048 as the thing that settled it -
+        # which made the agreement a coincidence of one value rather than a
+        # rule. At chunk_size=1024 the literal would reopen it at 2x.
+        self.code_chunker = CodeChunker(max_tokens=max(1, self.chunk_size // 4))
         # File ids whose summary changed during the current run. Flushed to the
         # LanceDB summary index once the pipeline drains - re-embedding only what
         # this run touched, rather than the whole corpus.
@@ -524,6 +724,7 @@ class IndexingService:
 
             progress.reset(0)
             with progress._lock:
+                progress.run_id += 1
                 progress.status = "running"
                 progress.current_file = "Scanning folders…"
 
@@ -533,8 +734,14 @@ class IndexingService:
             )
 
             if not all_files:
-                with progress._lock:
-                    progress.status = "idle"
+                progress.complete()  # also replaces the stale "Scanning folders…"
+                return
+
+            # /api/index/cancel is accepted as soon as status is "running", i.e.
+            # during the scan; the reset below would otherwise clear the flag
+            # and the run would index everything anyway.
+            if progress.is_cancelled:
+                progress.complete()
                 return
 
             # Create a dedicated reader connection for the scanner / change detection
@@ -549,6 +756,20 @@ class IndexingService:
             finally:
                 await reader_conn.close()
 
+            if progress.is_cancelled:  # cancelled during change detection
+                progress.complete()
+                return
+
+            try:
+                if await self._remove_vanished_files(unique_folders, all_files):
+                    from app.search.retrieval import clear_all_query_caches
+
+                    await clear_all_query_caches(self.lancedb_client)
+            except Exception as exc:
+                # Nothing is lost by failing: the chunk vectors go first and abort
+                # before any SQLite row is touched, so the next run retries.
+                logger.error("Removing deleted files from the index failed: %s", exc)
+
             progress.reset(len(files_to_index))
             with progress._lock:
                 progress.scan_method = scan_method
@@ -556,6 +777,13 @@ class IndexingService:
                 progress.skipped_files = skipped
                 progress.new_files = new_count
                 progress.changed_files = changed_count
+
+            try:
+                await self._regate_legacy_pdfs(
+                    unique_folders, {str(fp.absolute()) for fp, _, _ in files_to_index}
+                )
+            except Exception as exc:
+                logger.warning("OCR re-gate of already-indexed PDFs failed: %s", exc)
 
             if not files_to_index:
                 await self._generate_folder_profiles(all_files, unique_folders)
@@ -572,13 +800,14 @@ class IndexingService:
                         files_to_index, offset=0, total_to_index=len(files_to_index)
                     )
 
-                if progress.is_cancelled:
-                    progress.complete()
-                    return
-
-                # Phase 1: Resolve pending GraphRAG edges
-                progress.set_current_file("Resolving code graph edges…")
-                await self.db.resolve_pending_graph_edges()
+                # A cancelled run skips edge resolution but must NOT return: files
+                # whose footers already committed hold a valid sha256 and are
+                # skipped by every later run, so returning here before
+                # _flush_file_summaries dropped their summary vectors for good.
+                if not progress.is_cancelled:
+                    # Phase 1: Resolve pending GraphRAG edges
+                    progress.set_current_file("Resolving code graph edges…")
+                    await self.db.resolve_pending_graph_edges()
             except Exception as exc:
                 # index_folders runs as an unhandled FastAPI background task, so
                 # this is the only place the failure can be recorded anywhere the
@@ -592,7 +821,12 @@ class IndexingService:
                 # pre-run results. Finishing the tail is what makes the partial
                 # work usable.
                 logger.error("Indexing run failed: %s", exc, exc_info=True)
-                progress.fail(f"{type(exc).__name__}: {exc}")
+                # A TaskGroup failure arrives as "ExceptionGroup: unhandled
+                # errors in a TaskGroup (1 sub-exception)" - say what failed.
+                cause: BaseException = exc
+                while isinstance(cause, BaseExceptionGroup) and cause.exceptions:
+                    cause = cause.exceptions[0]
+                progress.fail(f"{type(cause).__name__}: {cause}")
             finally:
                 if use_bulk_mode:
                     await self.db.exit_ingest_mode()
@@ -603,9 +837,9 @@ class IndexingService:
                 logger.error("Failed to index file summaries: %s", e, exc_info=True)
 
             await self._generate_folder_profiles(all_files, unique_folders)
-            from app.search.retrieval import clear_retrieval_cache
+            from app.search.retrieval import clear_all_query_caches
 
-            clear_retrieval_cache()
+            await clear_all_query_caches(self.lancedb_client)
 
             # Create/update HNSW index at the end of the ingestion run.
             # pma_summaries is searched once per query (the document-routing
@@ -681,10 +915,25 @@ class IndexingService:
         if not RUST_CORE_AVAILABLE:
             return pre_extracted
 
+        # extract_text_files returns every file as one whole str, so the group's
+        # footprint is its total size, not a tunable. Files past the per-file
+        # cap, or that would push the group past the group cap, are left to the
+        # streaming reader (128 KiB windows) - section 6 boundedness invariant.
         rust_paths = []
+        group_bytes = 0
         for fp, _, _ in files_to_index:
             ext = fp.suffix.lower()
             if ext in TEXT_EXTENSIONS and ext not in [".json", ".csv"]:
+                try:
+                    size = fp.stat().st_size
+                except OSError:
+                    continue
+                if (
+                    size > _PRE_EXTRACT_FILE_MAX_BYTES
+                    or group_bytes + size > _PRE_EXTRACT_GROUP_MAX_BYTES
+                ):
+                    continue
+                group_bytes += size
                 rust_paths.append(str(fp.absolute()))
 
         if rust_paths:
@@ -822,6 +1071,27 @@ class IndexingService:
                 ft_summary = ""
                 meta = None
 
+                # CODE ONLY is chunked from the whole file, because an AST needs
+                # the complete source and cannot work off a stream. Everything
+                # else - markdown included - keeps streaming.
+                #
+                # This comment used to say "code AND markdown", which was false
+                # and had been false since the routing landed: markdown is not in
+                # `_WHOLE_TEXT_EXTENSIONS`, so it never buffers and never reaches
+                # `_create_chunks`. Section-aware markdown chunking was built,
+                # measured worse twice and reverted (CLAUDE.md 8.7b, A3); only
+                # the comments were left describing the version that lost.
+                #
+                # `buffered_chars` against settings.chunk_buffer_max_chars is
+                # what keeps the section 6 boundedness invariant true - peak
+                # stays a function of the tunables, never of how large a
+                # document happens to be. A file over the cap gives up the
+                # syntax-aware chunker and streams instead, which is a quality
+                # tradeoff rather than a failure.
+                buffering = path.suffix.lower() in _WHOLE_TEXT_EXTENSIONS
+                buffered: list[str] = []
+                buffered_chars = 0
+
                 chunks_emitted = 0
                 stub_skipped = False
                 stub_kind = ""
@@ -834,7 +1104,28 @@ class IndexingService:
                         return
                     for ex in EXTRACTORS:
                         if ex.can_handle(path):
-                            yield from ex.extract_stream(path, self.max_file_size)
+                            # Extractors yield one record per item (CSV row,
+                            # DOCX paragraph, slide, page) with no terminator,
+                            # and StreamChunker concatenates fragments. Without
+                            # a separator "Paris" + "name: Bob" became one FTS
+                            # token. Done here, not in the chunker or in
+                            # _extract_plain_text_stream, whose fragments are
+                            # arbitrary byte windows: a separator there would
+                            # shift chunk offsets (CLAUDE.md section 7).
+                            # Window-style extractors (JsonExtractor yields
+                            # arbitrary 128k slices of one document) opt out
+                            # with `yields_records = False`: a separator there
+                            # lands mid-token.
+                            records = getattr(ex, "yields_records", True)
+                            for item in ex.extract_stream(path, self.max_file_size):
+                                if (
+                                    records
+                                    and isinstance(item, str)
+                                    and item
+                                    and not item.endswith("\n")
+                                ):
+                                    item += "\n"
+                                yield item
                             return
                     yield from self._extract_plain_text_stream(path)
 
@@ -872,12 +1163,40 @@ class IndexingService:
                             transient_stub = fragment.startswith(_TRANSIENT_STUB_PREFIXES)
                             break
 
-                        for c in chunker.process(fragment):
-                            if progress.is_cancelled:
-                                return "CANCELLED", "", None, "cancelled"
-                            chunks_emitted += 1
-                            if not _offer(c):
-                                return "CANCELLED", "", None, "cancelled"
+                        if buffering:
+                            as_text = (
+                                fragment
+                                if isinstance(fragment, str)
+                                else fragment.decode("utf-8", errors="replace")
+                            )
+                            buffered.append(as_text)
+                            buffered_chars += len(as_text)
+                            if buffered_chars > settings.chunk_buffer_max_chars:
+                                # Over the cap. Give up the whole-text chunker
+                                # and replay what has been held through the
+                                # streaming one, so nothing read so far is lost.
+                                logger.info(
+                                    "%s exceeded chunk_buffer_max_chars (%d); "
+                                    "streaming it instead of syntax-aware chunking.",
+                                    path.name,
+                                    settings.chunk_buffer_max_chars,
+                                )
+                                buffering = False
+                                for part in buffered:
+                                    for c in chunker.process(part):
+                                        if progress.is_cancelled:
+                                            return "CANCELLED", "", None, "cancelled"
+                                        chunks_emitted += 1
+                                        if not _offer(c):
+                                            return "CANCELLED", "", None, "cancelled"
+                                buffered.clear()
+                        else:
+                            for c in chunker.process(fragment):
+                                if progress.is_cancelled:
+                                    return "CANCELLED", "", None, "cancelled"
+                                chunks_emitted += 1
+                                if not _offer(c):
+                                    return "CANCELLED", "", None, "cancelled"
                         if len(ft_summary) < 2000:
                             ft_summary += (
                                 fragment
@@ -885,7 +1204,21 @@ class IndexingService:
                                 else fragment.decode("utf-8", errors="replace")
                             )
 
-                    for c in chunker.finalize():
+                    if buffering:
+                        # The syntax-aware path, and in production it is reached
+                        # ONLY for code - `_WHOLE_TEXT_EXTENSIONS` is exactly
+                        # `_CODE_EXTENSIONS`, so `_create_chunks` always lands on
+                        # its CodeChunker branch from here. Its markdown and
+                        # .txt branches are reachable from tests only.
+                        # This is the call CLAUDE.md 8.7 A2/A3 found had no
+                        # production caller at all, and A4's kg_nodes / kg_edges
+                        # ride out on the chunks it returns.
+                        final_chunks = self._create_chunks("".join(buffered), file_path=str(path))
+                        buffered.clear()
+                    else:
+                        final_chunks = chunker.finalize()
+
+                    for c in final_chunks:
                         if progress.is_cancelled:
                             return "CANCELLED", "", None, "cancelled"
                         chunks_emitted += 1
@@ -934,6 +1267,10 @@ class IndexingService:
                         status = "nocontent"
                     elif chunks_emitted == 0 and source_size == 0:
                         status = "empty"
+                    elif meta is not None:
+                        # The OCR gate ran on this file; `_regate_legacy_pdfs`
+                        # keys on "" meaning it never did.
+                        status = "ocr_gated"
                     else:
                         status = ""
                     return sha256_result, ft_summary, meta, status
@@ -990,6 +1327,14 @@ class IndexingService:
             )
 
         except Exception as e:
+            if isinstance(e, FileNotFoundError) and not header_sent:
+                # Deleted between detection and extraction (Office `~$x.docx`
+                # locks, sync-client temp files). The old path wrote a size-0
+                # "ERROR" row for it that nothing ever removed, because the path
+                # is never scanned again. There is nothing to record.
+                logger.info("File vanished before extraction, skipping: %s", path)
+                progress.update(0, current_file=path.name)
+                return
             logger.error("Streaming extraction failed for %s: %s", path, e)
             if not header_sent:
                 try:
@@ -1047,10 +1392,14 @@ class IndexingService:
             # Passing the binary gate is not enough: UTF-16 read as UTF-8 still
             # decodes to U+FFFD noise, which is the same defect one layer down.
             with open(path, encoding=_encoding_for(head), errors="replace") as f:
-                while True:
-                    chunk = f.read(128 * 1024)
+                # Same cap rust_core's reader and the extractors apply; without
+                # it .sql/.ipynb/.rtf files were embedded to EOF.
+                remaining = self.max_file_size
+                while remaining > 0:
+                    chunk = f.read(min(128 * 1024, remaining))
                     if not chunk:
                         break
+                    remaining -= len(chunk)
                     yield chunk
         except Exception:
             return
@@ -1122,7 +1471,12 @@ class IndexingService:
     async def _process_embed_stream_batch(
         self, batch_items: list[dict[str, Any]], update_progress: bool = True
     ):
-        texts = [item["chunk"]["text_preview"] for item in batch_items]
+        texts = [
+            chunk_embedding_text(
+                item["chunk"]["text_preview"], str(item["path"]), settings.embed_chunk_prefix
+            )
+            for item in batch_items
+        ]
         if not texts:
             return
 
@@ -1163,12 +1517,25 @@ class IndexingService:
                 res = await self._flush_pending_chunks_sqlite(pending_chunks, active_files)
                 if res:
                     l_ids, l_embs, l_metas = res
-            if tx_open and use_tx:
-                if hasattr(self.db, "commit"):
-                    await self.db.commit()
-                tx_open = False
+            # Vectors first, SQLite commit second. The commit is what records
+            # each file's sha256, and a recorded sha256 makes later runs skip
+            # the file, so committing first left files "indexed" with no vectors
+            # whenever the add failed or the process died between the two.
+            # Chunk ids are already allocated inside the open transaction. A
+            # failed add raises into the rollback below; a failed commit
+            # removes the vectors just added, because rolled-back ids are reused.
             if l_ids:
                 await self._flush_pending_chunks_lancedb(l_ids, l_embs, l_metas)
+            if tx_open and use_tx:
+                try:
+                    if hasattr(self.db, "commit"):
+                        await self.db.commit()
+                except BaseException:
+                    if l_ids:
+                        with contextlib.suppress(Exception):
+                            await self.lancedb_client.delete_documents(l_ids)
+                    raise
+                tx_open = False
             pending_chunks.clear()
             chunks_since_commit = 0
             last_commit_time = time.monotonic()
@@ -1310,6 +1677,65 @@ class IndexingService:
         except Exception as exc:
             logger.warning("Failed to enqueue OCR for %s: %s", path_str, exc)
 
+    async def _regate_legacy_pdfs(self, unique_folders: list[Path], skip: set[str]) -> int:
+        """Run the OCR gate once over PDFs indexed before OCR was switched on.
+
+        The gate only runs during extraction, and a mixed PDF (native cover,
+        scanned body) is stored with a real digest, so `_detect_changes` skips
+        it forever and enabling OCR never reached its scanned pages. Such a row
+        has `extract_status == ""`; every PDF gated since carries "ocr_gated" (or
+        "ocr_pending"). This reads the pages again but embeds nothing, queues the
+        pages the gate flags, and marks the row so it is not read a second time.
+        `skip` is the files this run re-indexes anyway.
+        """
+        from app.ocr.settings import load_persisted_state
+
+        if not settings.ocr_enabled or settings.ocr_tier == "none":
+            load_persisted_state()
+        if not settings.ocr_enabled or settings.ocr_tier == "none":
+            return 0
+
+        bases = [f.absolute() for f in unique_folders]
+        rows = await self.db.execute_query(
+            "SELECT id, path, sha256 FROM files WHERE extract_status = '' "
+            "AND lower(path) LIKE '%.pdf' AND sha256 NOT IN ('', 'ERROR', 'CANCELLED', 'NOCONTENT')"
+        )
+        todo = [
+            (i, p, s)
+            for i, p, s in rows
+            if p not in skip and any(Path(p).is_relative_to(b) for b in bases)
+        ]
+        if not todo:
+            return 0
+        extractor = next(e for e in EXTRACTORS if e.can_handle(Path("x.pdf")))
+
+        def _gate(p: str) -> ExtractMeta | None:
+            found = None
+            for frag in extractor.extract_stream(Path(p), self.max_file_size):
+                if isinstance(frag, ExtractMeta):
+                    found = frag
+            return found
+
+        loop = asyncio.get_running_loop()
+        done = 0
+        for file_id, path, sha in todo:
+            if progress.is_cancelled:
+                break
+            progress.set_current_file(f"Checking PDFs for scanned pages ({done}/{len(todo)})…")
+            try:
+                meta = await loop.run_in_executor(_EXTRACT_EXECUTOR, _gate, path)
+            except Exception as exc:
+                logger.warning("OCR re-gate failed for %s: %s", path, exc)
+                continue
+            if meta is None:
+                continue  # gate unavailable; leave unmarked so a later run retries
+            await self._maybe_enqueue_ocr(path, {"extract_meta": meta, "sha256": sha})
+            await self.db.execute_write(
+                "UPDATE files SET extract_status = 'ocr_gated' WHERE id = ?", (file_id,)
+            )
+            done += 1
+        return done
+
     async def _flush_pending_chunks_sqlite(self, chunks: list[dict[str, Any]], active_files: dict):
         if not chunks:
             return None
@@ -1365,7 +1791,22 @@ class IndexingService:
                         "end_line": node.get("end_line"),
                     }
                 )
-                kg_nodes_data.append((node["id"], "entity", node["label"], props, chunk_id))
+                # CodeGraphExtractor's contract is {"id", "label", "name", ...}
+                # where `label` is the KIND ("class"/"function") and `name` is
+                # the identifier. The row is (id, type, label, ...), so the kind
+                # belongs in `type` and the name in `label`.
+                #
+                # This used to store a constant "entity" as the type and the
+                # kind as the label, discarding the name altogether - which also
+                # broke edge resolution silently: resolve_pending_graph_edges
+                # matches `kg_nodes.label = substr(target, 10)`, i.e. against the
+                # pending *name*, so with the kind in that column nothing could
+                # ever match and every PENDING:: edge was deleted by its cleanup
+                # step. Only same-file CONTAINS edges survived. Invisible until
+                # now because nothing wrote to these tables at all (8.7 A4).
+                kg_nodes_data.append(
+                    (node["id"], node.get("label", "entity"), node.get("name", ""), props, chunk_id)
+                )
 
             for edge in chunk.get("kg_edges", []):
                 props = json.dumps({"chunk_id": chunk_id})
@@ -1395,11 +1836,12 @@ class IndexingService:
 
     async def _flush_pending_chunks_lancedb(self, l_ids, l_embs, l_metas):
         if l_ids:
+            # No gc.collect() here: it ran a full collection on the event loop
+            # after every commit window (~100-190 ms of stalled queries and SSE
+            # on a large heap) and holds the GIL, so a worker thread does not
+            # help. Peak working set with and without it was identical on a
+            # 1500-file ingest (339.4 vs 340.3 MB, portable mode).
             await self.lancedb_client.add_documents(l_ids, l_embs, l_metas)
-
-            import gc
-
-            gc.collect()
 
     async def _delete_existing_chunks(self, file_id: int) -> None:
         old_ids = [str(cid) for cid in await self.db.get_file_chunk_ids(file_id)]
@@ -1477,8 +1919,20 @@ class IndexingService:
             logger.info("OCR produced no indexable text for %s", path.name)
             return 0
 
+        # The chunker above starts at offset 0, which collides with the file's
+        # native chunks: attach_parent_windows and the context deduper both key
+        # on (file_id, offset), so an OCR hit was stitched from - or dropped
+        # as a duplicate of - native text. Shift past everything native.
+        base_rows = await self.db.execute_query(
+            "SELECT COALESCE(MAX(end_offset), 0) FROM chunks "
+            "WHERE file_id = ? AND COALESCE(source, '') != 'ocr'",
+            (file_id,),
+        )
+        base = int(base_rows[0][0]) if base_rows else 0
         for chunk in raw_chunks:
             chunk["source"] = "ocr"
+            chunk["start_offset"] += base
+            chunk["end_offset"] += base
 
         items = [
             {"type": "chunk", "path": path, "chunk": chunk, "file_id": file_id}
@@ -1552,9 +2006,9 @@ class IndexingService:
             await self._flush_pending_chunks_lancedb(l_ids, l_embs, l_metas)
 
         try:
-            from app.search.retrieval import clear_retrieval_cache
+            from app.search.retrieval import clear_all_query_caches
 
-            clear_retrieval_cache()
+            await clear_all_query_caches(self.lancedb_client)
         except Exception as exc:
             logger.debug("Could not clear retrieval cache after OCR: %s", exc)
 
@@ -1649,6 +2103,13 @@ class IndexingService:
                 }
                 for p, e in zip(profiles, embs, strict=False)
             ]
+            # Replace rather than append: this runs on every index run, no-op
+            # ones included, and appended duplicates fill the top-k=2 profile
+            # leg with copies of one folder.
+            try:
+                await self.lancedb_client.delete_summaries_by_ids([s["doc_id"] for s in summaries])
+            except Exception as e:
+                logger.warning("Could not clear stale folder profiles: %s", e)
             await self.lancedb_client.add_summaries_batch(summaries)
 
     def _extract_text_monolithic(self, path: Path) -> str:
@@ -1721,6 +2182,57 @@ class IndexingService:
                     seen_paths.add(abs_p)
                     all_files.append((fp, f.name, str(f)))
         return all_files, "scandir", scan_dur
+
+    async def _remove_vanished_files(
+        self, unique_folders: list[Path], all_files: list[ScannedFile]
+    ) -> int:
+        """Drop indexed files that were deleted or renamed under the scanned roots.
+
+        Without this a re-index only ever added: the old path's rows, chunks, FTS
+        entries and vectors stayed searchable forever (audit A1-04). Conservative
+        by construction, because `D:` is a USB drive that can vanish mid-session
+        and an unplugged root must never wipe its index:
+          - only roots scanned in THIS run, and only if the root is still a
+            directory and the scan found at least one file under it;
+          - a candidate is removed only if it was not scanned AND a direct
+            `os.stat` raises FileNotFoundError/NotADirectoryError (a scanner that
+            skipped a subtree cannot delete anything still on disk, and a
+            PermissionError or other I/O error means "unknown", i.e. keep);
+          - the root is checked to still be a directory AGAIN after the stat
+            fan-out, immediately before removal: a drive that drops mid-run makes
+            every unscanned row read as gone.
+        Returns the number of files removed.
+        """
+        loop = asyncio.get_running_loop()
+        scanned = {str(fp.absolute()) for fp, _, _ in all_files}
+        vanished_by_root: list[tuple[Path, list[int]]] = []
+        for folder in unique_folders:
+            base = folder.absolute()
+            if not await loop.run_in_executor(_DISK_EXECUTOR, base.is_dir):
+                continue
+            if not any(Path(p).is_relative_to(base) for p in scanned):
+                continue
+            rows = await self.db.get_file_paths_under(str(base))
+            todo = [(i, p) for i, p in rows if p not in scanned]
+            ids: list[int] = []
+            for start in range(0, len(todo), 1000):
+                batch = todo[start : start + 1000]
+                gone = await asyncio.gather(
+                    *(loop.run_in_executor(_DISK_EXECUTOR, _path_is_gone, p) for _, p in batch)
+                )
+                ids.extend(i for (i, _), g in zip(batch, gone, strict=True) if g)
+            vanished_by_root.append((base, ids))
+        vanished: list[int] = []
+        for base, ids in vanished_by_root:
+            still_there = bool(ids) and await loop.run_in_executor(_DISK_EXECUTOR, base.is_dir)
+            if still_there:
+                vanished.extend(ids)
+        if not vanished or progress.is_cancelled:
+            return 0
+        progress.set_current_file("Removing deleted files…")
+        result = await self.db.remove_from_index(self.lancedb_client, file_ids=vanished)
+        logger.info("Removed %d deleted/renamed files from the index.", result["files_removed"])
+        return int(result["files_removed"])
 
     async def _detect_changes(
         self, all_files: list[ScannedFile], reader_conn: aiosqlite.Connection
@@ -1797,10 +2309,32 @@ class IndexingService:
         ext = Path(file_path).suffix.lower() if file_path else ""
         if RUST_CORE_AVAILABLE and ext in (".txt", ".md", ".markdown", ".log"):
             try:
-                # Offload to create_chunks PyO3 binding
-                chunks = rust_core.create_chunks(
-                    text, self.chunk_size, self.chunk_overlap, prefix, 0
-                )
+                # NOT REACHED IN PRODUCTION - tests only. Both branches below
+                # need this function to be called with a .md/.txt/.log path, and
+                # the only production caller is the buffering branch of
+                # `_extract_and_chunk`, which is gated on
+                # `_WHOLE_TEXT_EXTENSIONS = _CODE_EXTENSIONS`. Prose streams
+                # through StreamChunker instead and never arrives here.
+                #
+                # Kept rather than deleted because `chunk_markdown` is exercised
+                # by tests/test_chunker.py and is the thing A3 would re-route if
+                # a corpus is ever found where section boundaries carry more
+                # signal than they do here - it was measured worse twice
+                # (CLAUDE.md 8.7b) and is open by choice, not by oversight.
+                #
+                # What it does when a test calls it: splits on `^#{1,3}\s`, emits
+                # a whole section as one chunk when it fits, merges adjacent
+                # sections up to the budget, and falls back to the sliding window
+                # for oversized ones. .txt/.log have no section structure to
+                # exploit and take the plain window.
+                if ext in (".md", ".markdown"):
+                    chunks = rust_core.chunk_markdown(
+                        text, self.chunk_size, self.chunk_overlap, prefix
+                    )
+                else:
+                    chunks = rust_core.create_chunks(
+                        text, self.chunk_size, self.chunk_overlap, prefix, 0
+                    )
                 if os.environ.get("PMA_SENTENCE_OFFSETS", "0") == "0":
                     for c in chunks:
                         c["sentence_offsets"] = "[]"
@@ -1824,5 +2358,4 @@ class IndexingService:
 
     @staticmethod
     def _build_context_prefix(file_path: str) -> str:
-        p = Path(file_path)
-        return f"[{p.suffix.lstrip('.').upper() or 'file'}: {p.name}] "
+        return build_context_prefix(file_path)

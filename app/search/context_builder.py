@@ -1,5 +1,9 @@
 import functools
+import hashlib
+import logging
+import os
 import re
+from pathlib import Path
 from typing import Any
 
 from app.config import settings
@@ -9,11 +13,44 @@ try:
 except Exception:  # pragma: no cover - tiktoken is a declared dependency
     tiktoken = None  # type: ignore[assignment]
 
+logger = logging.getLogger(__name__)
+
 # None = not yet resolved, False = resolution failed, otherwise the Encoding.
 # tiktoken is a declared dependency now, so the ImportError branch above should
 # be unreachable - but get_encoding() itself can still fail on a cold cache, and
 # _token_count silently degrades to len(text)//4 when it does.
 _ENCODING: Any = None
+
+
+# tiktoken fetches cl100k_base from openaipublic.blob.core.windows.net on a cold
+# cache (CLAUDE.md 1.4). The file ships in app/assets/tiktoken under tiktoken's
+# cache name (sha1 of the blob URL), so TIKTOKEN_CACHE_DIR makes get_encoding
+# load it offline. The same path resolves inside a PyInstaller bundle, where
+# --add-data "app/assets;app/assets" puts it under _MEIPASS/app/assets.
+_BUNDLED_BPE_DIR = Path(__file__).resolve().parent.parent / "assets" / "tiktoken"
+_BPE_CACHE_KEY = "9b5ad71b2ce5302211f9c61530b329a4922fc6a4"
+_BPE_SHA256 = "223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7"
+
+
+def _point_tiktoken_at_bundled_bpe() -> bool:
+    """True when get_encoding("cl100k_base") will find its file without a fetch.
+
+    A user-set TIKTOKEN_CACHE_DIR that already holds the file wins. Otherwise the
+    bundled copy is used, but only after its sha256 matches: tiktoken deletes a
+    cache file that fails its own check and then goes to the network, so a
+    line-ending-mangled checkout must be refused here, not handed over.
+    """
+    user = os.environ.get("TIKTOKEN_CACHE_DIR")
+    if user and (Path(user) / _BPE_CACHE_KEY).is_file():
+        return True
+    bundled = _BUNDLED_BPE_DIR / _BPE_CACHE_KEY
+    try:
+        ok = hashlib.sha256(bundled.read_bytes()).hexdigest() == _BPE_SHA256
+    except OSError:
+        return False
+    if ok:
+        os.environ["TIKTOKEN_CACHE_DIR"] = str(_BUNDLED_BPE_DIR)
+    return ok
 
 
 def _get_encoding() -> Any:
@@ -23,6 +60,11 @@ def _get_encoding() -> Any:
         return _ENCODING
 
     if tiktoken is None:
+        _ENCODING = False
+        return _ENCODING
+
+    if not _point_tiktoken_at_bundled_bpe():
+        logger.warning("cl100k_base BPE file not available offline; budgeting with len(text)//4")
         _ENCODING = False
         return _ENCODING
 
@@ -269,7 +311,11 @@ def _deduplicate_by_file(
 def _format_snippets(
     deduplicated: list[dict[str, Any]],
     remaining_tokens: int,
+    head_share: float | None = None,
+    source_numbers: dict[int, int] | None = None,
 ) -> list[str]:
+    if head_share is None:
+        head_share = settings.context_snippet_head_share
     context_parts: list[str] = []
     used_tokens = 0
 
@@ -277,15 +323,35 @@ def _format_snippets(
         if used_tokens >= remaining_tokens:
             break
 
-        snippet_id = i + 1
+        # The client numbers its source frames by position in the full retrieved
+        # list, and the prompt tells the model to cite [n]. Numbering the subset
+        # that survived dedup / cutoff / max_chunks by its own position made
+        # "[3]" name a different chunk than frame 3.
+        snippet_id = (source_numbers or {}).get(id(res), i + 1)
         path = res.get("file_path", "Unknown File")
-        text = res.get("text", "")
+        # `parent_text` is the widened window when parent-window expansion ran
+        # (app/search/retrieval.py:attach_parent_windows); `text` is the child
+        # chunk that actually matched. Prefer the window for the model, and note
+        # that everything ABOVE this point - dedup, the relevance cutoff, the
+        # per-file cap - has already run against the child, which is the point
+        # of small-to-big rather than an oversight.
+        text = res.get("parent_text") or res.get("text", "")
 
         remaining_for_snippets = max(remaining_tokens - used_tokens, 0)
         remaining_count = max(len(deduplicated) - i, 1)
         if i < 3:
             # Reserve more budget for top-ranked chunks while still hard-limited.
-            snippet_budget = max(120, int(remaining_for_snippets * 0.34))
+            #
+            # This decay is a HARD CEILING on how much of the budget can ever be
+            # used, and it binds hardest exactly where there is least room. Three
+            # snippets each taking `share` of what remains can reach at most
+            # 1 - (1 - share)^3 of the budget: 71.2% at 0.34. For 3b_local, whose
+            # max_chunks is 3, every snippet is in this branch, so 29% of its
+            # context budget is unreachable by construction - measured 1,796
+            # tokens delivered against a 2,520 budget, predicted 1,789 (8.7f).
+            # Sweeping max_chunks and max_per_file both came back flat because of
+            # this, not because more evidence was unavailable.
+            snippet_budget = max(120, int(remaining_for_snippets * head_share))
         else:
             snippet_budget = max(80, int(remaining_for_snippets / remaining_count))
         snippet_budget = min(snippet_budget, remaining_for_snippets)
@@ -364,14 +430,27 @@ def _add_graph_paths(context_parts: list[str], text: str, max_tokens: int, used_
     return 0
 
 
-def compute_context_budget(model_class: str, history_turns: int) -> int:
-    """Adaptive context budget based on model's effective capacity."""
+def compute_context_budget(
+    model_class: str, history_turns: int, reported_window: int | None = None
+) -> int:
+    """Adaptive context budget based on model's effective capacity.
+
+    ``reported_window`` - the dispatched model's declared context length - only
+    ever lowers the class ceiling, never raises it (CLAUDE.md 8.1/8.4): a
+    custom-named 8k model guessed into 7b_local, or an 8k Groq model under the
+    100k cloud ceiling, would otherwise be handed more than it can hold.
+    """
     EFFECTIVE_CEILINGS = {  # noqa: N806
         "cloud": 100_000,
         "7b_local": 10_000,
-        "3b_local": 4_000,
+        # A setting so it can be swept. The small class is the one that binds:
+        # after the head-share fix it uses 93.5% of its budget (2,357 of 2,520),
+        # so the ceiling, not the allocation, is now what limits it.
+        "3b_local": settings.context_ceiling_small,
     }
     ceiling = EFFECTIVE_CEILINGS.get(model_class, 8000)
+    if reported_window and reported_window > 0:
+        ceiling = min(ceiling, reported_window)
 
     # Fixed costs
     system_prompt = 400
@@ -415,13 +494,15 @@ def build_context(
     if model_class == "3b_local":
         folder_profiles_text = ""
         graph_paths_text = ""
-        max_per_file = 1
+        max_per_file = settings.context_max_per_file_small
         score_multiplier = 0.4
-        max_chunks = 3
+        max_chunks = settings.context_max_chunks_small
+        head_share = settings.context_snippet_head_share_small
     else:
         max_per_file = 2
         score_multiplier = 0.2
         max_chunks = 15
+        head_share = settings.context_snippet_head_share
 
     context_parts: list[str] = []
     used_tokens = 0
@@ -454,7 +535,10 @@ def build_context(
             # Keep only top max_chunks
             deduplicated = deduplicated[:max_chunks]
 
-            snippet_parts = _format_snippets(deduplicated, max(0, max_tokens - used_tokens))
+            source_numbers = {id(r): n for n, r in enumerate(retrieved_results, 1)}
+            snippet_parts = _format_snippets(
+                deduplicated, max(0, max_tokens - used_tokens), head_share, source_numbers
+            )
             context_parts.extend(snippet_parts)
 
     final_context = _compress_text("\n".join(context_parts))

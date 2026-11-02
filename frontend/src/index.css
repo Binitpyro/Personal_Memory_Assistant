@@ -1,121 +1,567 @@
 @import "tailwindcss";
-/* daisyui: configured via vite.config / postcss plugin; keep directive below for Tailwind v4 */
-/* stylelint-disable-next-line at-rule-no-unknown */
-@plugin "daisyui";
 
-/* ── Light Skeuomorphic + Glassmorphism Theme ──────────────────── */
-@theme {
-  --color-primary: #3d15cb; /* Ultrasonic Blue */
-  --color-primary-light: #9984d4; /* Soft Periwinkle */
-  --color-surface: #959f93; /* Ash Grey (Background) */
-  --color-text-primary: #0f172a; /* Deep Slate (Text) */
-  --color-text-secondary: #4a5448; /* Darker Ash for contrast */
-  --color-accent: #8e48ea; /* Purple (X11) */
-  --color-success: #059669;
-  --color-warning: #d97706;
-  --color-error: #dc2626;
-}
+/* ═══════════════════════════════════════════════════════════════════════
+   PMA — Safelight
+   A dark room with one red lamp. Two themes, keeping their storage values
+   so no stored choice needs migrating: `cabinet` is Safelight (dark, the
+   default) and `paper` is Lights on (light).
 
+   Values are the board's (Safelight Design System v2, THEMES). Every ratio
+   below is WCAG 2, computed from these hex values against the opaque ground
+   named (room · sheet · raise). The source of truth for the system is the
+   Safelight Design System artifact; this block is its remap onto --pma-*.
+
+   Rules the tokens encode:
+   - The lamp (--pma-accent / --pma-plate) marks the one live thing. It is
+     never a focus colour, and ink text never sits on it (3.09 / 3.53).
+   - Faults are fog. There is no green and no blue: state is a word beside a
+     square, so success and info fall back to ink2.
+   - Depth is tone. Nothing is rounded; only floating things cast a shadow.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* ── Safelight (dark) — the default ───────────────────────────────────── */
 :root {
-  /* High-Contrast Glass Palette */
-  --panel-bg: rgba(241, 245, 224, 0.90); /* Translucent Beige */
-  --panel-border: rgba(255, 255, 255, 0.9);
-  --glass-blur: 32px;
+  color-scheme: dark;
+
+  --pma-bg:        #0B0A0A;  /* room: the window                         */
+  --pma-surface:   #131211;  /* sheet: panels                            */
+  --pma-raised:    #1B1918;  /* raise: hover, menus, what sits on a panel */
+  --pma-deep:      #0B0A0A;  /* the recess — code blocks sit on the room */
+  --pma-rule:      #2B2826;  /* line: decorative hairline. NOT a control edge */
+  --pma-edge:      #8F8883;  /* control boundary = ink3. 5.67 · 5.36 · 5.02,
+                                WCAG 1.4.11. The board's line2 is 1.73 · 1.64 · 1.53. */
+
+  --pma-text:      #EFEBE7;  /* ink   16.67 · 15.78 · 14.77 */
+  --pma-text-2:    #B8B1AB;  /* ink2   9.34 ·  8.83 ·  8.27 */
+  --pma-text-3:    #8F8883;  /* ink3   5.67 ·  5.36 ·  5.02 */
+
+  --pma-accent:    #F04A30;  /* the lamp, as text  5.39 · 5.10 · 4.78 */
+  --pma-accent-2:  #F04A30;  /* the lamp has no hover shade           */
+  --pma-plate:     #F04A30;  /* the lamp, as a fill                   */
+  --pma-on-plate:  #0B0A0A;  /* onsafe on the lamp 5.39               */
+
+  --pma-success:   #B8B1AB;  /* ink2 — no green in the room           */
+  --pma-warning:   #F2B84B;  /* fog  11.05 · 10.45 · 9.79             */
+  --pma-error:     #F2B84B;  /* fog — faults are fog                  */
+  --pma-danger:    #F2B84B;  /* destructive FILL; room label on it 11.05 */
+  --pma-info:      #B8B1AB;  /* ink2 — no blue in the room            */
+
+  --pma-ring:      #EFEBE7;  /* focus is ink, never the lamp          */
+
+  /* Receipt paper, printed in two inks. Receipts only. */
+  --pma-paper:      #E6E1DA;
+  --pma-paper-ink:  #141210;  /* 14.37 on paper */
+  --pma-paper-red:  #B8321E;  /*  4.60 on paper */
+  --pma-paper-mute: #5A554F;  /*  5.67 on paper */
+
+  /* `0 0 #0000`, not `none`: Tailwind composes shadows into a comma list,
+     where `none` would invalidate the whole declaration, rings included. */
+  --pma-shadow-1: 0 0 #0000;
+  --pma-shadow-2: 0 0 #0000;
+  --pma-shadow-3: 0 16px 40px rgba(0,0,0,.3);  /* shadow-float: menus, toasts */
+  --pma-inset:    0 0 #0000;
 }
 
-/* ── Base ────────────────────────────────────────────────── */
+/* Respect the OS when the user has not chosen. Safelight stays the default. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    color-scheme: light;
+    /* Must stay identical to [data-theme="paper"] below. */
+    --pma-bg:       #F2F0ED;
+    --pma-surface:  #FFFFFF;
+    --pma-raised:   #E9E6E2;
+    --pma-deep:     #F2F0ED;
+    --pma-rule:     #D9D5D0;
+    --pma-edge:     #66615D;
+    --pma-text:     #121110;
+    --pma-text-2:   #45413E;
+    --pma-text-3:   #66615D;
+    --pma-accent:   #C8321C;
+    --pma-accent-2: #C8321C;
+    --pma-plate:    #C8321C;
+    --pma-on-plate: #FFFFFF;
+    --pma-success:  #45413E;
+    --pma-warning:  #8A5A00;
+    --pma-error:    #8A5A00;
+    --pma-danger:   #8A5A00;
+    --pma-info:     #45413E;
+    --pma-ring:     #121110;
+    --pma-paper:      #FFFFFF;
+    --pma-paper-ink:  #121110;
+    --pma-paper-red:  #C8321C;
+    --pma-paper-mute: #5A554F;
+    --pma-shadow-1: 0 0 #0000;
+    --pma-shadow-2: 0 0 #0000;
+    --pma-shadow-3: 0 16px 40px rgba(60,40,20,.14);
+    --pma-inset:    0 0 #0000;
+  }
+}
+
+/* Explicit choice wins in both directions. */
+[data-theme="cabinet"] { color-scheme: dark; }
+
+/* Lights on. Ratios on room · sheet · raise:
+   ink 16.58 · 18.86 · 15.16   ink2 8.88 · 10.10 · 8.12   ink3 5.38 · 6.12 · 4.92
+   lamp 4.70 · 5.35 · 4.30 ← under 4.5 on raise: keep lamp text off raise
+   fog 5.21 · 5.93 · 4.76   onsafe on lamp 5.35   room on fog 5.21
+   paper-ink 18.86, paper-red 5.35, paper-mute 7.38 on paper.
+   Paper on room is 1.14, so a receipt here is bounded by its rules. */
+[data-theme="paper"] {
+  color-scheme: light;
+  --pma-bg:       #F2F0ED;
+  --pma-surface:  #FFFFFF;
+  --pma-raised:   #E9E6E2;
+  --pma-deep:     #F2F0ED;
+  --pma-rule:     #D9D5D0;
+  --pma-edge:     #66615D;
+  --pma-text:     #121110;
+  --pma-text-2:   #45413E;
+  --pma-text-3:   #66615D;
+  --pma-accent:   #C8321C;
+  --pma-accent-2: #C8321C;
+  --pma-plate:    #C8321C;
+  --pma-on-plate: #FFFFFF;
+  --pma-success:  #45413E;
+  --pma-warning:  #8A5A00;
+  --pma-error:    #8A5A00;
+  --pma-danger:   #8A5A00;
+  --pma-info:     #45413E;
+  --pma-ring:     #121110;
+  --pma-paper:      #FFFFFF;
+  --pma-paper-ink:  #121110;
+  --pma-paper-red:  #C8321C;
+  --pma-paper-mute: #5A554F;
+  --pma-shadow-1: 0 0 #0000;
+  --pma-shadow-2: 0 0 #0000;
+  --pma-shadow-3: 0 16px 40px rgba(60,40,20,.14);
+  --pma-inset:    0 0 #0000;
+}
+
+/* ── Tailwind theme ───────────────────────────────────────────────────────
+   `inline` so utilities emit `var(--pma-*)` directly and follow the
+   [data-theme] cascade rather than being frozen at :root.
+   ───────────────────────────────────────────────────────────────────────── */
+@theme inline {
+  /* semantic — what components should use */
+  --color-background:  var(--pma-bg);
+  --color-surface:     var(--pma-surface);
+  --color-raised:      var(--pma-raised);
+  --color-deep:        var(--pma-deep);
+  --color-rule:        var(--pma-rule);
+  --color-edge:        var(--pma-edge);
+
+  --color-text-primary:   var(--pma-text);
+  --color-text-secondary: var(--pma-text-2);
+  --color-text-tertiary:  var(--pma-text-3);
+
+  /* `primary` is ink, not the lamp. ~140 pre-Safelight sites use text-,
+     bg- and border-primary as a generic highlight; mapped to the lamp they lit
+     every page red, and the lamp only means something if it marks one thing.
+     The lamp is spelled explicitly: `accent` as text or line, `plate` as fill. */
+  --color-primary:     var(--pma-text);
+  --color-plate:       var(--pma-plate);     /* the lamp as a FILL */
+  --color-on-plate:    var(--pma-on-plate);
+  --color-accent:      var(--pma-accent);    /* the lamp as text or line */
+  --color-success:     var(--pma-success);
+  --color-warning:     var(--pma-warning);
+  --color-error:       var(--pma-error);
+  --color-info:        var(--pma-info);
+  --color-ring:        var(--pma-ring);
+
+  /* aliases — the 22 names the audit found emitting no CSS at all.
+     Defining them here revives ~58 call sites without touching markup. */
+  --color-danger:               var(--pma-error);
+  --color-danger-fill:          var(--pma-danger);
+  /* The room on fog: 11.05 · 5.21. Ink on a fog fill would be 1.51 in the dark. */
+  --color-on-danger:            var(--pma-bg);
+
+  /* Receipt paper — the Receipt primitive and nothing else. */
+  --color-paper:                var(--pma-paper);
+  --color-paper-ink:            var(--pma-paper-ink);
+  --color-paper-red:            var(--pma-paper-red);
+  --color-paper-mute:           var(--pma-paper-mute);
+  --color-primary-light:        var(--pma-text);
+  --color-primary-dark:         var(--pma-text);
+  --color-primary-h:            var(--pma-text);
+  --color-accent-blue:          var(--pma-info);
+  --color-surface-dark:         var(--pma-surface);
+  --color-surface-lighter:      var(--pma-raised);
+  --color-surface-elevation-2:  var(--pma-raised);
+  --color-surface-elevation-3:  var(--pma-rule);
+  --color-bg-dark:              var(--pma-bg);
+  --color-border:               var(--pma-rule);
+  --color-text-muted:           var(--pma-text-3);
+
+  /* type — vendored via @fontsource, no CDN (fonts.ts). Archivo is the
+     interface and stock face; Newsreader prints answers and quotes only;
+     Geist Mono is the edge face for receipts, paths, scores and status. */
+  --font-sans:    "Archivo Variable", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --font-serif:   "Newsreader Variable", "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  --font-mono:    "Geist Mono Variable", "Cascadia Mono", Consolas, "SF Mono", ui-monospace, monospace;
+  --font-display: var(--font-sans);
+
+  /* radius — nothing inside the window is rounded. Retroactive: every
+     rounded-* utility on the scale lands on 0 with no markup change.
+     `rounded-full` is not on the scale and is left alone. */
+  --radius-xs:  0px;
+  --radius-sm:  0px;
+  --radius-md:  0px;
+  --radius-lg:  0px;
+  --radius-xl:  0px;
+  --radius-2xl: 0px;
+  --radius-3xl: 0px;
+  --radius-4xl: 0px;
+
+  /* elevation — depth is tone; only xl and 2xl (floating things) cast one. */
+  --shadow-2xs: var(--pma-shadow-1);
+  --shadow-xs:  var(--pma-shadow-1);
+  --shadow-sm:  var(--pma-shadow-1);
+  --shadow-md:  var(--pma-shadow-2);
+  --shadow-lg:  var(--pma-shadow-2);
+  --shadow-xl:  var(--pma-shadow-3);
+  --shadow-2xl: var(--pma-shadow-3);
+}
+
+/* ── Base ─────────────────────────────────────────────────────────────── */
 body {
-  @apply bg-surface text-text-primary font-sans antialiased;
   margin: 0;
   min-height: 100vh;
+  background: var(--pma-bg);
+  color: var(--pma-text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
-#root {
-  min-height: 100vh;
+#root { min-height: 100vh; display: flex; }
+
+/* ── The answer ───────────────────────────────────────────────────────────
+   Model output is reading material, so it is set in the serif; the
+   application around it is not.
+
+   This replaces `prose prose-invert prose-sm`, which produced NOTHING:
+   @tailwindcss/typography is not a dependency of this project, so the
+   answer body — the product's primary output — has been rendering
+   completely unstyled. Found by scripts/check-utilities.mjs.
+   ───────────────────────────────────────────────────────────────────────── */
+.prose-answer {
+  font-family: var(--font-serif);
+  font-size: 17.5px;
+  line-height: 1.55;
+  color: var(--pma-text);
+}
+.prose-answer > * + * { margin-top: .85em; }
+.prose-answer p { margin: 0; }
+.prose-answer h1, .prose-answer h2, .prose-answer h3, .prose-answer h4 {
+  font-weight: 600;
+  line-height: 1.3;
+  margin: 1.4em 0 0;
+}
+.prose-answer h1 { font-size: 1.4em; }
+.prose-answer h2 { font-size: 1.22em; }
+.prose-answer h3 { font-size: 1.08em; }
+.prose-answer ul, .prose-answer ol { margin: 0; padding-left: 1.35em; }
+.prose-answer li + li { margin-top: .3em; }
+.prose-answer ul { list-style: disc; }
+.prose-answer ol { list-style: decimal; }
+.prose-answer a { color: var(--pma-accent); text-underline-offset: 3px; }
+.prose-answer strong { font-weight: 600; color: var(--pma-text); }
+.prose-answer em { font-style: italic; }
+.prose-answer blockquote {
+  margin: 0;
+  padding-left: 1em;
+  border-left: 2px solid var(--pma-edge);
+  color: var(--pma-text-2);
+}
+.prose-answer hr { border: 0; border-top: 1px solid var(--pma-rule); margin: 1.4em 0; }
+.prose-answer code {
+  font-family: var(--font-mono);
+  font-size: .86em;
+  padding: .12em .35em;
+  border-radius: var(--radius-xs);
+  background: var(--pma-deep);
+  border: 1px solid var(--pma-rule);
+}
+.prose-answer pre {
+  font-family: var(--font-mono);
+  font-size: .84em;
+  line-height: 1.55;
+  padding: .85em 1em;
+  overflow-x: auto;
+  border-radius: var(--radius-md);
+  background: var(--pma-deep);
+  border: 1px solid var(--pma-rule);
+}
+.prose-answer pre code { padding: 0; background: none; border: 0; font-size: inherit; }
+.prose-answer table { width: 100%; border-collapse: collapse; font-size: .92em; }
+.prose-answer th, .prose-answer td {
+  text-align: left;
+  padding: .45em .7em;
+  border-bottom: 1px solid var(--pma-rule);
+}
+.prose-answer th { font-weight: 600; color: var(--pma-text-2); }
+
+/* ── Focus ────────────────────────────────────────────────────────────────
+   A 2px ink ring, offset 2px, never the lamp: red means the one live thing,
+   so a red ring would say the focused control is it.
+   ───────────────────────────────────────────────────────────────────────── */
+:where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--pma-ring);
+  outline-offset: 2px;
+}
+
+/* ── Safelight type roles ─────────────────────────────────────────────────
+   Stock: Archivo 800 at width 62, in caps — questions, pane titles, figures.
+   Edge: Geist Mono 500 in caps, tracked +12% — receipts, paths, scores,
+   status. Nothing is set below 10px.
+   ───────────────────────────────────────────────────────────────────────── */
+.stock {
+  font-family: var(--font-sans);
+  font-weight: 800;
+  font-stretch: 62%;
+  text-transform: uppercase;
+}
+.edge-type {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+
+/* ── The receipt ──────────────────────────────────────────────────────────
+   The only light object in the dark room, in two inks. The torn foot is a
+   mask, so it tears through whatever ground the receipt sits on.
+   ───────────────────────────────────────────────────────────────────────── */
+.receipt {
   display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 20px 18px 26px;
+  background: var(--pma-paper);
+  color: var(--pma-paper-ink);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  -webkit-mask: linear-gradient(#000 0 0) top / 100% calc(100% - 8px) no-repeat, conic-gradient(from -45deg at bottom, #000 90deg, #0000 0) bottom / 16px 8px repeat-x;
+  mask: linear-gradient(#000 0 0) top / 100% calc(100% - 8px) no-repeat, conic-gradient(from -45deg at bottom, #000 90deg, #0000 0) bottom / 16px 8px repeat-x;
+}
+.receipt__block { display: flex; flex-direction: column; padding-top: 8px; border-top: 1px dashed var(--pma-paper-ink); }
+.receipt__row { display: flex; justify-content: space-between; gap: 8px; }
+.receipt__mute { color: var(--pma-paper-mute); }
+.receipt__total { display: flex; justify-content: space-between; align-items: baseline; padding-top: 8px; border-top: 1px dashed var(--pma-paper-ink); }
+.receipt__total b { font-size: 26px; line-height: 1; }
+
+/* Print: the receipt feeds out top-down in 28 steps, never eased. The
+   reduced-motion block below collapses it to its final frame. */
+.receipt { animation: receipt-print 1400ms steps(28, end) both; }
+@keyframes receipt-print {
+  from { clip-path: inset(0 0 100% 0); }
+  to   { clip-path: inset(0); }
 }
 
-/* ── Tactile Glass Components ────────────────────────────── */
+@media (forced-colors: active) {
+  .receipt { border: 1px solid CanvasText; -webkit-mask: none; mask: none; }
+}
+
+/* ── Case furniture ───────────────────────────────────────────────────────
+   `.glass*` keep their names as a migration bridge — they are used in
+   hundreds of places and Phase 3 replaces them with real primitives.
+   The GLASS IS GONE: opaque material, a real edge, one light direction.
+   No !important anywhere (there were ten; nothing could layer past them).
+   ───────────────────────────────────────────────────────────────────────── */
 .glass {
-  background: var(--panel-bg) !important;
-  backdrop-filter: blur(var(--glass-blur)) saturate(180%);
-  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(180%);
-  border: 1.5px solid var(--panel-border) !important;
-  
-  /* Lift Shadows for High Contrast against Grey Background */
-  box-shadow: 
-    15px 15px 30px rgba(60, 70, 58, 0.3),
-    -10px -10px 25px rgba(255, 255, 255, 0.2),
-    inset 1px 1px 0px rgba(255, 255, 255, 0.8);
+  background: var(--pma-surface);
+  border: 1px solid var(--pma-rule);
 }
 
 .glass-card {
-  @apply glass rounded-[2.5rem] p-8 transition-all duration-500 ease-out;
+  background: var(--pma-surface);
+  border: 1px solid var(--pma-rule);
+  border-radius: var(--radius-xl);
+  padding: 1.5rem;
+  box-shadow: var(--pma-shadow-1);
 }
 
-.glass-card:hover {
-  transform: translateY(-4px);
-  box-shadow: 
-    20px 20px 40px rgba(60, 70, 58, 0.35),
-    -12px -12px 30px rgba(255, 255, 255, 0.25);
-}
+/* The 4px/500ms lift is gone: it was applied to cards that are not
+   clickable, which is a false affordance. Interactive cards opt in. */
+.glass-card--interactive { transition: border-color 200ms ease, box-shadow 200ms ease; }
+.glass-card--interactive:hover { border-color: var(--pma-edge); box-shadow: var(--pma-shadow-2); }
 
+/* A control, so it uses --edge (3:1) and not --rule. */
 .glass-button {
-  @apply rounded-xl px-6 py-3 font-bold text-primary transition-all duration-200 active:scale-95 flex items-center justify-center gap-2;
-  background: rgba(255, 255, 255, 0.8) !important;
-  border: 1px solid rgba(255, 255, 255, 1) !important;
-  box-shadow: 
-    4px 4px 10px rgba(60, 70, 58, 0.15),
-    -2px -2px 6px rgba(255, 255, 255, 0.8);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: .5rem;
+  padding: .625rem 1.125rem;
+  border-radius: var(--radius-md);
+  font-weight: 500;
+  color: var(--pma-text);
+  background: var(--pma-surface);
+  border: 1px solid var(--pma-edge);
+  transition: background-color 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
 }
-
-.glass-button:hover {
-  @apply text-accent;
-  background: rgba(255, 255, 255, 1) !important;
-  box-shadow: 
-    6px 6px 14px rgba(60, 70, 58, 0.2),
-    -3px -3px 8px rgba(255, 255, 255, 0.9);
+.glass-button:hover { background: var(--pma-raised); box-shadow: var(--pma-shadow-1); }
+.glass-button:active { box-shadow: inset 0 1px 3px rgba(0,0,0,.35); transform: translateY(1px); }
+.glass-button:disabled,
+.glass-button[disabled] {
+  color: var(--pma-text-3);
+  border-color: var(--pma-rule);
+  background: var(--pma-surface);
+  box-shadow: none;
+  transform: none;
+  cursor: not-allowed;
 }
 
 .glass-input {
-  @apply w-full bg-white/70 border border-white/90 rounded-2xl px-6 py-4 text-text-primary placeholder-slate-500 focus:outline-none transition-all duration-300;
-  box-shadow: 
-    inset 4px 4px 8px rgba(60, 70, 58, 0.05),
-    inset -4px -4px 8px rgba(255, 255, 255, 0.5);
+  width: 100%;
+  padding: .75rem 1rem;
+  border-radius: var(--radius-md);
+  color: var(--pma-text);
+  background: var(--pma-bg);
+  border: 1px solid var(--pma-edge);
+  transition: border-color 120ms ease;
 }
+.glass-input::placeholder { color: var(--pma-text-3); }
+.glass-input:focus { outline: 2px solid var(--pma-ring); outline-offset: 2px; border-color: var(--pma-text); }
+.glass-input:disabled { color: var(--pma-text-3); border-color: var(--pma-rule); cursor: not-allowed; }
 
-.glass-input:focus {
-  @apply border-primary ring-4 ring-primary/10;
-  background: rgba(255, 255, 255, 0.9);
-}
-
-/* ── App Layout ──────────────────────────────────────────── */
+/* The rail is part of the case, so it takes the case tone, not the well's. */
 aside.glass {
-  @apply rounded-r-3xl my-4 ml-0 border-l-0;
-  height: calc(100vh - 2rem);
-  background: var(--panel-bg) !important; /* Sidebar matches Beige panels */
+  background: var(--pma-raised);
+  border: 0;
+  border-right: 1px solid var(--pma-rule);
+  border-radius: 0;
+  height: 100vh;
 }
 
-/* ── Status Colors Overrides (Ensure readability) ────────── */
-.text-success { color: #059669 !important; }
-.text-warning { color: #d97706 !important; }
-.text-error { color: #dc2626 !important; }
-.text-primary { color: #3d15cb !important; }
+/* The inset well — content is cut INTO the case, not floated on it.
+   This is the inversion that stops the app reading as a generic dark UI. */
+.well { background: var(--pma-bg); box-shadow: var(--pma-inset); }
 
-/* ── Utility ─────────────────────────────────────────────── */
-.custom-scrollbar::-webkit-scrollbar { width: 8px; }
-.custom-scrollbar::-webkit-scrollbar-thumb {
-  background: rgba(60, 70, 58, 0.15);
-  border-radius: 20px;
-}
+/* ── Utility ──────────────────────────────────────────────────────────── */
+.custom-scrollbar::-webkit-scrollbar { width: 8px; height: 8px; }
+.custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+.custom-scrollbar::-webkit-scrollbar-thumb { background: var(--pma-rule); border-radius: var(--radius-sm); }
+.custom-scrollbar::-webkit-scrollbar-thumb:hover { background: var(--pma-edge); }
 
 @keyframes fade-in-up {
-  from { opacity: 0; transform: translateY(20px); }
-  to { opacity: 1; transform: translateY(0); }
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+
+@keyframes fade-in-right { from { opacity: 0; transform: translateX(10px); } to { opacity: 1; transform: none; } }
+
+.animate-fade-in-up    { animation: fade-in-up 200ms ease-out both; }
+/* Each of these was used in the app and defined nowhere. */
+.animate-fade-in       { animation: fade-in 200ms ease-out both; }      /* 4 uses */
+.animate-fade-in-right { animation: fade-in-right 200ms ease-out both; } /* 2 uses, SetupPage */
+
+/* `animate-in` + its modifiers are tailwindcss-animate syntax, and that
+   package is not installed. This is the subset the app actually uses. */
+.animate-in {
+  --enter-opacity: 1;
+  --enter-scale: 1;
+  --enter-translate-y: 0;
+  animation: enter 200ms ease-out both;
+}
+.fade-in             { --enter-opacity: 0; }
+.zoom-in             { --enter-scale: .96; }
+.slide-in-from-top-2 { --enter-translate-y: -.5rem; }
+@keyframes enter {
+  from { opacity: var(--enter-opacity); transform: translateY(var(--enter-translate-y)) scale(var(--enter-scale)); }
+  to   { opacity: 1; transform: none; }
 }
 
-.animate-fade-in-up {
-  animation: fade-in-up 0.5s ease-out both;
+/* Used on the treemap's horizontal control strip; never defined. */
+.no-scrollbar { scrollbar-width: none; -ms-overflow-style: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; }
+
+/* ProvidersPage picks a dot SHAPE per provider kind. The triangle case
+   asked for `clip-triangle`, which did not exist — so every "triangle"
+   provider has been rendering as a square. */
+.clip-triangle { clip-path: polygon(50% 0%, 100% 100%, 0% 100%); }
+
+/* ── Tap targets ──────────────────────────────────────────────────────────
+   WCAG 2.2 SC 2.5.8 wants 24x24 CSS px. This grows the HIT AREA only: the
+   pseudo-element is transparent and centred, so a dense row (the provider
+   reorder arrows, the Explorer delete) does not reflow when a 22x22 control
+   becomes compliant.
+
+   One rule covers both shapes — `max(100%, 24px)` grows a small icon button
+   on both axes while leaving a wide, short text button's width alone and
+   lifting only its height.
+
+   It does NOT work under `overflow: hidden`, which clips hit-testing as well
+   as paint. ThemeToggle's wrapper is exactly that, so those buttons are sized
+   for real instead (ui/Feedback.tsx).
+   ───────────────────────────────────────────────────────────────────────── */
+.tap-24 { position: relative; }
+.tap-24::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: max(100%, 24px);
+  height: max(100%, 24px);
+  transform: translate(-50%, -50%);
 }
 
-/* CACHE BUST HASH: 0.0.41 */
+/* ── Native <dialog> ──────────────────────────────────────────────────────
+   The model picker uses showModal(), so the platform supplies the focus trap,
+   Escape and the inert background that a fixed overlay div had to hand-roll.
+   The dim is ::backdrop, which no utility class can reach — it is a
+   pseudo-element on the top layer, not a child of the dialog.
+   ───────────────────────────────────────────────────────────────────────── */
+dialog::backdrop {
+  background: rgba(0, 0, 0, .6);
+  backdrop-filter: blur(4px);
+}
+
+/* The UA stylesheet sets `display: block` on an open dialog, which would beat
+   a `flex` utility on the same element. The flex column lives on the inner
+   wrapper instead; this only restores the centring margins the reset drops. */
+dialog[open] { margin: auto; }
+
+/* ── Reduced motion ───────────────────────────────────────────────────────
+   There were zero `prefers-reduced-motion` rules in the entire frontend.
+   ───────────────────────────────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ── No font pop-in ───────────────────────────────────────────────────────
+   @fontsource ships `font-display: swap`, so serif text would render in the
+   fallback and then visibly re-flow to Newsreader. `fonts.ts` adds
+   `fonts-ready` once the faces resolve — or after 800ms, so a face that never
+   decodes cannot leave text hidden.
+
+   `visibility` rather than `display`: the box is still laid out, so nothing
+   moves when the real face arrives.
+   ───────────────────────────────────────────────────────────────────────── */
+html:not(.fonts-ready) .font-serif,
+html:not(.fonts-ready) .prose-answer,
+html:not(.fonts-ready) h1,
+html:not(.fonts-ready) h2 {
+  visibility: hidden;
+}
+html.fonts-ready .font-serif,
+html.fonts-ready .prose-answer,
+html.fonts-ready h1,
+html.fonts-ready h2 {
+  visibility: visible;
+  animation: fade-in 140ms ease-out both;
+}
+@media (prefers-reduced-motion: reduce) {
+  html.fonts-ready .font-serif,
+  html.fonts-ready .prose-answer,
+  html.fonts-ready h1,
+  html.fonts-ready h2 { animation: none; }
+}

@@ -4,11 +4,13 @@ One test per numbered item in the hardening plan. Each asserts the behaviour the
 fix exists to produce, not that the code was edited.
 """
 
+import asyncio
 import json
 import zlib
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
+import aiosqlite
 import pytest
 
 from app.search import agentic, retrieval
@@ -236,6 +238,79 @@ async def test_get_chunk_ids_for_paths_is_bounded_and_ordered(real_db):
     assert await real_db.get_chunk_ids_for_paths([], per_file_limit=3) == {}
 
 
+@pytest.mark.asyncio
+async def test_get_chunk_ids_for_paths_caps_rows_in_sql(real_db, monkeypatch):
+    """The per-file cap must hold in the query, not after it.
+
+    Truncating in Python after fetchall() read every chunk id of every routed
+    file, so the cost followed document length: 39.7 ms for 15 files of 5,000
+    chunks against 0.41 ms with the LIMIT in SQL (perf sweep 2026-09-30).
+    """
+    _, chunks = await _seed_file_with_chunks(
+        real_db, "big.md", "notes", [f"part {i}" for i in range(50)]
+    )
+    fetched: list[int] = []
+    original_fetchall = aiosqlite.Cursor.fetchall
+
+    async def counting_fetchall(self):
+        rows = await original_fetchall(self)
+        fetched.append(len(rows))
+        return rows
+
+    monkeypatch.setattr(aiosqlite.Cursor, "fetchall", counting_fetchall)
+
+    by_path = await real_db.get_chunk_ids_for_paths(["big.md"], per_file_limit=3)
+
+    assert by_path["big.md"] == chunks[:3]
+    assert fetched == [3], f"read {fetched} rows to keep 3 - the cap is not in the SQL"
+
+
+@pytest.mark.asyncio
+async def test_fts_leg_overlaps_the_vector_legs_with_a_supplied_embedding(monkeypatch):
+    """With a pre-computed embedding - always the case in production, since
+    _gather_full_rag_inputs passes one - FTS was awaited before the semantic and
+    summary legs were created, so the latencies added instead of overlapping.
+    Measured 2026-09-30 on SciFact: -10.9 ms median per query, results
+    identical 900/900.
+
+    The FTS stub blocks until the semantic stub has started, so a serial
+    implementation times out here.
+    """
+    retrieval.clear_retrieval_cache()
+    semantic_started = asyncio.Event()
+    overlapped: list[bool] = []
+
+    async def fts(*_a, **_kw):
+        try:
+            await asyncio.wait_for(semantic_started.wait(), timeout=1.0)
+            overlapped.append(True)
+        except TimeoutError:
+            overlapped.append(False)
+        return []
+
+    async def semantic(*_a, **_kw):
+        semantic_started.set()
+        return []
+
+    monkeypatch.setattr(retrieval, "_fts_search", fts)
+    monkeypatch.setattr(retrieval, "_semantic_search_with_emb", semantic)
+    monkeypatch.setattr(retrieval, "_summary_search_with_emb", AsyncMock(return_value=[]))
+    monkeypatch.setattr(retrieval, "_expand_summary_paths_to_chunks", AsyncMock(return_value=[]))
+
+    out = await retrieval.hybrid_retrieve(
+        query="overlap probe",
+        db=MagicMock(),
+        embedding_service=MagicMock(),
+        lancedb_client=MagicMock(),
+        k=5,
+        use_reranker=False,
+        query_emb=[0.0] * 8,
+    )
+
+    assert out == []
+    assert overlapped == [True], "FTS finished before the semantic leg was started"
+
+
 # ── 1.3a Indexing writes per-file summaries to the routing index ────────────
 
 
@@ -299,7 +374,7 @@ class _FakeLance:
 @pytest.mark.asyncio
 async def test_reindex_rebuilds_file_summaries_and_folder_profiles(real_db):
     """clear_all() drops pma_summaries; the re-embed loop only refills pma_chunks."""
-    from scripts.reindex_embeddings import _rebuild_summaries
+    from app.indexing.reembed import _rebuild_summaries
 
     await _seed_file_with_chunks(real_db, "doc_a.md", "notes", ["body a " * 20])
     await _seed_file_with_chunks(real_db, "doc_b.md", "code", ["body b " * 20])
@@ -328,7 +403,7 @@ async def test_reindex_rebuilds_file_summaries_and_folder_profiles(real_db):
 @pytest.mark.asyncio
 async def test_reindex_hard_fails_on_an_empty_summary_table(real_db):
     """A silent-empty summary table is the exact failure being fixed."""
-    from scripts.reindex_embeddings import _rebuild_summaries
+    from app.indexing.reembed import _rebuild_summaries
 
     await _seed_file_with_chunks(real_db, "doc.md", "notes", ["body " * 20])
 
@@ -336,15 +411,18 @@ async def test_reindex_hard_fails_on_an_empty_summary_table(real_db):
     emb.embed_texts = AsyncMock(side_effect=lambda texts: [[0.1] for _ in texts])
     lance = _FakeLance(rows_after=0)  # writes silently went nowhere
 
-    with pytest.raises(SystemExit) as exc:
-        await _rebuild_summaries(real_db, emb, lance, batch_size=100)
+    # Raises rather than sys.exit()ing now that this is library code with an
+    # API caller as well as a CLI one. scripts/reindex_embeddings.py catches
+    # ReembedError and still exits 1, so the command-line behaviour is unchanged.
+    from app.indexing.reembed import ReembedError
 
-    assert exc.value.code == 1
+    with pytest.raises(ReembedError, match="document-routing signal"):
+        await _rebuild_summaries(real_db, emb, lance, batch_size=100)
 
 
 @pytest.mark.asyncio
 async def test_reindex_skips_error_summaries(real_db):
-    from scripts.reindex_embeddings import _rebuild_summaries
+    from app.indexing.reembed import _rebuild_summaries
 
     await _seed_file_with_chunks(real_db, "ok.md", "notes", ["body " * 20])
     conn = real_db._get_conn()
@@ -841,6 +919,48 @@ async def test_per_subquery_k_is_derived_from_budget(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("n", [1, 2, 3])
+async def test_small_model_budget_still_retrieves(monkeypatch, n):
+    """At 3b_local's 2,520 tokens, 1-3 sub-questions at k=15 used to declare
+    2,520-2,700 and stop with budget_exhausted before any retrieval (M5:
+    71 of 592 queries could start). k must be capped by the remaining budget."""
+    monkeypatch.setattr(agentic.settings, "agentic_max_iterations", 1)
+    dispatched: list[int] = []
+
+    async def retrieve(text, k):
+        dispatched.append(k)
+        return [_chunk(f"c-{text}")]
+
+    llm = MagicMock()
+    llm.generate_raw = AsyncMock(return_value=json.dumps([{"question": f"q{i}"} for i in range(n)]))
+
+    state = await agentic.run_agentic_loop(
+        "q", retrieve=retrieve, llm_client=llm, k=15, tokens_ceiling=2520
+    )
+
+    assert state.stop_reason != "budget_exhausted"
+    assert len(dispatched) == n
+
+
+@pytest.mark.asyncio
+async def test_agentic_loop_that_never_retrieves_falls_back_to_single_pass(monkeypatch):
+    """[] from a loop stopped before its first round must not replace single-pass
+    retrieval with an empty context; (None, None) makes the caller fall through."""
+    from app.search import context_builder
+
+    monkeypatch.setattr(retrieval.settings, "agentic_enabled", True)
+    monkeypatch.setattr(context_builder, "compute_context_budget", lambda *_: 1)
+    plan = MagicMock(mode=PlanMode.FULL_RAG)
+    llm = MagicMock()
+    llm.generate_raw = AsyncMock(return_value='[{"question": "q1"}]')
+
+    got, trace = await retrieval._maybe_run_agentic_loop(
+        "q", plan, MagicMock(), MagicMock(), MagicMock(), llm, 10, None, None, None
+    )
+    assert got is None and trace is None
+
+
+@pytest.mark.asyncio
 async def test_decomposition_falls_back_to_the_original_query():
     """Local models wrap or mangle JSON; that must degrade, not disable retrieval."""
     llm = MagicMock()
@@ -978,3 +1098,200 @@ async def test_nodes_whose_chunk_id_lives_only_in_json_are_backfilled(tmp_path: 
     assert rows["orphaned_col"] == 7, "a recoverable node was left unreachable"
     assert rows["dangling"] is None, "a node pointing at a deleted chunk must stay NULL"
     assert 7 in seeds, "the back-filled node is still not reachable as a graph seed"
+
+
+# ── M7: recency questions see the newest / largest files ─────────────────────
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("intents", "expected"),
+    [
+        ({"inventory": True, "project": False, "latest": True}, "latest.md"),
+        ({"inventory": True, "project": False, "largest": True}, "largest.md"),
+        ({"inventory": False, "project": False}, None),
+    ],
+)
+async def test_full_rag_passes_recency_file_list_to_context(monkeypatch, intents, expected):
+    """_get_metadata_insights was never called, so "what did I add most recently?"
+    reached the LLM with totals and no file names."""
+    results = [{"chunk_id": 1, "text": "t", "file_path": "d.md", "score": 0.9}]
+    monkeypatch.setattr(
+        retrieval, "_gather_full_rag_inputs", AsyncMock(return_value=(results, None, ""))
+    )
+    monkeypatch.setattr(retrieval, "_check_rag_response_cache", lambda *a, **k: None)
+    monkeypatch.setattr(
+        retrieval, "_check_semantic_query_cache", AsyncMock(return_value=(None, None))
+    )
+    monkeypatch.setattr(retrieval, "_load_query_metadata", AsyncMock(return_value=([], None)))
+    seen: dict = {}
+
+    def fake_build_context(*a, **k):
+        seen.update(k)
+        return "ctx", 10
+
+    monkeypatch.setattr(retrieval, "build_context", fake_build_context)
+
+    db = MagicMock()
+
+    def fake_query(sql, *a):
+        if "ORDER BY modified_at" in sql:
+            return [("C:/n/latest.md", "2026-10-13T09:00:00")]
+        if "ORDER BY size" in sql:
+            return [("C:/n/largest.md", 3 * 1024 * 1024)]
+        return []  # attach_parent_windows: no neighbours
+
+    db.execute_query = AsyncMock(side_effect=fake_query)
+    planner = MagicMock()
+    planner.plan.return_value = MagicMock(
+        mode=PlanMode.FULL_RAG, intents=intents, original_query="q", keywords=[]
+    )
+    llm = MagicMock()
+    llm.get_model_class.return_value = "3b_local"
+    llm.generate_answer = AsyncMock(return_value="answer")
+
+    await retrieval.full_rag("q", db, MagicMock(), MagicMock(), llm, planner)
+
+    insights = seen["metadata_insights"]
+    if expected is None:
+        assert insights is None
+    else:
+        assert expected in insights
+
+
+class _ContextBuiltError(Exception):
+    pass
+
+
+@pytest.mark.asyncio
+async def test_stream_rag_passes_recency_file_list_to_context(monkeypatch):
+    """Same wiring on the streaming path, which has its own build_context call."""
+    results = [{"chunk_id": 1, "text": "t", "file_path": "d.md", "score": 0.9}]
+    monkeypatch.setattr(
+        retrieval, "_gather_full_rag_inputs", AsyncMock(return_value=(results, None, ""))
+    )
+    monkeypatch.setattr(retrieval, "_maybe_run_agentic_loop", AsyncMock(return_value=(None, None)))
+    monkeypatch.setattr(retrieval, "_load_query_metadata", AsyncMock(return_value=([], None)))
+    monkeypatch.setattr(retrieval, "_extract_knowledge_gaps", AsyncMock(return_value=[]))
+    seen: dict = {}
+
+    def fake_build_context(*a, **k):
+        seen.update(k)
+        raise _ContextBuiltError
+
+    monkeypatch.setattr(retrieval, "build_context", fake_build_context)
+
+    def fake_query(sql, *a):
+        if "ORDER BY modified_at" in sql:
+            return [("C:/n/latest.md", "2026-10-13T09:00:00")]
+        return []
+
+    db = MagicMock()
+    db.execute_query = AsyncMock(side_effect=fake_query)
+    emb = MagicMock()
+    emb.embed_query = AsyncMock(return_value=[0.1] * 384)
+    lance = MagicMock()
+    lance.search_cache = AsyncMock(return_value=None)
+    planner = MagicMock()
+    planner.plan.return_value = MagicMock(
+        mode=PlanMode.FULL_RAG,
+        intents={"inventory": True, "project": False, "latest": True},
+        original_query="q",
+        keywords=[],
+    )
+    llm = MagicMock()
+    llm.get_model_class.return_value = "3b_local"
+
+    with pytest.raises(_ContextBuiltError):
+        async for _ in retrieval.stream_rag("q", db, emb, lance, llm, planner):
+            pass
+
+    assert "latest.md" in seen["metadata_insights"]
+
+
+def test_reported_window_only_lowers_the_class_ceiling():
+    from app.search.context_builder import compute_context_budget
+
+    assert compute_context_budget("7b_local", 0, 4096) == 4096 - 400 - 1000 - 80
+    assert compute_context_budget("7b_local", 0, 131_072) == compute_context_budget("7b_local", 0)
+    assert compute_context_budget("cloud", 0, 8192) < compute_context_budget("cloud", 0)
+
+
+def _budget_rag_mocks(monkeypatch, window):
+    results = [{"chunk_id": 1, "text": "t", "file_path": "d.md", "score": 0.9}]
+    monkeypatch.setattr(
+        retrieval, "_gather_full_rag_inputs", AsyncMock(return_value=(results, None, ""))
+    )
+    monkeypatch.setattr(retrieval, "_maybe_run_agentic_loop", AsyncMock(return_value=(None, None)))
+    monkeypatch.setattr(retrieval, "_check_rag_response_cache", lambda *a, **k: None)
+    monkeypatch.setattr(
+        retrieval, "_check_semantic_query_cache", AsyncMock(return_value=(None, None))
+    )
+    monkeypatch.setattr(retrieval, "_load_query_metadata", AsyncMock(return_value=([], None)))
+    monkeypatch.setattr(retrieval, "_extract_knowledge_gaps", AsyncMock(return_value=[]))
+    seen: dict = {}
+
+    def fake_build_context(*a, **k):
+        seen.update(k)
+        raise _ContextBuiltError
+
+    monkeypatch.setattr(retrieval, "build_context", fake_build_context)
+    db = MagicMock()
+    db.execute_query = AsyncMock(return_value=[])
+    planner = MagicMock()
+    planner.plan.return_value = MagicMock(
+        mode=PlanMode.FULL_RAG, intents={}, original_query="q", keywords=[]
+    )
+    llm = MagicMock()
+    llm.get_model_class.return_value = "7b_local"
+    llm.get_context_window = AsyncMock(return_value=window)
+    return db, planner, llm, seen
+
+
+@pytest.mark.asyncio
+async def test_full_rag_budget_is_capped_by_the_reported_window(monkeypatch):
+    """A custom-named 4k model lands in 7b_local by name; its 8,520 budget overflowed it."""
+    db, planner, llm, seen = _budget_rag_mocks(monkeypatch, 4096)
+    with pytest.raises(_ContextBuiltError):
+        await retrieval.full_rag("q", db, MagicMock(), MagicMock(), llm, planner)
+    assert seen["max_tokens"] == 4096 - 400 - 1000 - 80
+
+
+@pytest.mark.asyncio
+async def test_stream_rag_budget_uses_the_overridden_models_window(monkeypatch):
+    db, planner, llm, seen = _budget_rag_mocks(monkeypatch, 4096)
+    emb = MagicMock()
+    emb.embed_query = AsyncMock(return_value=[0.1] * 384)
+    lance = MagicMock()
+    lance.search_cache = AsyncMock(return_value=None)
+    with pytest.raises(_ContextBuiltError):
+        async for _ in retrieval.stream_rag(
+            "q", db, emb, lance, llm, planner, override_provider="ollama", override_model="tiny"
+        ):
+            pass
+    assert seen["max_tokens"] == 4096 - 400 - 1000 - 80
+    llm.get_context_window.assert_awaited_once_with("ollama", "tiny")
+
+
+@pytest.mark.asyncio
+async def test_get_context_window_reads_the_dispatched_models_heap_entry(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.providers.cache import validation_cache
+    from app.search.llm_client import LLMClient
+
+    prov = SimpleNamespace(
+        spec=SimpleNamespace(id="ollama"), default_model="tiny", close=AsyncMock()
+    )
+    client = LLMClient()
+    monkeypatch.setattr(client, "_resolve", AsyncMock(return_value=prov))
+    heap = [
+        {"id": "big:latest", "context_length": 131072},
+        {"id": "tiny:latest", "context_length": 4096},
+    ]
+    monkeypatch.setattr(validation_cache, "get_persistent_models", lambda pid: heap)
+
+    assert await client.get_context_window() == 4096
+    prov.close.assert_awaited()
+    prov.default_model = "unlisted"
+    assert await client.get_context_window() is None

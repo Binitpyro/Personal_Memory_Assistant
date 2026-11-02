@@ -1,8 +1,8 @@
-import { Rocket, Zap, Shield, Star, X, Loader2 } from 'lucide-react';
 import { useState } from 'react';
-import { setProviderSettings, setLLMPreferences, getLLMPreferences } from '../api';
+import { setProviderSettings, setLLMPreferences, getLLMPreferences, setProviderDefaultModel, validateProvider } from '../api';
 import { invalidateCache } from '../useApi';
 import { CACHE_KEYS } from '../cacheKeys'
+import { Panel } from '../components/ui';
 
 export function ProviderRecipes({
   onRecipeApplied,
@@ -14,27 +14,59 @@ export function ProviderRecipes({
   );
   const [applying, setApplying] = useState<string | null>(null);
   const [applyError, setApplyError] = useState<string | null>(null);
+  // Installed chat models offered by "Free & Local"; null until it is clicked.
+  const [localModels, setLocalModels] = useState<string[] | null>(null);
+  const [localChoice, setLocalChoice] = useState('');
 
   if (isDismissed) return null;
 
-  const handleApply = async (id: string, fallback: string[], defaultModel: { provider: string; model: string }) => {
+  const handleApply = async (
+    id: string,
+    fallback: string[],
+    defaultModel: { provider: string; model: string | null },
+    chosen?: string,
+  ) => {
     setApplying(id);
     setApplyError(null);
     try {
+      const currentPrefs = await getLLMPreferences();
+      // A null model means "whatever is installed": the first click lists it and
+      // writes nothing, so the user picks before settings change.
+      const model = defaultModel.model ?? chosen ?? null;
+      if (model === null) {
+        // family === 'chat' comes from the provider's reported capabilities, not
+        // the name. Preselect the user's saved pick if it is still installed.
+        const installed = await validateProvider(defaultModel.provider, {})
+          .then(r => (r.ok ? r.models : []))
+          .catch(() => [])
+          .then(ms => ms.filter(m => m.family === 'chat').map(m => m.id));
+        if (installed.length === 0) {
+          setLocalModels(null);
+          throw new Error('No local models found. Install one in Ollama or LM Studio, then try again.');
+        }
+        const saved = currentPrefs[`${defaultModel.provider}_model`];
+        setLocalChoice(installed.includes(saved) ? saved : installed[0]);
+        setLocalModels(installed);
+        return;
+      }
+
       // 1. Update routing fallback chain
       await setProviderSettings({ provider: defaultModel.provider, fallback_chain: fallback });
-      
-      // Fetch latest prefs
-      const currentPrefs = await getLLMPreferences();
+
       // 2. Set default model
       await setLLMPreferences({
         ...currentPrefs,
         provider: defaultModel.provider as any,
-        [`${defaultModel.provider}_model`]: defaultModel.model,
+        [`${defaultModel.provider}_model`]: model,
       });
+      // Dispatch reads per_provider.default_model before the legacy key, so a
+      // model saved on the Providers page silently beat the recipe's pick.
+      await setProviderDefaultModel(defaultModel.provider, model);
 
       invalidateCache(CACHE_KEYS.providerSettings);
       invalidateCache(CACHE_KEYS.llmPreferences);
+      invalidateCache(CACHE_KEYS.currentProvider);
+      setLocalModels(null);
       onRecipeApplied();
     } catch (e: any) {
       setApplyError(e.message || 'Failed to apply recipe');
@@ -48,84 +80,118 @@ export function ProviderRecipes({
     localStorage.setItem('pma_recipes_dismissed', 'true');
   };
 
+  /**
+   * Three options told apart by their words. The per-recipe icon and tone went
+   * with Safelight: it has no icon set, success and info are both ink2, and
+   * "Maximum Quality" in fog would have read as a fault.
+   */
   const recipes = [
     {
       id: 'local',
       title: 'Free & Local',
       desc: '100% private. Runs entirely on your machine.',
-      icon: Shield,
-      color: 'text-emerald-500',
-      bg: 'bg-emerald-500/10',
-      fallback: ['ollama', 'lmstudio'],
-      defaultModel: { provider: 'ollama', model: 'llama3:8b' }
+      fallback: ['ollama', 'lm_studio'],
+      defaultModel: { provider: 'ollama', model: null }
     },
     {
       id: 'quality',
       title: 'Maximum Quality',
       desc: 'Best available reasoning. Costs money.',
-      icon: Star,
-      color: 'text-amber-500',
-      bg: 'bg-amber-500/10',
       fallback: ['anthropic', 'openai', 'gemini'],
-      defaultModel: { provider: 'anthropic', model: 'claude-3-5-sonnet-20240620' }
+      defaultModel: { provider: 'anthropic', model: 'claude-sonnet-5-5' }
     },
     {
       id: 'fast',
       title: 'Fast & Cheap',
       desc: 'Optimized for speed and minimal cost.',
-      icon: Zap,
-      color: 'text-accent-blue',
-      bg: 'bg-accent-blue/10',
       fallback: ['groq', 'gemini', 'openrouter'],
       defaultModel: { provider: 'groq', model: 'llama3-8b-8192' }
     }
   ];
 
   return (
-    <div className="glass rounded-3xl p-5 border border-primary/10 bg-white/40 mb-2 relative">
-      <button 
-        onClick={dismiss} 
-        className="absolute top-4 right-4 p-1.5 hover:bg-black/5 rounded-full transition-colors"
+    // Was `glass rounded-3xl border-primary/10` — the retired bridge class, a
+    // radius that renders 10px anyway, and a 10%-alpha brass border that is
+    // effectively invisible. `Panel` is exactly this shape.
+    <Panel className="p-5 mb-2 relative">
+      <button
+        onClick={dismiss}
+        aria-label="Dismiss quick start recipes"
+        className="absolute top-4 right-4 p-1.5 hover:bg-raised rounded-sm transition-colors"
       >
-        <X className="w-4 h-4 text-text-secondary" />
+        <span aria-hidden className="text-text-secondary">✕</span>
       </button>
-      
+
       <div className="flex items-center gap-2 mb-4">
-        <Rocket className="w-5 h-5 text-primary" />
-        <h3 className="font-bold text-sm">Quick Start Recipes</h3>
+        <h3 className="font-bold [font-stretch:80%] text-lg m-0">Quick Start Recipes</h3>
       </div>
-      
+
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
         {recipes.map(r => {
-          const Icon = r.icon;
           const isApplying = applying === r.id;
           return (
             <button
               key={r.id}
               disabled={applying !== null}
+              aria-busy={isApplying || undefined}
               onClick={() => handleApply(r.id, r.fallback, r.defaultModel)}
-              className="relative flex flex-col items-start text-left p-4 rounded-2xl border border-primary/10 hover:border-primary/30 hover:bg-white/50 transition-all group disabled:opacity-50 disabled:cursor-not-allowed"
+              // `--edge` rather than a brass tint: this card IS the control, and
+              // WCAG 1.4.11 wants 3:1 on a boundary that identifies one.
+              className="relative flex flex-col items-start text-left p-4 rounded-md border border-rule hover:border-edge hover:bg-raised transition-colors group disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              <div className={`p-2 rounded-xl ${r.bg} mb-3`}>
-                <Icon className={`w-4 h-4 ${r.color}`} />
-              </div>
-              <h4 className="font-bold text-sm group-hover:text-primary transition-colors">{r.title}</h4>
-              <p className="text-[11px] text-text-secondary mt-1">{r.desc}</p>
-              
+              <h4 className="font-medium text-sm group-hover:text-primary transition-colors">{r.title}</h4>
+              <p className="text-xs text-text-secondary mt-1">{r.desc}</p>
+
               {isApplying && (
-                <div className="absolute inset-0 bg-white/50 backdrop-blur-[1px] rounded-2xl flex items-center justify-center">
-                  <Loader2 className="w-5 h-5 text-primary animate-spin" />
+                // No backdrop-blur here: it sat on an opaque `bg-surface`, so it
+                // blurred nothing and cost a compositor layer. Same defect the
+                // raw-palette pass removed from TourOverlay.
+                <div className="absolute inset-0 bg-surface rounded-md flex items-center justify-center">
+                  <span className="edge-type text-text-tertiary">Applying…</span>
                 </div>
               )}
             </button>
           )
         })}
       </div>
+      {localModels && (
+        // Same native select as Settings > Model Selection.
+        <div className="mt-3 flex flex-col sm:flex-row gap-3 sm:items-end">
+          <label className="text-sm text-text-secondary flex flex-col gap-1 w-full sm:w-64">
+            Local model
+            <select
+              value={localChoice}
+              onChange={e => setLocalChoice(e.target.value)}
+              className="bg-raised border border-rule rounded-lg px-3 py-2 text-text-primary"
+            >
+              {localModels.map(m => (
+                <option key={m} value={m}>{m}</option>
+              ))}
+            </select>
+          </label>
+          <button
+            disabled={applying !== null}
+            onClick={() => {
+              const local = recipes.find(r => r.id === 'local')!;
+              handleApply(local.id, local.fallback, local.defaultModel, localChoice);
+            }}
+            className="glass-button !bg-plate !text-on-plate hover:!bg-plate !py-2 !px-4 disabled:opacity-50"
+          >
+            Use this model
+          </button>
+        </div>
+      )}
       {applyError && (
-        <div className="mt-3 text-xs font-medium text-danger bg-danger/5 border border-danger/10 px-3 py-2 rounded-lg text-center animate-fade-in">
+        // `danger` aliases `--pma-error`, so the colour was right; `error` is the
+        // canonical name. The 5%-alpha fill is gone — invisible tints are what
+        // `border-rule` and a real edge replaced everywhere else.
+        <div
+          role="alert"
+          className="mt-3 text-xs font-medium text-error bg-surface border border-error px-3 py-2 rounded-sm text-center animate-fade-in"
+        >
           {applyError}
         </div>
       )}
-    </div>
+    </Panel>
   );
 }

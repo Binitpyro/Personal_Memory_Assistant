@@ -92,6 +92,11 @@ def _list_dir_entries(directory: str, extensions: set[str]) -> list[tuple]:
     entries: list[tuple] = []
     with os.scandir(directory) as it:
         for entry in it:
+            # rust_core.scan_folders uses jwalk skip_hidden(true), which skips
+            # any dot-named file or directory (.git, .venv, .hidden.md). Match
+            # it so the result does not depend on which backend ran.
+            if entry.name.startswith("."):
+                continue
             try:
                 if entry.is_dir(follow_symlinks=False):
                     entries.append((False, entry.path))

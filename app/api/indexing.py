@@ -1,23 +1,23 @@
 import asyncio
 import json
 import logging
-from concurrent.futures import ThreadPoolExecutor
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
+from app import state
 from app.api.deps import ensure_indexing, get_db, get_emb, get_lancedb
 from app.api.limiter import limiter
 from app.storage.db import DatabaseManager
 
 logger = logging.getLogger(__name__)
 
-# Single-worker pool to prevent out-of-memory spikes during concurrent encodes
-_ENCODE_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pma-encode")
-
 router = APIRouter()
+
+# The running index task, kept so shutdown can ask it to stop (A10-11).
+_index_task: asyncio.Task | None = None
 
 # System directories that must never be indexed (PE8 Constant)
 BLOCKED_ROOTS: tuple[str, ...] = (
@@ -30,6 +30,21 @@ BLOCKED_ROOTS: tuple[str, ...] = (
     "/dev",
     "/boot",
 )
+
+
+def _is_blocked_root(path: str) -> bool:
+    """True if *path* is a blocked root, lies beneath one, or CONTAINS one.
+
+    The scanner walks everything under a root, so `/` or a drive root would index
+    /etc or the Windows directory though neither is itself blocked. Compared by
+    path component, so `/devices_backup` no longer matches `/dev`.
+    """
+    r = path.replace("\\", "/").rstrip("/").lower()
+    for b in BLOCKED_ROOTS:
+        n = b.replace("\\", "/").rstrip("/").lower()
+        if r == n or r.startswith(n + "/") or (n + "/").startswith(r + "/"):
+            return True
+    return False
 
 
 class IndexRequest(BaseModel):
@@ -55,8 +70,7 @@ class IndexRequest(BaseModel):
                 logger.warning("Rejected folder with traversal sequence: %s", p)
                 continue
             # Block sensitive system directories
-            r_lower = resolved.lower()
-            if any(r_lower.startswith(b.lower()) for b in BLOCKED_ROOTS):
+            if _is_blocked_root(resolved):
                 logger.warning("Rejected blocked system path: %s", resolved)
                 continue
             # Must exist and be a directory
@@ -72,7 +86,6 @@ class IndexRequest(BaseModel):
 async def index_start(
     request: Request,
     payload: IndexRequest,
-    background_tasks: BackgroundTasks,
     db: DatabaseManager = Depends(get_db),
     emb=Depends(get_emb),
     lancedb_client=Depends(get_lancedb),
@@ -107,8 +120,33 @@ async def index_start(
         except Exception as e:
             logger.debug("Could not notify OCR manager after indexing: %s", e)
 
-    background_tasks.add_task(_index_then_compact)
+    # A plain task in `state.bg_tasks`, not a Starlette BackgroundTask: uvicorn
+    # waits for an in-flight request's background work before it runs the
+    # lifespan shutdown, so SIGTERM blocked until the whole run finished (A10-11).
+    global _index_task
+    task = asyncio.create_task(_index_then_compact())
+    _index_task = task
+    state.bg_tasks.add(task)
+    task.add_done_callback(state.bg_tasks.discard)
     return {"message": "Indexing started"}
+
+
+async def stop_indexing_for_shutdown(timeout: float = 20.0) -> None:
+    """Ask a running index to stop at its next file, and wait for it to do so.
+
+    Called from the lifespan shutdown before `state.bg_tasks` are cancelled, so
+    the pipeline can commit and flush instead of being cut off mid-transaction.
+    A run that outlives `timeout` is left to the caller's cancel.
+    """
+    task = _index_task
+    if task is None or task.done():
+        return
+    _, progress = ensure_indexing()
+    with progress._lock:
+        progress.is_cancelled = True
+        if progress.status == "running":
+            progress.status = "cancelling"
+    await asyncio.wait({task}, timeout=timeout)
 
 
 @router.post("/cancel")
@@ -182,6 +220,7 @@ async def progress_stream(db: DatabaseManager = Depends(get_db)):
                 "failed_files": progress.failed_files,
                 "unchanged_files": progress.unchanged_files,
                 "run_failed": progress.run_failed,
+                "run_id": progress.run_id,
                 # `last_error` is deliberately NOT on this payload. This endpoint
                 # is on the token exemption list (app/main.py:509) and the field
                 # carries exception text, which for OSError/PermissionError
@@ -202,12 +241,19 @@ async def progress_stream(db: DatabaseManager = Depends(get_db)):
 
 @router.post("/cleanup")
 @limiter.limit("3/minute")
-async def cleanup_stale(request: Request, db: DatabaseManager = Depends(get_db)):
+async def cleanup_stale(
+    request: Request,
+    db: DatabaseManager = Depends(get_db),
+    lancedb_client=Depends(get_lancedb),
+):
     try:
+        from app.search.retrieval import clear_retrieval_cache
         from app.state import file_tree_cache as _file_tree_cache
         from app.state import insights_cache as _insights_cache
 
-        cleaned = await db.cleanup_stale_files()
+        cleaned = await db.cleanup_stale_files(lancedb_client=lancedb_client)
+        if cleaned:
+            clear_retrieval_cache()
         _file_tree_cache["data"] = _insights_cache["data"] = None
         return {"message": f"Cleaned {len(cleaned)} stale file(s).", "cleaned_paths": cleaned}
     except Exception as e:
@@ -222,13 +268,99 @@ async def clear_index(
     db: DatabaseManager = Depends(get_db),
     lancedb_client=Depends(get_lancedb),
 ):
+    from app.search.retrieval import clear_retrieval_cache
     from app.state import file_tree_cache as _file_tree_cache
     from app.state import insights_cache as _insights_cache
 
-    res = await db.clear_all()
-    await lancedb_client.clear_all()
+    ensure_indexing()
+    from app.indexing.service import indexing_lock
+
+    # A run in flight finishes its tail (folder profiles, summary flush, HNSW)
+    # after a wipe and re-creates state the user just cleared. Refuse instead,
+    # and hold the same lock the run takes so none can start mid-wipe.
+    if indexing_lock.locked():
+        return JSONResponse(
+            status_code=409,
+            content={"error": "Indexing is running. Cancel it before clearing the index."},
+        )
+    async with indexing_lock:
+        res = await db.clear_all()
+        await lancedb_client.clear_all()
+    clear_retrieval_cache()
     _file_tree_cache["data"] = _insights_cache["data"] = None
     return res
+
+
+class ReembedRequest(BaseModel):
+    confirm: bool = False
+
+
+@router.post("/reembed")
+@limiter.limit("3/minute")
+async def reembed_vectors(
+    request: Request,
+    payload: ReembedRequest,
+    db: DatabaseManager = Depends(get_db),
+    emb=Depends(get_emb),
+    lancedb_client=Depends(get_lancedb),
+):
+    """Rebuild every vector without touching files, chunks, FTS or history.
+
+    The repair for an embedding-model signature mismatch. Deliberately
+    user-initiated and confirmed: wiring this into the boot-time mismatch check
+    would turn a config change into an unprompted destructive wipe on every
+    start, which is why it was left unwired for so long.
+    """
+    from app import state
+    from app.indexing.reembed import reembed_all
+
+    if not payload.confirm:
+        return JSONResponse(
+            status_code=400,
+            content={"error": 'This rebuilds every embedding. Send {"confirm": true}.'},
+        )
+
+    if state.embedding_signature.get("reembed") == "running":
+        return JSONResponse(status_code=409, content={"error": "A re-embed is already running."})
+
+    from app.indexing.service import indexing_lock
+
+    # reembed_all refuses too, but only inside the background task, where the
+    # caller sees a 200 and a later "error" status. Say so up front.
+    if indexing_lock.locked():
+        return JSONResponse(
+            status_code=409,
+            content={"error": "Indexing is running. Wait for it to finish before re-embedding."},
+        )
+
+    async def _run():
+        from app.state import file_tree_cache as _file_tree_cache
+        from app.state import insights_cache as _insights_cache
+
+        state.embedding_signature["reembed"] = "running"
+        try:
+            result = await reembed_all(db, emb, lancedb_client)
+            # Only now is the index genuinely consistent with the live model,
+            # which is the one moment the stored signature may be advanced.
+            current_sig = getattr(emb, "model_signature", "")
+            if current_sig:
+                await db.set_system_state("embedding_model_signature", current_sig)
+                state.set_embedding_signature(current_sig, current_sig)
+            state.embedding_signature["reembed"] = "done"
+            _file_tree_cache["data"] = _insights_cache["data"] = None
+            logger.info("Re-embed finished: %s", result)
+        except Exception as err:
+            # ReembedError (summaries empty after rebuild) lands here too - it is
+            # a RuntimeError. Either way the run failed and the signature must
+            # NOT be advanced, or the mismatch warning disappears while the
+            # vectors are still wrong.
+            state.embedding_signature["reembed"] = "error"
+            logger.error("Re-embed failed: %s", err)
+
+    task = asyncio.create_task(_run())
+    state.bg_tasks.add(task)
+    task.add_done_callback(state.bg_tasks.discard)
+    return {"message": "Re-embed started.", "status": "running"}
 
 
 @router.get("/export")
@@ -273,24 +405,18 @@ async def remove_folder_index(
             content={"message": "No valid folder paths provided.", "chunks_removed": 0},
         )
 
-    folder = folders[0]
     try:
-        sql = """
-            SELECT c.id
-            FROM chunks c
-            JOIN files f ON c.file_id = f.id
-            WHERE f.path LIKE ? || '%'
-        """
-        rows = await db.execute_query(sql, (folder,))
-        chunk_ids_to_remove = [str(r[0]) for r in rows]
+        chunks_removed = 0
+        for folder in folders:
+            res = await db.remove_from_index(lancedb_client, folder=folder)
+            chunks_removed += res["chunks_removed"]
 
-        if chunk_ids_to_remove:
-            await lancedb_client.delete_documents(chunk_ids_to_remove)
+        from app.search.retrieval import clear_retrieval_cache
 
-        await db.delete_files_by_folder_prefix(folder)
-
+        # In-process answer/retrieval caches would otherwise keep serving the folder.
+        clear_retrieval_cache()
         _file_tree_cache["data"] = _insights_cache["data"] = None
-        return {"message": f"Removed {folder}", "chunks_removed": len(chunk_ids_to_remove)}
+        return {"message": f"Removed {', '.join(folders)}", "chunks_removed": chunks_removed}
     except Exception as e:
         logger.error("Failed to remove folder: %s", e)
         return JSONResponse(status_code=500, content={"error": str(e)})

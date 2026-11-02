@@ -20,22 +20,33 @@
  *
  * Fixes vs. previous revision:
  *   - WebGPUFallbackProps interface (was referenced but undeclared → compile error).
- *   - Static import of WebGL2Renderer (was dynamic import inside a callback
- *     whose ref<> type couldn't resolve → compile error). Three.js still
- *     lazy-loaded via the parent's React.lazy on WebGPUFallback itself.
+ *   - WebGL2Renderer is dynamically imported, so three.js and its five
+ *     postprocessing passes stay out of this chunk and are fetched only when
+ *     tier 2 is actually selected. An earlier revision made this import static
+ *     to dodge a ref<> type error and justified it as "three.js is still lazy
+ *     via React.lazy" - true of the app shell, false of the tier: every WebGPU
+ *     user downloaded and parsed three.js without ever instantiating it. The
+ *     type error is avoided by making `factory` async end-to-end rather than
+ *     casting at the call site.
  *   - Shared canvas hook, so both tiers get pick + focus behavior.
  *   - Name-table wiring: NavigationController is fed folder names from
  *     tree.folders so breadcrumbs show real paths instead of "#42".
  */
 
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { FileTypeTreemap } from './FileTypeTreemap';
+import { AccessibleTree, type A11yNode } from './AccessibleTree';
+import { ShortcutOverlay } from './ShortcutOverlay';
+import { FLY_KEYS, FLY_BOOST } from '../interaction/keymap';
+import {
+    nextSibling, previousSibling, expandOrDescend, collapseOrAscend,
+    initialCursor, describeNode, isFolder as navIsFolder,
+} from '../interaction/KeyboardNavigation';
+import { formatBytes } from '../utils/treeBuilder';
 import { WebGPURenderer } from '../renderer/WebGPURenderer';
-import { WebGL2Renderer } from '../renderer/WebGL2Renderer';
-import { getVisualizerStream, getVisualizerMeta, type FileEntry, type VisualizerNodeMeta } from '../api';
-import { FLAG_FOLDER } from '../interaction/NavigationController';
-import type { NavigationController } from '../interaction/NavigationController';
 import { useDreamscapeStore } from '../store/dreamscapeStore';
+import { getVisualizerStream, getVisualizerMeta, getFileChunkIds, type FileEntry, type VisualizerNodeMeta } from '../api';
+import type { NavigationController } from '../interaction/NavigationController';
 
 interface CachedStream {
     buffer: ArrayBuffer;
@@ -43,6 +54,17 @@ interface CachedStream {
 }
 
 const streamCache = new Map<string, CachedStream>();
+// The cache is valid for one file-tree snapshot. The tree is refetched when
+// indexing changes the corpus, which hands us a new `allFiles` object; a new
+// object clears the cache so the 3D view cannot outlive the data it drew.
+let streamCacheOwner: object | null = null;
+
+/** A fetch/parse failure of the graph data, as opposed to a GPU failure. Only
+ *  the latter may demote the render tier. */
+class DataLoadError extends Error {
+    readonly empty: boolean;
+    constructor(message: string, empty = false) { super(message); this.empty = empty; }
+}
 
 
 /** Both renderer classes conform to this shape; the hook is generic over it. */
@@ -56,6 +78,10 @@ interface RendererLike {
     readonly handleMouseMove: (dx: number, dy: number) => void;
     readonly handleZoom: (delta: number) => void;
     readonly focusOnNode: (sourceIndex: number) => void;
+    readonly flyBy: (forward: number, right: number, up: number) => void;
+    readonly markDirty: () => void;
+    /** Mutable: the view turns the camera glide off for reduced motion. */
+    smoothCamera: boolean;
     readonly nav: NavigationController;
     onDeviceLost?: () => void;
 }
@@ -93,6 +119,62 @@ export function resizeTarget(
     return target === canvas ? null : target;
 }
 
+/** Progress through the pre-first-frame work. `starting` covers renderer.init()
+ *  (device + pipelines + shader compilation); `streaming` covers the graph
+ *  fetch, which is the half that grows with the corpus. */
+export type LoadPhase = 'starting' | 'streaming' | 'ready' | 'failed';
+
+export const PHASE_LABEL: Record<Exclude<LoadPhase, 'ready'>, string> = {
+    starting: 'Starting GPU renderer…',
+    streaming: 'Loading graph…',
+    failed: 'Could not load the 3D graph.',
+};
+
+/** Largest backing-store ratio we will render at. Above this both the fragment
+ *  cost and the footprint of all twenty render targets grow with the square of
+ *  the ratio, against a ~4GB VRAM target. */
+export const MAX_DPR = 2;
+
+/**
+ * Device-pixel size of the canvas backing store for one ResizeObserver entry.
+ *
+ * Extracted and exported for the same reason as `resizeTarget`: jsdom has no
+ * layout engine so the observer itself cannot be driven in a unit test, but
+ * the arithmetic can.
+ *
+ * `devicePixelContentBoxSize` reports TRUE device pixels, so it does not need
+ * multiplying by the ratio - but it does need capping by it, and that is what
+ * this previously got wrong. The cap was computed and then applied only on the
+ * `contentRect` branch, so on Chromium - which has had the device-pixel box
+ * since 84, i.e. the Tauri webview and the primary browser path - it never ran
+ * at all. A DPR-3 display rendered at 3x: 2.25x the fragment work and 2.25x the
+ * render-target footprint that the cap exists to prevent.
+ */
+export function canvasPixelSize(
+    entry: ResizeObserverEntry,
+    devicePixelRatio: number | undefined,
+): { w: number; h: number } {
+    const dpr = devicePixelRatio || 1;
+    const capped = Math.min(dpr, MAX_DPR);
+    const dpBox = (entry as unknown as {
+        devicePixelContentBoxSize?: readonly { inlineSize: number; blockSize: number }[];
+    }).devicePixelContentBoxSize?.[0];
+
+    if (dpBox) {
+        // Already device pixels; scale down only when the display exceeds the cap.
+        const scale = capped / dpr;
+        return {
+            w: Math.round(dpBox.inlineSize * scale),
+            h: Math.round(dpBox.blockSize * scale),
+        };
+    }
+    // contentRect is CSS pixels, so here the ratio is applied rather than removed.
+    return {
+        w: Math.round(entry.contentRect.width * capped),
+        h: Math.round(entry.contentRect.height * capped),
+    };
+}
+
 /**
  * Shared 3D canvas hook. Encapsulates:
  *   - renderer lifecycle (init, resize observer, RAF loop, destroy)
@@ -111,9 +193,10 @@ function useDreamscapeCanvas<R extends RendererLike>(
     // chain above, that closes into a feedback loop that multiplies by DPR every
     // cycle. The wrapper's size is decided by layout alone and is never written to.
     wrapperRef: React.RefObject<HTMLElement | null>,
-    factory: (canvas: HTMLCanvasElement) => R,
+    factory: (canvas: HTMLCanvasElement) => Promise<R>,
     activeFilter: string | null | undefined,
-    onError: (msg: string) => void,
+    allFiles: Record<string, FileEntry[]>,
+    onError: (msg: string, demote?: boolean) => void,
     onNodeSelected?: (sourceIndex: number, name: string) => void,
     rendererOptions?: {
         exposure?: number;
@@ -122,6 +205,26 @@ function useDreamscapeCanvas<R extends RendererLike>(
 ) {
     const rendererRef = useRef<R | null>(null);
     const rafRef = useRef<number>(0);
+    // Read inside the init effect, which must not re-run on its identity.
+    const allFilesRef = useRef(allFiles);
+    allFilesRef.current = allFiles;
+
+    // Keys currently held, integrated once per frame. NOT accumulated per
+    // `keydown`: auto-repeat rate is an OS setting, so integrating repeats
+    // would make fly speed depend on the user's control panel.
+    const heldKeys = useRef<Set<string>>(new Set());
+    // Restarts the render loop after the idle gate has parked it. Assigned
+    // inside the init effect, where `loop` is in scope.
+    const wakeRef = useRef<() => void>(() => {});
+
+    // The Outliner cursor. Deliberately NOT NavigationController.focusIndex,
+    // which means "the node drilled into" — see interaction/KeyboardNavigation.
+    const [cursor, setCursor] = useState<number | null>(null);
+    const cursorRef = useRef<number | null>(null);
+    cursorRef.current = cursor;
+    const [announcement, setAnnouncement] = useState('');
+    // Bumped whenever nav's expansion state changes, to re-derive the a11y tree.
+    const [navVersion, setNavVersion] = useState(0);
     const [isDragging, setDragging] = useState(false);
     const lastPos = useRef({ x: 0, y: 0 });
     const dragStart = useRef({ x: 0, y: 0 });
@@ -132,17 +235,35 @@ function useDreamscapeCanvas<R extends RendererLike>(
     const lastHoverTs = useRef(0);
     const metaRef = useRef<Record<string, VisualizerNodeMeta>>({});
 
+    // The two slow phases before a first frame exists. Suspense in InsightsPage
+    // only covers the module download; everything below it - adapter + device
+    // request, ~15 render pipelines, WGSL compilation, then a stream fetch that
+    // scales with corpus size - used to run behind a blank canvas.
+    const [phase, setPhase] = useState<LoadPhase>('starting');
+    // Why the load failed, and whether it was merely an empty dataset.
+    const [loadError, setLoadError] = useState<{ message: string; empty: boolean } | null>(null);
+    // Bumped by Retry to re-run the init effect.
+    const [attempt, setAttempt] = useState(0);
+
     useEffect(() => {
         const canvas = canvasRef.current;
         if (!canvas) return;
 
         let cancelled = false;
         let resizeObserver: ResizeObserver | null = null;
-        const renderer = factory(canvas);
-        rendererRef.current = renderer;
+        let onVisibility: (() => void) | null = null;
+        setPhase('starting');
+        setLoadError(null);
 
         (async () => {
             try {
+                // Construction is awaited now: on tier 2 this is a chunk fetch,
+                // so teardown can beat it. Destroy immediately in that case —
+                // the cleanup below has already run and cannot see this one.
+                const renderer = await factory(canvas);
+                if (cancelled) { renderer.destroy(); return; }
+                rendererRef.current = renderer;
+
                 await renderer.init();
 
                 // Wired up the moment there is a device to lose — before the
@@ -168,29 +289,42 @@ function useDreamscapeCanvas<R extends RendererLike>(
                     tuned.enableOutline = rendererOptions.showOutlines;
                 }
 
+                if (!cancelled) setPhase('streaming');
+
                 let buffer: ArrayBuffer;
                 let meta: any;
                 const cacheKey = activeFilter || 'default';
+
+                if (streamCacheOwner !== allFilesRef.current) {
+                    streamCache.clear();
+                    streamCacheOwner = allFilesRef.current;
+                }
 
                 if (streamCache.has(cacheKey)) {
                     const cached = streamCache.get(cacheKey)!;
                     buffer = cached.buffer;
                     meta = cached.meta;
                 } else {
-                    [buffer, meta] = await Promise.all([
-                        getVisualizerStream(activeFilter),
-                        getVisualizerMeta(activeFilter).catch(() => ({})),
-                    ]);
-                    if (buffer.byteLength <= 4) {
-                        throw new Error('No 3D data available or filter returned 0 results.');
-                    }
-                    // Vite dev trap: if the backend is misconfigured we might get an
-                    // HTML page instead of binary. First two bytes of '<!doctype' are
-                    // 0x3C 0x21 in ASCII. Fail loud and early rather than reading
-                    // garbage as f32s.
-                    const head = new Uint8Array(buffer, 0, 2);
-                    if (head[0] === 0x3C && head[1] === 0x21) {
-                        throw new Error('Backend returned HTML instead of binary. Check the /api/visualizer/stream route.');
+                    try {
+                        [buffer, meta] = await Promise.all([
+                            getVisualizerStream(activeFilter),
+                            getVisualizerMeta(activeFilter).catch(() => ({})),
+                        ]);
+                        if (buffer.byteLength <= 4) {
+                            throw new DataLoadError('No 3D data available or filter returned 0 results.', true);
+                        }
+                        // Vite dev trap: if the backend is misconfigured we might get an
+                        // HTML page instead of binary. First two bytes of '<!doctype' are
+                        // 0x3C 0x21 in ASCII. Fail loud and early rather than reading
+                        // garbage as f32s.
+                        const head = new Uint8Array(buffer, 0, 2);
+                        if (head[0] === 0x3C && head[1] === 0x21) {
+                            throw new Error('Backend returned HTML instead of binary. Check the /api/visualizer/stream route.');
+                        }
+                    } catch (e) {
+                        throw e instanceof DataLoadError
+                            ? e
+                            : new DataLoadError(e instanceof Error ? e.message : 'Unknown 3D data error');
                     }
                     streamCache.set(cacheKey, { buffer, meta });
                 }
@@ -211,35 +345,95 @@ function useDreamscapeCanvas<R extends RendererLike>(
 
                 resizeObserver = new ResizeObserver(entries => {
                     for (const e of entries) {
-                        const dpr = Math.min(window.devicePixelRatio || 1, 2);
-                        const dpBox = (e as any).devicePixelContentBoxSize?.[0];
-                        let w: number, h: number;
-                        if (dpBox) {
-                            w = dpBox.inlineSize;
-                            h = dpBox.blockSize;
-                        } else {
-                            w = Math.round(e.contentRect.width * dpr);
-                            h = Math.round(e.contentRect.height * dpr);
-                        }
-                        if (w > 0 && h > 0) renderer.resize(w, h);
+                        const { w, h } = canvasPixelSize(e, window.devicePixelRatio);
+                        if (w > 0 && h > 0) { renderer.resize(w, h); wakeRef.current(); }
                     }
                 });
                 const measured = resizeTarget(canvas, wrapperRef.current);
                 if (measured) resizeObserver.observe(measured);
 
+                // A continuously-animating scene with no way to stop it. Two
+                // gates: `prefers-reduced-motion`, which the CSS block in
+                // index.css cannot reach because this is a JS-driven rAF loop
+                // rather than a CSS animation; and document visibility, since
+                // rendering a hidden canvas burns GPU for nothing. Both still
+                // render one frame, so the scene is drawn rather than blank.
+                const reduced =
+                    typeof matchMedia === 'function' &&
+                    matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+                // The camera glide is animation, so reduced motion cuts
+                // instead. It is also load-bearing for the gate below: with a
+                // glide, a cursor move under reduced motion would render one
+                // frame — a tenth of the way — and then park, leaving the
+                // camera stranded short of the node it was asked to look at.
+                renderer.smoothCamera = !reduced;
+
                 const loop = () => {
                     if (cancelled) return;
+
+                    // Fly is integrated per frame from the held-key set.
+                    const held = heldKeys.current;
+                    let f = 0, r = 0, u = 0;
+                    for (const k of held) {
+                        const v = FLY_KEYS[k];
+                        if (v) { f += v.forward; r += v.right; u += v.up; }
+                    }
+                    const flying = f !== 0 || r !== 0 || u !== 0;
+                    if (flying) {
+                        const boost = held.has('shift') ? FLY_BOOST : 1;
+                        renderer.flyBy(f * boost, r * boost, u * boost);
+                    }
+
                     renderer.render();
+
+                    // Direct manipulation is not the involuntary animation
+                    // `prefers-reduced-motion` is about, so held keys keep the
+                    // loop alive even under that setting. It is only the idle,
+                    // unattended animation that the gate exists to stop.
+                    if (!flying && (reduced || document.hidden)) {
+                        rafRef.current = 0;
+                        return;
+                    }
                     rafRef.current = requestAnimationFrame(loop);
                 };
                 rafRef.current = requestAnimationFrame(loop);
+
+                wakeRef.current = () => {
+                    if (!cancelled && rafRef.current === 0) {
+                        rafRef.current = requestAnimationFrame(loop);
+                    }
+                };
+
+                // Resume when the tab comes back, or the scene freezes for good.
+                onVisibility = () => {
+                    if (!cancelled && !document.hidden && rafRef.current === 0) {
+                        rafRef.current = requestAnimationFrame(loop);
+                    }
+                };
+                document.addEventListener('visibilitychange', onVisibility);
+                if (!cancelled) setPhase('ready');
             } catch (err) {
-                onError(err instanceof Error ? err.message : 'Unknown 3D init error');
+                const msg = err instanceof Error ? err.message : 'Unknown 3D init error';
+                if (err instanceof DataLoadError) {
+                    // The GPU is fine; a retry (filter change, remount) can
+                    // still succeed, so do not step the tier down.
+                    if (!cancelled) {
+                        setLoadError({ message: msg, empty: err.empty });
+                        setPhase('failed');
+                        onError(msg, false);
+                    }
+                } else {
+                    onError(msg);
+                }
             }
         })();
 
         return () => {
             cancelled = true;
+            heldKeys.current.clear();
+            wakeRef.current = () => {};
+            if (onVisibility) document.removeEventListener('visibilitychange', onVisibility);
             if (rafRef.current) cancelAnimationFrame(rafRef.current);
             resizeObserver?.disconnect();
             rendererRef.current?.destroy();
@@ -249,7 +443,7 @@ function useDreamscapeCanvas<R extends RendererLike>(
     // different buffer). We do NOT want re-init on every allFiles reference
     // change (that fires whenever InsightsPage re-renders). Include only the
     // stable dependencies.
-    }, [activeFilter, factory, onError, rendererOptions?.exposure, rendererOptions?.showOutlines]);
+    }, [activeFilter, factory, onError, attempt, rendererOptions?.exposure, rendererOptions?.showOutlines]);
 
     const onMouseDown = (e: React.MouseEvent) => {
         setDragging(true);
@@ -260,6 +454,7 @@ function useDreamscapeCanvas<R extends RendererLike>(
         if (isDragging && rendererRef.current) {
             setHover(null);
             rendererRef.current.handleMouseMove(e.clientX - lastPos.current.x, e.clientY - lastPos.current.y);
+            wakeRef.current();
             lastPos.current = { x: e.clientX, y: e.clientY };
             return;
         }
@@ -303,38 +498,233 @@ function useDreamscapeCanvas<R extends RendererLike>(
         if (dx > 5 || dy > 5) return;
 
         const rect = canvas.getBoundingClientRect();
-        const sourceIndex = await renderer.pick(e.clientX - rect.left, e.clientY - rect.top);
+        let sourceIndex: number | null;
+        try {
+            sourceIndex = await renderer.pick(e.clientX - rect.left, e.clientY - rect.top);
+        } catch {
+            return; // renderer torn down or device lost mid-pick
+        }
         if (sourceIndex === null) return;
 
         // Drill in: expand + focus camera on the clicked node.
         renderer.nav.navigateTo(sourceIndex);
         renderer.focusOnNode(sourceIndex);
         // Renderer needs to know its visible set is stale.
-        (renderer as unknown as { markDirty?: () => void }).markDirty?.();
+        renderer.markDirty();
+        wakeRef.current();
 
         const bc = renderer.nav.breadcrumbs;
         const name = bc[bc.length - 1]?.name ?? `#${sourceIndex}`;
         onNodeSelected?.(sourceIndex, name);
 
-        // If it's a file, add it to the dreamscape store for chat context.
-        // NavigationController has no metadata side-channel; the node's own
-        // flags are the authoritative folder/file bit (FLAG_FOLDER).
-        const node = renderer.nav.getGraphNode(sourceIndex);
-        const isFolder = ((node?.flags ?? 0) & FLAG_FOLDER) === FLAG_FOLDER;
-        
-        if (!isFolder && e.shiftKey) { // Optional: require shift-click to select? Or just any click on a file? Let's just add any clicked file.
-           // Actually, let's just add it anytime they click a file.
-           useDreamscapeStore.getState().addChunk({
-               id: sourceIndex,
-               filename: name,
-           });
-        } else if (!isFolder) {
-           useDreamscapeStore.getState().addChunk({
-               id: sourceIndex,
-               filename: name,
-           });
+        // Add the clicked FILE to the chat context, resolved by path. The
+        // buffer carries only tree-node indices, never chunk ids (A8-06), so
+        // the backend maps the path to that file's own chunks.
+        const node = renderer.nav.nodes[sourceIndex];
+        const m = node ? metaRef.current[String(node.typeHash)] : undefined;
+        if (m && !m.is_folder && m.path) {
+            getFileChunkIds(m.path)
+                .then(({ chunk_ids }) => {
+                    for (const id of chunk_ids) useDreamscapeStore.getState().addChunk({ id, filename: m.name });
+                })
+                .catch(() => { /* navigation still worked; the file just isn't pinned */ });
         }
     };
+
+
+    // ── Keyboard ────────────────────────────────────────────────────────
+    //
+    // Two keymaps on one focus target, following the Unreal/Unity split
+    // between a viewport (camera verbs) and an outliner (hierarchy verbs).
+    // Both are bound here rather than on separate elements so a sighted
+    // keyboard user never has to tab between panels to fly and to select.
+
+    const nameOf = useCallback((index: number) => {
+        const renderer = rendererRef.current;
+        const node = renderer?.nav.getGraphNode(index);
+        const meta = node ? metaRef.current[String(node.typeHash)] : undefined;
+        return meta?.name ?? `#${index}`;
+    }, []);
+
+    /**
+     * Move the cursor and let the camera follow.
+     *
+     * A DCC outliner does NOT move the camera on selection — that is what F is
+     * for. This one does, because the renderer has no selection highlight, so
+     * without the camera following, arrow keys would produce no visible change
+     * whatsoever for a sighted keyboard user. If a highlight is ever added to
+     * the instance buffer, decouple these and restore the outliner behaviour.
+     */
+    const moveCursorTo = useCallback((index: number, announce?: string) => {
+        const renderer = rendererRef.current;
+        if (!renderer) return;
+        setCursor(index);
+        renderer.focusOnNode(index);
+        wakeRef.current();
+        setAnnouncement(announce ?? describeNode(renderer.nav, index, nameOf(index)));
+    }, [nameOf]);
+
+    const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLElement>) => {
+        const renderer = rendererRef.current;
+        if (!renderer) return;
+        const nav = renderer.nav;
+        if (nav.nodes.length === 0) return;
+
+        const lower = e.key.toLowerCase();
+
+        // Held-key camera movement. Tracked, not acted on here.
+        if (FLY_KEYS[lower]) {
+            heldKeys.current.add(lower);
+            if (e.shiftKey) heldKeys.current.add('shift');
+            wakeRef.current();
+            e.preventDefault();
+            return;
+        }
+        if (e.key === 'Shift') { heldKeys.current.add('shift'); return; }
+
+        const at = cursorRef.current ?? initialCursor(nav);
+
+        switch (e.key) {
+            case 'ArrowUp':
+            case 'ArrowDown':
+            case 'ArrowLeft':
+            case 'ArrowRight': {
+                e.preventDefault();
+                if (e.shiftKey) {
+                    // Orbit. Discrete per keypress; auto-repeat gives a
+                    // continuous feel, and unlike fly the step is fixed so the
+                    // repeat rate only affects how fast, not how far per unit.
+                    const ORBIT = 24;
+                    const dx = e.key === 'ArrowLeft' ? -ORBIT : e.key === 'ArrowRight' ? ORBIT : 0;
+                    const dy = e.key === 'ArrowUp' ? -ORBIT : e.key === 'ArrowDown' ? ORBIT : 0;
+                    renderer.handleMouseMove(dx, dy);
+                    wakeRef.current();
+                    return;
+                }
+                const move =
+                    e.key === 'ArrowDown' ? nextSibling(nav, at)
+                    : e.key === 'ArrowUp' ? previousSibling(nav, at)
+                    : e.key === 'ArrowRight' ? expandOrDescend(nav, at)
+                    : collapseOrAscend(nav, at);
+
+                if (move.changed) {
+                    renderer.markDirty();
+                    setNavVersion(v => v + 1);
+                    moveCursorTo(move.index);
+                } else if (move.announce) {
+                    setAnnouncement(move.announce);
+                }
+                return;
+            }
+
+            case 'Enter': {
+                e.preventDefault();
+                nav.navigateTo(at);
+                renderer.markDirty();
+                setNavVersion(v => v + 1);
+                moveCursorTo(at, `Entered ${nameOf(at)}`);
+                onNodeSelected?.(at, nameOf(at));
+                return;
+            }
+
+            case 'Backspace': {
+                e.preventDefault();
+                nav.navigateUp();
+                renderer.markDirty();
+                setNavVersion(v => v + 1);
+                const up = nav.getFocusIndex();
+                moveCursorTo(up, `Up to ${nameOf(up)}`);
+                return;
+            }
+
+            case 'Home': {
+                e.preventDefault();
+                const root = nav.getRootIndex();
+                nav.navigateTo(root);
+                renderer.markDirty();
+                setNavVersion(v => v + 1);
+                moveCursorTo(root, 'Framed everything');
+                return;
+            }
+
+            case 'f':
+            case 'F': {
+                e.preventDefault();
+                renderer.focusOnNode(at);
+                wakeRef.current();
+                setAnnouncement(`Framed ${nameOf(at)}`);
+                return;
+            }
+
+            case 'Escape': {
+                setCursor(null);
+                setAnnouncement('Selection cleared');
+                return;
+            }
+
+            case '+':
+            case '=':
+                e.preventDefault();
+                renderer.handleZoom(-1);
+                wakeRef.current();
+                return;
+
+            case '-':
+            case '_':
+                e.preventDefault();
+                renderer.handleZoom(1);
+                wakeRef.current();
+                return;
+
+            default:
+                return;
+        }
+    }, [moveCursorTo, nameOf, onNodeSelected]);
+
+    const handleKeyUp = useCallback((e: React.KeyboardEvent<HTMLElement>) => {
+        heldKeys.current.delete(e.key.toLowerCase());
+        if (e.key === 'Shift') heldKeys.current.delete('shift');
+    }, []);
+
+    // A key held while focus leaves would otherwise stay held forever, flying
+    // the camera off on its own.
+    const handleBlur = useCallback(() => { heldKeys.current.clear(); }, []);
+
+    /**
+     * The accessible mirror of the visible hierarchy.
+     *
+     * Only expanded nodes are materialised, so this tracks what the scene
+     * actually shows and a 5000-file corpus does not become 5000 DOM nodes.
+     */
+    const a11yNodes = useMemo<A11yNode[]>(() => {
+        void navVersion;
+        const renderer = rendererRef.current;
+        if (!renderer || renderer.nav.nodes.length === 0) return [];
+        const nav = renderer.nav;
+
+        const build = (index: number, depth: number): A11yNode => {
+            const node = nav.getGraphNode(index);
+            const folder = navIsFolder(nav, index);
+            const expanded = folder && nav.expandedNodes.has(index);
+            const meta = node ? metaRef.current[String(node.typeHash)] : undefined;
+            return {
+                id: String(index),
+                name: nameOf(index),
+                isFolder: folder,
+                expanded: folder ? expanded : undefined,
+                detail: folder && node
+                    ? `${node.children.length} items`
+                    : meta?.size !== undefined ? formatBytes(meta.size) : undefined,
+                children: expanded && node && depth < 12
+                    ? node.children.map(c => build(c, depth + 1))
+                    : undefined,
+            };
+        };
+
+        const focus = nav.getFocusIndex();
+        const root = nav.getGraphNode(focus);
+        return root ? root.children.map(c => build(c, 1)) : [];
+    }, [navVersion, nameOf, phase]);
 
     // Wheel handling has to be a native listener so we can passive:false and
     // preventDefault (browsers give warnings otherwise, and the surrounding
@@ -346,38 +736,65 @@ function useDreamscapeCanvas<R extends RendererLike>(
             e.preventDefault();
             e.stopPropagation();
             rendererRef.current?.handleZoom(e.deltaY);
+            wakeRef.current();
         };
         canvas.addEventListener('wheel', onWheel, { passive: false });
         return () => canvas.removeEventListener('wheel', onWheel);
     }, [canvasRef]);
 
-    return { rendererRef, onMouseDown, onMouseMove, onMouseUp, hover, setHover };
+    return {
+        rendererRef, onMouseDown, onMouseMove, onMouseUp, hover, setHover, phase,
+        handleKeyDown, handleKeyUp, handleBlur,
+        cursor, setCursor: moveCursorTo, a11yNodes, announcement, nameOf,
+        wake: () => wakeRef.current(),
+        loadError, retry: () => setAttempt(n => n + 1),
+    };
 }
 
 interface CanvasInnerProps extends WebGPUFallbackProps {
     readonly tier: 'webgpu' | 'webgl2';
-    readonly onError: (msg: string) => void;
+    readonly onError: (msg: string, demote?: boolean) => void;
 }
 
-const DreamscapeCanvas: React.FC<CanvasInnerProps> = ({ activeFilter, tier, onError, exposure, showOutlines }) => {
+const DreamscapeCanvas: React.FC<CanvasInnerProps> = ({ allFiles, activeFilter, tier, onError, exposure, showOutlines }) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const wrapperRef = useRef<HTMLDivElement>(null);
     const [selection, setSelection] = useState<{ index: number, name: string } | null>(null);
 
     // Renderer factory is stable per-tier — this is important so useEffect
-    // doesn't reinit on every render.
+    // doesn't reinit on every render. Async because the tier-2 module is
+    // code-split; the WebGPU branch resolves without a network round-trip.
     const factory = useCallback(
-        (canvas: HTMLCanvasElement): RendererLike =>
-            tier === 'webgpu'
-                ? new WebGPURenderer(canvas) as unknown as RendererLike
-                : new WebGL2Renderer(canvas) as unknown as RendererLike,
+        async (canvas: HTMLCanvasElement): Promise<RendererLike> => {
+            if (tier === 'webgpu') {
+                return new WebGPURenderer(canvas) as unknown as RendererLike;
+            }
+            const { WebGL2Renderer } = await import('../renderer/WebGL2Renderer');
+            return new WebGL2Renderer(canvas) as unknown as RendererLike;
+        },
         [tier],
     );
 
-    const { rendererRef, onMouseDown, onMouseMove, onMouseUp, hover, setHover } =
-        useDreamscapeCanvas(canvasRef, wrapperRef, factory, activeFilter, onError,
+    const {
+        rendererRef, onMouseDown, onMouseMove, onMouseUp, hover, setHover, phase,
+        handleKeyDown, handleKeyUp, handleBlur,
+        cursor, setCursor, a11yNodes, announcement, wake, loadError, retry,
+    } = useDreamscapeCanvas(canvasRef, wrapperRef, factory, activeFilter, allFiles, onError,
             (idx, name) => setSelection({ index: idx, name }),
             { exposure, showOutlines });
+
+    const [shortcutsOpen, setShortcutsOpen] = useState(false);
+
+    // `?` and F1 open the reference from anywhere in the view. Kept out of
+    // handleKeyDown so the tree gets it too without duplicating the binding.
+    const onViewKeyDown = useCallback((e: React.KeyboardEvent<HTMLElement>) => {
+        if (e.key === '?' || e.key === 'F1') {
+            e.preventDefault();
+            setShortcutsOpen(true);
+            return;
+        }
+        handleKeyDown(e);
+    }, [handleKeyDown]);
 
     const breadcrumbs = rendererRef.current?.nav.breadcrumbs ?? [];
 
@@ -387,40 +804,56 @@ const DreamscapeCanvas: React.FC<CanvasInnerProps> = ({ activeFilter, tier, onEr
         r.nav.navigateUp();
         const last = r.nav.breadcrumbs[r.nav.breadcrumbs.length - 1];
         if (last) r.focusOnNode(last.index);
-        (r as unknown as { markDirty?: () => void }).markDirty?.();
+        r.markDirty();
+        wake();
         setSelection(null);
     };
 
+    // Fixed light values, not theme tokens, and no glow. `bg-accent` was wrong
+    // here for the same reason white text is right: this chrome sits on a
+    // permanently dark canvas, so Paper's brass (#5E4724) would have all but
+    // disappeared. The violet glow on the WebGPU tier was a survivor of the
+    // pre-redesign palette, which §2 bans in any role.
     const tierBadge = tier === 'webgpu'
-        ? { color: 'bg-accent shadow-[0_0_12px_rgba(142,72,234,0.6)]', label: 'WebGPU' }
-        : { color: 'bg-amber-400 shadow-[0_0_12px_rgba(251,191,36,0.6)]', label: 'WebGL2 Fallback' };
-
-    // Helper to format bytes
-    function formatBytes(n?: number): string {
-        if (n === undefined) return '—';
-        if (n < 1024) return `${n} B`;
-        const units = ['KB', 'MB', 'GB', 'TB'];
-        let v = n / 1024, u = 0;
-        while (v >= 1024 && u < units.length - 1) { v /= 1024; u++; }
-        return `${v.toFixed(1)} ${units[u]}`;
-    }
+        ? { color: 'bg-white/90', label: 'WebGPU' }
+        : { color: 'bg-amber-400', label: 'WebGL2 Fallback' };
 
     return (
-        <div ref={wrapperRef} className="w-full h-full min-h-[400px] relative bg-[#02030a] rounded-3xl overflow-hidden border border-white/10 shadow-inner">
-            {/* Title */}
-            <div className="absolute top-6 left-8 z-10 pointer-events-none">
+        // THE WHITE-ON-DARK CHROME BELOW IS DELIBERATE - DO NOT TOKENISE IT.
+        //
+        // `renderer/palette.ts` reads no CSS variable and no theme: the vitrine
+        // is a fixed dark grade (skyHorizon #0A0806) in BOTH cabinet and paper,
+        // and this wrapper is a fixed #02030a. So the ground behind every
+        // overlay here is dark regardless of the user's theme, and swapping
+        // `text-white/*` for `text-text-primary` would render ink on ink the
+        // moment someone switches to Paper - the opposite of a fix.
+        //
+        // What DID need fixing was the alpha. Composited against the real
+        // ground, `text-white/40` measured 3.70 at 10px and 3.69 at 9px, both
+        // under AA; they are /70 now (9.85 and 9.87). The `checking` and
+        // `unsupported` branches above are different - they render on the
+        // themed page, not the canvas, so those use tokens.
+        <div ref={wrapperRef} className="w-full h-full min-h-[400px] relative bg-[#02030a] rounded-xl overflow-hidden border border-white/10 shadow-inner">
+            {/* Title.
+                Plated, like every other overlay here. The white-on-#02030a
+                contrast reasoned about below is the contrast against the
+                WRAPPER, and the canvas paints over the wrapper — the godray and
+                bloom passes composite additively, so the ground under this text
+                is bright, moving and unknowable at author time. The plate is
+                what makes the label readable regardless of the frame. */}
+            <div className="absolute top-6 left-8 z-10 pointer-events-none bg-black/60 backdrop-blur-sm rounded-lg px-4 py-2 border border-white/10">
                 <h2 className="text-2xl font-bold text-white flex items-center gap-3">
-                    <span className={`w-3 h-3 rounded-full animate-pulse ${tierBadge.color}`} />
+                    <span aria-hidden className={`w-3 h-3 rounded-full ${tierBadge.color}`} />
                     Crystal Dreamscape 3D
                 </h2>
-                <p className="text-white/50 text-[10px] font-bold mt-2 tracking-widest uppercase">
+                <p className="text-white/70 text-xs font-bold mt-2 tracking-widest uppercase">
                     {tierBadge.label}
                 </p>
             </div>
 
             {/* Breadcrumbs */}
             {breadcrumbs.length > 1 && (
-                <div className="absolute top-6 right-8 z-10 flex items-center gap-2 bg-black/40 backdrop-blur-sm rounded-full px-4 py-2 border border-white/10">
+                <div className="absolute top-6 right-8 z-10 flex items-center gap-2 bg-black/60 backdrop-blur-sm rounded-full px-4 py-2 border border-white/10">
                     <button
                         onClick={navigateUp}
                         className="text-white/80 hover:text-white text-xs font-bold uppercase tracking-widest"
@@ -428,7 +861,7 @@ const DreamscapeCanvas: React.FC<CanvasInnerProps> = ({ activeFilter, tier, onEr
                     >
                         ← Back
                     </button>
-                    <span className="text-white/30 text-xs">|</span>
+                    <span aria-hidden className="w-px h-3 bg-white/30 shrink-0" />
                     <span className="text-white/70 text-xs font-mono truncate max-w-[24ch]">
                         {breadcrumbs.map(b => b.name).join(' / ')}
                     </span>
@@ -437,9 +870,9 @@ const DreamscapeCanvas: React.FC<CanvasInnerProps> = ({ activeFilter, tier, onEr
 
             {/* Tooltip */}
             {selection && (
-                <div className="absolute bottom-6 left-8 z-10 bg-black/50 backdrop-blur-sm rounded-lg px-4 py-2 border border-white/10">
+                <div className="absolute bottom-6 left-8 z-10 bg-black/60 backdrop-blur-sm rounded-lg px-4 py-2 border border-white/10">
                     <p className="text-white/90 text-sm font-mono">{selection.name}</p>
-                    <p className="text-white/40 text-[10px] uppercase tracking-widest">Node #{selection.index}</p>
+                    <p className="text-white/70 text-xs uppercase tracking-widest">Node #{selection.index}</p>
                 </div>
             )}
 
@@ -450,13 +883,43 @@ const DreamscapeCanvas: React.FC<CanvasInnerProps> = ({ activeFilter, tier, onEr
                     style={{ left: hover.x + 14, top: hover.y + 14 }}
                 >
                     <p className="text-white/90 text-xs font-mono truncate max-w-[36ch]">{hover.name}</p>
-                    <p className="text-white/40 text-[9px] uppercase tracking-widest">
+                    <p className="text-white/70 text-xs uppercase tracking-widest">
                         {hover.kind}
                         {hover.fileCount !== undefined && ` · ${hover.fileCount} files`}
                     </p>
-                    <p className="text-white/60 text-[10px] font-mono mt-1">
-                        {formatBytes(hover.size)} · {hover.hits ?? 0} hits
+                    <p className="text-white/60 text-xs font-mono mt-1">
+                        {hover.size === undefined ? '—' : formatBytes(hover.size)} · {hover.hits ?? 0} hits
                     </p>
+                </div>
+            )}
+
+            {/* Loading overlay. Same spinner as the capability-probe branch, but
+                white-on-dark rather than themed: it sits on the fixed #02030a
+                ground, where `text-text-secondary` would be ink on ink in Paper.
+                See the chrome note at the top of this return. */}
+            {phase !== 'ready' && (
+                <div
+                    className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-[#02030a]/80 backdrop-blur-sm"
+                    role="status"
+                    aria-live="polite"
+                >
+                    {phase !== 'failed' && (
+                        <div className="w-10 h-10 border-2 border-white/20 border-t-white/90 rounded-full animate-spin" />
+                    )}
+                    <p className="mt-4 text-white/70 font-mono text-sm">
+                        {phase === 'failed' && loadError?.empty ? 'No 3D data to show yet.' : PHASE_LABEL[phase]}
+                    </p>
+                    {phase === 'failed' && loadError && (
+                        <>
+                            <p className="mt-1 text-white/60 font-mono text-xs max-w-[48ch] text-center">{loadError.message}</p>
+                            <button
+                                onClick={retry}
+                                className="mt-4 px-3 h-8 border border-white/30 text-white/90 hover:text-white text-xs font-bold uppercase tracking-widest"
+                            >
+                                Retry
+                            </button>
+                        </>
+                    )}
                 </div>
             )}
 
@@ -464,14 +927,64 @@ const DreamscapeCanvas: React.FC<CanvasInnerProps> = ({ activeFilter, tier, onEr
                 intrinsic size that can exceed the wrapper, which desyncs the render
                 viewport (sized from the wrapper) from the hit-test box (read off the
                 canvas in onMouseMove). The floor belongs on the wrapper alone. */}
+            {/* The AT surface. First in DOM order so a screen reader meets
+                the readable hierarchy before the opaque canvas. */}
+            <AccessibleTree
+                label="Corpus hierarchy"
+                nodes={a11yNodes}
+                selectedId={cursor === null ? null : String(cursor)}
+                onSelect={id => setCursor(Number(id))}
+                onActivate={id => {
+                    const r = rendererRef.current;
+                    if (!r) return;
+                    r.nav.navigateTo(Number(id));
+                    r.markDirty();
+                    wake();
+                    setCursor(Number(id));
+                }}
+                onUnhandledKey={onViewKeyDown}
+            />
+
+            {/* Transient results the tree cannot express — "Framed X",
+                "At root", "Empty folder". Always mounted: a live region that
+                appears together with its text announces nothing. */}
+            <span className="sr-only" aria-live="polite">{announcement}</span>
+
             <canvas
                 ref={canvasRef}
-                className="w-full h-full cursor-grab active:cursor-grabbing block touch-none"
+                // role="application" tells a screen reader to pass keys
+                // through instead of capturing them for browse mode, which is
+                // what a custom keymap needs. The hierarchy itself is readable
+                // through the tree above, not through this element.
+                role="application"
+                tabIndex={0}
+                aria-label="Crystal Dreamscape 3D viewport"
+                aria-describedby="dreamscape-keyhint"
+                className="w-full h-full cursor-grab active:cursor-grabbing block touch-none focus-visible:outline-2 focus-visible:outline-offset-[-2px]"
                 style={{ height: '100%', width: '100%', touchAction: 'none' }}
                 onMouseDown={onMouseDown}
                 onMouseMove={onMouseMove}
                 onMouseUp={onMouseUp}
                 onMouseLeave={(e) => { setHover(null); onMouseUp(e); }}
+                onKeyDown={onViewKeyDown}
+                onKeyUp={handleKeyUp}
+                onBlur={handleBlur}
+            />
+
+            {/* Was absent entirely on this view: the 3D scene documented none
+                of its controls. Short, with the full table one key away. */}
+            <div
+                id="dreamscape-keyhint"
+                className="absolute bottom-4 right-6 z-10 pointer-events-none text-xs font-mono uppercase tracking-wider text-white/90 bg-black/60 backdrop-blur-sm rounded-md px-3 py-1.5 border border-white/10"
+            >
+                WASD fly · F frame · ↑↓←→ browse · ? keys
+            </div>
+
+            <ShortcutOverlay
+                open={shortcutsOpen}
+                onClose={() => setShortcutsOpen(false)}
+                groups={['viewport', 'outliner']}
+                title="Dreamscape keyboard reference"
             />
         </div>
     );
@@ -489,8 +1002,9 @@ export const WebGPUFallback: React.FC<WebGPUFallbackProps> = ({ allFiles, active
     // array. As an inline arrow it changed identity on every parent render, so
     // an unrelated InsightsPage re-render tore down the renderer and built a
     // fresh GPUDevice — which is why a single fault used to log twice.
-    const handleError = useCallback((msg: string) => {
+    const handleError = useCallback((msg: string, demote = true) => {
         setReason(msg);
+        if (!demote) return; // data/network error: the tier is not at fault
         // If the chosen tier errors out at load-time, degrade one step.
         setStatus(prev => (prev === 'webgpu' ? 'webgl2' : 'unsupported'));
     }, []);
@@ -539,10 +1053,10 @@ export const WebGPUFallback: React.FC<WebGPUFallbackProps> = ({ allFiles, active
         // h-full, not a fixed height: a hardcoded 600px disagreed with the
         // steady-state panel and made it jump the moment the tier resolved.
         return (
-            <div className="w-full h-full min-h-[400px] bg-slate-900 flex items-center justify-center rounded-lg border border-slate-800">
+            <div className="w-full h-full min-h-[400px] bg-surface flex items-center justify-center rounded-xl border border-rule">
                 <div className="flex flex-col items-center">
-                    <div className="w-12 h-12 border-4 border-blue-500/30 border-t-blue-500 rounded-full animate-spin" />
-                    <p className="mt-4 text-slate-400 font-mono text-sm">Initializing GPU Infrastructure…</p>
+                    <div className="w-10 h-10 border-2 border-rule border-t-primary rounded-full animate-spin" />
+                    <p className="mt-4 text-text-secondary font-mono text-sm">Checking graphics support…</p>
                 </div>
             </div>
         );
@@ -551,9 +1065,9 @@ export const WebGPUFallback: React.FC<WebGPUFallbackProps> = ({ allFiles, active
     if (status === 'unsupported') {
         return (
             <div className="w-full h-full flex flex-col">
-                <div className="bg-amber-900/30 border-l-4 border-amber-500 p-4 mb-4">
-                    <p className="text-amber-200 text-sm">
-                        <span className="font-bold">2D View:</span> {reason ?? '3D not available on this device.'}
+                <div className="bg-surface border-l-2 border-warning rounded-sm p-4 mb-4">
+                    <p className="text-text-primary text-sm m-0">
+                        <span className="font-medium">2D view:</span> {reason ?? '3D not available on this device.'}
                     </p>
                 </div>
                 <div className="flex-1 min-h-[400px]">

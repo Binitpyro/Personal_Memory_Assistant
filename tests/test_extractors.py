@@ -9,6 +9,8 @@ import json
 import zipfile
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from app.config import settings
 from app.indexing.extractors import EXTRACTORS, ExtractMeta
 from app.indexing.extractors.csv_extractor import CsvExtractor
@@ -222,6 +224,28 @@ class TestPdfExtractor:
             result = self.ext.extract(fake_path, MAX_SIZE)
         assert "Page 2 content" in result
 
+    @pytest.mark.parametrize("how", ["consumed", "encrypted", "abandoned"])
+    def test_reader_closed_on_every_exit(self, tmp_path, how):
+        # An unclosed PdfReader keeps the whole file plus its parsed objects in
+        # reference cycles until a gen-2 GC (M6 follow-up: ~55 MB on College).
+        fake_path = tmp_path / "doc.pdf"
+        fake_path.touch()
+        mock_pypdf = MagicMock()
+        page = MagicMock()
+        page.extract_text.return_value = "text"
+        mock_reader = MagicMock()
+        mock_reader.is_encrypted = how == "encrypted"
+        mock_reader.pages = [page, page]
+        mock_pypdf.PdfReader.return_value = mock_reader
+        with patch.dict("sys.modules", {"pypdf": mock_pypdf}):
+            gen = self.ext.extract_stream(fake_path, MAX_SIZE)
+            next(gen)
+            if how == "abandoned":
+                gen.close()
+            else:
+                list(gen)
+        mock_reader.close.assert_called_once()
+
 
 # ── PDF OCR gate integration ─────────────────────────────────────────────────
 
@@ -341,6 +365,26 @@ class TestPdfExtractorOcrGate:
 
         assert isinstance(result, str)
         assert "Hello from a scanned-ish page" in result
+
+    def test_a6_16_mojibake_page_text_is_dropped_but_clean_ocr_page_text_kept(
+        self, tmp_path, monkeypatch
+    ):
+        """Drop keyed on the garbage score, not the OCR verdict: the short clean
+        logo page also goes to OCR and keeps its text; clean Hindi stays native."""
+        mojibake = "ÿþ#$%&'()*+ Ó¿¾½¼»º¹¸·¶µ´³²±° ¯®­¬«ª©¨§¦¥¤£¢¡ " * 4  # noqa: RUF001
+        logo_page = "ACME Corp quarterly report"
+        hindi = "भारत एक विशाल देश है। यहाँ अनेक भाषाएँ बोली जाती हैं। " * 4
+        pages = [
+            self._page(mojibake, scanned=True),
+            self._page(logo_page, scanned=True),
+            self._page(hindi, scanned=True),
+        ]
+        items = self._run(tmp_path, pages, monkeypatch)
+
+        texts = [i for i in items if isinstance(i, str)]
+        assert texts == [logo_page, hindi]
+        assert items[-1].ocr_pages == (0, 1)
+        assert items[-1].native_pages == 1
 
 
 # ── DOCX (mocked python-docx) ─────────────────────────────────────────────────
@@ -812,7 +856,7 @@ class TestEpubExtractor:
 
         result = self.ext.extract(fake_epub, MAX_SIZE)
         assert "Introduction" in result
-        assert "Welcome to standard text." in result
+        assert "Welcome to & standard text." in result
         assert "This is second page." in result
         assert "ignored" not in result
 

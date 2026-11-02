@@ -1,0 +1,215 @@
+{
+  "provenance": {
+    "generated_at": "2026-09-01T13:32:12.795623+00:00",
+    "python": "3.12.10",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "k": 10,
+    "corpus": "tests\\eval\\corpus_large",
+    "settings": {
+      "chunk_size": 512,
+      "chunk_overlap": 50,
+      "embedding_model": "BAAI/bge-small-en-v1.5",
+      "embedding_batch_size": 64,
+      "embedding_batch_char_budget": 10240,
+      "rrf_fts_weight": 0.4,
+      "rrf_semantic_weight": 0.6,
+      "rrf_summary_weight": 0.05,
+      "rrf_k": 60,
+      "retrieval_top_k": 15,
+      "fusion_balance_enabled": true
+    },
+    "chunks_indexed": 589
+  },
+  "arms": {
+    "reranker_off": {
+      "document": {
+        "recall": 1.0,
+        "precision": 0.32291666666666663,
+        "ndcg": 0.8913662191964322,
+        "mrr": 0.8541666666666666,
+        "domain_coverage": 1.0
+      },
+      "chunk": {
+        "chunk_precision": 0.1,
+        "answer_coverage": 0.5974702380952381
+      },
+      "chunk_short": {
+        "chunk_precision": 0.05,
+        "answer_coverage": 0.5
+      },
+      "chunk_long": {
+        "chunk_precision": 0.15000000000000002,
+        "answer_coverage": 0.6949404761904762
+      },
+      "per_query": {
+        "curl_noise": {
+          "recall": 1.0,
+          "precision": 0.3333333333333333,
+          "ndcg": 1.0,
+          "mrr": 1.0,
+          "domain_coverage": 1.0,
+          "chunk_precision": 0.2,
+          "answer_coverage": 0.7797619047619048
+        },
+        "attribute_transfer": {
+          "recall": 1.0,
+          "precision": 0.3333333333333333,
+          "ndcg": 1.0,
+          "mrr": 1.0,
+          "domain_coverage": 1.0,
+          "chunk_precision": 0.0,
+          "answer_coverage": 0.0
+        },
+        "scatter_density": {
+          "recall": 1.0,
+          "precision": 0.3333333333333333,
+          "ndcg": 0.5,
+          "mrr": 0.3333333333333333,
+          "domain_coverage": 1.0,
+          "chunk_precision": 0.0,
+          "answer_coverage": 0.0
+        },
+        "geometry_cache": {
+          "recall": 1.0,
+          "precision": 0.3333333333333333,
+          "ndcg": 1.0,
+          "mrr": 1.0,
+          "domain_coverage": 1.0,
+          "chunk_precision": 0.2,
+          "answer_coverage": 1.0
+        },
+        "colour_ingest": {
+          "recall": 1.0,
+          "precision": 0.3333333333333333,
+          "ndcg": 1.0,
+          "mrr": 1.0,
+          "domain_coverage": 1.0,
+          "chunk_precision": 0.0,
+          "answer_coverage": 0.0
+        },
+        "turbulence": {
+          "recall": 1.0,
+          "precision": 0.3333333333333333,
+          "ndcg": 1.0,
+          "mrr": 1.0,
+          "domain_coverage": 1.0,
+          "chunk_precision": 0.1,
+          "answer_coverage": 1.0
+        },
+        "advection": {
+          "recall": 1.0,
+          "precision": 0.25,
+          "ndcg": 0.6309297535714575,
+          "mrr": 0.5,
+          "domain_coverage": 1.0,
+          "chunk_precision": 0.2,
+          "answer_coverage": 1.0
+        },
+        "farm_batching": {
+          "recall": 1.0,
+          "precision": 0.3333333333333333,
+          "ndcg": 1.0,
+          "mrr": 1.0,
+          "domain_coverage": 1.0,
+          "chunk_precision": 0.1,
+          "answer_coverage": 1.0
+        }
+      }
+    },
+    "reranker_on": {
+      "document": {
+        "recall": 1.0,
+        "precision": 0.35416666666666663,
+        "ndcg": 1.0,
+        "mrr": 1.0,
+        "domain_coverage": 1.0
+      },
+      "chunk": {
+        "chunk_precision": 0.1,
+        "answer_coverage": 0.50852039483505
+      },
+      "chunk_short": {
+        "chunk_precision": 0.025,
+        "answer_coverage": 0.25
+      },
+      "chunk_long": {
+        "chunk_precision": 0.17500000000000002,
+        "answer_coverage": 0.7670407896701
+      },
+      "per_query": {
+        "curl_noise": {
+          "recall": 1.0,
+          "precision": 0.3333333333333333,
+          "ndcg": 1.0,
+          "mrr": 1.0,
+          "domain_coverage": 1.0,
+          "chunk_precision": 0.2,
+          "answer_coverage": 0.7797619047619048
+        },
+        "attribute_transfer": {
+          "recall": 1.0,
+          "precision": 0.3333333333333333,
+          "ndcg": 1.0,
+          "mrr": 1.0,
+          "domain_coverage": 1.0,
+          "chunk_precision": 0.1,
+          "answer_coverage": 1.0
+        },
+        "scatter_density": {
+          "recall": 1.0,
+          "precision": 0.3333333333333333,
+          "ndcg": 1.0,
+          "mrr": 1.0,
+          "domain_coverage": 1.0,
+          "chunk_precision": 0.0,
+          "answer_coverage": 0.0
+        },
+        "geometry_cache": {
+          "recall": 1.0,
+          "precision": 0.3333333333333333,
+          "ndcg": 1.0,
+          "mrr": 1.0,
+          "domain_coverage": 1.0,
+          "chunk_precision": 0.2,
+          "answer_coverage": 1.0
+        },
+        "colour_ingest": {
+          "recall": 1.0,
+          "precision": 0.5,
+          "ndcg": 1.0,
+          "mrr": 1.0,
+          "domain_coverage": 1.0,
+          "chunk_precision": 0.1,
+          "answer_coverage": 0.2884012539184953
+        },
+        "turbulence": {
+          "recall": 1.0,
+          "precision": 0.3333333333333333,
+          "ndcg": 1.0,
+          "mrr": 1.0,
+          "domain_coverage": 1.0,
+          "chunk_precision": 0.0,
+          "answer_coverage": 0.0
+        },
+        "advection": {
+          "recall": 1.0,
+          "precision": 0.3333333333333333,
+          "ndcg": 1.0,
+          "mrr": 1.0,
+          "domain_coverage": 1.0,
+          "chunk_precision": 0.2,
+          "answer_coverage": 1.0
+        },
+        "farm_batching": {
+          "recall": 1.0,
+          "precision": 0.3333333333333333,
+          "ndcg": 1.0,
+          "mrr": 1.0,
+          "domain_coverage": 1.0,
+          "chunk_precision": 0.0,
+          "answer_coverage": 0.0
+        }
+      }
+    }
+  }
+}

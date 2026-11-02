@@ -204,3 +204,23 @@ async def test_db_insert_chunks_bulk_large(db: DatabaseManager):
     ]
     ids = await db.insert_chunks_bulk(chunks)
     assert len(ids) == 22
+
+
+def test_graph_neighbourhood_cte_does_not_re_enter_visited_nodes():
+    """UNION ALL walked a 6-clique back and forth: 781 rows at depth 4, not <= 30."""
+    import itertools
+    import sqlite3
+
+    from app.storage.db import GRAPH_NEIGHBOURHOOD_CTE
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE kg_edges (source TEXT, target TEXT, relation TEXT)")
+    nodes = [f"n{i}" for i in range(6)]
+    conn.executemany(
+        "INSERT INTO kg_edges VALUES (?, ?, 'calls')", itertools.combinations(nodes, 2)
+    )
+    (rows,) = conn.execute(
+        GRAPH_NEIGHBOURHOOD_CTE + "SELECT COUNT(*) FROM connected_nodes",  # noqa: S608
+        ("n0", 4),
+    ).fetchone()
+    assert rows <= len(nodes) * (4 + 1)

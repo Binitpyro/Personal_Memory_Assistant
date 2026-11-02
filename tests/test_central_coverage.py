@@ -194,12 +194,17 @@ def client(real_db):
 
 
 def test_main_endpoints_high_coverage(client):
-    client.get("/api/health")
-    client.get("/api/system/metrics")
-    client.get("/api/insights")
-    client.post("/api/query", json={"question": "test"})
-    client.post("/api/system/compact-db")
-    client.get("/api/system/info")
+    # A10-13: this asserted nothing, so a 500 from any endpoint passed.
+    responses = {
+        "health": client.get("/api/health"),
+        "metrics": client.get("/api/system/metrics"),
+        "insights": client.get("/api/insights"),
+        "query": client.post("/api/query", json={"question": "test"}),
+        "compact": client.post("/api/system/compact-db"),
+        "info": client.get("/api/system/info"),
+    }
+    errors = {k: r.status_code for k, r in responses.items() if r.status_code >= 500}
+    assert not errors, errors
 
 
 @pytest.mark.asyncio

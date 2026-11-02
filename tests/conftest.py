@@ -6,6 +6,10 @@ import re
 import sys
 from unittest.mock import AsyncMock, MagicMock
 
+# Eval corpora are data. corpus_qtype holds a snapshot of this repo's own Python,
+# test_*.py and conftest.py included, which pytest would otherwise collect.
+collect_ignore_glob = ["eval/corpus_*"]
+
 if not hasattr(ctypes, "windll"):
     ctypes.windll = MagicMock()
 if not hasattr(ctypes, "get_last_error"):
@@ -43,6 +47,9 @@ if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 os.environ["X_LOCAL_ACCESS_TOKEN"] = "test-token"  # noqa: S105
+# The Host guard (A5-01) refuses any Host but loopback/tauri; test clients send
+# Host "test"/"testserver". Allowed through the normal setting, not a sniff.
+os.environ.setdefault("PMA_ALLOWED_HOSTS", "test,testserver")
 
 from app.api.deps import get_db, get_emb, get_lancedb, get_llm  # noqa: E402
 from app.config import settings  # noqa: E402
@@ -170,6 +177,16 @@ async def cleanup_db():
     if _db_manager and _db_manager.conn:
         await _db_manager.close()
     gc.collect()
+
+
+@pytest.fixture(autouse=True)
+def reset_ollama_num_ctx_state():
+    """The Ollama num_ctx high-water mark and F5b warned-set are process-global."""
+    from app.providers import ollama
+
+    ollama._NUM_CTX_HW.clear()
+    ollama._NUM_CTX_WARNED.clear()
+    yield
 
 
 @pytest.fixture(autouse=True)

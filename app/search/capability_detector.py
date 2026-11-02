@@ -8,13 +8,29 @@ logger = logging.getLogger(__name__)
 
 
 class CapabilityDetector:
-    _instance = None
+    # Class-level, so every instance already shares it. The module-level
+    # ``capability_detector`` below is the singleton; a __new__ override on top
+    # of that bought nothing.
     _capability_cache: dict[str, bool] = {}  # noqa: RUF012
 
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
+    @staticmethod
+    async def _cache_key(llm_client: "LLMClient") -> str:
+        """Provider id + the model a request will actually use (A4-12).
+
+        The legacy key read the gemini / ollama / lm_studio fields only, so a model
+        picked through per_provider.default_model reused another model's verdict.
+        """
+        try:
+            prov = await llm_client._resolve()
+        except Exception:
+            return (
+                f"{llm_client.provider_preference}_{llm_client.model}_"
+                f"{llm_client.ollama_model}_{llm_client.lm_studio_model}"
+            )
+        try:
+            return f"{prov.spec.id}:{getattr(prov, 'default_model', None)}"
+        finally:
+            await prov.close()
 
     async def detect_capabilities(self, llm_client: "LLMClient") -> bool:
         """
@@ -30,7 +46,7 @@ class CapabilityDetector:
             logger.info("CapabilityDetector: Model class is 3b_local, disabling claim tags.")
             return False
 
-        cache_key = f"{llm_client.provider_preference}_{llm_client.model}_{llm_client.ollama_model}_{llm_client.lm_studio_model}"
+        cache_key = await self._cache_key(llm_client)
 
         if cache_key in self._capability_cache:
             return bool(self._capability_cache[cache_key])
@@ -45,10 +61,19 @@ class CapabilityDetector:
 
         try:
             logger.info("CapabilityDetector: Running <claim> tag probe...")
-            # We call generate_answer. Using history=[] to ensure no contamination.
-            response = await llm_client.generate_answer(
-                probe_prompt, context="", history=[], skip_capability_check=True
-            )
+            # generate_raw, not generate_answer (A4-12): the RAG template around an
+            # empty context invites "not enough information", which failed the
+            # probe and disabled <claim> tags for a model that supports them.
+            response = await llm_client.generate_raw([{"role": "user", "content": probe_prompt}])
+
+            # generate_answer reports a dead provider as prose, never raises. That
+            # says nothing about the model, so it must not be cached as a verdict
+            # (it would disable <claim> support for the process lifetime).
+            from app.search.llm_client import LLM_UNAVAILABLE_PREFIX
+
+            if response.startswith(LLM_UNAVAILABLE_PREFIX):
+                logger.info("CapabilityDetector: Provider unavailable, probe not cached.")
+                return False
 
             # Simple heuristic check:
             if "<claim" in response and "sources=" in response and "</claim>" in response:
@@ -61,12 +86,11 @@ class CapabilityDetector:
                 return False
         except Exception as e:
             logger.warning("CapabilityDetector: Probe failed due to error: %s", e)
-            self._capability_cache[cache_key] = False
             return False
 
-    def report_failure(self, llm_client: "LLMClient"):
+    async def report_failure(self, llm_client: "LLMClient"):
         """Called when the model fails to follow the <claim> tag instructions on a real query."""
-        cache_key = f"{llm_client.provider_preference}_{llm_client.model}_{llm_client.ollama_model}_{llm_client.lm_studio_model}"
+        cache_key = await self._cache_key(llm_client)
         logger.warning(
             "CapabilityDetector: Model failed to produce <claim> tags in real query. Disabling capabilities for session."
         )

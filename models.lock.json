@@ -13,6 +13,10 @@
         "tokenizer.json": {
           "sha256": "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66",
           "size_bytes": 711396
+        },
+        "onnx/model_fp16.onnx": {
+          "sha256": "4d76223b73a3fd708f009a93a830a6ed5e536b07c77d3c812ba7b35a4988d767",
+          "size_bytes": 66749212
         }
       }
     },

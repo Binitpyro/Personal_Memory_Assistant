@@ -212,7 +212,16 @@ async def test_purge_host_cache(client, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_compact_db_endpoints(client):
+async def test_compact_db_endpoints(client, tmp_path):
+    """Drives the real job (real DB, real lock): it must reclaim pages and report it."""
+    import asyncio
+
+    from app.api import system as system_api
+    from app.api.deps import get_db
+    from app.main import app
+    from app.state import bg_tasks
+    from app.storage.db import DatabaseManager
+
     # 1. Non-zero worker check (maintenance skips)
     with patch.dict(os.environ, {"UVICORN_WORKER_ID": "1"}):
         response = await client.post("/api/system/compact-db")
@@ -220,20 +229,39 @@ async def test_compact_db_endpoints(client):
             response.json()["message"] == "Compaction can only be triggered by the primary worker."
         )
 
-    # 2. Primary worker, starts compaction
-    with patch.dict(os.environ, {"UVICORN_WORKER_ID": "0"}):  # noqa: SIM117
-        with patch("app.api.system.get_vacuum_lock") as mock_lock_getter:
-            mock_lock = MagicMock()
-            mock_lock.locked.return_value = False
-            mock_lock_getter.return_value = mock_lock
+    # 2. Primary worker really compacts a database that has free pages
+    db = DatabaseManager(str(tmp_path / "compact.db"))
+    await db.init_db()
+    try:
+        for i in range(60):
+            await db.insert_file(
+                {
+                    "path": str(tmp_path / f"{i}.txt"),
+                    "size": 1,
+                    "modified_at": "now",
+                    "type": ".txt",
+                    "folder_tag": "t",
+                    "summary": "x" * 40000,
+                }
+            )
+        await db.execute_write("DELETE FROM files")
+        assert (await db.execute_query("PRAGMA freelist_count"))[0][0] > 10
+        app.dependency_overrides[get_db] = lambda: db
 
+        with patch.dict(os.environ, {"UVICORN_WORKER_ID": "0"}):
             response = await client.post("/api/system/compact-db")
             assert response.json()["message"] == "Compaction started in background."
+            await asyncio.gather(*list(bg_tasks))
+            assert system_api._vacuum_last_error is None
+            assert system_api._vacuum_last_run is not None
+            assert (await db.execute_query("PRAGMA freelist_count"))[0][0] == 0
 
-            # Lock is already locked (subsequent trigger)
-            mock_lock.locked.return_value = True
-            response2 = await client.post("/api/system/compact-db")
-            assert response2.json()["message"] == "Compaction already in progress."
+            # 3. A trigger while the (real) lock is held is refused
+            async with system_api.get_vacuum_lock():
+                response2 = await client.post("/api/system/compact-db")
+                assert response2.json()["message"] == "Compaction already in progress."
+    finally:
+        await db.close()
 
 
 @pytest.mark.asyncio
@@ -279,9 +307,11 @@ async def test_demo_seed_endpoint(client, tmp_path):
 async def test_pick_folder_mocked(client):
     # Reached only in browser dev mode -- isTauri routes around this endpoint
     # in the packaged app, so the tkinter dialog runs here and only here.
-    fake_loop = MagicMock()
-    fake_loop.run_in_executor = AsyncMock(return_value="C:/Users/test/Documents")
-    with patch("app.api.system.asyncio.get_running_loop", return_value=fake_loop):
+    # Fake tkinter, not a fake loop: patching asyncio.get_running_loop is
+    # global, and anyio's TaskGroup then creates its tasks on the mock and
+    # waits on them forever.
+    _, modules = _fake_tkinter(askdirectory_result="C:/Users/test/Documents")
+    with patch.dict("sys.modules", modules):
         response = await client.get("/api/pick/folder")
     assert response.status_code == 200
     data = response.json()
@@ -293,9 +323,7 @@ def _fake_tkinter(askdirectory_result=None, askdirectory_error=None):
     """Stand-in for tkinter, returning the mock root so a test can assert on it.
 
     _dialog imports tkinter inside the function body, so sys.modules is the
-    only place to intercept it. The other pick_folder tests mock
-    run_in_executor, which means _dialog never runs at all and neither of them
-    could have observed what it does with the root.
+    only place to intercept it.
     """
     fake_root = MagicMock()
     fake_tk = MagicMock()
@@ -341,9 +369,8 @@ async def test_pick_folder_destroys_the_tk_root_when_the_dialog_raises(client):
 async def test_pick_folder_dialog_failure(client):
     # No display / tkinter unavailable: fails closed with the same error
     # message the Tauri-context stub used to always return.
-    fake_loop = MagicMock()
-    fake_loop.run_in_executor = AsyncMock(side_effect=RuntimeError("no display"))
-    with patch("app.api.system.asyncio.get_running_loop", return_value=fake_loop):
+    # A None entry makes `import tkinter` raise ImportError.
+    with patch.dict("sys.modules", {"tkinter": None, "tkinter.filedialog": None}):
         response = await client.get("/api/pick/folder")
     assert response.status_code == 200
     data = response.json()

@@ -134,9 +134,9 @@ fn fs_main(in: VertexOutput) -> FragOutput {
     let L_back = normalize(vec3<f32>( 0.15, -0.40, -0.85));   // magenta rim
 
     // Light colors — restrained so total energy stays under ACES knee.
-    let c_key  = vec3<f32>(1.00, 0.92, 0.82) * 1.2;
-    let c_fill = vec3<f32>(0.50, 0.70, 1.00) * 0.45;
-    let c_back = vec3<f32>(1.00, 0.50, 0.80) * 0.35;
+    let c_key  = PMA_KEY * 1.2;
+    let c_fill = PMA_FILL * 0.45;
+    let c_back = PMA_RIM * 0.35;
 
     // Sharp specular for faceted gem look — low roughness body + mirror coat.
     let rough_body = 0.15;     // sharper than before → distinct per-facet glints
@@ -253,7 +253,7 @@ fn fs_main(in: VertexOutput) -> FragOutput {
     // a hardcoded world -Z through an already-rotated position, so the interior
     // counter-rotated with the body and read as pasted on.
     let core = inner_light(in.body_pos, normalize(in.view_body), camera.time,
-                           base * vec3<f32>(0.7, 0.6, 0.8));
+                           base * PMA_CRYSTAL_SHADE);
     // Strongest at center of gem face, fades at edges.
     let core_mask = pow(NdotV, 2.5) * 0.25;
     rgb = rgb + core * core_mask;
@@ -270,7 +270,7 @@ fn fs_main(in: VertexOutput) -> FragOutput {
     // ── Fresnel edge sparkle ────────────────────────────────────────────
     // Subtle white-violet edge glow — the hallmark of polished crystal.
     let edge = pow(1.0 - NdotV, 5.0);
-    rgb = rgb + vec3<f32>(0.85, 0.80, 1.0) * edge * 0.12;
+    rgb = rgb + PMA_CRYSTAL_EDGE * edge * 0.12;
 
     // ── Breathing emissive pulse ────────────────────────────────────────
     let type_hash_f = f32(in.type_hash % 100u);

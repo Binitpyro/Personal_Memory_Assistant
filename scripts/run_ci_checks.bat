@@ -57,7 +57,7 @@ echo.
 echo [2/4] Running MyPy (Type Checks)...
 call uv run mypy .
 if %ERRORLEVEL% NEQ 0 (
-    echo MyPy check failed!
+    echo MyPy check failed ^(exit !ERRORLEVEL!; -1073741819 is a native crash, not type errors^)
     goto :error
 )
 
@@ -65,7 +65,7 @@ echo.
 echo [3/4] Running Fast-Path Golden Tests...
 call uv run pytest tests/ -v --basetemp=.pytest_temp --junitxml=pytest-report.xml
 if %ERRORLEVEL% NEQ 0 (
-    echo Pytest failed!
+    echo Pytest failed ^(exit !ERRORLEVEL!; -1073741819 is a native crash, not test failures^)
     goto :error
 )
 
@@ -82,12 +82,29 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo.
-echo [5/6] Running ESLint (TypeScript Security)...
+echo [5/6] Running ESLint, frontend build, and the utility diff...
 cd frontend
 call npx eslint . --format json -o eslint-report.json
 if %ERRORLEVEL% NEQ 0 (
     cd ..
     echo ESLint security check failed!
+    goto :error
+)
+call npm run build
+if %ERRORLEVEL% NEQ 0 (
+    cd ..
+    echo Frontend build failed!
+    goto :error
+)
+REM Tailwind emits NOTHING for a class it does not know - no build error, no
+REM lint warning, no failing test. The UI/UX audit found 58 such usages across
+REM 22 names, several on error text. This is the guard that keeps it at zero.
+REM Must stay in step with .github/workflows/ci.yml - section 13 records the
+REM local gate and CI drifting apart twice already.
+call node scripts/check-utilities.mjs
+if %ERRORLEVEL% NEQ 0 (
+    cd ..
+    echo Utility diff failed: a class used in src/ produces no CSS!
     goto :error
 )
 cd ..
@@ -97,7 +114,7 @@ echo [6/6] Running Rust Security Checks...
 
 echo   - Checking Extraction Core (app\scanner\rust_core)
 cd app\scanner\rust_core
-call cargo clippy --message-format=json > sonar-issues.json
+call cargo clippy --all-targets --message-format=json -- -D warnings > sonar-issues.json
 if %ERRORLEVEL% NEQ 0 (
     cd ..\..\..
     echo Clippy check failed for rust_core!
@@ -119,7 +136,7 @@ cd ..\..\..
 
 echo   - Checking Desktop Shell (frontend\src-tauri)
 cd frontend\src-tauri
-call cargo clippy --message-format=json > sonar-issues.json
+call cargo clippy --all-targets --message-format=json -- -D warnings > sonar-issues.json
 if %ERRORLEVEL% NEQ 0 (
     cd ..\..
     echo Clippy check failed for src-tauri!

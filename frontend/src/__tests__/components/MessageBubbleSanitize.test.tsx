@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { screen } from '@testing-library/react';
 import { MessageBubble } from '../../components/chat/MessageBubble';
 import { renderWithProviders } from '../test-utils';
@@ -16,7 +16,7 @@ import { type Message } from '../../hooks/useChatStream';
 const assistant = (content: string): Message => ({ id: 'x', role: 'assistant', content });
 
 const render = (content: string) =>
-  renderWithProviders(<MessageBubble message={assistant(content)} onNearMissClick={vi.fn()} />);
+  renderWithProviders(<MessageBubble message={assistant(content)} />);
 
 describe('MessageBubble sanitises model output', () => {
   it('strips inline event handlers', () => {

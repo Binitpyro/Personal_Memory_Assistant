@@ -191,6 +191,19 @@ def _parse_domains(raw: str, questions: list[str]) -> dict[str, str | None]:
     return hints
 
 
+def _per_query_k(state: QueryState, k: int, n: int) -> int:
+    """Chunk budget per sub-question: k split n ways, capped by what is left.
+
+    Dividing k alone ignored the ceiling: at 3b_local (2,520 tokens) one
+    sub-question at k=15 declares 2,700 and the loop stopped before retrieving
+    anything. Floored at 3 so a wide decomposition still gets something usable
+    per branch; if even that is unaffordable the pre-commit check stops the loop.
+    """
+    n = max(1, n)
+    remaining = max(0, state.tokens_ceiling - state.tokens_spent)
+    return max(3, min(k // n, remaining // (n * _AVG_CHUNK_TOKENS)))
+
+
 async def decompose_node(state: QueryState, llm_client: Any, k: int) -> QueryState:
     """Split the query into sub-questions and allocate each a share of the budget.
 
@@ -204,7 +217,7 @@ async def decompose_node(state: QueryState, llm_client: Any, k: int) -> QuerySta
 
     if not state.can_afford(_DECOMPOSE_COST_ESTIMATE):
         state.note("decompose", "Skipped decomposition - insufficient token budget.")
-        state.subqueries = [SubQuery(text=state.query, k=k)]
+        state.subqueries = [SubQuery(text=state.query, k=_per_query_k(state, k, 1))]
         return state
 
     prompt = _DECOMPOSE_PROMPT.format(query=state.query, max_subqueries=max_subqueries)
@@ -219,9 +232,7 @@ async def decompose_node(state: QueryState, llm_client: Any, k: int) -> QuerySta
     questions = _parse_subqueries(raw or "", state.query, max_subqueries)
     hints = _parse_domains(raw or "", questions)
 
-    # Chunk budget split across sub-questions, floored so a wide decomposition
-    # still retrieves something usable per branch.
-    per_query_k = max(3, k // max(1, len(questions)))
+    per_query_k = _per_query_k(state, k, len(questions))
     state.subqueries = [
         SubQuery(text=q, domain_hint=hints.get(q), k=per_query_k) for q in questions
     ]

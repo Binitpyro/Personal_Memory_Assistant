@@ -29,7 +29,7 @@
  *       → Bloom(down×5, up×5) → Tonemap → SwapChain → Copy(SceneColorPrev).
  */
 
-import commonShaderCode      from './shaders/common.wgsl?raw';
+import rawCommonShaderCode   from './shaders/common.wgsl?raw';
 import skyShaderCode         from './shaders/aurora_sky.wgsl?raw';
 import crystalShaderCode     from './shaders/crystal.wgsl?raw';
 import bubbleShaderCode      from './shaders/bubble.wgsl?raw';
@@ -42,9 +42,19 @@ import tonemapShaderCode     from './shaders/tonemap.wgsl?raw';
 import pickingShaderCode     from './shaders/picking.wgsl?raw';
 import outlineShaderCode     from './shaders/outline.wgsl?raw';
 
+import { wgslPalette, VITRINE } from './palette';
 import { generateCrystalVariants, CRYSTAL_VARIANTS, type MeshData } from './geometry/icosahedron';
+
+/**
+ * Every shader module below is built as `commonShaderCode + '\n' + <module>`,
+ * so prepending the palette here is the one place it needs to happen for all
+ * twelve. The shaders reference the injected `PMA_*` consts by name instead of
+ * carrying their own colour literals.
+ */
+const commonShaderCode = wgslPalette() + '\n' + rawCommonShaderCode;
 import { generateIcosphereMulti } from './geometry/icosphere';
 import { NavigationController, NODE_STRIDE, NODE_OFF_TYPE_HASH, NO_PARENT } from '../interaction/NavigationController';
+import { flyStep, approachEye } from '../interaction/flyCamera';
 
 /** Grown UBO — matches common.wgsl's CameraUniform (std140). */
 const CAMERA_UNIFORM_SIZE = 192;
@@ -181,10 +191,17 @@ export class WebGPURenderer {
      * behind a fault the user can no longer act on.
      */
     private deviceLost = false;
+    private tornDown = false;
 
     private rotationX = 0.5;
     private rotationY = 0.5;
     private zoom = 550;
+    private flyLimit = 10000;
+    /**
+     * Glide the camera toward its target, or cut. Set false for
+     * `prefers-reduced-motion` — see approachEye, where the reasoning lives.
+     */
+    public smoothCamera = true;
     public focusPosition: [number, number, number] = [0, 0, 0];
     private cameraPosition: [number, number, number] = [0, 0, 0];
     private isFirstFrame = true;
@@ -203,6 +220,9 @@ export class WebGPURenderer {
         if (!adapter) throw new Error('No appropriate GPUAdapter found.');
         this.device = await adapter.requestDevice();
         this.device.lost.then(info => {
+            // destroy() resolves `lost` too (reason 'destroyed'); that is our
+            // own teardown, not a GPU loss, and must not demote the tier.
+            if (this.tornDown || info.reason === 'destroyed') return;
             this.deviceLost = true;
             console.error('[Aurora] GPU device lost:', info.message);
             this.onDeviceLost?.();
@@ -774,6 +794,11 @@ export class WebGPURenderer {
         this.depthTex?.destroy();
         this.depthTexCopy?.destroy();
         this.pickTex?.destroy();
+        // setupTextures() recreates pickDepthTex too. It was missing here while
+        // its nine siblings were freed, so every distinct size orphaned one
+        // full-res depth32float - 8.3 MB at 1080p, and a window drag emits
+        // dozens of distinct sizes.
+        this.pickDepthTex?.destroy();
         this.godRaysMask?.destroy();
         this.godRaysBlur?.destroy();
 
@@ -808,6 +833,10 @@ export class WebGPURenderer {
         if (rootPos) this.focusPosition = rootPos;
         const rootRadius = this.nav.getRadius(rootIdx);
         if (rootRadius > 0) this.zoom = Math.max(50, rootRadius * 2.5);
+        // How far flying may take the pivot from the origin. Scaled to the
+        // corpus so a small library is not roamable into empty space, and a
+        // large one is not fenced in.
+        this.flyLimit = Math.max(1000, rootRadius * 8);
         this.isFirstFrame = true;
     }
 
@@ -889,6 +918,23 @@ export class WebGPURenderer {
         this.zoom = Math.max(5, this.zoom + (delta > 0 ? speed : -speed));
     }
 
+    /**
+     * WASD/QE flythrough. Translates the PIVOT along the camera basis — the
+     * eye is derived from it in updateCamera, so the whole rig moves and
+     * orbit, dolly and focusOnNode are unaffected. See interaction/flyCamera.ts
+     * for why the basis lives outside this class.
+     */
+    public flyBy(forward: number, right: number, up: number): void {
+        this.focusPosition = flyStep(
+            this.focusPosition,
+            this.rotationX,
+            this.rotationY,
+            this.zoom,
+            { forward, right, up },
+            this.flyLimit,
+        ) as [number, number, number];
+    }
+
     private updateCamera(): void {
         const aspect = this.canvas.width / this.canvas.height;
         const projection = this.perspective(FOV_Y, aspect, 0.1, 100000);
@@ -901,9 +947,9 @@ export class WebGPURenderer {
             this.cameraPosition = [eyeX, eyeY, eyeZ];
             this.isFirstFrame = false;
         } else {
-            this.cameraPosition[0] += (eyeX - this.cameraPosition[0]) * 0.1;
-            this.cameraPosition[1] += (eyeY - this.cameraPosition[1]) * 0.1;
-            this.cameraPosition[2] += (eyeZ - this.cameraPosition[2]) * 0.1;
+            this.cameraPosition = approachEye(
+                this.cameraPosition, [eyeX, eyeY, eyeZ], this.smoothCamera, 0.1,
+            ) as [number, number, number];
         }
         const view = this.lookAt(this.cameraPosition, t, [0, 1, 0]);
         const vp   = this.multiply(projection, view);
@@ -1137,7 +1183,11 @@ export class WebGPURenderer {
 
         // ── 7. Bloom chain ──────────────────────────────────────────────
         // Prefilter: sceneColor → bloomMips[0]
-        this.writeBloomParams(0, this.dimsOf(this.bloomMips[0]), 1.05, 0.35, 1.0);
+        // Intensity comes from the palette: glow is the register this redesign
+        // moves away from, so the vitrine reads as lamp-lit rather than
+        // lit-from-within. Threshold and knee are unchanged — this is a
+        // strength change, not a change to the bloom curve.
+        this.writeBloomParams(0, this.dimsOf(this.bloomMips[0]), 1.05, 0.35, VITRINE.bloomStrength);
         {
             const p = encoder.beginRenderPass({
                 colorAttachments: [{ view: this.bloomMips[0].createView(), loadOp: 'clear', clearValue: [0,0,0,0], storeOp: 'store' }],
@@ -1241,8 +1291,17 @@ export class WebGPURenderer {
     }
 
     // ── Picking (unchanged from legacy — silhouette-tight) ──────────────
-    public async pick(x: number, y: number): Promise<number | null> {
-        if (!this.instanceBuffer || this.deviceLost) return null;
+    // One MAP_READ buffer serves every pick, so overlapping picks (a click
+    // during a throttled hover readback) must run one after another.
+    private pickQueue: Promise<unknown> = Promise.resolve();
+    public pick(x: number, y: number): Promise<number | null> {
+        const run = this.pickQueue.then(() => this.pickNow(x, y));
+        this.pickQueue = run.catch(() => {});
+        return run;
+    }
+
+    private async pickNow(x: number, y: number): Promise<number | null> {
+        if (!this.instanceBuffer || this.deviceLost || this.tornDown) return null;
         if (this.visibleDirty) this.rebuildInstances();
         const total = this.crystalCount + this.bubbleCount;
         if (total === 0) return null;
@@ -1381,6 +1440,7 @@ export class WebGPURenderer {
     private dot3(a: number[], b: number[]): number { return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; }
 
     public destroy(): void {
+        this.tornDown = true;
         this.sceneColor?.destroy();
         this.sceneColorPrev?.destroy();
         this.oitAccum?.destroy();

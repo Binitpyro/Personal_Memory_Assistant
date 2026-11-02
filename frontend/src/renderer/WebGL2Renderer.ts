@@ -31,9 +31,11 @@ import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 
 import { NavigationController, NODE_STRIDE } from '../interaction/NavigationController';
+import { flyStep, approachEye } from '../interaction/flyCamera';
 import { generateCrystalVariants, CRYSTAL_VARIANTS, type MeshData } from './geometry/icosahedron';
 import { crystalXform, crystalPalette } from './crystalInstance';
 import { generateIcosphereMulti } from './geometry/icosphere';
+import { VITRINE, hex, glslVec3 } from './palette';
 
 // ─── Sky dome shaders (single hemispherical wash + stars + nebula) ────────
 const skyVert = /* glsl */`
@@ -85,16 +87,16 @@ const skyFrag = /* glsl */`
         vec3 d = normalize(vDir);
         float y = clamp(d.y * 0.5 + 0.5, 0.0, 1.0);
         // Sky gradient (linear space)
-        vec3 horizon = vec3(0.035, 0.035, 0.180);
-        vec3 mid     = vec3(0.165, 0.100, 0.360);
-        vec3 zenith  = vec3(0.350, 0.180, 0.520);
+        vec3 horizon = ${glslVec3(VITRINE.skyHorizon)};
+        vec3 mid     = ${glslVec3(VITRINE.skyMid)};
+        vec3 zenith  = ${glslVec3(VITRINE.skyZenith)};
         vec3 col = mix(horizon, mid, smoothstep(0.0, 0.55, y));
         col = mix(col, zenith, smoothstep(0.45, 1.0, y));
 
         // Nebula
         float n = fbm(d * 2.7 + vec3(0.0, uTime * 0.008, 0.0));
-        vec3 nebA = vec3(0.10, 0.35, 0.60);
-        vec3 nebB = vec3(0.55, 0.18, 0.50);
+        vec3 nebA = ${glslVec3(VITRINE.washWarm)};
+        vec3 nebB = ${glslVec3(VITRINE.washCool)};
         vec3 nebCol = mix(nebA, nebB, smoothstep(0.4, 0.9, fbm(d * 0.5 + 7.7)));
         float hFade = smoothstep(-0.05, 0.55, d.y);
         col += nebCol * smoothstep(0.42, 0.85, n) * 0.55 * hFade;
@@ -112,7 +114,7 @@ const skyFrag = /* glsl */`
             float halo = smoothstep(sz * 4.0, 0.0, dist) * 0.15;
             float tw = 0.55 + 0.45 * sin(uTime * (1.5 + hash21(cell + 7.0) * 3.0));
             float bright = pow(hash21(cell + 13.0), 4.0);
-            vec3 tint = mix(vec3(1.0, 0.85, 0.72), vec3(0.78, 0.88, 1.0), bright);
+            vec3 tint = mix(${glslVec3(VITRINE.moteWarm)}, ${glslVec3(VITRINE.moteCool)}, bright);
             col += (core + halo) * tw * tint * (0.6 + bright * 1.4);
         }
 
@@ -140,7 +142,7 @@ function makeCrystalMaterial(env: THREE.Texture): THREE.MeshPhysicalMaterial {
         envMap: env,
         envMapIntensity: 1.4,
         attenuationDistance: 4.0,
-        attenuationColor: new THREE.Color(0.85, 0.65, 1.00),
+        attenuationColor: new THREE.Color(...VITRINE.crystalAttenuation),
         side: THREE.DoubleSide,   // reveal back facets through transmission
     });
     // Golden-ratio hue rotation seeded by (implicit) instance-color path in
@@ -151,7 +153,7 @@ function makeCrystalMaterial(env: THREE.Texture): THREE.MeshPhysicalMaterial {
 
 function makeBubbleMaterial(env: THREE.Texture): THREE.MeshPhysicalMaterial {
     const mat = new THREE.MeshPhysicalMaterial({
-        color: new THREE.Color(0.92, 0.72, 0.85),
+        color: new THREE.Color(...VITRINE.bubbleBase),
         metalness: 0.0,
         roughness: 0.02,
         transmission: 1.0,        // fully transparent body
@@ -177,7 +179,7 @@ function makeProceduralEnv(renderer: THREE.WebGLRenderer): THREE.Texture {
     // 4-corner gradient baked into a small cube map, then PMREM-blurred.
     const pmrem = new THREE.PMREMGenerator(renderer);
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x2a1a5e);
+    scene.background = new THREE.Color(...VITRINE.background);
     // Simple ambient scene with a bright zenith and warm horizon.
     const zenith = new THREE.Mesh(
         new THREE.SphereGeometry(500, 32, 16),
@@ -195,11 +197,11 @@ function makeProceduralEnv(renderer: THREE.WebGLRenderer): THREE.Texture {
         const y = pos.getY(i) / 500;
         const t = y * 0.5 + 0.5;
         // Match the sky gradient stops from aurora_sky.wgsl.
-        const c = new THREE.Color(0.035, 0.035, 0.180).lerp(
-            new THREE.Color(0.165, 0.100, 0.360), Math.min(1, t / 0.55),
+        const c = new THREE.Color(...VITRINE.skyHorizon).lerp(
+            new THREE.Color(...VITRINE.skyMid), Math.min(1, t / 0.55),
         );
         if (t > 0.45) {
-            c.lerp(new THREE.Color(0.350, 0.180, 0.520),
+            c.lerp(new THREE.Color(...VITRINE.skyZenith),
                    THREE.MathUtils.clamp((t - 0.45) / 0.55, 0, 1));
         }
         colors[i*3+0] = c.r; colors[i*3+1] = c.g; colors[i*3+2] = c.b;
@@ -240,6 +242,9 @@ export class WebGL2Renderer {
     private rotationX = 0.5;
     private rotationY = 0.5;
     private zoom = 550;
+    private flyLimit = 10000;
+    /** See the WebGPU tier and approachEye. */
+    public smoothCamera = true;
     public focusPosition: [number, number, number] = [0, 0, 0];
     private cameraPosition = new THREE.Vector3();
     private isFirstFrame = true;
@@ -280,7 +285,7 @@ export class WebGL2Renderer {
             alpha: false,
             powerPreference: 'high-performance',
         });
-        this.renderer.setClearColor(0x02030a, 1);
+        this.renderer.setClearColor(hex(VITRINE.ground), 1);
         // Pixel ratio stays 1 because `resize()` is fed DEVICE pixels (the
         // ResizeObserver reports devicePixelContentBoxSize). Leaving three.js to
         // apply the ratio as well multiplied the backing store by DPR a second
@@ -305,15 +310,15 @@ export class WebGL2Renderer {
         this.scene.environment = env;
 
         // Exponential fog matched to WebGPU tier.
-        this.scene.fog = new THREE.FogExp2(0x0a0a2e, 0.00025);
+        this.scene.fog = new THREE.FogExp2(hex(VITRINE.fog), 0.00025);
 
         // Three-point lighting — sun/sky/back key.
-        const sun = new THREE.DirectionalLight(0xffefd8, 1.4);
+        const sun = new THREE.DirectionalLight(hex(VITRINE.keyLight), 1.4);
         sun.position.set(30, 45, 20);
         this.scene.add(sun);
-        const sky = new THREE.HemisphereLight(0x8ac1ff, 0x201040, 0.55);
+        const sky = new THREE.HemisphereLight(hex(VITRINE.fillLight), hex(VITRINE.groundBounce), 0.55);
         this.scene.add(sky);
-        const back = new THREE.DirectionalLight(0xff8fd6, 0.35);
+        const back = new THREE.DirectionalLight(hex(VITRINE.rimLight), 0.35);
         back.position.set(-20, -12, -30);
         this.scene.add(back);
 
@@ -573,6 +578,8 @@ export class WebGL2Renderer {
         this.visibleDirty = true;
         const rootPos = this.nav.getPosition(this.nav.getRootIndex());
         if (rootPos) this.focusPosition = rootPos;
+        // Matches the WebGPU tier: fly bounds scale with the corpus.
+        this.flyLimit = Math.max(1000, this.nav.getRadius(this.nav.getRootIndex()) * 8);
         this.isFirstFrame = true;
     }
 
@@ -586,6 +593,18 @@ export class WebGL2Renderer {
     public handleZoom(delta: number): void {
         const step = Math.max(10, this.zoom * 0.05);
         this.zoom = Math.max(5, this.zoom + (delta > 0 ? step : -step));
+    }
+
+    /** WASD/QE flythrough — see the WebGPU tier and interaction/flyCamera.ts. */
+    public flyBy(forward: number, right: number, up: number): void {
+        this.focusPosition = flyStep(
+            this.focusPosition,
+            this.rotationX,
+            this.rotationY,
+            this.zoom,
+            { forward, right, up },
+            this.flyLimit,
+        ) as [number, number, number];
     }
     public focusOnNode(sourceIndex: number): void {
         const p = this.nav.getPosition(sourceIndex);
@@ -604,7 +623,11 @@ export class WebGL2Renderer {
             this.cameraPosition.set(eyeX, eyeY, eyeZ);
             this.isFirstFrame = false;
         } else {
-            this.cameraPosition.lerp(new THREE.Vector3(eyeX, eyeY, eyeZ), 0.12);
+            const [nx, ny, nz] = approachEye(
+                [this.cameraPosition.x, this.cameraPosition.y, this.cameraPosition.z],
+                [eyeX, eyeY, eyeZ], this.smoothCamera, 0.12,
+            );
+            this.cameraPosition.set(nx, ny, nz);
         }
         this.camera.position.copy(this.cameraPosition);
         this.camera.lookAt(t[0], t[1], t[2]);

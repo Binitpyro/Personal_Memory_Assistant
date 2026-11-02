@@ -1,6 +1,7 @@
 import os
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -230,3 +231,248 @@ def test_launch_uses_saved_base_url(mock_read, mock_launch):
     assert resp.status_code == 200
     assert resp.json()["ok"] is True
     mock_launch.assert_awaited_once_with("ollama", "http://127.0.0.1:9999")
+
+
+# ── consent_required: the onboarding trap ────────────────────────────────────
+#
+# Setup can store a cloud API key and finish without ever collecting consent.
+# `auto` then resolves to that provider and every query dies in the dispatch
+# gate, with the only remedy on a page absent from the nav. This field is what
+# lets the UI offer the fix before the user hits the wall.
+
+
+@patch("app.api.providers.get_default_chain_async", new_callable=AsyncMock)
+@patch("app.api.providers.read_settings")
+def test_consent_required_when_auto_resolves_to_a_cloud_provider(mock_read, mock_chain):
+    mock_chain.return_value = ["gemini"]
+    mock_read.return_value = {
+        "llm": {"provider": "auto", "per_provider": {}, "cloud_privacy_consent": False}
+    }
+
+    data = client.get("/api/providers/settings", headers=headers).json()
+    assert data["consent_required"] is True
+
+
+@patch("app.api.providers.get_default_chain_async", new_callable=AsyncMock)
+@patch("app.api.providers.read_settings")
+def test_consent_required_is_false_once_consent_is_given(mock_read, mock_chain):
+    mock_chain.return_value = ["gemini"]
+    mock_read.return_value = {
+        "llm": {"provider": "auto", "per_provider": {}, "cloud_privacy_consent": True}
+    }
+
+    data = client.get("/api/providers/settings", headers=headers).json()
+    assert data["consent_required"] is False
+
+
+@patch("app.api.providers.get_default_chain_async", new_callable=AsyncMock)
+@patch("app.api.providers.read_settings")
+def test_consent_not_required_with_an_empty_chain(mock_read, mock_chain):
+    """Nothing configured cannot dispatch anywhere, so nothing to consent to."""
+    mock_chain.return_value = []
+    mock_read.return_value = {
+        "llm": {"provider": "auto", "per_provider": {}, "cloud_privacy_consent": False}
+    }
+
+    data = client.get("/api/providers/settings", headers=headers).json()
+    assert data["consent_required"] is False
+
+
+@patch("app.api.providers.get_default_chain_async", new_callable=AsyncMock)
+@patch("app.api.providers.read_settings")
+def test_consent_required_follows_an_explicit_preference_not_the_chain(mock_read, mock_chain):
+    """An explicit local preference is not overruled by a cloud entry in the chain."""
+    mock_chain.return_value = ["gemini"]
+    mock_read.return_value = {
+        "llm": {"provider": "ollama", "per_provider": {}, "cloud_privacy_consent": False}
+    }
+
+    data = client.get("/api/providers/settings", headers=headers).json()
+    assert data["consent_required"] is False
+
+
+@patch("app.api.providers.get_default_chain_async", new_callable=AsyncMock)
+@patch("app.api.providers.read_settings")
+def test_consent_required_for_a_local_provider_aimed_off_box(mock_read, mock_chain):
+    """The case a `spec.kind` check gets wrong.
+
+    ollama is kind="local", but pointed at another host it still ships the
+    user's documents off this machine. The dispatch gate keys on the resolved
+    base_url, so this field must too or the banner disagrees with the gate.
+    """
+    mock_chain.return_value = ["ollama"]
+    mock_read.return_value = {
+        "llm": {
+            "provider": "auto",
+            "per_provider": {"ollama": {"base_url": "http://192.168.1.50:11434"}},
+            "cloud_privacy_consent": False,
+        }
+    }
+
+    data = client.get("/api/providers/settings", headers=headers).json()
+    assert data["consent_required"] is True
+
+
+@patch("app.api.providers.get_default_chain_async", new_callable=AsyncMock)
+@patch("app.api.providers.read_settings")
+def test_no_consent_required_for_a_loopback_local_provider(mock_read, mock_chain):
+    mock_chain.return_value = ["ollama"]
+    mock_read.return_value = {
+        "llm": {
+            "provider": "auto",
+            "per_provider": {"ollama": {"base_url": "http://localhost:11434"}},
+            "cloud_privacy_consent": False,
+        }
+    }
+
+    data = client.get("/api/providers/settings", headers=headers).json()
+    assert data["consent_required"] is False
+
+
+# ── Live LLMClient follows key rotation (F3') ────────────────────────────────
+
+
+def _llm_with_gemini_key(key: str | None):
+    from app.search.llm_client import LLMClient
+
+    llm = LLMClient()
+    llm.ollama_model = ""  # so `auto` can only resolve to cloud via the key
+    llm.lm_studio_model = ""
+    llm._oauth_token = None
+    llm.api_key = key
+    llm.provider_keys = {"gemini": key} if key else {}
+    return llm
+
+
+def test_rotating_the_gemini_key_updates_the_live_client(monkeypatch):
+    monkeypatch.setattr("app.api.providers.settings.gemini_api_key", None)
+    llm = _llm_with_gemini_key("old-key")
+    assert llm.get_model_class() == "cloud"
+
+    with patch("app.api.providers.get_llm", return_value=llm), patch("keyring.set_password"):
+        resp = client.put("/api/providers/gemini/key", json={"api_key": "new-key"}, headers=headers)
+
+    assert resp.status_code == 200
+    assert llm.provider_keys["gemini"] == "new-key"
+    assert llm.api_key == "new-key"
+    assert llm.get_model_class() == "cloud"
+
+
+def test_first_gemini_key_makes_the_live_client_cloud(monkeypatch):
+    """Without the live update, `auto` stays on the local default until restart."""
+    monkeypatch.setattr("app.api.providers.settings.gemini_api_key", None)
+    llm = _llm_with_gemini_key(None)
+    assert llm.get_model_class() == "7b_local"
+
+    with patch("app.api.providers.get_llm", return_value=llm), patch("keyring.set_password"):
+        resp = client.put("/api/providers/gemini/key", json={"api_key": "new-key"}, headers=headers)
+
+    assert resp.status_code == 200
+    assert llm.get_model_class() == "cloud"
+
+
+def test_deleting_the_gemini_key_clears_the_live_client(monkeypatch):
+    monkeypatch.setattr("app.api.providers.settings.gemini_api_key", None)
+    llm = _llm_with_gemini_key("old-key")
+
+    with patch("app.api.providers.get_llm", return_value=llm), patch("keyring.delete_password"):
+        resp = client.delete("/api/providers/gemini/key", headers=headers)
+
+    assert resp.status_code == 200
+    assert "gemini" not in llm.provider_keys
+    assert llm.api_key is None
+
+
+def test_openai_key_rotation_touches_provider_keys_only(monkeypatch):
+    monkeypatch.setattr("app.api.providers.settings.openai_api_key", None, raising=False)
+    llm = _llm_with_gemini_key("gem-key")
+
+    with patch("app.api.providers.get_llm", return_value=llm), patch("keyring.set_password"):
+        resp = client.put("/api/providers/openai/key", json={"api_key": "oa-new"}, headers=headers)
+    assert resp.status_code == 200
+    assert llm.provider_keys["openai"] == "oa-new"
+    assert llm.api_key == "gem-key"
+
+    with patch("app.api.providers.get_llm", return_value=llm), patch("keyring.delete_password"):
+        resp = client.delete("/api/providers/openai/key", headers=headers)
+    assert resp.status_code == 200
+    assert "openai" not in llm.provider_keys
+    assert llm.api_key == "gem-key"
+
+
+# ── A stored key must not follow a caller-supplied URL (F4') ─────────────────
+
+
+@patch("app.api.providers.create_provider")
+@patch("app.api.providers.read_settings")
+@patch("keyring.get_password")
+def test_validate_rejects_a_different_base_url_for_a_fixed_provider(
+    mock_get_pw, mock_read, mock_create
+):
+    mock_read.return_value = {"llm": {"per_provider": {}}}
+
+    resp = client.post(
+        "/api/providers/gemini/validate",
+        json={"base_url": "https://attacker.example"},
+        headers=headers,
+    )
+
+    assert resp.status_code == 400
+    mock_create.assert_not_called()
+    mock_get_pw.assert_not_called()
+
+
+@pytest.mark.parametrize("suffix", ["", "/"])
+@patch("app.api.providers.create_provider")
+@patch("app.api.providers.read_settings")
+@patch("keyring.get_password", return_value=None)
+def test_validate_accepts_the_effective_default_url_for_a_fixed_provider(
+    mock_get_pw, mock_read, mock_create, suffix
+):
+    from app.providers.registry import PROVIDER_REGISTRY
+
+    mock_read.return_value = {"llm": {"per_provider": {}}}
+    provider = mock_create.return_value
+    provider.validate = AsyncMock(
+        return_value={
+            "ok": True,
+            "latency_ms": 1,
+            "models": [],
+            "error": None,
+            "error_code": None,
+            "server_time": None,
+        }
+    )
+    provider.close = AsyncMock()
+    url = PROVIDER_REGISTRY["gemini"].default_base_url + suffix
+
+    resp = client.post("/api/providers/gemini/validate", json={"base_url": url}, headers=headers)
+
+    assert resp.status_code == 200
+    mock_create.assert_called_once()
+
+
+# ── PUT /settings rejects an unknown provider (F10) ──────────────────────────
+
+
+@patch("app.api.providers.read_settings")
+@patch("app.api.providers.write_settings")
+def test_put_settings_rejects_an_unknown_provider(mock_write, mock_read):
+    mock_read.return_value = {"llm": {"per_provider": {}}}
+
+    resp = client.put("/api/providers/settings", json={"provider": "foo"}, headers=headers)
+
+    assert resp.status_code == 400
+    mock_write.assert_not_called()
+
+
+@pytest.mark.parametrize("provider", ["auto", "ollama"])
+@patch("app.api.providers.read_settings")
+@patch("app.api.providers.write_settings")
+def test_put_settings_accepts_auto_and_known_providers(mock_write, mock_read, provider):
+    mock_read.return_value = {"llm": {"per_provider": {}}}
+
+    resp = client.put("/api/providers/settings", json={"provider": provider}, headers=headers)
+
+    assert resp.status_code == 200
+    assert mock_write.call_args[0][0]["llm"]["provider"] == provider

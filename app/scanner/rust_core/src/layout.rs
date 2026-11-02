@@ -303,6 +303,75 @@ pub fn simulate_layout(nodes: &mut [Node], config: &LayoutConfig) {
             nodes[i].position[2] += velocities[i][2];
         }
     }
+
+    resolve_overlaps(nodes, OVERLAP_PASSES);
+}
+
+/// Clearance kept between two sibling spheres once they have been separated.
+const OVERLAP_GAP: f32 = 0.25;
+/// Upper bound on relaxation passes; a pass that moves nothing ends it early.
+const OVERLAP_PASSES: usize = 64;
+
+/// Push apart every pair of spheres closer than `radius_a + radius_b`.
+///
+/// The force simulation above treats nodes as radius-less unit masses, so sibling
+/// folders whose radii are in the hundreds settled tens of units apart and their
+/// spheres interpenetrated by 76-90% (A8-14). This pass is what makes the radii
+/// count. Sweep-and-prune on x keeps a pass near O(n log n) rather than O(n^2);
+/// the order is re-sorted every pass and ties break on index, so the result is
+/// deterministic. Each pair is split evenly between its two members.
+///
+/// ponytail: Gauss-Seidel relaxation capped at `passes`; a very dense flat folder
+/// may keep a residual overlap. Raise the cap, or switch to a grid, if one shows.
+pub fn resolve_overlaps(nodes: &mut [Node], passes: usize) {
+    let n = nodes.len();
+    if n < 2 {
+        return;
+    }
+    let mut order: Vec<usize> = (0..n).collect();
+    for _ in 0..passes {
+        order.sort_by(|&a, &b| {
+            let ka = nodes[a].position[0] - nodes[a].radius;
+            let kb = nodes[b].position[0] - nodes[b].radius;
+            ka.total_cmp(&kb).then(a.cmp(&b))
+        });
+        let mut moved = false;
+        for oi in 0..n {
+            let i = order[oi];
+            for &j in &order[oi + 1..] {
+                let reach = nodes[i].position[0] + nodes[i].radius + OVERLAP_GAP;
+                if nodes[j].position[0] - nodes[j].radius > reach {
+                    break;
+                }
+                let mut d = [
+                    nodes[j].position[0] - nodes[i].position[0],
+                    nodes[j].position[1] - nodes[i].position[1],
+                    nodes[j].position[2] - nodes[i].position[2],
+                ];
+                let dist = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+                let need = nodes[i].radius + nodes[j].radius + OVERLAP_GAP;
+                if dist >= need {
+                    continue;
+                }
+                if dist < 1e-6 {
+                    // Coincident centres have no direction; derive one from the index.
+                    let a = i as f32 * 2.399_963;
+                    d = [a.cos(), a.sin(), 0.0];
+                } else {
+                    d = [d[0] / dist, d[1] / dist, d[2] / dist];
+                }
+                let half = (need - dist) * 0.5;
+                for (k, dk) in d.iter().enumerate() {
+                    nodes[i].position[k] -= dk * half;
+                    nodes[j].position[k] += dk * half;
+                }
+                moved = true;
+            }
+        }
+        if !moved {
+            break;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -367,6 +436,28 @@ mod tests {
         assert!(!tree.nodes.is_empty());
         assert_eq!(tree.nodes[0].mass, 2.0);
         assert_eq!(tree.nodes[0].center_of_mass, [5.0, 5.0, 5.0]);
+    }
+
+    #[test]
+    fn test_resolve_overlaps_separates_large_siblings() {
+        let mk = |p: [f32; 3], r: f32| Node { position: p, radius: r, ..Default::default() };
+        // Two big spheres nearly on top of each other, one pair exactly coincident.
+        let mut nodes = vec![
+            mk([0.0, 0.0, 0.0], 300.0),
+            mk([5.0, 0.0, 0.0], 250.0),
+            mk([1.0, 1.0, 1.0], 40.0),
+            mk([1.0, 1.0, 1.0], 40.0),
+        ];
+        resolve_overlaps(&mut nodes, OVERLAP_PASSES);
+        for a in 0..nodes.len() {
+            for b in a + 1..nodes.len() {
+                let d: f32 = (0..3)
+                    .map(|k| (nodes[a].position[k] - nodes[b].position[k]).powi(2))
+                    .sum::<f32>()
+                    .sqrt();
+                assert!(d >= nodes[a].radius + nodes[b].radius, "{a}-{b} overlap: {d}");
+            }
+        }
     }
 
     #[test]

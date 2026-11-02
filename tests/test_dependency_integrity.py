@@ -22,7 +22,10 @@ class TestTiktokenPresent:
     def test_tiktoken_imports(self):
         import tiktoken
 
-        assert tiktoken.get_encoding("cl100k_base") is not None
+        # get_encoding() here would download the BPE file on a cold cache; the
+        # offline load is covered by test_encoding_resolves via the bundled asset.
+        assert callable(tiktoken.get_encoding)
+        assert (cb._BUNDLED_BPE_DIR / cb._BPE_CACHE_KEY).is_file()
 
     def test_encoding_resolves(self):
         cb._ENCODING = None

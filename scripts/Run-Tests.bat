@@ -24,6 +24,10 @@ call ".venv\Scripts\activate.bat"
 
 :: Phase 1: Python tests
 echo [1/4] Running Python tests...
+:: coverage 7.13.5's C tracer crashes (0xC0000005) during collection on this
+:: machine in ~2 of 3 runs (2026-10-08, also at HEAD); the sys.monitoring core
+:: gave 0 crashes in 5 and the same coverage. Re-test before removing.
+set "COVERAGE_CORE=sysmon"
 call pytest tests/ --cov=app --cov-report=xml:coverage.xml --cov-report=term-missing --tb=short -q --basetemp=.pytest_temp
 set PYTHON_EXIT=%ERRORLEVEL%
 

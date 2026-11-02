@@ -1,4 +1,3 @@
-import { Filter } from 'lucide-react';
 
 interface FilterBarProps {
   selectedFileType: string;
@@ -7,6 +6,8 @@ interface FilterBarProps {
   setSelectedFolderTag: (val: string) => void;
   selectedMode: string;
   setSelectedMode: (val: string) => void;
+  selectedLength: string;
+  setSelectedLength: (val: string) => void;
   fileTypeOptions: string[];
   folderOptions: string[];
   disabled: boolean;
@@ -19,19 +20,22 @@ export function FilterBar({
   setSelectedFolderTag,
   selectedMode,
   setSelectedMode,
+  selectedLength,
+  setSelectedLength,
   fileTypeOptions,
   folderOptions,
   disabled
 }: FilterBarProps) {
+  // The ask bar's scope: what this question searches. Each select is named,
+  // because its first option is a value, not a label.
+  const select = 'h-[34px] max-w-[9.5rem] bg-transparent border border-edge px-2 font-mono text-[11px] tracking-[.1em] uppercase text-text-primary';
   return (
-    <div className="flex flex-wrap items-center gap-2 px-1">
-      <span className="text-[10px] text-text-secondary font-bold uppercase tracking-widest flex items-center gap-1">
-        <Filter className="w-3 h-3" /> Quick Filters
-      </span>
+    <div className="flex items-center gap-1.5">
       <select
         value={selectedFileType}
         onChange={(e) => setSelectedFileType(e.target.value)}
-        className="text-[11px] bg-white/5 border border-white/10 rounded-lg px-2 py-1 text-text-primary"
+        aria-label="File type"
+        className={select}
         disabled={disabled}
       >
         <option value="">All file types</option>
@@ -42,7 +46,8 @@ export function FilterBar({
       <select
         value={selectedFolderTag}
         onChange={(e) => setSelectedFolderTag(e.target.value)}
-        className="text-[11px] bg-white/5 border border-white/10 rounded-lg px-2 py-1 text-text-primary"
+        aria-label="Folder"
+        className={select}
         disabled={disabled}
       >
         <option value="">All folders</option>
@@ -53,7 +58,8 @@ export function FilterBar({
       <select
         value={selectedMode}
         onChange={(e) => setSelectedMode(e.target.value)}
-        className="text-[11px] bg-white/5 border border-white/10 rounded-lg px-2 py-1 text-text-primary"
+        aria-label="Answer style"
+        className={select}
         disabled={disabled}
       >
         <option value="">Default Mode</option>
@@ -61,17 +67,28 @@ export function FilterBar({
         <option value="verify">Verify</option>
         <option value="explore">Explore</option>
         <option value="distill">Distill</option>
-        <option value="challenge">Challenge</option>
       </select>
-      {(selectedFileType || selectedFolderTag || selectedMode) && (
+      <select
+        value={selectedLength}
+        onChange={(e) => setSelectedLength(e.target.value)}
+        aria-label="Answer length"
+        className={select}
+        disabled={disabled}
+      >
+        <option value="">Default length</option>
+        <option value="short">Short</option>
+        <option value="detailed">Detailed</option>
+      </select>
+      {(selectedFileType || selectedFolderTag || selectedMode || selectedLength) && (
         <button
           type="button"
           onClick={() => {
             setSelectedFileType('')
             setSelectedFolderTag('')
             setSelectedMode('')
+            setSelectedLength('')
           }}
-          className="text-[10px] px-2 py-1 rounded-lg border border-primary/20 text-primary-light hover:bg-primary/10"
+          className="tap-24 font-mono text-[11px] tracking-[.1em] uppercase text-text-secondary hover:text-text-primary underline underline-offset-4"
         >
           Clear filters
         </button>

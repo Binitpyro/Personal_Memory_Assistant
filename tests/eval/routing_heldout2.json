@@ -1,0 +1,173 @@
+{
+ "version": 1,
+ "items": [
+  {
+   "id": "k001",
+   "query": "How big is my whole collection now?",
+   "intent": "inventory",
+   "stratum": "heldout2",
+   "gold_mode": "FAST_METADATA"
+  },
+  {
+   "id": "k002",
+   "query": "What formats are most common in my files?",
+   "intent": "inventory",
+   "stratum": "heldout2",
+   "gold_mode": "FAST_METADATA"
+  },
+  {
+   "id": "k003",
+   "query": "Do I have any spreadsheets indexed?",
+   "intent": "inventory",
+   "stratum": "heldout2",
+   "gold_mode": "FAST_METADATA"
+  },
+  {
+   "id": "k004",
+   "query": "How many PDFs are in the Taxes folder?",
+   "intent": "inventory",
+   "stratum": "heldout2",
+   "gold_mode": "FAST_METADATA"
+  },
+  {
+   "id": "k005",
+   "query": "Give me a breakdown of everything indexed by type",
+   "intent": "inventory",
+   "stratum": "heldout2",
+   "gold_mode": "FAST_METADATA"
+  },
+  {
+   "id": "k006",
+   "query": "Give me an overview of my repos",
+   "intent": "project",
+   "stratum": "heldout2",
+   "gold_mode": "FAST_PROJECT"
+  },
+  {
+   "id": "k007",
+   "query": "What does each of my indexed folders contain?",
+   "intent": "project",
+   "stratum": "heldout2",
+   "gold_mode": "FAST_PROJECT"
+  },
+  {
+   "id": "k008",
+   "query": "Describe the projects in my workspace",
+   "intent": "project",
+   "stratum": "heldout2",
+   "gold_mode": "FAST_PROJECT"
+  },
+  {
+   "id": "k009",
+   "query": "Which documents did I add today?",
+   "intent": "recency",
+   "stratum": "heldout2",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "k010",
+   "query": "What did I index last week?",
+   "intent": "recency",
+   "stratum": "heldout2",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "k011",
+   "query": "What are the largest files I have?",
+   "intent": "recency",
+   "stratum": "heldout2",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "k012",
+   "query": "Which notes have I updated recently?",
+   "intent": "recency",
+   "stratum": "heldout2",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "k013",
+   "query": "What functions call parse_config?",
+   "intent": "graph",
+   "stratum": "heldout2",
+   "gold_mode": "GRAPH_SEARCH"
+  },
+  {
+   "id": "k014",
+   "query": "Who imports the QueryPlanner class?",
+   "intent": "graph",
+   "stratum": "heldout2",
+   "gold_mode": "GRAPH_SEARCH"
+  },
+  {
+   "id": "k015",
+   "query": "What relies on DatabaseManager?",
+   "intent": "graph",
+   "stratum": "heldout2",
+   "gold_mode": "GRAPH_SEARCH"
+  },
+  {
+   "id": "k016",
+   "query": "Which modules depend on settings.py?",
+   "intent": "graph",
+   "stratum": "heldout2",
+   "gold_mode": "GRAPH_SEARCH"
+  },
+  {
+   "id": "k017",
+   "query": "What did the economics lecture say about imports from China?",
+   "intent": "content",
+   "stratum": "heldout2_trap",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "k018",
+   "query": "How does the immune system rely on T cells?",
+   "intent": "content",
+   "stratum": "heldout2_trap",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "k019",
+   "query": "What is the impact of interest rates on housing?",
+   "intent": "content",
+   "stratum": "heldout2_trap",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "k020",
+   "query": "Do I have any notes about the French Revolution?",
+   "intent": "content",
+   "stratum": "heldout2_trap",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "k021",
+   "query": "How many chapters are in the Biology textbook?",
+   "intent": "content",
+   "stratum": "heldout2_trap",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "k022",
+   "query": "Summarize the notes in the Physics folder",
+   "intent": "content",
+   "stratum": "heldout2_trap",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "k023",
+   "query": "Explain how gradient descent works",
+   "intent": "content",
+   "stratum": "heldout2",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "k024",
+   "query": "What were the key findings of the vaccine trial?",
+   "intent": "content",
+   "stratum": "heldout2",
+   "gold_mode": "FULL_RAG"
+  }
+ ]
+}

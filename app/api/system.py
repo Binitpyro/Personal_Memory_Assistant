@@ -40,6 +40,7 @@ async def get_app_config():
     return {
         "app_version": APP_VERSION,
         "embedding_model": settings.embedding_model,
+        "embedding_device": settings.embedding_device,
         "gemini_model": getattr(llm, "model", settings.gemini_model),
         "gemini_max_output_tokens": settings.gemini_max_output_tokens,
         "dev_mode": settings.dev_mode,
@@ -258,19 +259,9 @@ async def compact_db(db: DatabaseManager = Depends(get_db)):
             _vacuum_last_error = None
             try:
                 # FTS optimize via aiosqlite (non-blocking in event loop terms)
-                await db.fts_optimize()
-                # VACUUM cannot run inside an active transaction and is CPU-bound.
-                # Open a separate sync connection to avoid blocking the event loop
-                # and to sidestep aiosqlite's implicit transaction wrapping.
-                import sqlite3
-
-                def _vacuum_sync():
-                    con = sqlite3.connect(db.db_path, timeout=60)
-                    con.isolation_level = None  # autocommit mode
-                    con.execute("PRAGMA incremental_vacuum(100)")
-                    con.close()
-
-                await asyncio.to_thread(_vacuum_sync)
+                await db.fts_optimize(full=True)
+                # Frees every free page, in batches that release the write lock.
+                await db.incremental_vacuum()
                 from datetime import datetime
 
                 _vacuum_last_run = datetime.now(UTC).isoformat()
@@ -297,7 +288,7 @@ async def compact_status():
 
 
 @router.post("/system/clear-cache")
-async def clear_cache():
+async def clear_cache(lancedb_client=Depends(get_lancedb)):
     try:
         from app.state import file_tree_cache as _file_tree_cache
         from app.state import insights_cache as _insights_cache
@@ -306,9 +297,9 @@ async def clear_cache():
     except ImportError:
         pass
 
-    from app.search.retrieval import clear_retrieval_cache
+    from app.search.retrieval import clear_all_query_caches
 
-    clear_retrieval_cache()
+    await clear_all_query_caches(lancedb_client)
     return {"message": "Caches cleared."}
 
 
@@ -340,16 +331,8 @@ async def demo_seed(
     async def _demo_index_then_compact():
         await service.index_folders([demo_folder])
         try:
-            await db.fts_optimize()
-            import sqlite3
-
-            def _vacuum_sync():
-                con = sqlite3.connect(db.db_path, timeout=60)
-                con.isolation_level = None
-                con.execute("PRAGMA incremental_vacuum(100)")
-                con.close()
-
-            await asyncio.to_thread(_vacuum_sync)
+            await db.fts_optimize(full=True)
+            await db.incremental_vacuum()
             logger.info("Auto-compact completed after demo indexing.")
         except Exception as e:
             logger.warning("Auto-compact after demo indexing failed: %s", e)

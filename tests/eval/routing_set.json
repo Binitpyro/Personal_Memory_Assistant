@@ -1,0 +1,691 @@
+{
+ "version": 1,
+ "items": [
+  {
+   "id": "r001",
+   "query": "How many files have I indexed?",
+   "intent": "inventory",
+   "stratum": "clear",
+   "gold_mode": "FAST_METADATA"
+  },
+  {
+   "id": "r002",
+   "query": "What's the total size of my index?",
+   "intent": "inventory",
+   "stratum": "clear",
+   "gold_mode": "FAST_METADATA"
+  },
+  {
+   "id": "r003",
+   "query": "How much disk space does the index use?",
+   "intent": "inventory",
+   "stratum": "clear",
+   "gold_mode": "FAST_METADATA"
+  },
+  {
+   "id": "r004",
+   "query": "Show index stats",
+   "intent": "inventory",
+   "stratum": "clear",
+   "gold_mode": "FAST_METADATA"
+  },
+  {
+   "id": "r005",
+   "query": "What types of files are indexed?",
+   "intent": "inventory",
+   "stratum": "clear",
+   "gold_mode": "FAST_METADATA"
+  },
+  {
+   "id": "r006",
+   "query": "How many documents are in my library?",
+   "intent": "inventory",
+   "stratum": "clear",
+   "gold_mode": "FAST_METADATA"
+  },
+  {
+   "id": "r007",
+   "query": "Give me a file count",
+   "intent": "inventory",
+   "stratum": "clear",
+   "gold_mode": "FAST_METADATA"
+  },
+  {
+   "id": "r008",
+   "query": "List all indexed folders",
+   "intent": "inventory",
+   "stratum": "clear",
+   "gold_mode": "FAST_METADATA"
+  },
+  {
+   "id": "r009",
+   "query": "How much stuff have I put into PMA so far?",
+   "intent": "inventory",
+   "stratum": "paraphrase",
+   "gold_mode": "FAST_METADATA"
+  },
+  {
+   "id": "r010",
+   "query": "Roughly how many notes and PDFs does it know about?",
+   "intent": "inventory",
+   "stratum": "paraphrase",
+   "gold_mode": "FAST_METADATA"
+  },
+  {
+   "id": "r011",
+   "query": "Is my library getting huge?",
+   "intent": "inventory",
+   "stratum": "paraphrase",
+   "gold_mode": "FAST_METADATA"
+  },
+  {
+   "id": "r012",
+   "query": "What's the breakdown of my files by format?",
+   "intent": "inventory",
+   "stratum": "paraphrase",
+   "gold_mode": "FAST_METADATA"
+  },
+  {
+   "id": "r013",
+   "query": "Tell me the size of everything you've indexed",
+   "intent": "inventory",
+   "stratum": "paraphrase",
+   "gold_mode": "FAST_METADATA"
+  },
+  {
+   "id": "r014",
+   "query": "How many PDFs do I have indexed?",
+   "intent": "inventory",
+   "stratum": "paraphrase",
+   "gold_mode": "FAST_METADATA"
+  },
+  {
+   "id": "r015",
+   "query": "Count the documents you have",
+   "intent": "inventory",
+   "stratum": "paraphrase",
+   "gold_mode": "FAST_METADATA"
+  },
+  {
+   "id": "r016",
+   "query": "What kinds of documents have I added?",
+   "intent": "inventory",
+   "stratum": "paraphrase",
+   "gold_mode": "FAST_METADATA"
+  },
+  {
+   "id": "r017",
+   "query": "Give me a project summary",
+   "intent": "project",
+   "stratum": "clear",
+   "gold_mode": "FAST_PROJECT"
+  },
+  {
+   "id": "r018",
+   "query": "Show project overview",
+   "intent": "project",
+   "stratum": "clear",
+   "gold_mode": "FAST_PROJECT"
+  },
+  {
+   "id": "r019",
+   "query": "What projects do I have indexed?",
+   "intent": "project",
+   "stratum": "clear",
+   "gold_mode": "FAST_PROJECT"
+  },
+  {
+   "id": "r020",
+   "query": "Summary of projects in my folders",
+   "intent": "project",
+   "stratum": "clear",
+   "gold_mode": "FAST_PROJECT"
+  },
+  {
+   "id": "r021",
+   "query": "Summarize my indexed projects",
+   "intent": "project",
+   "stratum": "paraphrase",
+   "gold_mode": "FAST_PROJECT"
+  },
+  {
+   "id": "r022",
+   "query": "What am I working on, based on my folders?",
+   "intent": "project",
+   "stratum": "paraphrase",
+   "gold_mode": "FAST_PROJECT"
+  },
+  {
+   "id": "r023",
+   "query": "Which codebases has PMA picked up?",
+   "intent": "project",
+   "stratum": "paraphrase",
+   "gold_mode": "FAST_PROJECT"
+  },
+  {
+   "id": "r024",
+   "query": "Describe each of my repos in one line",
+   "intent": "project",
+   "stratum": "paraphrase",
+   "gold_mode": "FAST_PROJECT"
+  },
+  {
+   "id": "r025",
+   "query": "What kind of projects are in my workspace?",
+   "intent": "project",
+   "stratum": "paraphrase",
+   "gold_mode": "FAST_PROJECT"
+  },
+  {
+   "id": "r026",
+   "query": "Tell me what each indexed folder is for",
+   "intent": "project",
+   "stratum": "paraphrase",
+   "gold_mode": "FAST_PROJECT"
+  },
+  {
+   "id": "r027",
+   "query": "What did I add most recently?",
+   "intent": "recency",
+   "stratum": "clear",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r028",
+   "query": "Show my latest files",
+   "intent": "recency",
+   "stratum": "clear",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r029",
+   "query": "Which files were modified last?",
+   "intent": "recency",
+   "stratum": "clear",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r030",
+   "query": "What are my largest documents?",
+   "intent": "recency",
+   "stratum": "clear",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r031",
+   "query": "Biggest files in the index?",
+   "intent": "recency",
+   "stratum": "clear",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r032",
+   "query": "What's new since last week?",
+   "intent": "recency",
+   "stratum": "paraphrase",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r033",
+   "query": "Which notes did I change today?",
+   "intent": "recency",
+   "stratum": "paraphrase",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r034",
+   "query": "Which PDFs are the heaviest?",
+   "intent": "recency",
+   "stratum": "paraphrase",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r035",
+   "query": "What have I been adding lately?",
+   "intent": "recency",
+   "stratum": "paraphrase",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r036",
+   "query": "Which file did I touch most recently?",
+   "intent": "recency",
+   "stratum": "paraphrase",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r037",
+   "query": "What calls embed_query?",
+   "intent": "graph",
+   "stratum": "clear",
+   "gold_mode": "GRAPH_SEARCH"
+  },
+  {
+   "id": "r038",
+   "query": "Who calls hybrid_retrieve?",
+   "intent": "graph",
+   "stratum": "clear",
+   "gold_mode": "GRAPH_SEARCH"
+  },
+  {
+   "id": "r039",
+   "query": "What depends on the LanceDB client?",
+   "intent": "graph",
+   "stratum": "clear",
+   "gold_mode": "GRAPH_SEARCH"
+  },
+  {
+   "id": "r040",
+   "query": "Dependencies of the indexing service",
+   "intent": "graph",
+   "stratum": "clear",
+   "gold_mode": "GRAPH_SEARCH"
+  },
+  {
+   "id": "r041",
+   "query": "Where is _sanitize_fts_query called?",
+   "intent": "graph",
+   "stratum": "clear",
+   "gold_mode": "GRAPH_SEARCH"
+  },
+  {
+   "id": "r042",
+   "query": "Which functions invoke rerank?",
+   "intent": "graph",
+   "stratum": "paraphrase",
+   "gold_mode": "GRAPH_SEARCH"
+  },
+  {
+   "id": "r043",
+   "query": "Show the callers of index_folders",
+   "intent": "graph",
+   "stratum": "paraphrase",
+   "gold_mode": "GRAPH_SEARCH"
+  },
+  {
+   "id": "r044",
+   "query": "What modules import app.config?",
+   "intent": "graph",
+   "stratum": "paraphrase",
+   "gold_mode": "GRAPH_SEARCH"
+  },
+  {
+   "id": "r045",
+   "query": "Which code relies on settings.rrf_k?",
+   "intent": "graph",
+   "stratum": "paraphrase",
+   "gold_mode": "GRAPH_SEARCH"
+  },
+  {
+   "id": "r046",
+   "query": "What breaks if I change the chunker's signature?",
+   "intent": "graph",
+   "stratum": "paraphrase",
+   "gold_mode": "GRAPH_SEARCH"
+  },
+  {
+   "id": "r047",
+   "query": "What were the main causes of the French Revolution?",
+   "intent": "content",
+   "stratum": "clear",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r048",
+   "query": "Explain how photosynthesis converts light into chemical energy",
+   "intent": "content",
+   "stratum": "clear",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r049",
+   "query": "What did my lecture notes say about Bayes' theorem?",
+   "intent": "content",
+   "stratum": "clear",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r050",
+   "query": "Summarise the argument of the chapter on game theory",
+   "intent": "content",
+   "stratum": "clear",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r051",
+   "query": "What is the difference between TCP and UDP?",
+   "intent": "content",
+   "stratum": "clear",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r052",
+   "query": "Which treatment worked best in the trial?",
+   "intent": "content",
+   "stratum": "clear",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r053",
+   "query": "Where do I describe the database schema?",
+   "intent": "content",
+   "stratum": "clear",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r054",
+   "query": "What does the README say about installation?",
+   "intent": "content",
+   "stratum": "clear",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r055",
+   "query": "How many files does the build script copy into dist?",
+   "intent": "content",
+   "stratum": "trap",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r056",
+   "query": "Summary of project timeline risks in my PM notes",
+   "intent": "content",
+   "stratum": "trap",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r057",
+   "query": "What is the impact of caffeine on sleep according to my notes?",
+   "intent": "content",
+   "stratum": "trap",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r058",
+   "query": "How is entropy used in the thermodynamics lecture?",
+   "intent": "content",
+   "stratum": "trap",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r059",
+   "query": "What does the paper say depends on temperature?",
+   "intent": "content",
+   "stratum": "trap",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r060",
+   "query": "How much storage does a Raft log need per entry?",
+   "intent": "content",
+   "stratum": "trap",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r061",
+   "query": "What's the total size limit for uploads in the API spec?",
+   "intent": "content",
+   "stratum": "trap",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r062",
+   "query": "Give me an overview of the Krebs cycle",
+   "intent": "content",
+   "stratum": "trap",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r063",
+   "query": "What is the connection between inflation and interest rates?",
+   "intent": "content",
+   "stratum": "trap",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r064",
+   "query": "How large is the dataset used in the transformer paper?",
+   "intent": "content",
+   "stratum": "trap",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r065",
+   "query": "List all the side effects mentioned in the drug study",
+   "intent": "content",
+   "stratum": "trap",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r066",
+   "query": "Show my notes on index funds",
+   "intent": "content",
+   "stratum": "trap",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r067",
+   "query": "How many items does the recipe call for?",
+   "intent": "content",
+   "stratum": "trap",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r068",
+   "query": "How big is the moon compared to Earth?",
+   "intent": "content",
+   "stratum": "trap",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r069",
+   "query": "What's the latest thinking on dark matter in my physics notes?",
+   "intent": "content",
+   "stratum": "trap",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r070",
+   "query": "Summarize the project proposal for the solar car",
+   "intent": "content",
+   "stratum": "trap",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r071",
+   "query": "What relates to photosynthesis in my biology notes?",
+   "intent": "content",
+   "stratum": "trap",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r072",
+   "query": "How full is the reservoir in the hydrology report?",
+   "intent": "content",
+   "stratum": "trap",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r073",
+   "query": "What file formats does the export feature support?",
+   "intent": "content",
+   "stratum": "trap",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r074",
+   "query": "What does the textbook say about the largest prime gaps?",
+   "intent": "content",
+   "stratum": "trap",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r075",
+   "query": "why was stale geometry served and how is the cache keyed",
+   "intent": "content",
+   "stratum": "realistic",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r076",
+   "query": "what does the attribute transfer node do",
+   "intent": "content",
+   "stratum": "realistic",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r077",
+   "query": "batching frames into farm tasks to amortise startup cost",
+   "intent": "content",
+   "stratum": "realistic",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r078",
+   "query": "velocity field advection",
+   "intent": "content",
+   "stratum": "realistic",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r079",
+   "query": "scene linear versus display encoded textures at ingest",
+   "intent": "content",
+   "stratum": "realistic",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r080",
+   "query": "turbulence octaves and how much high frequency detail to use",
+   "intent": "content",
+   "stratum": "realistic",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r081",
+   "query": "What was ABC's viewership share in 1993?",
+   "intent": "content",
+   "stratum": "realistic",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r082",
+   "query": "What has replaced the former shipping premises?",
+   "intent": "content",
+   "stratum": "realistic",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r083",
+   "query": "What two other rulers had their graves hidden under a river?",
+   "intent": "content",
+   "stratum": "realistic",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r084",
+   "query": "Who decides who gets to address the members of Parliament to share their thoughts on issues of faith?",
+   "intent": "content",
+   "stratum": "realistic",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r085",
+   "query": "The majority of building construction jobs are what?",
+   "intent": "content",
+   "stratum": "realistic",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r086",
+   "query": "Who led the in house design studies for NASA?",
+   "intent": "content",
+   "stratum": "realistic",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r087",
+   "query": "A total of 1,000 people in the UK are asymptomatic carriers of vCJD infection.",
+   "intent": "content",
+   "stratum": "realistic",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r088",
+   "query": "Cell autonomous sex determination in somatic cells does not occur in Galliformes.",
+   "intent": "content",
+   "stratum": "realistic",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r089",
+   "query": "The one-child policy has been successful in lowering population growth.",
+   "intent": "content",
+   "stratum": "realistic",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r090",
+   "query": "Assembly of invadopodia is triggered by focal generation of phosphatidylinositol-3,4-biphosphate and the activation of the nonreceptor tyrosine kinase Src.",
+   "intent": "content",
+   "stratum": "realistic",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r091",
+   "query": "Infection of human T-cell lymphotropic virus type 1 is most frequent in individuals of African origin.",
+   "intent": "content",
+   "stratum": "realistic",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r092",
+   "query": "Articles published in open access format are more likely to be cited than traditional journals.",
+   "intent": "content",
+   "stratum": "realistic",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r093",
+   "query": "extractors  ooxml guard module",
+   "intent": "content",
+   "stratum": "realistic",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r094",
+   "query": "meeting with Ines Moreau on 2025-07-10",
+   "intent": "content",
+   "stratum": "realistic",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r095",
+   "query": "invoice from Tallpine Office Goods September 2025",
+   "intent": "content",
+   "stratum": "realistic",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r096",
+   "query": "api search module",
+   "intent": "content",
+   "stratum": "realistic",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r097",
+   "query": "def has_failed",
+   "intent": "content",
+   "stratum": "realistic",
+   "gold_mode": "FULL_RAG"
+  },
+  {
+   "id": "r098",
+   "query": "strip_control_chars",
+   "intent": "content",
+   "stratum": "realistic",
+   "gold_mode": "FULL_RAG"
+  }
+ ]
+}

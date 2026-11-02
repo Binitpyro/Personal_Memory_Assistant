@@ -93,10 +93,47 @@ def serialize_write(func):
     return wrapper
 
 
+def _folder_match(column: str, folder: str) -> tuple[str, tuple[Any, ...]]:
+    """SQL predicate: *column* is *folder* itself or lies beneath it.
+
+    `LIKE folder || '%'` matched `proj2` and `Proj` when asked for `proj`, and
+    read `_`/`%` in the folder name as wildcards. This compares a literal prefix
+    and then demands a separator (or the end of the string) right after it.
+    Case-insensitive only on Windows, where the filesystem is.
+    """
+    base = folder.rstrip("\\/")
+    n = len(base)
+    nocase = " COLLATE NOCASE" if os.name == "nt" else ""
+    sql = (
+        f"(substr({column}, 1, ?) = ?{nocase} "  # nosec B608
+        f"AND (length({column}) = ? OR substr({column}, ?, 1) IN (?, ?)))"
+    )
+    return sql, (n, base, n, n + 1, "\\", "/")
+
+
 # Module-level so a test can shrink it. Generous rather than tight: legitimate
 # contention on a pool_size=4 pool during a bulk ingest is normal, and this is
 # meant to catch a leak, not to police slow queries.
 _READ_ACQUIRE_TIMEOUT_S = 30.0
+
+# Nodes within `max_depth` undirected hops of a node. UNION, not UNION ALL: the
+# join walks edges both ways, so UNION ALL re-entered visited nodes and produced
+# degree**depth rows (A -> B -> A -> ...), which the caller then joined against
+# itself twice. UNION bounds it at nodes * (depth + 1). Params: (node_id, max_depth).
+GRAPH_NEIGHBOURHOOD_CTE = """
+    WITH RECURSIVE
+        connected_nodes(id, depth) AS (
+            SELECT ? AS id, 0 AS depth
+            UNION
+            SELECT CASE
+                WHEN ke.source = cn.id THEN ke.target
+                ELSE ke.source
+            END AS id, cn.depth + 1 AS depth
+            FROM kg_edges ke
+            JOIN connected_nodes cn ON ke.source = cn.id OR ke.target = cn.id
+            WHERE cn.depth < ?
+        )
+"""
 
 
 class ReadPoolExhaustedError(RuntimeError):
@@ -144,17 +181,33 @@ class DatabaseManager:
             if self._read_pool is None:
                 self._read_pool = asyncio.Queue()
 
-            # 1. Primary write connection
-            self._write_conn = await aiosqlite.connect(self.db_path)
-            await self._configure_conn(self._write_conn, is_write_conn=True)
+            try:
+                # 1. Primary write connection
+                self._write_conn = await aiosqlite.connect(self.db_path)
+                await self._configure_conn(self._write_conn, is_write_conn=True)
 
-            # 2. Read connection pool
-            self._read_conns = []
-            for _ in range(self.pool_size):
-                conn = await aiosqlite.connect(self.db_path, isolation_level=None)
-                await self._configure_conn(conn, is_write_conn=False)
-                self._read_conns.append(conn)
-                await self._read_pool.put(conn)
+                # 2. Read connection pool
+                self._read_conns = []
+                for _ in range(self.pool_size):
+                    conn = await aiosqlite.connect(self.db_path, isolation_level=None)
+                    # Ledgered before it is configured: a pragma failing below must
+                    # not strand a live, non-daemon aiosqlite thread that blocks
+                    # interpreter exit (CLAUDE.md 8.4).
+                    self._read_conns.append(conn)
+                    await self._configure_conn(conn, is_write_conn=False)
+                    await self._read_pool.put(conn)
+            except BaseException:
+                if self._write_conn is not None:
+                    with contextlib.suppress(Exception):
+                        await self._write_conn.close()
+                    self._write_conn = None
+                for conn in self._read_conns:
+                    with contextlib.suppress(Exception):
+                        await conn.close()
+                self._read_conns = []
+                while not self._read_pool.empty():
+                    self._read_pool.get_nowait()
+                raise
 
             self._pool_initialized = True
 
@@ -294,7 +347,10 @@ class DatabaseManager:
                         "Database heavily fragmented (%d free pages). Running incremental vacuum.",
                         row[0],
                     )
-                    await conn.execute("PRAGMA incremental_vacuum(5000);")
+                    # incremental_vacuum frees one page per row stepped, and a bare
+                    # execute() steps none: fetch the rows or nothing is freed.
+                    async with conn.execute("PRAGMA incremental_vacuum(5000);") as cur:
+                        await cur.fetchall()
                     await conn.commit()
         except Exception as e:
             logger.warning("Failed to run startup incremental vacuum: %s", e)
@@ -569,12 +625,94 @@ class DatabaseManager:
                     weight REAL DEFAULT 1.0,
                     properties TEXT DEFAULT '{}',
                     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                    PRIMARY KEY (source, target, relation),
-                    FOREIGN KEY (source) REFERENCES kg_nodes(id) ON DELETE CASCADE,
-                    FOREIGN KEY (target) REFERENCES kg_nodes(id) ON DELETE CASCADE
+                    PRIMARY KEY (source, target, relation)
                 )
             """)
+            # kg_edges carried FOREIGN KEY (source|target) REFERENCES kg_nodes(id).
+            # That contradicts the design it belongs to: CodeGraphExtractor emits
+            # `PENDING::<name>` targets on purpose for calls it cannot resolve
+            # within one file, and resolve_pending_graph_edges (called from
+            # app/indexing/service.py) rewrites or deletes them once the whole
+            # run has been indexed. A PENDING:: target is never a kg_nodes.id, so
+            # the constraint rejects exactly the rows the feature depends on.
+            #
+            # insert_kg_edges_bulk already knew this and wrapped its insert in
+            # `PRAGMA foreign_keys = OFF` - but that pragma is **a no-op inside a
+            # transaction**, and the indexer inserts with auto_commit=False from
+            # inside one. So the guard silently did nothing and the insert raised
+            # `FOREIGN KEY constraint failed`, aborting the whole indexing run.
+            #
+            # Never observed until now only because nothing wrote to this table:
+            # the sole producer of kg_nodes/kg_edges was unreachable from the
+            # shipped pipeline (CLAUDE.md 8.7 A4), so every existing index has
+            # zero rows here and this rebuild is a no-op on real data.
+            try:
+                async with conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='kg_edges'"
+                ) as cur:
+                    row = await cur.fetchone()
+                if row and row[0] and "REFERENCES kg_nodes" in row[0]:
+                    logger.info("Migrating kg_edges to drop the PENDING-hostile foreign keys...")
+                    await conn.execute("ALTER TABLE kg_edges RENAME TO kg_edges_old")
+                    await conn.execute("""
+                        CREATE TABLE kg_edges (
+                            source TEXT NOT NULL,
+                            target TEXT NOT NULL,
+                            relation TEXT NOT NULL,
+                            weight REAL DEFAULT 1.0,
+                            properties TEXT DEFAULT '{}',
+                            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                            PRIMARY KEY (source, target, relation)
+                        )
+                    """)
+                    await conn.execute("""
+                        INSERT OR IGNORE INTO kg_edges
+                            (source, target, relation, weight, properties, created_at)
+                        SELECT source, target, relation, weight, properties, created_at
+                        FROM kg_edges_old
+                    """)
+                    await conn.execute("DROP TABLE kg_edges_old")
+                    await conn.commit()
+                    logger.info("kg_edges migration completed successfully.")
+            except Exception as exc:
+                logger.warning("kg_edges schema migration failed: %s", exc)
+
+            # The dropped FOREIGN KEY carried ON DELETE CASCADE, and that half of
+            # it was correct: deleting a node must take its edges with it, or the
+            # graph accumulates edges pointing at nothing every time a file is
+            # re-indexed. The constraint conflated two separate things - refusing
+            # bad INSERTs (wrong here, PENDING:: targets are by design) and
+            # cascading DELETEs (right). A trigger keeps the half that was right.
+            #
+            # Fires on source and target separately rather than with an OR, so
+            # each index can be used.
+            await conn.execute("""
+                CREATE TRIGGER IF NOT EXISTS trg_kg_edges_cascade_source
+                AFTER DELETE ON kg_nodes
+                BEGIN
+                    DELETE FROM kg_edges WHERE source = OLD.id;
+                END
+            """)
+            # An edge INTO a deleted node from another file is not dead: only
+            # the callee's file was re-indexed, and the unchanged caller is never
+            # re-extracted, so deleting the edge lost it for good. Turn
+            # CALLS/INHERITS back into the PENDING:: form the extractor emits;
+            # resolve_pending_graph_edges re-binds it to the re-created node (or
+            # drops it if the node is really gone). A rewritten row that
+            # collides with an existing PENDING edge replaces it.
+            await conn.execute("DROP TRIGGER IF EXISTS trg_kg_edges_cascade_target")
+            await conn.execute("""
+                CREATE TRIGGER trg_kg_edges_cascade_target
+                AFTER DELETE ON kg_nodes
+                BEGIN
+                    UPDATE OR REPLACE kg_edges SET target = 'PENDING::' || OLD.label
+                    WHERE target = OLD.id AND relation IN ('CALLS', 'INHERITS');
+                    DELETE FROM kg_edges WHERE target = OLD.id;
+                END
+            """)
+
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_kg_edges_target ON kg_edges(target)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_kg_edges_source ON kg_edges(source)")
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_kg_edges_relation ON kg_edges(relation)"
             )
@@ -745,15 +883,24 @@ class DatabaseManager:
             "INSERT OR REPLACE INTO system_state (key, value) VALUES (?, ?)",
             (key, value),
         )
-        await conn.commit()
+        await self._maybe_commit(conn)
 
     @serialize_write
-    async def fts_optimize(self) -> None:
-        """Optimizes the FTS5 index to reduce fragmentation and improve search speed."""
+    async def fts_optimize(self, full: bool = False) -> None:
+        """Keep the FTS5 index from fragmenting.
+
+        Default is a bounded incremental merge: 'optimize' rewrites every segment
+        into one, so its cost (and the write-lock hold) scales with the corpus,
+        not with what a run changed (measured 4.5 s for one new row at 40k
+        chunks). `full=True` is for explicit maintenance (compact-db).
+        """
         conn = self._get_conn()
         try:
             logger.info("Optimizing FTS5 index (chunk_fts)...")
-            await conn.execute("INSERT INTO chunk_fts(chunk_fts) VALUES('optimize')")
+            if full:
+                await conn.execute("INSERT INTO chunk_fts(chunk_fts) VALUES('optimize')")
+            else:
+                await conn.execute("INSERT INTO chunk_fts(chunk_fts, rank) VALUES('merge', 500)")
             await conn.commit()
             logger.info("FTS5 index optimization complete.")
         except Exception as e:
@@ -778,16 +925,36 @@ class DatabaseManager:
         await conn.commit()
         logger.info("Database maintenance completed.")
 
-    @serialize_write
     async def incremental_vacuum(self, pages: int = 1000) -> None:
-        """Run an incremental vacuum to reclaim space without locking for long periods."""
-        conn = self._get_conn()
+        """Reclaim every free page, `pages` at a time.
+
+        The write lock is released between batches, so a large reclaim never
+        holds it for long. Stops when the freelist is empty or a batch frees
+        nothing (a database not in INCREMENTAL auto_vacuum mode).
+        """
+        remaining = None
         try:
-            logger.info("Running incremental vacuum (%d pages)...", pages)
-            await conn.execute(f"PRAGMA incremental_vacuum({pages});")
-            await conn.commit()
+            logger.info("Running incremental vacuum (%d pages per batch)...", pages)
+            while True:
+                left = await self._incremental_vacuum_step(pages)
+                if left <= 0 or (remaining is not None and left >= remaining):
+                    break
+                remaining = left
         except Exception as e:
             logger.warning("Incremental vacuum failed: %s", e)
+
+    @serialize_write
+    async def _incremental_vacuum_step(self, pages: int) -> int:
+        """Free up to `pages` pages; return how many remain on the freelist."""
+        conn = self._get_conn()
+        # One page is freed per row stepped. execute() alone steps none, so the
+        # old call freed nothing no matter what N was.
+        async with conn.execute(f"PRAGMA incremental_vacuum({int(pages)});") as cur:
+            await cur.fetchall()
+        await self._maybe_commit(conn)
+        async with conn.execute("PRAGMA freelist_count;") as cur:
+            row = await cur.fetchone()
+        return int(row[0]) if row else 0
 
     @serialize_write
     async def wal_checkpoint(self) -> None:
@@ -1073,18 +1240,20 @@ class DatabaseManager:
         """
         if not data:
             return
+        # The `PRAGMA foreign_keys = OFF` / `ON` pair that used to wrap this is
+        # gone with the constraint it was working around. It never worked: the
+        # pragma is a no-op inside a transaction and the indexer inserts from
+        # inside one, so it silently protected nothing. Its `finally` was also
+        # unconditionally *enabling* foreign keys, which is not this function's
+        # to decide for whatever caller comes next.
         conn = self._get_conn()
-        await conn.execute("PRAGMA foreign_keys = OFF")
-        try:
-            await conn.executemany(
-                "INSERT INTO kg_edges (source, target, relation, weight, properties) VALUES (?, ?, ?, ?, ?) "
-                "ON CONFLICT(source, target, relation) DO UPDATE SET weight=excluded.weight, properties=excluded.properties",
-                data,
-            )
-            if auto_commit:
-                await self._maybe_commit(conn)
-        finally:
-            await conn.execute("PRAGMA foreign_keys = ON")
+        await conn.executemany(
+            "INSERT INTO kg_edges (source, target, relation, weight, properties) VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(source, target, relation) DO UPDATE SET weight=excluded.weight, properties=excluded.properties",
+            data,
+        )
+        if auto_commit:
+            await self._maybe_commit(conn)
 
     @serialize_write
     async def resolve_pending_graph_edges(self) -> None:
@@ -1170,17 +1339,24 @@ class DatabaseManager:
         if not paths or per_file_limit <= 0:
             return {}
 
+        # The per-file cap is applied in SQL: truncating after fetchall() read
+        # every chunk id of every routed file (39.7 ms for 15 files of 5,000
+        # chunks vs 0.41 ms, 2026-09-30).
         placeholders = ",".join("?" for _ in paths)
         query = f"""
             SELECT f.path, c.id
             FROM chunks c
             JOIN files f ON c.file_id = f.id
             WHERE f.path IN ({placeholders})
+              AND c.id IN (
+                  SELECT c2.id FROM chunks c2 WHERE c2.file_id = f.id ORDER BY c2.id LIMIT ?
+              )
             ORDER BY f.path, c.id
         """  # nosec B608 # noqa: S608
 
         by_path: dict[str, list[int]] = {}
-        async with self._get_read_conn() as conn, conn.execute(query, tuple(paths)) as cursor:
+        params = (*paths, per_file_limit)
+        async with self._get_read_conn() as conn, conn.execute(query, params) as cursor:
             rows = await cursor.fetchall()
         for path, chunk_id in rows:
             bucket = by_path.setdefault(path, [])
@@ -1595,7 +1771,7 @@ class DatabaseManager:
             "UPDATE files SET usage_count = usage_count + 1 WHERE path = ?",
             (file_path,),
         )
-        await conn.commit()
+        await self._maybe_commit(conn)
 
     @serialize_write
     async def batch_increment_usage(self, file_paths: list[str]) -> None:
@@ -1623,7 +1799,7 @@ class DatabaseManager:
             + ")"
         )
         await conn.execute(sql, tuple(case_params + in_params))
-        await conn.commit()
+        await self._maybe_commit(conn)
 
     async def get_all_files(self) -> list[aiosqlite.Row]:
         """Returns all indexed files ordered by folder and path."""
@@ -1793,7 +1969,7 @@ class DatabaseManager:
             (question, answer, source_count, latency_ms),
         ) as cursor:
             row = await cursor.fetchone()
-            await conn.commit()
+            await self._maybe_commit(conn)
             return row[0] if row else 0
 
     @serialize_write
@@ -1839,7 +2015,7 @@ class DatabaseManager:
                 chunks_dropped,
             ),
         )
-        await conn.commit()
+        await self._maybe_commit(conn)
 
     async def get_query_history(self, limit: int = 20) -> list[dict[str, Any]]:
         """Return recent queries from history."""
@@ -1869,13 +2045,13 @@ class DatabaseManager:
         """Delete all entries from the query_history table."""
         conn = self._get_conn()
         await conn.execute("DELETE FROM query_history")
-        await conn.commit()
+        await self._maybe_commit(conn)
         return {"message": "Query history cleared successfully."}
 
-    @serialize_write
-    async def cleanup_stale_files(self) -> list[str]:
+    async def cleanup_stale_files(self, lancedb_client: Any = None) -> list[str]:
         """Remove index entries for files that no longer exist on disk.
 
+        Pass `lancedb_client` to drop their vectors too (see `remove_from_index`).
         Returns list of paths that were cleaned up.
         """
         cleaned: list[str] = []
@@ -1890,39 +2066,7 @@ class DatabaseManager:
                 cleaned.append(path)
                 logger.info("Cleaned stale file: %s", path)
         if stale_ids:
-            conn = self._get_conn()
-            savepoint_name = None
-            try:
-                try:
-                    await conn.execute("BEGIN IMMEDIATE")
-                except Exception as e:
-                    if "cannot start a transaction within a transaction" in str(e):
-                        savepoint_name = f"sp_{uuid.uuid4().hex}"
-                        await conn.execute(f"SAVEPOINT {savepoint_name}")
-                    else:
-                        raise
-
-                batch_size = 900
-                for i in range(0, len(stale_ids), batch_size):
-                    batch = stale_ids[i : i + batch_size]
-                    placeholders = ",".join("?" for _ in batch)
-                    await conn.execute(
-                        f"DELETE FROM files WHERE id IN ({placeholders})",  # nosec B608 # noqa: S608
-                        tuple(batch),
-                    )
-
-                if savepoint_name:
-                    await conn.execute(f"RELEASE {savepoint_name}")
-                else:
-                    await conn.commit()
-            except Exception:
-                if savepoint_name:
-                    with contextlib.suppress(Exception):
-                        await conn.execute(f"ROLLBACK TO {savepoint_name}")
-                else:
-                    with contextlib.suppress(Exception):
-                        await conn.rollback()
-                raise
+            await self.remove_from_index(lancedb_client, file_ids=stale_ids)
         return cleaned
 
     @serialize_write
@@ -2019,15 +2163,130 @@ class DatabaseManager:
         async with self._get_read_conn() as conn, conn.execute(sql, params) as cursor:
             return list(await cursor.fetchall())
 
-    @serialize_write
+    async def get_file_paths_under(self, folder: str) -> list[tuple[int, str]]:
+        """Return (id, path) of every indexed file at or beneath *folder*."""
+        clause, params = _folder_match("path", folder)
+        async with (
+            self._get_read_conn() as conn,
+            conn.execute(
+                f"SELECT id, path FROM files WHERE {clause}",  # nosec B608 # noqa: S608
+                params,
+            ) as cur,
+        ):
+            return [(r[0], r[1]) for r in await cur.fetchall()]
+
     async def delete_files_by_folder_prefix(self, folder: str) -> None:
-        """Delete all files (and cascading chunks) whose path starts with *folder*."""
-        conn = self._get_conn()
-        await conn.execute(
-            "DELETE FROM files WHERE path LIKE ? || '%'",
-            (folder,),
-        )
-        await conn.commit()
+        """Delete all files (and cascading chunks) at or beneath *folder*.
+
+        SQLite only. Callers that also hold vectors want `remove_from_index`.
+        """
+        await self.remove_from_index(None, folder=folder)
+
+    async def remove_from_index(
+        self,
+        lancedb_client: Any = None,
+        *,
+        folder: str | None = None,
+        file_ids: list[int] | None = None,
+    ) -> dict[str, Any]:
+        """The one way to take files out of the index.
+
+        Pass `folder` (the folder and everything beneath it, plus its folder
+        profile) and/or `file_ids` (just those files). Removes the `files` rows
+        (chunks, embeddings and FTS go with them via cascade and triggers), the
+        files' `ocr_queue` rows, the folder's `folder_profiles` rows, and - when
+        `lancedb_client` is given - the chunk vectors, the per-file summary
+        vectors (`file_<id>`) and the `folder_profile_<tag>` summary vectors.
+        `ocr_cache` is keyed on content and deliberately kept.
+
+        Chunk vectors are deleted first and a failure there aborts before any
+        SQLite row is touched, so the removal can simply be retried. Summary
+        vectors are best-effort: a stray one only mis-routes a document.
+
+        Returns ``{"paths", "files_removed", "chunks_removed"}``.
+        """
+        rows: list[Any] = []
+        async with self._get_read_conn() as conn:
+            if folder is not None:
+                clause, params = _folder_match("path", folder)
+                async with conn.execute(
+                    f"SELECT id, path FROM files WHERE {clause}",  # nosec B608 # noqa: S608
+                    params,
+                ) as cur:
+                    rows.extend(await cur.fetchall())
+            ids = {r[0] for r in rows}
+            wanted = [i for i in (file_ids or []) if i not in ids]
+            for i in range(0, len(wanted), 900):
+                batch = wanted[i : i + 900]
+                marks = ",".join("?" for _ in batch)
+                async with conn.execute(
+                    f"SELECT id, path FROM files WHERE id IN ({marks})",  # nosec B608 # noqa: S608
+                    tuple(batch),
+                ) as cur:
+                    rows.extend(await cur.fetchall())
+            all_ids = [r[0] for r in rows]
+            chunk_ids: list[str] = []
+            for i in range(0, len(all_ids), 900):
+                batch = all_ids[i : i + 900]
+                marks = ",".join("?" for _ in batch)
+                async with conn.execute(
+                    f"SELECT id FROM chunks WHERE file_id IN ({marks})",  # nosec B608 # noqa: S608
+                    tuple(batch),
+                ) as cur:
+                    chunk_ids.extend(str(c[0]) for c in await cur.fetchall())
+            profile_tags: list[str] = []
+            if folder is not None:
+                clause, params = _folder_match("folder_path", folder)
+                async with conn.execute(
+                    f"SELECT folder_tag FROM folder_profiles WHERE {clause}",  # nosec B608 # noqa: S608
+                    params,
+                ) as cur:
+                    profile_tags = [r[0] for r in await cur.fetchall()]
+
+        if lancedb_client is not None:
+            for i in range(0, len(chunk_ids), 2000):
+                await lancedb_client.delete_documents(chunk_ids[i : i + 2000])
+
+        paths = [r[1] for r in rows]
+        async with self.write_transaction() as conn:
+            for i in range(0, len(all_ids), 900):
+                batch = all_ids[i : i + 900]
+                marks = ",".join("?" for _ in batch)
+                await conn.execute(
+                    f"DELETE FROM files WHERE id IN ({marks})",  # nosec B608 # noqa: S608
+                    tuple(batch),
+                )
+            for i in range(0, len(paths), 900):
+                batch = paths[i : i + 900]
+                marks = ",".join("?" for _ in batch)
+                await conn.execute(
+                    f"DELETE FROM ocr_queue WHERE file_path IN ({marks})",  # nosec B608 # noqa: S608
+                    tuple(batch),
+                )
+            if folder is not None:
+                clause, params = _folder_match("file_path", folder)
+                await conn.execute(f"DELETE FROM ocr_queue WHERE {clause}", params)  # nosec B608 # noqa: S608
+                clause, params = _folder_match("folder_path", folder)
+                await conn.execute(f"DELETE FROM folder_profiles WHERE {clause}", params)  # nosec B608 # noqa: S608
+
+        if lancedb_client is not None:
+            # Two folders can share a tag (and so a `folder_profile_<tag>` vector);
+            # keep that vector while any profile row still wears the tag.
+            async with (
+                self._get_read_conn() as conn,
+                conn.execute("SELECT DISTINCT folder_tag FROM folder_profiles") as cur,
+            ):
+                still_used = {r[0] for r in await cur.fetchall()}
+            summary_ids = [f"file_{i}" for i in all_ids] + [
+                f"folder_profile_{t}" for t in set(profile_tags) - still_used
+            ]
+            if summary_ids:
+                try:
+                    await lancedb_client.delete_summaries_by_ids(summary_ids)
+                except Exception as exc:
+                    logger.warning("Could not remove summary vectors: %s", exc)
+
+        return {"paths": paths, "files_removed": len(all_ids), "chunks_removed": len(chunk_ids)}
 
     async def is_healthy(self) -> bool:
         """Quick DB health check - runs a trivial query."""
@@ -2140,24 +2399,15 @@ class DatabaseManager:
 
     async def get_graph_edges(self, node_id: str, max_depth: int = 2) -> list[dict[str, Any]]:
         """Retrieve 1-hop and 2-hop edges for a given node using recursive CTE."""
-        query = """
-            WITH RECURSIVE
-                connected_nodes(id, depth) AS (
-                    SELECT ? AS id, 0 AS depth
-                    UNION ALL
-                    SELECT CASE
-                        WHEN ke.source = cn.id THEN ke.target
-                        ELSE ke.source
-                    END AS id, cn.depth + 1 AS depth
-                    FROM kg_edges ke
-                    JOIN connected_nodes cn ON ke.source = cn.id OR ke.target = cn.id
-                    WHERE cn.depth < ?
-                )
+        query = (
+            GRAPH_NEIGHBOURHOOD_CTE  # nosec B608 # noqa: S608 - constant SQL, values bound
+            + """
             SELECT DISTINCT e.source, e.target, e.relation, e.weight, e.properties
             FROM kg_edges e
-            JOIN connected_nodes n1 ON e.source = n1.id
-            JOIN connected_nodes n2 ON e.target = n2.id
+            WHERE e.source IN (SELECT id FROM connected_nodes)
+              AND e.target IN (SELECT id FROM connected_nodes)
         """
+        )
         async with self._get_read_conn() as conn:  # noqa: SIM117
             async with conn.execute(query, (node_id, max_depth)) as cursor:
                 rows = await cursor.fetchall()

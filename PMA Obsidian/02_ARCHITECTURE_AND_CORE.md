@@ -1,19 +1,20 @@
 # Architecture (Current Implementation)
 
-This document is the source-of-truth architecture description for the current application state.
+This document is the source-of-truth architecture description for the current application state. Last checked against source: 2026-10-14, `UI/UX` at `87f7e66`.
 
 ---
 
-## 1. System Architecture (v0.0.70)
+## 1. System Architecture
 
 PMA (Personal Memory Assistant) is a local-first, high-performance desktop retrieval engine. It operates as a single-user monolith, prioritizing low-latency query resolution and secure, private data handling.
 
 ## 1) High-Level Flow
 
-1.  **Extraction (Zero-Loss Streaming)**: The system scans local directories. It uses a **Pipelined Worker Architecture** that extracts, chunks, and embeds data in a continuous stream. This ensures O(1) memory usage regardless of file size.
+1.  **Extraction (Zero-Loss Streaming)**: The system scans local directories. It uses a **Pipelined Worker Architecture** that extracts, chunks, and embeds data in a continuous stream. Peak memory is bounded by the tunables (`index_concurrency`, `embedding_batch_size`, `embedding_batch_char_budget`), not by file size: 535-632 MB above idle measured on real corpora (see `01_PROJECT_CONTEXT.md` §11).
 2.  **Clustering & Storage**: Text is split into semantically relevant chunks. Metadata and **binary embeddings** are stored in **SQLite**, while a high-performance **vector cache** is maintained in **LanceDB**.
-3.  **Retrieval (Hybrid & Profile-First)**: Queries trigger a simultaneous search across FTS5 (SQLite), semantic chunks (LanceDB), and synthesized **Folder Profiles**.
-4.  **Synthesis**: Results are context-injected into a Local or Remote LLM (Gemini) to generate human-readable answers, with clear separation between architecture and implementation.
+3.  **Routing**: The query planner sends whole-collection inventory and project questions to deterministic metadata answers, code relationship questions to the knowledge graph, and everything else to full RAG.
+4.  **Retrieval (Hybrid & Profile-First)**: FTS5 (SQLite), semantic chunks and document summaries (LanceDB) fused by RRF, then a cross-encoder reranker, alongside synthesized **Folder Profiles**.
+5.  **Synthesis**: Results are context-injected into a local or cloud LLM through the 9-provider abstraction (local-first by default; cloud needs explicit consent). The context budget comes from the model's size class, capped at the model's reported window.
 
 ---
 
@@ -38,14 +39,14 @@ PMA (Personal Memory Assistant) is a local-first, high-performance desktop retri
 5. **ONNX Runtime** â€” High-performance CPU-optimized embedding and reranking models (replaced massive PyTorch/SentenceTransformers stack).
 6. **Rust Core** (`app/scanner/rust_core`) â€” High-speed I/O, parallel text extraction, 3D Force-Directed Layout simulation.
 
-7. **Unified LLM Client** â€” Gemini (Header-based auth), Ollama, LM Studio.
+7. **Unified LLM Client** â€” 9 providers: Ollama, LM Studio, Gemini, Groq, Anthropic, OpenAI, NVIDIA NIM, OpenRouter, OpenAI-compatible.
 
 ---
 
 ## 3. Security Model
 
 - **Dynamic Session Token**: Verified using timing-attack resistant `compare_digest`.
-- **Local Isolation**: CORS strictly limited to `localhost` and `tauri` schemes.
+- **Local Isolation**: a host guard (outermost middleware) rejects any Host outside loopback / `tauri.localhost`; CORS limited to `localhost` and `http://tauri.localhost`.
 - **Resource Hardening**: Streaming extractors prevent OOM from ZIP bombs or massive text files.
 - **Prompt Isolation**: Uses explicit XML-style delimiters and safety instructions to prevent RAG-based injection.
 
@@ -69,19 +70,20 @@ Modern React application with Vite and TailwindCSS.
 - **Virtual DOM Safeguards:** Folder tree rendering is capped at 100 files per directory to prevent DOM bloat.
 
 ### 4.4 Retrieval Layer (app/search)
+- **Query Planner** (`planner.py`): `FAST_METADATA`, `FAST_PROJECT`, `GRAPH_SEARCH`, `FULL_RAG`; scored against a frozen labelled routing set (`scripts/eval_routing.py`).
 - **Profile-First Intelligence:** Parallel retrieval of high-level folder profiles for architectural context.
-- **Hybrid RAG:** RRF fusion of SQLite FTS5 and LanceDB semantic search.
+- **Hybrid RAG:** RRF fusion (k=60) of SQLite FTS5, LanceDB chunk vectors and LanceDB summary vectors, then the ONNX cross-encoder (always on FULL_RAG, 5 s deadline).
 - **Categorized Context:** Explicitly separates `PROJECT ARCHITECTURE` from `IMPLEMENTATION DETAILS`.
 
 ---
 
 ## 5. Performance Characteristics
-- **Constant Indexing RAM:** ~60MB peak memory during 10GB file processing.
+- **Bounded Indexing RAM:** the old "~60MB peak" figure was never measured and is retracted. Measured: 195.7-248 MB idle, 535-632 MB above idle at ingestion peak (`01_PROJECT_CONTEXT.md` §11).
 - **Boot Sync:** Queries latest ID from LanceDB to reduce memory overhead.
 - **Zero-Latency Visualization:** optimized binary struct streaming for WebGPU.
 - **Background Reranker Preloading:** eliminates cold-start latency for the first user query.
 
-# API Specification (v0.0.70)
+# API Specification
 
 Base URL: `http://127.0.0.1:8000/api`
 
@@ -99,12 +101,14 @@ Returns runtime health and readiness.
 Response 200:
 ```json
 {
-  "version": "0.0.70",
+  "version": "0.0.72",
   "status": "ok|degraded",
-  "db": "connected|error",
+  "db": "connected|disconnected",
   "model_ready": true,
   "indexing": "idle|running",
-  "split_brain_sync_status": "done|syncing|error"
+  "split_brain_sync_status": "done|syncing|error",
+  "embedding_signature": {},
+  "subsystems": {"ocr": {}, "watcher": {}, "reranker": {}}
 }
 ```
 
@@ -208,7 +212,7 @@ The indexing core has been re-architected into a **High-Throughput Worker Pipeli
 1.  **Header Generation**: The `Extractor` identifies the file, calculates its SHA-256, and emits a `header` message to create the database record immediately.
 2.  **Streaming Extraction**: Specialized generators (`extract_stream`) read the file in 128KB fragments.
 3.  **Buffer Chunking**: The `StreamChunker` aggregates fragments and snaps to sentence boundaries, yielding properly sized vector chunks.
-4.  **Global Batch Embedding**: The `Embedder` worker collects chunks from *all* active extraction tasks into batches of 100 for high-efficiency GPU/CPU inference.
+4.  **Global Batch Embedding**: The `Embedder` worker collects chunks from *all* active extraction tasks into length-sorted batches capped at 64 rows and at `embedding_batch_char_budget` (10240) for `rows × widest row`, which is what bounds peak memory.
 5.  **Transactional Storage**: The `Storer` worker performs atomic bulk inserts into SQLite and LanceDB, finalizing with a `footer` message that updates the file's summary and stats.
 
 ---
@@ -252,9 +256,11 @@ Summaries are integrated into the `PROJECT ARCHITECTURE` section of the RAG cont
 
 ## 5) Retrieval Pipeline (Profile-First Mode)
 
+Step 0: **Planning** — `QueryPlanner` picks the mode; only `FULL_RAG` reaches the steps below.
+
 Step 1: **Parallel Retrieval Branches**
 - **Folder Profile Search**: Concurrent semantic search for the top 2 relevant synthesized folder profiles.
-- **Hybrid Retrieval**: RRF fusion of FTS5 (SQLite) and Chunk Semantic Search (LanceDB).
+- **Hybrid Retrieval**: RRF fusion of FTS5 (SQLite), chunk semantic search and summary search (LanceDB), then cross-encoder reranking.
 
 Step 2: **Categorized Context Assembly**
 The `ContextBuilder` partitions the LLM input into explicit semantic layers:
@@ -273,30 +279,3 @@ Step 3: **LLM Generation**
 - `index_concurrency`: number of parallel extraction workers.
 - `lm_studio_url`: configurable local LLM endpoint.
 - `supported_extensions`: module-level cached set for fast filtering.
-# Codebase Organization Plan
-
-## Objective
-Clean up untracked artifacts, organize the repository root, and update the `.gitignore` and git staging area according to the "Conservative Cleanup" approach, preserving the core architecture defined in `PMA Obsidian/`.
-
-## Background & Motivation (Multi-Agent Review)
-- **Primary Designer**: The root folder is cluttered with `.pytest_temp/` (50+ subfolders) and `.egg-info` build directories.
-- **Skeptic / Challenger**: Any deep restructuring of `app/` or `tests/` could break the Tauri integration or FastAPI imports.
-- **Constraint Guardian**: The `PMA Obsidian/` architecture constraints prohibit arbitrary framework reorganization. The standalone EXE target and pipeline must remain stable.
-- **User Advocate**: Removing clutter at the root makes the developer experience significantly better when navigating the workspace.
-
-## Key Files & Context
-- `D:/projects/Personal_Memory_Assistant/.gitignore`
-- `D:/projects/Personal_Memory_Assistant/.pytest_temp/` (to be removed)
-- `D:/projects/Personal_Memory_Assistant/personal_memory_assistant.egg-info/` (to be removed)
-
-## Implementation Steps
-1. **Remove Artifacts**: Delete the `.pytest_temp/` directory and the `personal_memory_assistant.egg-info/` build directory from the filesystem to clean up the workspace.
-2. **Update `.gitignore`**: Append `.pytest_temp/` to the existing `.gitignore` (under the "Temp/test files at root" section) to prevent future test artifacts from cluttering source control.
-3. **Staging Area Review & Update**: 
-   - Run `git status` to identify the current staging state.
-   - Run `git rm -r --cached .pytest_temp/` (if it was accidentally staged).
-   - Stage the updated `.gitignore` using `git add .gitignore`.
-
-## Verification & Testing
-- Run `git status` to ensure the working tree is clean of test artifacts and that `.gitignore` changes are properly staged.
-- Verify that running tests (e.g., `pytest`) cleanly creates `.pytest_temp/` without it appearing in untracked files.

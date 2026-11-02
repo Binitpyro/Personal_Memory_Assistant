@@ -1,0 +1,188 @@
+import type { ReactNode } from 'react';
+import { setTheme, useTheme } from '../../theme';
+import { formatScore } from '../../utils/format';
+
+export type Tone = 'neutral' | 'success' | 'warning' | 'error' | 'info' | 'accent';
+
+const TONE_TEXT: Record<Tone, string> = {
+  neutral: 'text-text-secondary',
+  success: 'text-success',
+  warning: 'text-warning',
+  error: 'text-error',
+  info: 'text-info',
+  accent: 'text-primary',
+};
+
+const TONE_DOT: Record<Tone, string> = {
+  neutral: 'bg-text-tertiary',
+  success: 'bg-success',
+  warning: 'bg-warning',
+  error: 'bg-error',
+  info: 'bg-info',
+  accent: 'bg-plate',
+};
+
+/**
+ * A status chip. The surface and edge stay constant across tones and only the
+ * text and dot carry the colour — a tinted fill per tone would put six
+ * differently-lit shapes on one row.
+ */
+export function Badge({
+  tone = 'neutral',
+  dot = false,
+  mono = false,
+  className = '',
+  children,
+}: Readonly<{ tone?: Tone; dot?: boolean; mono?: boolean; className?: string; children: ReactNode }>) {
+  return (
+    <span
+      className={
+        `inline-flex items-center gap-1.5 h-6 px-2.5 rounded-sm text-xs bg-surface border border-edge ` +
+        `${TONE_TEXT[tone]} ${mono ? 'font-mono text-xs' : ''} ${className}`
+      }
+    >
+      {/* State is a square beside a word, never a dot. */}
+      {dot && <span aria-hidden className={`w-1.5 h-1.5 shrink-0 ${TONE_DOT[tone]}`} />}
+      {children}
+    </span>
+  );
+}
+
+/**
+ * Flat blocks, deliberately without a shimmer sweep: a moving gradient is the
+ * glow language in a different costume. The app had `animate-spin` in 30 places
+ * and zero skeletons — a spinner says "wait", a skeleton says what is coming.
+ */
+export function Skeleton({ className = '' }: Readonly<{ className?: string }>) {
+  // The radius is NOT overridable through `className`. Tailwind emits
+  // `.rounded-full` before `.rounded-sm`, and equal-specificity rules are
+  // decided by emission order rather than by the order of the class attribute,
+  // so `rounded-sm` here wins over anything a caller passes. Passing
+  // `rounded-full` for a circular placeholder looks right and does nothing.
+  return <div aria-hidden className={`bg-raised rounded-sm ${className}`} />;
+}
+
+export function SkeletonText({ lines = 3 }: Readonly<{ lines?: number }>) {
+  const widths = ['w-5/12', 'w-11/12', 'w-9/12', 'w-10/12', 'w-7/12'];
+  return (
+    <div className="flex flex-col gap-2" aria-hidden>
+      {Array.from({ length: lines }, (_, i) => (
+        <Skeleton key={i} className={`h-3 ${widths[i % widths.length]}`} />
+      ))}
+    </div>
+  );
+}
+
+export function EmptyState({
+  title,
+  body,
+  actions,
+}: Readonly<{ title: string; body?: ReactNode; actions?: ReactNode }>) {
+  return (
+    <div className="bg-surface border border-rule rounded-xl px-8 py-9">
+      <div className="font-mono text-xs tracking-widest uppercase text-text-tertiary mb-4">Empty</div>
+      <div className="font-bold [font-stretch:80%] text-lg mb-2">{title}</div>
+      {body && <p className="text-base text-text-secondary leading-relaxed max-w-[46ch] m-0">{body}</p>}
+      {actions && <div className="flex gap-2.5 mt-5">{actions}</div>}
+    </div>
+  );
+}
+
+export function ErrorState({
+  title,
+  body,
+  actions,
+}: Readonly<{ title: string; body?: ReactNode; actions?: ReactNode }>) {
+  return (
+    <div className="bg-surface border border-rule border-l-2 border-l-error rounded-xl px-8 py-9" role="alert">
+      <div className="font-mono text-xs tracking-widest uppercase text-error mb-4"><span aria-hidden>■ </span>Error</div>
+      <div className="font-bold [font-stretch:80%] text-lg mb-2">{title}</div>
+      {body && <p className="text-base text-text-secondary leading-relaxed max-w-[48ch] m-0">{body}</p>}
+      {actions && <div className="flex gap-2.5 mt-5">{actions}</div>}
+    </div>
+  );
+}
+
+/**
+ * A citation, set as a shelf mark.
+ *
+ * Carries exactly what `QuerySource` provides — file name, folder tag, chunk id
+ * and score. There are no section anchors in the data, so this does not invent
+ * them.
+ */
+export function ShelfMark({
+  marker,
+  file,
+  folder,
+  chunkId,
+  score,
+  inferred = false,
+}: Readonly<{
+  marker: string;
+  file: string;
+  folder?: string;
+  chunkId?: number;
+  score?: number;
+  inferred?: boolean;
+}>) {
+  return (
+    <div className="flex gap-2 min-w-0">
+      <span className={`font-mono text-xs shrink-0 ${inferred ? 'text-text-tertiary' : 'text-primary'}`}>
+        {marker}
+      </span>
+      <div className="min-w-0">
+        {inferred ? (
+          <div className="font-mono text-xs tracking-wider uppercase text-text-tertiary leading-relaxed">
+            Inferred — not grounded in a retrieved passage
+          </div>
+        ) : (
+          <>
+            <div className="font-mono text-xs text-text-secondary leading-relaxed truncate">{file}</div>
+            {folder && (
+              <div className="font-mono text-xs text-text-tertiary leading-relaxed truncate">{folder}</div>
+            )}
+            {(chunkId !== undefined || score !== undefined) && (
+              <div className="font-mono text-xs text-text-tertiary leading-relaxed">
+                {chunkId !== undefined ? `chunk ${chunkId}` : ''}
+                {chunkId !== undefined && score !== undefined ? ' · ' : ''}
+                {score !== undefined ? formatScore(score) : ''}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Lights on: one toggle with a constant label, pressed while the light theme
+ * shows. Safelight has no icon set, so the control is its own words.
+ * Writes the choice through so it survives a reload.
+ *
+ * Reads `useTheme` rather than seeding local state from `resolveTheme()` once:
+ * with no stored choice the theme still tracks the OS, so a one-shot read left
+ * the toggle showing the wrong side after the user changed their system
+ * appearance.
+ */
+export function ThemeToggle({ className = '' }: Readonly<{ className?: string }>) {
+  const theme = useTheme();
+  const on = theme === 'paper';
+
+  return (
+    // 56x32, over the 24x24 target minimum (WCAG 2.2 SC 2.5.8).
+    <button
+      type="button"
+      onClick={() => setTheme(on ? 'cabinet' : 'paper')}
+      aria-pressed={on}
+      title={on ? 'Lights on — switch to Safelight' : 'Safelight — switch to Lights on'}
+      className={
+        `w-14 h-8 border font-mono text-[11px] leading-[1.15] tracking-[.1em] uppercase transition-colors ${
+          on ? 'border-text-primary text-text-primary' : 'border-edge text-text-tertiary hover:text-text-primary'
+        } ${className}`
+      }
+    >
+      Lights on
+    </button>
+  );
+}

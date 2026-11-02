@@ -5,8 +5,10 @@ import math
 import re
 import threading
 import time
+import weakref
 from collections import OrderedDict
 from collections.abc import AsyncGenerator
+from contextlib import aclosing
 from pathlib import Path
 from typing import Any, cast
 
@@ -18,14 +20,13 @@ from app.project_constants import (
     FUSION_VERSION,
     RAG_CACHE_MAX_SIZE,
     RETRIEVAL_CACHE_MAX_SIZE,
-    determine_query_intent,
+    build_context_prefix,
 )
 from app.search.context_builder import (
-    append_inventory_type_lines,
     append_project_profile_lines,
     build_context,
 )
-from app.search.llm_client import LLMClient
+from app.search.llm_client import LLM_UNAVAILABLE_PREFIX, LLMClient
 from app.search.planner import PlanMode, QueryPlanner
 from app.search.reranker import RerankerFailedError, RerankerNotInstalledError, rerank
 from app.storage.db import DatabaseManager
@@ -49,10 +50,10 @@ _retrieval_cache: OrderedDict[_RetrievalCacheKey, list[dict[str, Any]]] = Ordere
 _cache_lock = threading.Lock()
 
 # Full-RAG response cache (caches LLM answers for repeat queries)
-# Keys are (query, file_type, folder_tag, index_gen)
+# Keys are (query, file_type, folder_tag, history, mode, index_gen)
 # Values are Dict[str, Any] (full response)
 _rag_response_cache: OrderedDict[
-    tuple[str, str | None, str | None, tuple[tuple[str, str], ...] | None, int],
+    tuple[str, str | None, str | None, tuple[tuple[str, str], ...] | None, str | None, int],
     dict[str, Any],
 ] = OrderedDict()
 _rag_cache_lock = threading.Lock()
@@ -75,9 +76,56 @@ def clear_retrieval_cache():
     logger.info("Retrieval + RAG response caches cleared (generation=%d).", _index_generation)
 
 
-async def _append_latest_files(lines: list[str], db: DatabaseManager):
+async def clear_all_query_caches(lancedb_client) -> None:
+    """`clear_retrieval_cache()` plus the persistent LanceDB `query_cache` table.
+
+    That table holds verbatim question and answer text and is served for any
+    similar query, so an answer quoting a re-indexed or deleted file outlived the
+    file. Failure is logged, never raised: the cache must not fail an index run.
+    """
+    clear_retrieval_cache()
+    try:
+        await lancedb_client.clear_query_cache()
+    except Exception as exc:
+        logger.warning("Persistent semantic query cache not cleared: %s", exc)
+
+
+def _folder_scope(folder: str | None) -> tuple[str | None, str | None]:
+    """Split the Ask folder filter into ``(folder_tag, root)``.
+
+    The picker sends the indexed folder's full root path (the keys of
+    /api/files/tree), but chunks and LanceDB rows carry only ``folder_tag``,
+    the root's basename. Comparing the two matched nothing, so picking a folder
+    always answered "no relevant documents". A bare tag (no separator) is
+    passed through for callers that still send one, with no root.
+    """
+    if folder and ("\\" in folder or "/" in folder):
+        root = folder.rstrip("\\/")
+        return re.split(r"[\\/]", root)[-1], root
+    return folder, None
+
+
+def _norm_path(path: str) -> str:
+    return path.replace("/", "\\").lower()
+
+
+def _files_scope_sql(folder_tag: str | None, root: str | None) -> tuple[str, tuple[Any, ...]]:
+    """WHERE clause restricting the files table to the Ask folder filter."""
+    if root:
+        prefix = _norm_path(root).rstrip("\\") + "\\"
+        escaped = prefix.replace("!", "!!").replace("%", "!%").replace("_", "!_")
+        return " WHERE replace(path, '/', '\\') LIKE ? ESCAPE '!'", (escaped + "%",)
+    if folder_tag:
+        return " WHERE folder_tag = ?", (folder_tag,)
+    return "", ()
+
+
+async def _append_latest_files(
+    lines: list[str], db: DatabaseManager, scope: tuple[str, tuple[Any, ...]] = ("", ())
+):
     rows = await db.execute_query(
-        "SELECT path, modified_at FROM files ORDER BY modified_at DESC LIMIT 5"
+        f"SELECT path, modified_at FROM files{scope[0]} ORDER BY modified_at DESC LIMIT 5",  # nosec B608 # noqa: S608
+        scope[1],
     )
     if rows:
         lines.append("Recently modified files:")
@@ -85,50 +133,56 @@ async def _append_latest_files(lines: list[str], db: DatabaseManager):
             lines.append(f"- {Path(r[0]).name} (last changed {r[1]})")
 
 
-async def _append_largest_files(lines: list[str], db: DatabaseManager):
-    rows = await db.execute_query("SELECT path, size FROM files ORDER BY size DESC LIMIT 5")
+async def _append_largest_files(
+    lines: list[str], db: DatabaseManager, scope: tuple[str, tuple[Any, ...]] = ("", ())
+):
+    rows = await db.execute_query(
+        f"SELECT path, size FROM files{scope[0]} ORDER BY size DESC LIMIT 5",  # nosec B608 # noqa: S608
+        scope[1],
+    )
     if rows:
         lines.append("Largest indexed files:")
         for r in rows:
             lines.append(f"- {Path(r[0]).name} ({round(r[1] / (1024 * 1024), 2)} MB)")
 
 
-async def _get_metadata_insights(
-    query: str,
-    db: DatabaseManager,
-    file_stats: dict[str, Any] | None,
-    folder_profiles: list[dict[str, Any]],
-) -> str | None:
-    """Gather factual metadata insights based on the user query."""
-    intent = determine_query_intent(query)
-
-    if not (
-        intent.get("inventory")
-        or intent.get("project")
-        or intent.get("latest")
-        or intent.get("largest")
-    ):
+async def _reported_window(
+    llm_client: LLMClient, provider: str | None = None, model: str | None = None
+) -> int | None:
+    """Best-effort reported context window; None keeps the class ceiling."""
+    try:
+        window = await llm_client.get_context_window(provider, model)
+    except Exception:
         return None
+    return window if isinstance(window, int) else None
 
+
+async def _get_metadata_insights(
+    intents: dict[str, bool],
+    db: DatabaseManager,
+    folder_tag: str | None = None,
+    root: str | None = None,
+    file_type: str | None = None,
+) -> str | None:
+    """Newest / largest files for a recency question, or None.
+
+    Only what nothing else carries: totals reach the context as file_stats and
+    folder profiles as folder_profiles_text. This was never called before M7, so
+    "what did I add most recently?" got totals and no file names.
+
+    Scoped to the folder filter; it used to list files from the whole index
+    under any filter. A file_type filter has no cheap SQL form here, so the
+    block is dropped rather than leaked.
+    """
+    if file_type or not (intents.get("latest") or intents.get("largest")):
+        return None
+    scope = _files_scope_sql(folder_tag, root)
     lines: list[str] = ["=== Metadata Insights (Factual Source of Truth) ==="]
-
-    if intent["latest"]:
-        await _append_latest_files(lines, db)
-
-    if intent.get("largest"):
-        await _append_largest_files(lines, db)
-
-    if intent.get("inventory") and file_stats:
-        file_count = file_stats["total_files"]
-        size_mb = file_stats["total_size_mb"]
-        lines.append(f"Total indexed files: {file_count}. Total size: ~{size_mb} MB.")
-        append_inventory_type_lines(lines, file_stats)
-
-    if intent["project"] and folder_profiles:
-        append_project_profile_lines(lines, folder_profiles)
-
-    lines.append("=" * 50)
-    return "\n".join(lines)
+    if intents.get("latest"):
+        await _append_latest_files(lines, db, scope)
+    if intents.get("largest"):
+        await _append_largest_files(lines, db, scope)
+    return "\n".join(lines) if len(lines) > 1 else None
 
 
 def _build_fast_answer(
@@ -246,11 +300,14 @@ async def _semantic_search_with_emb(
         ids = ids_list[0]
         distances_list = raw.get("distances", [[]])
         dists = distances_list[0] if distances_list else []
+        metas_list = raw.get("metadatas", [[]])
+        metas = metas_list[0] if metas_list else []
         for i, doc_id in enumerate(ids):
             results.append(
                 {
                     "id": str(doc_id),
                     "score": dists[i] if i < len(dists) else 0.0,
+                    "file_path": (metas[i] or {}).get("file_path") if i < len(metas) else None,
                 }
             )
     return results
@@ -466,6 +523,32 @@ def _rebalance_after_rerank(results: list[dict[str, Any]], k: int) -> list[dict[
     return [by_id[cid] for cid in order] + tail
 
 
+# Shortest chunk worth a context slot. `context_builder._deduplicate_redundant`
+# uses the same number with the OPPOSITE meaning - below it, keep the chunk and
+# skip span dedup - so they are not the same policy and are deliberately not
+# shared beyond this note.
+_MIN_CANDIDATE_CHARS = 50
+
+
+async def _fetch_candidate_rows(db: DatabaseManager, chunk_ids: list[int]) -> dict[int, Any]:
+    """chunk id -> the row ``_build_candidate_results`` indexes by position.
+
+    Separate from ``hybrid_retrieve`` so ``scripts/analyze_fusion_k.py`` builds
+    reranker candidates from the same columns, in the same order, as production.
+    """
+    placeholders = ",".join("?" for _ in chunk_ids)
+    query_sql = (
+        f"SELECT c.id, zlib_decompress(c.text_preview) as text_preview, f.path, f.folder_tag, f.modified_at, c.start_offset, c.end_offset, c.sentence_offsets, c.segmenter_version, c.file_id "  # nosec B608 # noqa: S608
+        f"FROM chunks c JOIN files f ON c.file_id = f.id "
+        f"WHERE c.id IN ({placeholders})"
+    )
+    rows = await db.execute_query(query_sql, tuple(chunk_ids))
+    row_map: dict[int, Any] = {}
+    for row in rows:
+        row_map[row[0]] = row
+    return row_map
+
+
 def _build_candidate_results(
     chunk_ids_ordered: list[int],
     row_map: dict[int, Any],
@@ -480,6 +563,7 @@ def _build_candidate_results(
     ``context_builder._deduplicate_redundant``, after reranking.
     """
     results: list[dict[str, Any]] = []
+    dropped_short = 0
 
     for cid in chunk_ids_ordered:
         if len(results) > 100:
@@ -489,7 +573,13 @@ def _build_candidate_results(
         if not row:
             continue
         text = row[1]
-        if len(text) < 50:
+        if len(text) < _MIN_CANDIDATE_CHARS:
+            # Runs AFTER fusion has ordered the candidates, so this can discard
+            # a chunk RRF ranked first. Kept - a sub-50-character fragment is not
+            # worth a context slot - but counted, because silently dropping the
+            # top-ranked candidate is the kind of thing that should never have
+            # been invisible. Logged once per call rather than per chunk.
+            dropped_short += 1
             continue
 
         file_path = row[2]
@@ -501,7 +591,7 @@ def _build_candidate_results(
         results.append(
             {
                 "chunk_id": cid,
-                "text": text,
+                "text": _chunk_body(text, row[5], row[6], file_path),
                 "file_path": file_path,
                 "folder_tag": row[3],
                 "modified_at": row[4],
@@ -512,6 +602,12 @@ def _build_candidate_results(
                 "file_id": row[9],
                 "score": round(rrf_score, 4),
             }
+        )
+    if dropped_short:
+        logger.debug(
+            "Dropped %d ranked candidate(s) shorter than %d characters.",
+            dropped_short,
+            _MIN_CANDIDATE_CHARS,
         )
     return results
 
@@ -584,11 +680,12 @@ async def hybrid_retrieve(
         recall_k = max(50, k * 2)
 
     # Phase 3.1: Build LanceDB where-filter for pushed-down metadata filtering
+    # pma_chunks has no file_type column (id, vector, chunk_id, file_path,
+    # folder_tag), so a file_type predicate raised. It is applied to the semantic
+    # leg below, from the file_path each row carries.
     lancedb_where: dict[str, Any] = {}
     if folder_tag:
         lancedb_where["folder_tag"] = folder_tag
-    if file_type:
-        lancedb_where["file_type"] = file_type.lower()
 
     # Launch FTS & embedding concurrently (skip embed if pre-computed)
     fts_task = asyncio.create_task(
@@ -603,13 +700,17 @@ async def hybrid_retrieve(
     )
     if query_emb is None:
         query_emb = await embedding_service.embed_query(query)
-    else:
-        await fts_task  # wait for FTS to complete while we skip re-embedding
 
     # Launch semantic & summary search concurrently
+    # ponytail: file_type is a post-filter on an over-fetched window (4x), so a
+    # very rare type can still leave this leg short; FTS and summary legs filter
+    # exactly. Exact pushdown needs a LIKE predicate in LanceDBClient.
     semantic_task = asyncio.create_task(
         _semantic_search_with_emb(
-            lancedb_client, query_emb, recall_k, where_filter=lancedb_where or None
+            lancedb_client,
+            query_emb,
+            recall_k * (4 if file_type else 1),
+            where_filter=lancedb_where or None,
         )
     )
     summary_where: dict[str, Any] = {"is_folder_profile": "false"}
@@ -619,9 +720,24 @@ async def hybrid_retrieve(
         _summary_search_with_emb(lancedb_client, query_emb, k, where_filter=summary_where)
     )
 
-    fts_results, semantic_results, summary_paths = await asyncio.gather(
-        fts_task, semantic_task, summary_task
-    )
+    fts_results, summary_paths = await asyncio.gather(fts_task, summary_task)
+    # The other two legs swallow their own errors; this one did not, so a
+    # LanceDB fault (e.g. a query dimension that no longer matches the column
+    # after an embedding-model change) failed the whole query although FTS had
+    # hits. Degrade to the remaining legs and say so.
+    semantic_failed = False
+    try:
+        semantic_results = await semantic_task
+    except Exception as e:
+        logger.error("Semantic search failed, continuing without it: %s", e, exc_info=True)
+        semantic_results = []
+        semantic_failed = True
+
+    if file_type:
+        suffix = file_type.lower()
+        semantic_results = [
+            r for r in semantic_results if (r.get("file_path") or "").lower().endswith(suffix)
+        ][: 2 * recall_k]
 
     summary_results = await _expand_summary_paths_to_chunks(db, summary_paths, file_type)
 
@@ -632,16 +748,7 @@ async def hybrid_retrieve(
     chunk_ids_ordered = [int(cid) for cid, _ in sorted_ids]
     score_map = {int(cid): sc for cid, sc in sorted_ids}
 
-    placeholders = ",".join("?" for _ in chunk_ids_ordered)
-    query_sql = (
-        f"SELECT c.id, zlib_decompress(c.text_preview) as text_preview, f.path, f.folder_tag, f.modified_at, c.start_offset, c.end_offset, c.sentence_offsets, c.segmenter_version, c.file_id "  # nosec B608 # noqa: S608
-        f"FROM chunks c JOIN files f ON c.file_id = f.id "
-        f"WHERE c.id IN ({placeholders})"
-    )
-    rows = await db.execute_query(query_sql, tuple(chunk_ids_ordered))
-    row_map: dict[int, Any] = {}
-    for row in rows:
-        row_map[row[0]] = row
+    row_map = await _fetch_candidate_rows(db, chunk_ids_ordered)
 
     # The metadata join is hoisted above candidate construction so folder_tag is
     # available at allocation time (Phase 2) without a schema change - FTS
@@ -663,14 +770,158 @@ async def hybrid_retrieve(
     results = _rebalance_after_rerank(results, k)
 
     final_results = results[: k + near_misses]
+    if semantic_failed:
+        _mark_degraded(final_results)
 
-    # Update Cache
-    with _cache_lock:
-        if len(_retrieval_cache) >= RETRIEVAL_CACHE_MAX_SIZE:
-            _retrieval_cache.popitem(last=False)
-        _retrieval_cache[cache_key] = final_results
+    # Update Cache. A degraded (reranker timed out or failed) result is a
+    # transient fault: caching it replays RRF order for the life of the entry, and
+    # the callers' _degraded pop on the shared dicts then reports it as healthy.
+    if not any(r.get("_degraded") for r in final_results):
+        with _cache_lock:
+            if len(_retrieval_cache) >= RETRIEVAL_CACHE_MAX_SIZE:
+                _retrieval_cache.popitem(last=False)
+            _retrieval_cache[cache_key] = final_results
 
     return final_results
+
+
+def _chunk_body(
+    text_preview: str,
+    start: int | None = None,
+    end: int | None = None,
+    file_path: str = "",
+) -> str:
+    """The chunk's source text, with the ``[EXT: name]`` prefix removed.
+
+    Every chunker stores ``build_context_prefix(path) + source[start:end]``, so
+    with the path in hand the strip is exact and needs no offsets - which is what
+    lets the graph leg and the re-embed loop use it, neither of which selects
+    them.
+
+    The length identity ``len(preview) - (end - start)`` stays as the fallback for
+    callers that have offsets but no path. It is deliberately no longer primary:
+    it is exact for the streaming chunker and only near-exact for the syntax-aware
+    one, whose bodies are line-joined and can differ from their span by a trailing
+    newline. That was tolerable while a bad value only cost a duplicated prefix
+    inside a parent window; this text is now what gets ranked and displayed, where
+    an off-by-one would silently eat the first character of every code chunk.
+    """
+    if file_path:
+        prefix = build_context_prefix(file_path)
+        if text_preview.startswith(prefix):
+            return text_preview[len(prefix) :]
+    if start is None or end is None:
+        return text_preview
+    span = end - start
+    prefix_len = len(text_preview) - span
+    if 0 <= prefix_len <= len(text_preview):
+        return text_preview[prefix_len:]
+    return text_preview
+
+
+async def attach_parent_windows(db: DatabaseManager, results: list[dict[str, Any]]) -> None:
+    """Widen each result's text to a bounded window of its neighbours, in place.
+
+    Small-to-big retrieval: fusion and the cross-encoder both still rank the
+    *child* chunk, so nothing about selection changes. Only the text handed to
+    the model widens, which is what a chunk boundary landing mid-argument costs
+    you.
+
+    Stitched from sibling chunks in SQLite rather than by re-reading the file.
+    Offsets address the *extracted text stream*, not the file's bytes, so for a
+    PDF or a .docx the file could not be sliced by them anyway - and re-reading
+    would break for any document that has since moved or been deleted, which on
+    a personal corpus is normal rather than exceptional.
+
+    Sets ``parent_text``; the child ``text`` is left alone so that dedup,
+    scoring and the citation UI keep pointing at the passage that actually
+    matched.
+    """
+    if not settings.parent_window_enabled or not results:
+        return
+
+    width = max(1, settings.chunk_size * settings.parent_window_multiplier)
+    by_file: dict[Any, list[dict[str, Any]]] = {}
+    for r in results:
+        if r.get("file_id") is not None and r.get("start_offset") is not None:
+            by_file.setdefault(r["file_id"], []).append(r)
+
+    # One query for every file in the result set, not one per file, and one
+    # clause per result rather than one [first hit, last hit] span per file: two
+    # hits at opposite ends of a long file fetched every chunk between them
+    # (75,000 rows and 559 ms for 15 files of 5,000 chunks, 2026-09-30). Each
+    # window is clipped to that same span, so the rows the stitch below uses -
+    # and so parent_text - are unchanged.
+    # ponytail: the clip keeps a truncation - with hits close together a result's
+    # own window extends past the span. Widening it changes model context, which
+    # needs an eval first (CLAUDE.md 8.3).
+    clauses: list[str] = []
+    params: list[Any] = []
+    for file_id, group in by_file.items():
+        lo = min(int(r["start_offset"]) for r in group)
+        hi = max(int(r["end_offset"]) for r in group)
+        pad = max(0, (width - (hi - lo)) // 2)
+        span_lo, span_hi = lo - pad, hi + pad
+        for r in group:
+            centre = (int(r["start_offset"]) + int(r["end_offset"])) // 2
+            clauses.append("(file_id = ? AND end_offset > ? AND start_offset < ?)")
+            params.extend(
+                (file_id, max(centre - width // 2, span_lo), min(centre + width // 2, span_hi))
+            )
+
+    try:
+        batched = await db.execute_query(
+            # Every clause is the same fixed literal and every value is bound;
+            # the only thing interpolated is how MANY clauses there are.
+            "SELECT file_id, zlib_decompress(text_preview), start_offset, end_offset "  # nosec B608 # noqa: S608
+            f"FROM chunks WHERE {' OR '.join(clauses)} "
+            "ORDER BY file_id, start_offset",
+            tuple(params),
+        )
+    except Exception as exc:  # pragma: no cover - degradation, not a fault
+        logger.debug("Parent-window expansion skipped: %s", exc)
+        return
+
+    rows_by_file: dict[Any, list[tuple[Any, ...]]] = {}
+    for row in batched:
+        rows_by_file.setdefault(row[0], []).append((row[1], row[2], row[3]))
+
+    for file_id, group in by_file.items():
+        path = str(group[0].get("file_path") or "")
+        rows = rows_by_file.get(file_id, [])
+
+        for r in group:
+            centre = (int(r["start_offset"]) + int(r["end_offset"])) // 2
+            w_lo, w_hi = centre - width // 2, centre + width // 2
+            # Walk in offset order and take only the part of each sibling that
+            # the cursor has not already covered. Chunks overlap by
+            # chunk_overlap characters, so concatenating them whole would repeat
+            # that text - which is exactly the redundancy _deduplicate_redundant
+            # exists to keep out of the window.
+            cursor = w_lo
+            parts: list[str] = []
+            for text, s_off, e_off in rows:
+                if text is None or e_off <= cursor or s_off >= w_hi:
+                    continue
+                body = _chunk_body(text, s_off, e_off, path)
+                take_from = max(0, cursor - s_off)
+                if take_from < len(body):
+                    parts.append(body[take_from:])
+                cursor = e_off
+            stitched = "".join(parts).strip()
+            if len(stitched) > len(r.get("text", "")):
+                r["parent_text"] = stitched
+
+
+# An asyncio.Lock binds to the first loop that contends it, so one lock per
+# running loop (one in production; one per test under pytest-asyncio).
+_rerank_turns: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _rerank_turn() -> asyncio.Lock:
+    return _rerank_turns.setdefault(asyncio.get_running_loop(), asyncio.Lock())
 
 
 async def _apply_reranker_if_needed(
@@ -702,10 +953,18 @@ async def _apply_reranker_if_needed(
         # returns in RRF order (correct) while the ONNX call runs to completion
         # on a shared executor thread. Bounding that executor is P-5.
         # P-08: Extended timeout from 800ms to 5s for cold-start load.
-        results = await asyncio.wait_for(
-            rerank(query, results, top_k=k, text_key="text"),
-            timeout=5.0,
-        )
+        # One rerank at a time, matching the single-slot ONNX executor, and the
+        # turn is taken BEFORE the clock starts: the 5 s is a bound on this
+        # query's own inference, not on how many other queries are ahead of it
+        # (the single worker made the 3rd-5th concurrent query time out on
+        # queue time alone and return RRF order). ponytail: a job abandoned by
+        # its own timeout still occupies the worker for its remainder; a
+        # cancellable inference would need a separate process.
+        async with _rerank_turn():
+            results = await asyncio.wait_for(
+                rerank(query, results, top_k=k, text_key="text"),
+                timeout=5.0,
+            )
     except RerankerNotInstalledError as e:
         # Capability state, not a per-answer fault. It is true of every query on
         # this install, so flagging it here would light a "degraded" badge on
@@ -733,10 +992,21 @@ def _mark_degraded(results: list[dict[str, Any]]) -> None:
         r["_degraded"] = True
 
 
-def _detect_heuristic_contradiction(query: str, retrieved: list[dict[str, Any]]) -> bool:
-    """Identify potential contradictions using TF-IDF proxy overlap and negation words."""
+def _detect_heuristic_contradiction(query: str, retrieved: list[dict[str, Any]]) -> list[Any]:
+    """Chunk ids whose text looks like it contradicts the query, or an empty list.
+
+    Returns the offending ids rather than a bare bool so the UI can name what it
+    is warning about. A banner that says "sources may conflict" without saying
+    which ones is unfalsifiable - the reader cannot check it and cannot dismiss
+    it.
+
+    The heuristic itself is deliberately unchanged here: it fires on any chunk
+    that overlaps the query and contains a negation word, and "but"/"however"/
+    "except" are ordinary prose, so it is expected to be noisy. Tightening it
+    changes retrieval behaviour and needs an eval run, not a green gate.
+    """
     if not retrieved:
-        return False
+        return []
 
     negation_words = {
         "not",
@@ -753,8 +1023,9 @@ def _detect_heuristic_contradiction(query: str, retrieved: list[dict[str, Any]])
     }
     query_terms = set(re.findall(r"\w+", query.lower()))
     if not query_terms:
-        return False
+        return []
 
+    offenders: list[Any] = []
     for chunk in retrieved:
         text = chunk.get("text", "").lower()
         chunk_terms = set(re.findall(r"\w+", text))
@@ -762,8 +1033,8 @@ def _detect_heuristic_contradiction(query: str, retrieved: list[dict[str, Any]])
         overlap = query_terms.intersection(chunk_terms)
         if len(overlap) / len(query_terms) > 0.5:  # noqa: SIM102
             if negation_words.intersection(chunk_terms):
-                return True
-    return False
+                offenders.append(chunk.get("chunk_id"))
+    return [o for o in offenders if o is not None]
 
 
 async def _extract_knowledge_gaps(
@@ -821,9 +1092,30 @@ async def _extract_knowledge_gaps(
     return gaps
 
 
-def _check_rag_response_cache(query, file_type, folder_tag, history, t_start):
+def _semantic_cache_scope(lancedb_client, file_type, folder_tag, mode, provider=None, model=None):
+    """Persistent-cache scope: the filters plus whatever shapes the answer text.
+
+    Mode (challenge/eli5/verify...) and a provider/model override change the
+    answer for the same question, so they must not share a cached row. The
+    suffix is omitted when all three are unset so default-mode rows written
+    before this keep matching.
+    """
+    scope = lancedb_client.cache_scope(file_type, folder_tag)
+    if mode or provider or model:
+        scope = f"{scope}|{mode or ''}|{provider or ''}|{model or ''}"
+    return scope
+
+
+def _check_rag_response_cache(query, file_type, folder_tag, history, t_start, mode=None):
     hist_key = tuple((h["role"], h["content"]) for h in history) if history else None
-    rag_cache_key = (query.strip().lower(), file_type, folder_tag, hist_key, _index_generation)
+    rag_cache_key = (
+        query.strip().lower(),
+        file_type,
+        folder_tag,
+        hist_key,
+        mode,
+        _index_generation,
+    )
     with _rag_cache_lock:
         if rag_cache_key in _rag_response_cache:
             _rag_response_cache.move_to_end(rag_cache_key)
@@ -837,14 +1129,14 @@ def _check_rag_response_cache(query, file_type, folder_tag, history, t_start):
 
 
 async def _check_semantic_query_cache(
-    query, embedding_service, lancedb_client, t_start, file_type=None, folder_tag=None
+    query, embedding_service, lancedb_client, t_start, file_type=None, folder_tag=None, mode=None
 ):
     try:
         query_emb = await embedding_service.embed_query(query)
         cache_hit = await lancedb_client.search_cache(
             query_emb,
             threshold=0.97,
-            scope=lancedb_client.cache_scope(file_type, folder_tag),
+            scope=_semantic_cache_scope(lancedb_client, file_type, folder_tag, mode),
         )
         if cache_hit:
             logger.info("Semantic query cache hit for query: '%s'", query)
@@ -934,7 +1226,7 @@ async def _execute_graph_plan(
         results.append(
             {
                 "chunk_id": row[0],
-                "text": row[1],
+                "text": _chunk_body(row[1], file_path=row[2]),
                 "file_path": row[2],
                 "folder_tag": row[3],
                 "modified_at": row[4],
@@ -991,7 +1283,9 @@ async def _maybe_run_agentic_loop(
 
     try:
         ceiling = compute_context_budget(
-            llm_client.get_model_class(), len(history) if history else 0
+            llm_client.get_model_class(),
+            len(history) if history else 0,
+            await _reported_window(llm_client),
         )
         state = await run_agentic_loop(
             query,
@@ -1002,6 +1296,15 @@ async def _maybe_run_agentic_loop(
         )
     except Exception as e:
         logger.error("Agentic loop failed (%s) - falling back to single-pass retrieval.", e)
+        return None, None
+
+    # A loop that never dispatched a round has no evidence, not "no answer".
+    # Returning [] would replace single-pass retrieval with an empty context.
+    if state.iteration == 0:
+        logger.info(
+            "Agentic loop stopped before retrieving (%s) - using single-pass retrieval.",
+            state.stop_reason,
+        )
         return None, None
 
     return state.chunks()[:k], trace_payload(state)
@@ -1019,17 +1322,27 @@ async def full_rag(
     folder_tag: str | None = None,
     mode: str | None = None,
     history: list[dict[str, str]] | None = None,
+    answer_length: str | None = None,
 ) -> dict[str, Any]:
     t_start = time.perf_counter()
 
-    cached_res = _check_rag_response_cache(query, file_type, folder_tag, history, t_start)
+    # Caches key on the filter as sent (a full root keeps like-named folders
+    # apart) and on the length, which changes the answer text.
+    folder_scope = folder_tag
+    folder_tag, folder_root = _folder_scope(folder_tag)
+    cache_mode = f"{mode or ''}|{answer_length}" if answer_length else mode
+    filtered = bool(file_type or folder_tag)
+
+    cached_res = _check_rag_response_cache(
+        query, file_type, folder_scope, history, t_start, cache_mode
+    )
     if cached_res:
         return cast(dict[str, Any], cached_res)
 
     query_emb = None
     if not history:
         cache_res, query_emb = await _check_semantic_query_cache(
-            query, embedding_service, lancedb_client, t_start, file_type, folder_tag
+            query, embedding_service, lancedb_client, t_start, file_type, folder_scope, cache_mode
         )
         if cache_res:
             return cast(dict[str, Any], cache_res)
@@ -1045,7 +1358,11 @@ async def full_rag(
         project=project,
     )
 
-    fast_answer = _build_fast_answer(query, plan, file_stats, folder_profiles)
+    # The fast paths and the totals describe the whole index; under a filter
+    # they answered about folders the user had excluded.
+    fast_answer = None if filtered else _build_fast_answer(query, plan, file_stats, folder_profiles)
+    if filtered:
+        file_stats = None
     if fast_answer and not history:  # Skip fast-path if there's history to allow follow-ups
         source_rows = [
             {
@@ -1062,6 +1379,7 @@ async def full_rag(
             "retrieved_count": len(source_rows),
             "latency_ms": total_ms,
             "mode": "fast_path",
+            "query_mode": mode,
             "timing": {"metadata_ms": total_ms, "retrieval_ms": 0, "llm_ms": 0},
         }
 
@@ -1088,7 +1406,9 @@ async def full_rag(
             retrieved = agentic_retrieved
             file_stats = file_stats if inventory else None
             folder_profiles_text = (
-                await db.get_folder_profiles_text() if include_profiles_text else ""
+                await db.get_folder_profiles_text()
+                if include_profiles_text and not filtered
+                else ""
             )
         else:
             if plan.mode == PlanMode.GRAPH_SEARCH:
@@ -1112,11 +1432,15 @@ async def full_rag(
                     include_profiles_text=bool(include_profiles_text),
                     query_emb=query_emb,  # P-03: reuse embedding from semantic cache check
                     keywords=plan.keywords,
+                    file_type=file_type,
+                    folder_tag=folder_tag,
                 )
     retrieval_ms = round((time.perf_counter() - t_ret) * 1000, 1)
 
-    if file_type or folder_tag:
-        retrieved = _filter_retrieved_results(retrieved, file_type=file_type, folder_tag=folder_tag)
+    if filtered:
+        retrieved = _filter_retrieved_results(
+            retrieved, file_type=file_type, folder_tag=folder_tag, root=folder_root
+        )
 
     if not retrieved and not file_stats and not folder_profiles_text:
         return {
@@ -1130,13 +1454,20 @@ async def full_rag(
 
     model_class = llm_client.get_model_class()
     history_turns = len(history) if history else 0
-    budget = compute_context_budget(model_class, history_turns)
+    budget = compute_context_budget(model_class, history_turns, await _reported_window(llm_client))
+
+    # Small-to-big: ranking is done, so widen what the model sees without
+    # touching what was selected.
+    await attach_parent_windows(db, retrieved)
 
     context, context_tokens_used = build_context(
         retrieved,
         max_tokens=budget,
         file_stats=file_stats,
         folder_profiles_text=folder_profiles_text,
+        metadata_insights=await _get_metadata_insights(
+            plan.intents, db, folder_tag, folder_root, file_type
+        ),
         graph_paths_text=graph_paths_text,
         model_class=model_class,
     )
@@ -1145,7 +1476,9 @@ async def full_rag(
     _llm_error = False  # P2-4: track LLM failure explicitly
     with Timer("llm_generation"):
         try:
-            answer = await llm_client.generate_answer(query, context, history=history, mode=mode)
+            answer = await llm_client.generate_answer(
+                query, context, history=history, mode=mode, answer_length=answer_length
+            )
         except Exception as e:
             logger.error("LLM Generation failed: %s", e)
             answer = (
@@ -1154,6 +1487,9 @@ async def full_rag(
                 "Please try again."
             )
             _llm_error = True
+    # generate_answer reports a dead chain as prose, not an exception.
+    if answer.startswith(LLM_UNAVAILABLE_PREFIX):
+        _llm_error = True
     llm_ms = round((time.perf_counter() - t_llm) * 1000, 1)
 
     total_ms = round((time.perf_counter() - t_start) * 1000, 1)
@@ -1167,6 +1503,7 @@ async def full_rag(
         "sources": retrieved,
         "retrieved_count": len(retrieved),
         "latency_ms": total_ms,
+        "query_mode": mode,
         "mode": "degraded_rag" if is_degraded else "full_rag",
         "timing": {"retrieval_ms": retrieval_ms, "llm_ms": llm_ms, "total_ms": total_ms},
         "_is_error": _llm_error,
@@ -1185,9 +1522,18 @@ async def full_rag(
 
     # Phase 1.1: Cache the full RAG response for repeat queries.
     # P2-4: Only cache if no LLM error occurred Ã¢â‚¬â€ string matching was fragile.  # noqa: RUF003
-    if not result["_is_error"]:
+    # A degraded answer (reranker fault) or a blank one is a transient failure;
+    # caching it would replay it after the cause is gone.
+    if not result["_is_error"] and not is_degraded and answer.strip():
         hist_key = tuple((h["role"], h["content"]) for h in history) if history else None
-        rag_cache_key = (query.strip().lower(), file_type, folder_tag, hist_key, _index_generation)
+        rag_cache_key = (
+            query.strip().lower(),
+            file_type,
+            folder_scope,
+            hist_key,
+            cache_mode,
+            _index_generation,
+        )
         with _rag_cache_lock:
             if len(_rag_response_cache) >= RAG_CACHE_MAX_SIZE:
                 _rag_response_cache.popitem(last=False)
@@ -1203,7 +1549,9 @@ async def full_rag(
                     query_text=query,
                     response_text=answer,
                     timestamp=time.time(),
-                    scope=lancedb_client.cache_scope(file_type, folder_tag),
+                    scope=_semantic_cache_scope(
+                        lancedb_client, file_type, folder_scope, cache_mode
+                    ),
                 )
             )
             state.bg_tasks.add(task)
@@ -1226,6 +1574,7 @@ async def retrieve_only(
     Used for visualization modes (like Dreamscape) where reading LLM tokens is unnecessary.
     """
     t_start = time.perf_counter()
+    folder_tag, folder_root = _folder_scope(folder_tag)
 
     query_emb = await embedding_service.embed_query(query)
     plan = planner.plan(query)
@@ -1254,10 +1603,14 @@ async def retrieve_only(
             include_profiles_text=bool(include_profiles_text),
             query_emb=query_emb,
             keywords=plan.keywords,
+            file_type=file_type,
+            folder_tag=folder_tag,
         )
 
     if file_type or folder_tag:
-        retrieved = _filter_retrieved_results(retrieved, file_type=file_type, folder_tag=folder_tag)
+        retrieved = _filter_retrieved_results(
+            retrieved, file_type=file_type, folder_tag=folder_tag, root=folder_root
+        )
 
     total_ms = round((time.perf_counter() - t_start) * 1000, 1)
 
@@ -1283,9 +1636,16 @@ async def stream_rag(
     history: list[dict[str, str]] | None = None,
     override_provider: str | None = None,
     override_model: str | None = None,
+    answer_length: str | None = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """NDJSON stream events for /api/query/stream (match SearchPage chunk types)."""
     t_start = time.perf_counter()
+
+    # See full_rag: caches key on the filter as sent and on the length.
+    folder_scope = folder_tag
+    folder_tag, folder_root = _folder_scope(folder_tag)
+    cache_mode = f"{mode or ''}|{answer_length}" if answer_length else mode
+    filtered = bool(file_type or folder_tag)
 
     plan = planner.plan(query)
 
@@ -1298,7 +1658,9 @@ async def stream_rag(
         project=project,
     )
 
-    fast_answer = _build_fast_answer(query, plan, file_stats, folder_profiles)
+    fast_answer = None if filtered else _build_fast_answer(query, plan, file_stats, folder_profiles)
+    if filtered:
+        file_stats = None
     if fast_answer and not history:
         source_rows = [
             {
@@ -1323,13 +1685,23 @@ async def stream_rag(
 
     # Phase 7: Semantic Query Cache (persistent)
     query_emb = None
-    if not history:
+    # Pinned context changes the answer but is not part of the cache scope, so a
+    # pinned query neither reads an unpinned answer nor writes one for others.
+    use_semantic_cache = not history and not forced_chunk_ids
+    if use_semantic_cache:
         try:
             query_emb = await embedding_service.embed_query(query)
             cache_hit = await lancedb_client.search_cache(
                 query_emb,
                 threshold=0.97,
-                scope=lancedb_client.cache_scope(file_type, folder_tag),
+                scope=_semantic_cache_scope(
+                    lancedb_client,
+                    file_type,
+                    folder_scope,
+                    cache_mode,
+                    override_provider,
+                    override_model,
+                ),
             )
             if cache_hit:
                 logger.info("Semantic query cache hit for streamed query: '%s'", query)
@@ -1374,7 +1746,9 @@ async def stream_rag(
             retrieved = agentic_retrieved
             file_stats = file_stats if inventory else None
             folder_profiles_text = (
-                await db.get_folder_profiles_text() if include_profiles_text else ""
+                await db.get_folder_profiles_text()
+                if include_profiles_text and not filtered
+                else ""
             )
         else:
             if plan.mode == PlanMode.GRAPH_SEARCH:
@@ -1399,6 +1773,8 @@ async def stream_rag(
                     query_emb=query_emb,  # P-03: reuse embedding from semantic cache check
                     near_misses=10,
                     keywords=plan.keywords,
+                    file_type=file_type,
+                    folder_tag=folder_tag,
                 )
 
     if agentic_trace:
@@ -1409,6 +1785,7 @@ async def stream_rag(
     retrieved = retrieved[:k]
 
     contradictions_found = False
+    contradiction_sources: list[Any] = []
     if mode == "challenge":
         with Timer("challenge_retrieval"):
             negated_query = (
@@ -1423,19 +1800,25 @@ async def stream_rag(
                 k=3,
                 near_misses=0,
                 use_reranker=True,
+                file_type=file_type,
+                folder_tag=folder_tag,
                 query_emb=neg_emb,
             )
             if neg_retrieved:
-                contradictions_found = True
                 neg_ids = set(r["chunk_id"] for r in retrieved)
                 # Append negated results that aren't already in the top K
                 for nr in neg_retrieved:
                     if nr["chunk_id"] not in neg_ids:
                         nr["_challenge_source"] = True
+                        contradiction_sources.append(nr["chunk_id"])
                         retrieved.append(nr)
+                # Only passages the answer did not already have count as a conflict;
+                # any non-empty index returns *something* for the negated query.
+                contradictions_found = bool(contradiction_sources)
     else:
         # Standard heuristic
-        contradictions_found = _detect_heuristic_contradiction(query, retrieved)
+        contradiction_sources = _detect_heuristic_contradiction(query, retrieved)
+        contradictions_found = bool(contradiction_sources)
 
     if forced_chunk_ids:
         placeholders = ",".join("?" for _ in forced_chunk_ids)
@@ -1468,8 +1851,14 @@ async def stream_rag(
         forced_ids = set(c["chunk_id"] for c in forced_chunks)
         retrieved = forced_chunks + [r for r in retrieved if r["chunk_id"] not in forced_ids]
 
-    if file_type or folder_tag:
-        retrieved = _filter_retrieved_results(retrieved, file_type=file_type, folder_tag=folder_tag)
+    if filtered:
+        retrieved = _filter_retrieved_results(
+            retrieved, file_type=file_type, folder_tag=folder_tag, root=folder_root
+        )
+        # Near misses are shown as sources too; they obey the same filter.
+        near_miss_chunks = _filter_retrieved_results(
+            near_miss_chunks, file_type=file_type, folder_tag=folder_tag, root=folder_root
+        )
 
     if not retrieved and not file_stats and not folder_profiles_text:
         yield {"type": "content", "text": "I couldn't find any relevant documents."}
@@ -1486,8 +1875,10 @@ async def stream_rag(
         "sources": retrieved,
         "near_misses": near_miss_chunks,
         "contradictions_found": contradictions_found,
+        "contradiction_sources": contradiction_sources,
         "knowledge_gaps": knowledge_gaps,
         "latency_ms": retrieval_ms,
+        "query_mode": mode,
         "retrieval_ms": retrieval_ms,
         "mode": "degraded_rag" if is_degraded else "full_rag",
     }
@@ -1496,67 +1887,132 @@ async def stream_rag(
 
     model_class = llm_client.get_model_class(override_provider, override_model)
     history_turns = len(history) if history else 0
-    budget = compute_context_budget(model_class, history_turns)
+    budget = compute_context_budget(
+        model_class,
+        history_turns,
+        await _reported_window(llm_client, override_provider, override_model),
+    )
+
+    # Small-to-big: ranking is done, so widen what the model sees without
+    # touching what was selected.
+    await attach_parent_windows(db, retrieved)
 
     context, context_tokens_used = build_context(
         retrieved,
         max_tokens=budget,
         file_stats=file_stats,
         folder_profiles_text=folder_profiles_text,
+        metadata_insights=await _get_metadata_insights(
+            plan.intents, db, folder_tag, folder_root, file_type
+        ),
         graph_paths_text=graph_paths_text,
         model_class=model_class,
     )
 
     full_answer = ""
-    with Timer("llm_generation"):
-        async for chunk in llm_client.stream_answer(
-            query,
-            context,
-            history=history,
-            mode=mode,
-            override_provider=override_provider,
-            override_model=override_model,
-        ):
-            if chunk.startswith('{"control":'):
-                try:
-                    control_data = json.loads(chunk)
-                    ctrl_type = control_data.get("control")
-                    if ctrl_type == "fallback":
-                        yield {"type": "fallback", "to": control_data.get("to")}
-                    elif ctrl_type == "usage":
-                        yield {
-                            "type": "usage",
-                            "prompt_tokens": control_data.get("prompt_tokens"),
-                            "completion_tokens": control_data.get("completion_tokens"),
-                        }
-                except Exception:
-                    # Fallback to normal text if JSON fails to parse
-                    full_answer += chunk
-                    yield {"type": "content", "text": chunk}
-            else:
-                full_answer += chunk
-                yield {"type": "content", "text": chunk}
+    stream_failed = False
+    try:
+        with Timer("llm_generation"):
+            async with aclosing(
+                llm_client.stream_answer(
+                    query,
+                    context,
+                    history=history,
+                    mode=mode,
+                    override_provider=override_provider,
+                    override_model=override_model,
+                    answer_length=answer_length,
+                )
+            ) as stream:
+                async for chunk in stream:
+                    if chunk.startswith('{"control":'):
+                        try:
+                            control_data = json.loads(chunk)
+                            ctrl_type = control_data.get("control")
+                            if ctrl_type == "fallback":
+                                yield {"type": "fallback", "to": control_data.get("to")}
+                            elif ctrl_type == "usage":
+                                yield {
+                                    "type": "usage",
+                                    "prompt_tokens": control_data.get("prompt_tokens"),
+                                    "completion_tokens": control_data.get("completion_tokens"),
+                                }
+                            elif ctrl_type == "provider_error":
+                                # Chain exhausted. Surfaced as a typed error so the UI
+                                # can offer the matching remedy - a consent failure is
+                                # one click from fixable - instead of printing the
+                                # message into the answer body.
+                                yield {
+                                    "type": "error",
+                                    "text": control_data.get("message", "Provider unavailable."),
+                                    "code": control_data.get("code"),
+                                }
+                                # Nothing after this is an answer: stop reading,
+                                # and the annotator and the cache are skipped below.
+                                stream_failed = True
+                                break
+                        except Exception:
+                            # Fallback to normal text if JSON fails to parse
+                            full_answer += chunk
+                            yield {"type": "content", "text": chunk}
+                    else:
+                        full_answer += chunk
+                        yield {"type": "content", "text": chunk}
+    except (asyncio.CancelledError, GeneratorExit):
+        # M-15: a stopped generation (client disconnect closes this generator;
+        # a cancelled task raises into it) never reached the save below, so the
+        # query vanished from history. Record the partial as the abandoned turn.
+        # Never cached, and not awaited: an await here can be cancelled again.
+        if full_answer.strip():
+            task = asyncio.create_task(
+                _save_abandoned_turn(
+                    db,
+                    query,
+                    full_answer,
+                    len(retrieved),
+                    round((time.perf_counter() - t_start) * 1000, 1),
+                    mode,
+                    model_class,
+                    budget,
+                    context_tokens_used,
+                )
+            )
+            state.bg_tasks.add(task)
+            task.add_done_callback(state.bg_tasks.discard)
+        raise
+
+    if not full_answer.strip():
+        # Nothing to annotate, cache or save. A provider_error already told the
+        # user why; a clean-but-blank stream has not.
+        if not stream_failed:
+            yield {
+                "type": "error",
+                "text": "The model returned an empty reply.",
+                "code": "empty_answer",
+            }
+        return
 
     # Phase 5: Personal Pattern Annotator
     pattern_annotations = []
-    try:
-        annotation_query = "Extract patterns"
-        annotation_context = (
-            f"Identify 1 to 3 coding/writing patterns or stylistic technical decisions from this answer:\n"
-            f"{full_answer}\n"
-            "Return them as a simple comma-separated list."
-        )
-        annotations_raw = await llm_client.generate_answer(
-            annotation_query,
-            annotation_context,
-            override_provider=override_provider,
-            override_model=override_model,
-        )
+    if settings.pattern_annotator_enabled and not stream_failed:
+        try:
+            annotation_query = "Extract patterns"
+            annotation_context = (
+                f"Identify 1 to 3 coding/writing patterns or stylistic technical decisions from this answer:\n"
+                f"{full_answer}\n"
+                "Return them as a simple comma-separated list."
+            )
+            annotations_raw = await llm_client.generate_answer(
+                annotation_query,
+                annotation_context,
+                override_provider=override_provider,
+                override_model=override_model,
+            )
 
-        if annotations_raw:
-            pattern_annotations = [a.strip() for a in annotations_raw.split(",") if a.strip()]
-    except Exception as e:
-        logger.warning("Pattern annotation failed: %s", e)
+            if annotations_raw and not annotations_raw.startswith(LLM_UNAVAILABLE_PREFIX):
+                pattern_annotations = [a.strip() for a in annotations_raw.split(",") if a.strip()]
+        except Exception as e:
+            logger.warning("Pattern annotation failed: %s", e)
 
     if pattern_annotations:
         yield {
@@ -1583,8 +2039,8 @@ async def stream_rag(
         state.bg_tasks.add(telemetry_task)
         telemetry_task.add_done_callback(state.bg_tasks.discard)
 
-        # Phase 7: Add to persistent semantic cache
-        if not history and query_emb is not None:
+        # Phase 7: Add to persistent semantic cache (never a failed turn's partial)
+        if use_semantic_cache and query_emb is not None and not stream_failed and not is_degraded:
             import numpy as np
 
             task = asyncio.create_task(
@@ -1593,7 +2049,14 @@ async def stream_rag(
                     query_text=query,
                     response_text=full_answer,
                     timestamp=time.time(),
-                    scope=lancedb_client.cache_scope(file_type, folder_tag),
+                    scope=_semantic_cache_scope(
+                        lancedb_client,
+                        file_type,
+                        folder_scope,
+                        cache_mode,
+                        override_provider,
+                        override_model,
+                    ),
                 )
             )
             state.bg_tasks.add(task)
@@ -1625,7 +2088,12 @@ async def stream_rag(
                 state.bg_tasks.add(telemetry_task)
                 telemetry_task.add_done_callback(state.bg_tasks.discard)
 
-                if not history and query_emb is not None:
+                if (
+                    use_semantic_cache
+                    and query_emb is not None
+                    and not stream_failed
+                    and not is_degraded
+                ):
                     import numpy as np
 
                     await lancedb_client.add_query_cache(
@@ -1633,13 +2101,42 @@ async def stream_rag(
                         query_text=query,
                         response_text=full_answer,
                         timestamp=time.time(),
-                        scope=lancedb_client.cache_scope(file_type, folder_tag),
+                        scope=_semantic_cache_scope(
+                            lancedb_client,
+                            file_type,
+                            folder_scope,
+                            cache_mode,
+                            override_provider,
+                            override_model,
+                        ),
                     )
         except Exception:  # nosec B110
             pass
 
+    if stream_failed:
+        return
     if graph_paths_text:
         yield {"type": "done", "graph_hops": graph_paths_text}
+
+
+async def _save_abandoned_turn(
+    db, query, answer, n_chunks, total_ms, mode, model_class, budget, context_tokens_used
+) -> None:
+    try:
+        query_id = await db.save_query(query, answer, n_chunks, total_ms)
+        await db.save_telemetry(
+            query_id=query_id,
+            time_to_first_token_ms=0.0,
+            mode_selected=mode,
+            model_class=model_class,
+            context_tokens_budget=budget,
+            context_tokens_used=context_tokens_used,
+            chunks_included=n_chunks,
+            chunks_dropped=0,
+            response_abandoned=True,
+        )
+    except Exception as e:
+        logger.warning("Failed to save abandoned query history: %s", e, exc_info=True)
 
 
 async def _load_query_metadata(db, inventory, project):
@@ -1661,6 +2158,8 @@ async def _gather_full_rag_inputs(
     include_profiles_text: bool = False,
     query_emb: list[float] | None = None,
     keywords: list[str] | None = None,
+    file_type: str | None = None,
+    folder_tag: str | None = None,
 ):
     # P0-1: Always gather named results for structural safety
     async def _noop(val):
@@ -1679,28 +2178,43 @@ async def _gather_full_rag_inputs(
             lancedb_client=lancedb_client,
             k=k,
             near_misses=near_misses,
-            use_reranker=not (project or inventory),
+            # A3-12: no use_reranker=not (project or inventory). Those flags are
+            # substring/regex hits ("summary", "latest"), so content questions
+            # lost the cross-encoder (+0.027-0.032 nDCG on SciFact) by accident.
             query_emb=query_emb,  # P-02: pass pre-computed embedding
             keywords=keywords,
+            file_type=file_type,
+            folder_tag=folder_tag,
         ),
-        _get_top_relevant_profiles(lancedb_client, db, query_emb, k=2),
+        _get_top_relevant_profiles(
+            lancedb_client, db, query_emb, k=2, file_type=file_type, folder_tag=folder_tag
+        ),
         _noop(cached_file_stats) if inventory else _noop(None),
         db.get_folder_profiles_text() if include_profiles_text else _noop(""),
     )
 
-    # Merge top profiles with legacy text if available
+    # Merge top profiles with legacy text if available. The legacy text spans
+    # every folder, so it is dropped under a filter rather than leaked past it.
     combined_profiles = top_folder_profiles
-    if not combined_profiles and legacy_profiles_text:
+    if not combined_profiles and legacy_profiles_text and not (file_type or folder_tag):
         combined_profiles = legacy_profiles_text
 
     return retrieved, file_stats, combined_profiles
 
 
-async def _get_top_relevant_profiles(lancedb_client, db, query_emb, k=2) -> str:
+async def _get_top_relevant_profiles(
+    lancedb_client, db, query_emb, k=2, file_type=None, folder_tag=None
+) -> str:
     """Fetch the full text for the most semantically relevant folder profiles."""
+    # A profile describes a whole folder, not a file type, so a file_type filter
+    # has no profile that honours it; a folder filter restricts to that folder.
+    if file_type:
+        return ""
     try:
         # Search summaries for folders specifically
         where = {"is_folder_profile": "true"}
+        if folder_tag:
+            where["folder_tag"] = folder_tag
         raw = await lancedb_client.search_summaries(query_emb, k=k, where_filter=where)
 
         tags = []
@@ -1725,7 +2239,10 @@ async def _get_top_relevant_profiles(lancedb_client, db, query_emb, k=2) -> str:
         return ""
 
 
-def _filter_retrieved_results(retrieved, file_type, folder_tag):
+def _filter_retrieved_results(retrieved, file_type, folder_tag, root=None):
+    # The root check is what tells two like-named folders apart: they share a
+    # folder_tag, so the tag test alone admits both.
+    root_prefix = _norm_path(root).rstrip("\\") + "\\" if root else None
     filtered = []
     for res in retrieved:
         path = res.get("file_path", "").lower()
@@ -1733,6 +2250,8 @@ def _filter_retrieved_results(retrieved, file_type, folder_tag):
         if file_type and not path.endswith(file_type.lower()):
             continue
         if folder_tag and tag != folder_tag:
+            continue
+        if root_prefix and not _norm_path(path).startswith(root_prefix):
             continue
         filtered.append(res)
     return filtered

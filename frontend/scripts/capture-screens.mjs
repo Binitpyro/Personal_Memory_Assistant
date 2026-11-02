@@ -8,7 +8,7 @@
  * Requires the backend on 127.0.0.1:8000. Output goes to `PMA Obsidian/files/`,
  * which is gitignored (.gitignore:230) — screenshots should not enter history.
  *
- * Usage:  node scripts/capture-screens.mjs [outDir]
+ * Usage:  node scripts/capture-screens.mjs
  */
 import { chromium } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
@@ -16,7 +16,8 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const OUT = process.argv[2] ?? resolve(HERE, '..', '..', 'PMA Obsidian', 'files', 'screens');
+// No outDir argument: output stays in the gitignored folder above.
+const OUT = resolve(HERE, '..', '..', 'PMA Obsidian', 'files', 'screens');
 const BASE = 'http://127.0.0.1:8000';
 
 const ROUTES = [

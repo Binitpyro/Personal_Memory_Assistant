@@ -18,7 +18,7 @@
  *      `animate-fade-in` (4 uses), a bare `rounded` (26) and 86 arbitrary
  *      `text-[9px]`-style sizes were invisible to it. We check every utility.
  *
- * Usage:  node scripts/check-utilities.mjs [path/to/built.css]
+ * Usage:  node scripts/check-utilities.mjs   (reads the largest built stylesheet)
  * Exit 1 if any referenced utility produces no rule.
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs';
@@ -97,12 +97,10 @@ function baseUtility(token) {
   return t;
 }
 
-const cssPath =
-  process.argv[2] ??
-  readdirSync(CSS_DIR)
-    .filter((f) => f.endsWith('.css'))
-    .map((f) => join(CSS_DIR, f))
-    .sort((a, b) => statSync(b).size - statSync(a).size)[0];
+const cssPath = readdirSync(CSS_DIR)
+  .filter((f) => f.endsWith('.css'))
+  .map((f) => join(CSS_DIR, f))
+  .sort((a, b) => statSync(b).size - statSync(a).size)[0];
 
 if (!cssPath) {
   console.error('check-utilities: no built stylesheet found. Run `npm run build` first.');

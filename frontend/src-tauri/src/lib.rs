@@ -510,9 +510,15 @@ fn open_file(app: tauri::AppHandle, path: String) -> Result<&'static str, String
 mod tests {
     use super::*;
 
+    /// Scratch root under this crate's gitignored target dir. A compile-time
+    /// path, unlike `std::env::temp_dir`, which reads TMP/TEMP at run time.
+    fn test_tmp() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join("test-tmp")
+    }
+
     #[test]
     fn test_openable_file_path_accepts_documents_only() {
-        let dir = std::env::temp_dir().join(format!("test_open_{}", uuid::Uuid::new_v4()));
+        let dir = test_tmp().join(format!("test_open_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let doc = dir.join("report.PDF");
         let exe = dir.join("Setup.EXE");
@@ -579,7 +585,7 @@ mod tests {
 
     #[test]
     fn test_resolve_sidecar_without_marker_is_not_reused() {
-        let temp_dir = std::env::temp_dir().join(format!("test_no_marker_{}", uuid::Uuid::new_v4()));
+        let temp_dir = test_tmp().join(format!("test_no_marker_{}", uuid::Uuid::new_v4()));
         let resource_dir = temp_dir.join("resources");
         let app_local_data_dir = temp_dir.join("local_data");
         let python_dir = resource_dir.join("python");
@@ -644,7 +650,7 @@ mod tests {
 
     #[test]
     fn test_resolve_sidecar_missing_both() {
-        let temp_dir = std::env::temp_dir().join(format!("test_missing_both_{}", uuid::Uuid::new_v4()));
+        let temp_dir = test_tmp().join(format!("test_missing_both_{}", uuid::Uuid::new_v4()));
         let resource_dir = temp_dir.join("resources");
         let app_local_data_dir = temp_dir.join("local_data");
         std::fs::create_dir_all(&resource_dir).unwrap();
@@ -660,7 +666,7 @@ mod tests {
 
     #[test]
     fn test_resolve_sidecar_direct_exe() {
-        let temp_dir = std::env::temp_dir().join(format!("test_direct_exe_{}", uuid::Uuid::new_v4()));
+        let temp_dir = test_tmp().join(format!("test_direct_exe_{}", uuid::Uuid::new_v4()));
         let resource_dir = temp_dir.join("resources");
         let app_local_data_dir = temp_dir.join("local_data");
         
@@ -679,7 +685,7 @@ mod tests {
 
     #[test]
     fn test_resolve_sidecar_already_extracted() {
-        let temp_dir = std::env::temp_dir().join(format!("test_already_extracted_{}", uuid::Uuid::new_v4()));
+        let temp_dir = test_tmp().join(format!("test_already_extracted_{}", uuid::Uuid::new_v4()));
         let resource_dir = temp_dir.join("resources");
         let app_local_data_dir = temp_dir.join("local_data");
 
@@ -706,7 +712,7 @@ mod tests {
 
     #[test]
     fn test_resolve_sidecar_clean_partial() {
-        let temp_dir = std::env::temp_dir().join(format!("test_clean_partial_{}", uuid::Uuid::new_v4()));
+        let temp_dir = test_tmp().join(format!("test_clean_partial_{}", uuid::Uuid::new_v4()));
         let resource_dir = temp_dir.join("resources");
         let app_local_data_dir = temp_dir.join("local_data");
 
@@ -733,7 +739,7 @@ mod tests {
 
     #[test]
     fn test_resolve_sidecar_non_existent_resource_dir() {
-        let temp_dir = std::env::temp_dir().join(format!("test_non_existent_{}", uuid::Uuid::new_v4()));
+        let temp_dir = test_tmp().join(format!("test_non_existent_{}", uuid::Uuid::new_v4()));
         let resource_dir = temp_dir.join("non_existent_resources");
         let app_local_data_dir = temp_dir.join("local_data");
         std::fs::create_dir_all(&app_local_data_dir).unwrap();
@@ -757,7 +763,7 @@ mod tests {
     #[test]
     fn test_resolve_sidecar_extracts_build_exe_layout() {
         // Real zip built the way Build-Exe.bat does (tar -C <parent> PMA), real Expand-Archive.
-        let temp_dir = std::env::temp_dir().join(format!("test_real_extract_{}", uuid::Uuid::new_v4()));
+        let temp_dir = test_tmp().join(format!("test_real_extract_{}", uuid::Uuid::new_v4()));
         let resource_dir = temp_dir.join("resources");
         let app_local_data_dir = temp_dir.join("local_data");
         let staged = temp_dir.join("sidecar").join("PMA");

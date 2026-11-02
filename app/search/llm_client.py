@@ -23,6 +23,7 @@ from app.providers import (
 )
 from app.search.capability_detector import capability_detector
 from app.settings_store import CURRENT_SCHEMA_VERSION, SettingsStore
+from app.utils.log_safe import log_safe
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,9 @@ def _get_effective_fallback_chain() -> list[str]:
         # provider, including ones the user left out on purpose. A saved local
         # chain whose provider is momentarily down must fail as that provider
         # ("Ollama is not running"), not be answered by a cloud one.
-        logger.warning("Saved fallback_chain %s has no configured providers; keeping it.", saved)
+        logger.warning(
+            "Saved fallback_chain %s has no configured providers; keeping it.", log_safe(saved)
+        )
         return list(saved)
 
     return chain
@@ -160,9 +163,9 @@ def _warn_unparsed_model_name(name: str) -> None:
         "'7b_local' context class (a ~8,520 token budget). If it is smaller than "
         "%.0fB its prompt will be truncated head-first and silently - set "
         'PMA_MODEL_CLASS_OVERRIDES=\'{"%s": "3b_local"}\' to correct it.',
-        name,
+        log_safe(name),
         _SMALL_MODEL_BILLIONS,
-        name,
+        log_safe(name),
     )
 
 

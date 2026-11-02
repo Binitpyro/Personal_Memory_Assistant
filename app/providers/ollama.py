@@ -9,6 +9,7 @@ import httpx
 from app.providers.base import ModelInfo, ValidationResult, new_async_client, stream_error_for
 from app.providers.cache import validation_cache
 from app.providers.registry import spec_of
+from app.utils.log_safe import log_safe
 
 logger = logging.getLogger(__name__)
 
@@ -147,11 +148,11 @@ def _warn_if_over_window(key: tuple[str, str], num_ctx: int) -> None:
     if len(_NUM_CTX_WARNED) < _HW_MAX_KEYS:
         _NUM_CTX_WARNED.add(key)
     logger.warning(
-        "Ollama model %s: num_ctx %d exceeds its reported context window %d; the prompt "
+        "Ollama model %s: num_ctx %d exceeds its reported context window %s; the prompt "
         "may be silently truncated.",
-        model,
+        log_safe(model),
         num_ctx,
-        window,
+        log_safe(window),
     )
 
 
@@ -164,7 +165,9 @@ def _resolve_num_ctx(base_url: str | None, model_name: str, required: int) -> in
         num_ctx = max(bucketed, hw)
         if hw < bucketed <= _HW_CAP and (key in _NUM_CTX_HW or len(_NUM_CTX_HW) < _HW_MAX_KEYS):
             _NUM_CTX_HW[key] = bucketed
-            logger.info("Ollama num_ctx high-water for %s raised to %d", model_name, bucketed)
+            logger.info(
+                "Ollama num_ctx high-water for %s raised to %d", log_safe(model_name), bucketed
+            )
     elif hw:
         num_ctx = hw
     else:
@@ -399,18 +402,18 @@ class OllamaProvider:
             logger.warning(
                 "Ollama model %s returned empty content (done_reason=%s) and no reasoning; "
                 "not retrying.",
-                model_name,
-                data.get("done_reason"),
+                log_safe(model_name),
+                log_safe(data.get("done_reason")),
             )
             return ""
 
         logger.warning(
-            "Ollama model %s spent its %d-token budget reasoning (%d chars of thinking, "
+            "Ollama model %s spent its %s-token budget reasoning (%d chars of thinking, "
             "done_reason=%s) and returned no answer. Retrying once with think=false.",
-            model_name,
-            max_tokens,
+            log_safe(model_name),
+            log_safe(max_tokens),
             len(thinking),
-            data.get("done_reason"),
+            log_safe(data.get("done_reason")),
         )
         retry = await client.post(
             url,

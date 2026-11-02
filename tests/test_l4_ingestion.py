@@ -118,7 +118,7 @@ async def test_a1_06_pre_extract_group_is_bounded_by_bytes(tmp_path, monkeypatch
         await mgr.close()
 
     # huge.log is over the per-file cap; c.txt would take the group past 250.
-    assert [p.rsplit("\\", 1)[-1] for p in seen[0]] == ["a.txt", "b.txt"]
+    assert [p.replace("\\", "/").rsplit("/", 1)[-1] for p in seen[0]] == ["a.txt", "b.txt"]
 
 
 # --- A1-03 ---------------------------------------------------------------

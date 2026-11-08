@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import logging
 import threading
 from collections import OrderedDict
@@ -9,7 +10,7 @@ from typing import Any
 import numpy as np
 
 from app.config import settings
-from app.utils.model_integrity import load_models_lock, verify_file_sha256
+from app.utils.model_integrity import bundled_model_dir, load_models_lock, verify_file_sha256
 
 logger = logging.getLogger(__name__)
 
@@ -311,6 +312,10 @@ class EmbeddingService:
         from app.embeddings.gpu.client import GpuEmbedClient
 
         fp16 = model_path / registry.FP16
+        if not fp16.exists():
+            # A bundled install ships INT8 only; the GPU installer cached the fp16.
+            with contextlib.suppress(Exception):
+                fp16 = registry.pinned_model_file(registry.FP16, allow_download=False)
         sha = (expected_files.get(registry.FP16) or {}).get("sha256")
         if not registry.is_installed():
             self._gpu_error = "GPU embedding is enabled but not installed."
@@ -329,6 +334,70 @@ class EmbeddingService:
             return {"running": False, "degraded": True, "last_error": self._gpu_error, "ep": ""}
         status: dict[str, Any] = self._gpu.status()
         return status
+
+    def _from_hf_cache(
+        self, repo_id: str, revision: str | None, expected_files: dict[str, Any]
+    ) -> Path:
+        """Snapshot dir in the HF cache; downloads only if embedding_allow_download."""
+        from app.utils.model_integrity import configure_hf_env
+
+        configure_hf_env()
+
+        from huggingface_hub import snapshot_download
+        from huggingface_hub.errors import (
+            LocalEntryNotFoundError,
+            RepositoryNotFoundError,
+            RevisionNotFoundError,
+        )
+
+        # Pinned: exactly the files the CPU session loads. The fp16 build is the
+        # GPU worker's, fetched by its own installer (gpu/registry.py). The old
+        # globs pulled every ONNX build in the revision (~460 MB for 34 MB used).
+        allow_patterns = [k for k in expected_files if not k.endswith("_fp16.onnx")] or [
+            "*.json",
+            "*.txt",
+            "*.onnx",
+            "onnx/*",
+        ]
+        ignore_patterns = ["*.safetensors", "*.bin", "*.h5", "*.msgpack"]
+        try:
+            model_path = Path(
+                snapshot_download(  # nosec B615
+                    repo_id=repo_id,
+                    revision=revision,
+                    local_files_only=True,
+                    allow_patterns=allow_patterns,
+                    ignore_patterns=ignore_patterns,
+                )
+            )
+            logger.info("Loaded ONNX model from local HF cache: %s", model_path)
+            return model_path
+        except LocalEntryNotFoundError:
+            if not settings.embedding_allow_download:
+                raise RuntimeError(
+                    "Embedding model not present in local cache and downloads are disabled. "
+                    "Set PMA_EMBEDDING_ALLOW_DOWNLOAD=true to enable downloads."
+                ) from None
+        logger.info(
+            "Downloading ONNX model '%s' (repo %s, rev %s)...",
+            self.model_name,
+            repo_id,
+            revision or "latest",
+        )
+        try:
+            return Path(
+                snapshot_download(  # nosec B615
+                    repo_id=repo_id,
+                    revision=revision,
+                    local_files_only=False,
+                    allow_patterns=allow_patterns,
+                    ignore_patterns=ignore_patterns,
+                )
+            )
+        except (RevisionNotFoundError, RepositoryNotFoundError) as e:
+            raise RuntimeError(
+                f"models.lock.json points at {repo_id}@{revision}, which does not resolve on HuggingFace: {e}"
+            ) from e
 
     def load_model(self) -> None:
         """Loads the embedding model using ONNX Runtime (blocking)."""
@@ -372,52 +441,15 @@ class EmbeddingService:
                     revision = entry.get("revision")
                     expected_files = entry.get("files", {})
 
-                from app.utils.model_integrity import configure_hf_env
-
-                configure_hf_env()
-
-                from huggingface_hub import snapshot_download
-                from huggingface_hub.errors import (
-                    LocalEntryNotFoundError,
-                    RepositoryNotFoundError,
-                    RevisionNotFoundError,
-                )
-
-                try:
-                    model_path_str = snapshot_download(  # nosec B615
-                        repo_id=repo_id,
-                        revision=revision,
-                        local_files_only=True,
-                        allow_patterns=["*.json", "*.txt", "*.onnx", "onnx/*"],
-                        ignore_patterns=["*.safetensors", "*.bin", "*.h5", "*.msgpack"],
-                    )
-                    model_path = Path(model_path_str)
-                    logger.info("Loaded ONNX model from local HF cache: %s", model_path)
-                except LocalEntryNotFoundError:
-                    if not settings.embedding_allow_download:
-                        raise RuntimeError(
-                            "Embedding model not present in local cache and downloads are disabled. "
-                            "Set PMA_EMBEDDING_ALLOW_DOWNLOAD=true to enable downloads."
-                        ) from None
-                    logger.info(
-                        "Downloading ONNX model '%s' (repo %s, rev %s)...",
-                        self.model_name,
-                        repo_id,
-                        revision or "latest",
-                    )
-                    try:
-                        model_path_str = snapshot_download(  # nosec B615
-                            repo_id=repo_id,
-                            revision=revision,
-                            local_files_only=False,
-                            allow_patterns=["*.json", "*.txt", "*.onnx", "onnx/*"],
-                            ignore_patterns=["*.safetensors", "*.bin", "*.h5", "*.msgpack"],
-                        )
-                    except (RevisionNotFoundError, RepositoryNotFoundError) as e:
-                        raise RuntimeError(
-                            f"models.lock.json points at {repo_id}@{revision}, which does not resolve on HuggingFace: {e}"
-                        ) from e
-                    model_path = Path(model_path_str)
+                # A bundled copy (Build-Exe.bat) wins, so a fresh install needs no
+                # network. Only for a pinned model: _load_onnx_model verifies every
+                # file against expected_files and fails closed, with no fallback.
+                bundled = bundled_model_dir(self.model_name) if expected_files else None
+                if bundled is not None:
+                    model_path = bundled
+                    logger.info("Using bundled ONNX model: %s", model_path)
+                else:
+                    model_path = self._from_hf_cache(repo_id, revision, expected_files)
 
             logger.info("Loading ONNX embedding model from: %s", model_path)
             self._load_onnx_model(

@@ -62,6 +62,31 @@ def models_lock_path() -> Path:
     return Path(__file__).parent.parent.parent / "models.lock.json"
 
 
+def install_root() -> Path:
+    """Install root, resolving inside a PyInstaller bundle as well.
+
+    ``Path("models")`` was CWD-relative, so a packaged sidecar - whose working
+    directory is whatever launched it - resolved somewhere arbitrary.
+    """
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        return Path(meipass)
+    return Path(__file__).resolve().parent.parent.parent
+
+
+def bundled_model_dir(name: str) -> Path | None:
+    """``<install root>/models/<name>`` (``/`` as ``_`` first), or None.
+
+    Build-Exe.bat stages the pinned files there. Callers still verify every
+    file against models.lock.json; finding the directory proves nothing.
+    """
+    models = install_root() / "models"
+    for candidate in (models / name.replace("/", "_"), models / name):
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def load_models_lock(*, family: str | None = None) -> dict[str, Any]:
     """Return the `models` map, optionally filtered to one family.
 

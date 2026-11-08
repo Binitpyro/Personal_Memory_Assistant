@@ -45,6 +45,16 @@ if "%IS_CI%"=="1" (
 echo [2/4] Ensuring PyInstaller is available...
 uv pip install pyinstaller --quiet 2>nul || pip install pyinstaller --quiet
 
+:: ── Stage the bundled models (first run needs no network) ─────────────────
+echo [2b/4] Staging bundled models from the HuggingFace cache...
+:: The PowerShell lives at the end of this file, after `exit /b`, so cmd never runs it.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$s = [IO.File]::ReadAllText('%~f0'); iex $s.Substring($s.LastIndexOf('#STAGE_MODELS#'))"
+if %ERRORLEVEL% neq 0 (
+    echo [ERROR] Model staging failed: a pinned model file is missing or fails its digest.
+    if "%IS_CI%"=="0" pause
+    exit /b 1
+)
+
 :: ── Run PyInstaller ───────────────────────────────────────────────────────
 echo [3/4] Building PMA.exe with PyInstaller...
 
@@ -83,6 +93,7 @@ pyinstaller ^
     --add-data "app/ocr/protocol.py;app/ocr" ^
     --add-data "app/embeddings/gpu/worker.py;app/embeddings/gpu" ^
     --add-data "models.lock.json;." ^
+    --add-data "dist/bundled/models;models" ^
     --add-binary "app/scanner/rust_core/target/release/rust_core.dll;app/scanner/rust_core/target/release" ^
     __main__.py
 
@@ -142,3 +153,43 @@ if "%IS_CI%"=="0" (
         timeout /t 30
     )
 )
+exit /b 0
+
+#STAGE_MODELS# - PowerShell, run by step [2b/4] above; cmd never reaches it.
+# Copies the embedder and reranker INT8 ONNX + tokenizer at the revisions pinned in
+# models.lock.json from the local HuggingFace cache into dist\bundled\models\<name, / as _>\,
+# which PyInstaller adds to the sidecar as <bundle>\models (model_integrity.bundled_model_dir).
+# Every file is checked against its pinned SHA-256; a missing file or mismatch exits non-zero.
+# Never downloads: the cache must already hold the pinned revision (CI fills it first, see
+# .github/workflows/release.yml). The fp16 build is skipped - only the opt-in GPU worker reads it.
+$ErrorActionPreference = 'Stop'
+$root = (Get-Location).Path
+$lock = (Get-Content -Raw -LiteralPath (Join-Path $root 'models.lock.json') | ConvertFrom-Json).models
+$hub = if ($env:HF_HUB_CACHE) { $env:HF_HUB_CACHE }
+       elseif ($env:HF_HOME) { Join-Path $env:HF_HOME 'hub' }
+       else { Join-Path $env:USERPROFILE '.cache\huggingface\hub' }
+$out = Join-Path $root 'dist\bundled\models'
+if (Test-Path -LiteralPath $out) { Remove-Item -Recurse -Force -LiteralPath $out }
+foreach ($name in 'BAAI/bge-small-en-v1.5', 'cross-encoder/ms-marco-MiniLM-L-6-v2') {
+    $m = $lock.$name
+    if (-not $m) { throw "$name is not pinned in models.lock.json" }
+    $snap = Join-Path $hub ("models--" + ($m.repo_id -replace '/', '--') + "\snapshots\" + $m.revision)
+    foreach ($f in $m.files.PSObject.Properties) {
+        if ($f.Name -like '*_fp16.onnx') { continue }
+        $src = Join-Path $snap $f.Name
+        $dst = Join-Path $out (Join-Path ($name -replace '/', '_') $f.Name)
+        if (-not (Test-Path -LiteralPath $src)) {
+            throw "Missing $src - put $($m.repo_id)@$($m.revision) in the HF cache ($hub) first."
+        }
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dst) | Out-Null
+        Copy-Item -LiteralPath $src -Destination $dst  # follows the cache's symlinks
+        # .NET, not Get-FileHash: powershell.exe launched from pwsh 7 (CI's default shell)
+        # inherits pwsh's PSModulePath and cannot resolve Get-FileHash.
+        $hash = [BitConverter]::ToString(
+            [Security.Cryptography.SHA256]::Create().ComputeHash([IO.File]::ReadAllBytes($dst))) -replace '-', ''
+        if ($hash -ne $f.Value.sha256) {  # -ne is case-insensitive; $hash is upper-case
+            throw "Digest mismatch for $dst`n  got    $hash`n  pinned $($f.Value.sha256)"
+        }
+        Write-Host "[OK] $name/$($f.Name) ($((Get-Item -LiteralPath $dst).Length) bytes)"
+    }
+}

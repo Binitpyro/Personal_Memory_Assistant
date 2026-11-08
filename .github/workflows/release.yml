@@ -15,15 +15,15 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           targets: x86_64-pc-windows-msvc
 
       - name: Install uv (Python toolchain)
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
         with:
           version: "latest"
           python-version: "3.12"
@@ -36,7 +36,7 @@ jobs:
         run: uv run maturin develop --release
 
       - name: Install Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '24'
           cache: 'npm'
@@ -47,6 +47,19 @@ jobs:
         run: |
           npm ci
           npm run build
+
+      # The installer bundles the embedder and reranker so first run needs no network.
+      # Fetch exactly the files Build-Exe.bat bundles (pinned INT8 ONNX + tokenizer at the
+      # pinned revision) into the HF cache; Build-Exe.bat's [2b/4] model-staging step then
+      # copies them and fails the build on any missing file or SHA-256 mismatch.
+      - name: Fetch pinned models into the HF cache
+        shell: pwsh
+        env:
+          HF_HUB_DISABLE_TELEMETRY: "1"
+          HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"
+        run: |
+          .venv\Scripts\python.exe -c "import json; from huggingface_hub import hf_hub_download; m = json.load(open('models.lock.json'))['models']; [print(hf_hub_download(repo_id=m[n]['repo_id'], revision=m[n]['revision'], filename=f)) for n in ('BAAI/bge-small-en-v1.5', 'cross-encoder/ms-marco-MiniLM-L-6-v2') for f in m[n]['files'] if not f.endswith('_fp16.onnx')]"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build PyInstaller Sidecar
         run: scripts\Build-Exe.bat
@@ -59,6 +72,12 @@ jobs:
             exit 1
           }
           Get-Item "dist\PMA-sidecar.zip" | Format-List FullName,Length,LastWriteTime
+          $models = @(Get-ChildItem -Recurse "dist\sidecar\PMA" -Filter model_quantized.onnx)
+          if ($models.Count -ne 2) {
+            echo "::error::Expected 2 bundled models in the sidecar, found $($models.Count)."
+            exit 1
+          }
+          $models | Format-Table FullName,Length -AutoSize
 
       - name: Install WiX Toolset
         run: choco install wixtoolset -y
@@ -67,14 +86,14 @@ jobs:
         working-directory: ./frontend
         shell: pwsh
         run: |
-          npx tauri build --bundles msi --verbose 2>&1 | Tee-Object -FilePath ..\tauri-msi-build.log
+          npx tauri build --bundles msi --config src-tauri/tauri.bundle.conf.json --verbose 2>&1 | Tee-Object -FilePath ..\tauri-msi-build.log
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
 
       - name: Upload build diagnostics
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-build-diagnostics
           if-no-files-found: ignore
@@ -92,6 +111,14 @@ jobs:
           dir dist
           echo "Checking Tauri output..."
           dir frontend\src-tauri\target\release\bundle\msi
+          # Heuristic: the sidecar zip is already compressed, so an MSI that carries it
+          # cannot be much smaller. An MSI built without the bundle config is a few MB.
+          $zip = (Get-Item "dist\PMA-sidecar.zip").Length
+          $msi = (Get-ChildItem "frontend\src-tauri\target\release\bundle\msi\*.msi" | Select-Object -First 1).Length
+          if ($msi -lt 0.9 * $zip) {
+            echo "::error::MSI ($msi bytes) is smaller than the sidecar zip ($zip bytes): the backend is not inside it."
+            exit 1
+          }
 
       - name: Prepare Release Artifacts
         shell: pwsh
@@ -110,9 +137,10 @@ jobs:
           }
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: |
             PMA-*-sidecar.zip
             PMA-*-windows-x64.msi
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-rc') }}

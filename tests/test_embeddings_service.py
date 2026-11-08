@@ -294,10 +294,114 @@ class TestRepoIdOverrideAndExceptions:
         with (
             patch("app.embeddings.service._get_models_lock_data", return_value=mock_lock_data),
             patch("huggingface_hub.snapshot_download", side_effect=_side_effect),
+            patch("app.config.settings.embedding_allow_download", True),
         ):
             svc.load_model()
             assert svc.has_failed is True
             assert "does not resolve on HuggingFace" in svc.load_error
+
+
+class TestBundledModelResolution:
+    """B1: a fresh install loads the bundled copy and never touches the network."""
+
+    NAME = "BAAI/bge-small-en-v1.5"
+
+    def _bundle(self, tmp_path, monkeypatch):
+        import hashlib
+        import sys
+
+        monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
+        model = tmp_path / "models" / "BAAI_bge-small-en-v1.5"
+        (model / "onnx").mkdir(parents=True)
+        (model / "tokenizer.json").write_bytes(b'{"tok": 1}')
+        (model / "onnx" / "model_quantized.onnx").write_bytes(b"int8 weights")
+        files = {
+            rel: {"sha256": hashlib.sha256((model / rel).read_bytes()).hexdigest()}
+            for rel in ("tokenizer.json", "onnx/model_quantized.onnx")
+        }
+        lock = {
+            self.NAME: {"repo_id": "Xenova/bge-small-en-v1.5", "revision": "r1", "files": files}
+        }
+        return model, lock
+
+    def test_bundled_dir_is_used_without_hf(self, tmp_path, monkeypatch):
+        model, lock = self._bundle(tmp_path, monkeypatch)
+        svc = EmbeddingService(self.NAME)
+        with (
+            patch("app.embeddings.service._get_models_lock_data", return_value=lock),
+            patch("huggingface_hub.snapshot_download") as hf,
+            patch.object(svc, "_load_onnx_model") as load,
+        ):
+            svc.load_model()
+        hf.assert_not_called()
+        assert load.call_args.args[0] == model
+        assert load.call_args.args[1] == lock[self.NAME]["files"]
+
+    def test_bundled_digest_mismatch_refuses(self, tmp_path, monkeypatch):
+        model, lock = self._bundle(tmp_path, monkeypatch)
+        (model / "onnx" / "model_quantized.onnx").write_bytes(b"tampered weights")
+        svc = EmbeddingService(self.NAME)
+        with (
+            patch("app.embeddings.service._get_models_lock_data", return_value=lock),
+            patch("huggingface_hub.snapshot_download") as hf,
+            patch("tokenizers.Tokenizer.from_file", return_value=MagicMock()),
+        ):
+            svc.load_model()
+        hf.assert_not_called()  # fails closed: no fallback to the cache or the network
+        assert svc.has_failed
+        assert "failed integrity check" in svc.load_error
+
+    def test_no_download_when_disallowed(self, tmp_path, monkeypatch):
+        import sys
+
+        from huggingface_hub.errors import LocalEntryNotFoundError
+
+        monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)  # nothing bundled
+        calls = []
+
+        def _hf(**kwargs):
+            calls.append(kwargs)
+            raise LocalEntryNotFoundError("not cached")
+
+        svc = EmbeddingService(self.NAME)
+        with (
+            patch("huggingface_hub.snapshot_download", side_effect=_hf),
+            patch("app.config.settings.embedding_allow_download", False),
+        ):
+            svc.load_model()
+        assert [c["local_files_only"] for c in calls] == [True]
+        assert "downloads are disabled" in svc.load_error
+
+    def test_download_is_off_by_default(self):
+        from app.config import Settings
+
+        assert Settings.model_fields["embedding_allow_download"].default is False
+
+    def test_opt_in_download_fetches_only_pinned_int8_and_tokenizer(self, tmp_path, monkeypatch):
+        import sys
+
+        from huggingface_hub.errors import LocalEntryNotFoundError
+
+        monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
+        calls = []
+
+        def _hf(**kwargs):
+            calls.append(kwargs)
+            if kwargs["local_files_only"]:
+                raise LocalEntryNotFoundError("not cached")
+            return str(tmp_path)
+
+        svc = EmbeddingService(self.NAME)  # real models.lock.json
+        with (
+            patch("huggingface_hub.snapshot_download", side_effect=_hf),
+            patch("app.config.settings.embedding_allow_download", True),
+            patch.object(svc, "_load_onnx_model"),
+        ):
+            svc.load_model()
+        assert sorted(calls[-1]["allow_patterns"]) == [
+            "onnx/model_quantized.onnx",
+            "tokenizer.json",
+        ]
 
 
 class TestBatchSizeAndSessionOptions:

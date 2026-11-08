@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -9,7 +8,7 @@ from typing import Any
 import numpy as np
 
 from app.config import settings
-from app.utils.model_integrity import load_models_lock, verify_file_sha256
+from app.utils.model_integrity import bundled_model_dir, load_models_lock, verify_file_sha256
 
 logger = logging.getLogger(__name__)
 
@@ -55,19 +54,6 @@ class RerankerFailedError(RuntimeError):
     """
 
 
-def _base_dir() -> Path:
-    """Install root, resolving inside a PyInstaller bundle as well.
-
-    ``Path("models")`` was CWD-relative, so a packaged sidecar - whose working
-    directory is whatever launched it - resolved somewhere arbitrary, and the
-    resulting FileNotFoundError was swallowed into un-reranked results.
-    """
-    meipass = getattr(sys, "_MEIPASS", None)
-    if meipass:
-        return Path(meipass)
-    return Path(__file__).resolve().parent.parent.parent
-
-
 def _resolve_model_dir(entry: dict[str, Any]) -> Path:
     """Directory holding the pinned reranker files.
 
@@ -76,13 +62,9 @@ def _resolve_model_dir(entry: dict[str, Any]) -> Path:
     lockfile's repo_id/revision - the same mechanism the embedder uses - with
     ``local_files_only=True`` so a query never triggers a download.
     """
-    root = _base_dir()
-    for candidate in (
-        root / "models" / _MODEL_NAME.replace("/", "_"),
-        root / "models" / _MODEL_NAME,
-    ):
-        if candidate.exists():
-            return candidate
+    bundled = bundled_model_dir(_MODEL_NAME)
+    if bundled is not None:
+        return bundled
 
     repo_id, revision = entry.get("repo_id"), entry.get("revision")
     if not repo_id:

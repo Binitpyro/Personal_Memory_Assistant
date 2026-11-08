@@ -265,6 +265,17 @@ export const MessageBubble = memo(function MessageBubble({ message: msg, latest 
           )}
         </div>}
 
+        {/* No model is configured: the answer above is the passages themselves,
+            cited by frame number. Say so, and say how to get a written answer. */}
+        {msg.llm_available === false && (
+          <div className="max-w-[60ch] w-full border border-rule p-3 text-sm text-text-secondary" role="note">
+            No model is connected, so these are the closest passages from your files, not a written answer.
+            <Link to="/settings/providers" className="block mt-2 underline underline-offset-4 font-semibold text-text-primary">
+              Add a model
+            </Link>
+          </div>
+        )}
+
         {msg.error && (
           <div className="max-w-[60ch] w-full">
             <StreamError error={msg.error} hasContent={!!msg.content.trim()} />

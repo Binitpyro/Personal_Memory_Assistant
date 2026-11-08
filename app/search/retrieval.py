@@ -1,4 +1,5 @@
 import asyncio
+import html
 import json
 import logging
 import math
@@ -26,7 +27,7 @@ from app.search.context_builder import (
     append_project_profile_lines,
     build_context,
 )
-from app.search.llm_client import LLM_UNAVAILABLE_PREFIX, LLMClient
+from app.search.llm_client import LLM_UNAVAILABLE_PREFIX, NO_PROVIDERS_ANSWER, LLMClient
 from app.search.planner import PlanMode, QueryPlanner
 from app.search.reranker import RerankerFailedError, RerankerNotInstalledError, rerank
 from app.storage.db import DatabaseManager
@@ -1284,7 +1285,7 @@ async def _maybe_run_agentic_loop(
     try:
         ceiling = compute_context_budget(
             llm_client.get_model_class(),
-            len(history) if history else 0,
+            history,
             await _reported_window(llm_client),
         )
         state = await run_agentic_loop(
@@ -1453,8 +1454,7 @@ async def full_rag(
     from app.search.context_builder import compute_context_budget
 
     model_class = llm_client.get_model_class()
-    history_turns = len(history) if history else 0
-    budget = compute_context_budget(model_class, history_turns, await _reported_window(llm_client))
+    budget = compute_context_budget(model_class, history, await _reported_window(llm_client))
 
     # Small-to-big: ranking is done, so widen what the model sees without
     # touching what was selected.
@@ -1490,6 +1490,11 @@ async def full_rag(
     # generate_answer reports a dead chain as prose, not an exception.
     if answer.startswith(LLM_UNAVAILABLE_PREFIX):
         _llm_error = True
+    # No model at all: answer with the passages themselves. Still `_is_error`,
+    # so it is never cached and replayed once a model is added.
+    llm_available = answer != NO_PROVIDERS_ANSWER
+    if not llm_available:
+        answer = _extractive_answer(retrieved)
     llm_ms = round((time.perf_counter() - t_llm) * 1000, 1)
 
     total_ms = round((time.perf_counter() - t_start) * 1000, 1)
@@ -1507,6 +1512,7 @@ async def full_rag(
         "mode": "degraded_rag" if is_degraded else "full_rag",
         "timing": {"retrieval_ms": retrieval_ms, "llm_ms": llm_ms, "total_ms": total_ms},
         "_is_error": _llm_error,
+        "llm_available": llm_available,
         "_telemetry": {
             "model_class": model_class,
             "context_tokens_budget": budget,
@@ -1886,10 +1892,9 @@ async def stream_rag(
     from app.search.context_builder import compute_context_budget
 
     model_class = llm_client.get_model_class(override_provider, override_model)
-    history_turns = len(history) if history else 0
     budget = compute_context_budget(
         model_class,
-        history_turns,
+        history,
         await _reported_window(llm_client, override_provider, override_model),
     )
 
@@ -1937,6 +1942,21 @@ async def stream_rag(
                                     "prompt_tokens": control_data.get("prompt_tokens"),
                                     "completion_tokens": control_data.get("completion_tokens"),
                                 }
+                            elif (
+                                ctrl_type == "provider_error"
+                                and control_data.get("code") == "no_providers_configured"
+                            ):
+                                # No model at all: the passages are the answer.
+                                # stream_failed skips the annotator and the cache;
+                                # the turn is still saved to history.
+                                full_answer = _extractive_answer(retrieved)
+                                yield {
+                                    "type": "content",
+                                    "text": full_answer,
+                                    "llm_available": False,
+                                }
+                                stream_failed = True
+                                break
                             elif ctrl_type == "provider_error":
                                 # Chain exhausted. Surfaced as a typed error so the UI
                                 # can offer the matching remedy - a consent failure is
@@ -2117,6 +2137,27 @@ async def stream_rag(
         return
     if graph_paths_text:
         yield {"type": "done", "graph_hops": graph_paths_text}
+
+
+def _extractive_answer(sources: list[dict[str, Any]], limit: int = 3) -> str:
+    """Quote the top passages when no model can write an answer.
+
+    `[n]` is the passage's 1-based position in `sources`, which is the number
+    the Frames pane prints, so each citation points at its frame.
+    """
+    if not sources:
+        return "No language model is connected, and no passages matched this question."
+    lines = ["No language model is connected, so here are the closest passages in your files:", ""]
+    for i, src in enumerate(sources[:limit], 1):
+        text = " ".join(str(src.get("text") or "").split())
+        if len(text) > 400:
+            text = text[:400].rsplit(" ", 1)[0] + "…"
+        # Escaped: the passage is user-file text inside a raw <claim> tag.
+        name = html.escape(Path(str(src.get("file_path", ""))).name)
+        lines.append(
+            f'{i}. <claim sources="[{i}]">{html.escape(text, quote=False)}</claim> ({name}) [{i}]'
+        )
+    return "\n".join(lines)
 
 
 async def _save_abandoned_turn(

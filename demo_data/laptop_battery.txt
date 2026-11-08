@@ -1,0 +1,16 @@
+Laptop battery notes
+
+The battery report says the battery holds 82 percent of its original capacity
+after two years. On a full charge it lasts about four hours of note-taking with
+the screen at half brightness, and under two hours when compiling code.
+
+To slow the wear down:
+- Charge limit set to 80 percent in the manufacturer's settings app.
+- Unplug it once a week and let it run down to about 30 percent.
+- Keep it off the bed and the sofa; it gets hot when the vents are covered.
+
+The power-saving mode cuts the screen refresh rate, which is the biggest single
+gain. Turning off the keyboard backlight helps a little.
+
+If capacity drops below 70 percent, a replacement battery is cheaper than a new
+laptop. Check the exact model number on the sticker underneath before ordering.

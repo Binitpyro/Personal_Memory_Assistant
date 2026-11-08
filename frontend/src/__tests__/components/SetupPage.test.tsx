@@ -174,6 +174,38 @@ describe('SetupPage Component', () => {
 
     expect(screen.queryByText(/I understand and consent to cloud data processing/)).toBeNull();
   });
+
+  // ── No model at all (release blocker B3) ─────────────────────────────────
+  //
+  // A fresh install has no key and no local runtime. Continue used to stay
+  // disabled, so a stranger could not finish setup. Ask answers extractively
+  // without a model now, so setup must let them through - and say so.
+
+  it('lets a fresh install with no model continue, and says what that means', () => {
+    renderWithProviders(<SetupPage />);
+
+    const button = continueButton() as HTMLButtonElement;
+    expect(button.disabled).toBe(false);
+    expect(button.textContent).toMatch(/Continue without a model/);
+
+    fireEvent.click(button);
+
+    expect(screen.queryByText('Model connected')).toBeNull();
+    expect(screen.getByText('No model connected')).toBeDefined();
+    expect(screen.getByText(/closest passages from your files/)).toBeDefined();
+    // The demo stays reachable without a model.
+    expect(screen.getByRole('button', { name: /Try the demo corpus/ })).toBeDefined();
+  });
+
+  it('still says "Model connected" when one is', () => {
+    state.providers = [geminiConnected];
+    state.routingSettings = { consent_required: false, cloud_privacy_consent: true };
+    renderWithProviders(<SetupPage />);
+
+    fireEvent.click(continueButton());
+
+    expect(screen.getByText('Model connected')).toBeDefined();
+  });
 });
 
 /**

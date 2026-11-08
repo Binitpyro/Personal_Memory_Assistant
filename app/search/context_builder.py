@@ -430,10 +430,20 @@ def _add_graph_paths(context_parts: list[str], text: str, max_tokens: int, used_
     return 0
 
 
+#: Most recent messages ``LLMClient._build_messages`` sends to the model. The UI
+#: may send up to 50; the budget below must charge only what is actually sent.
+HISTORY_WINDOW = 10
+
+
 def compute_context_budget(
-    model_class: str, history_turns: int, reported_window: int | None = None
+    model_class: str,
+    history: list[dict[str, str]] | None,
+    reported_window: int | None = None,
 ) -> int:
     """Adaptive context budget based on model's effective capacity.
+
+    ``history`` is charged at its real token count, over the last
+    ``HISTORY_WINDOW`` messages only (the slice the model receives).
 
     ``reported_window`` - the dispatched model's declared context length - only
     ever lowers the class ceiling, never raises it (CLAUDE.md 8.1/8.4): a
@@ -456,7 +466,9 @@ def compute_context_budget(
     system_prompt = 400
     output_reserve = min(1000, ceiling // 4)
     query_overhead = 80
-    history_cost = history_turns * 400
+    history_cost = sum(
+        count_tokens_uncached(m.get("content") or "") for m in (history or [])[-HISTORY_WINDOW:]
+    )
 
     context_budget = ceiling - system_prompt - output_reserve - query_overhead - history_cost
     return max(1000, context_budget)

@@ -436,8 +436,8 @@ def test_deduplicate_redundant_drops_identical_text_without_offsets():
 
 
 def test_compute_context_budget():
-    assert compute_context_budget("cloud", 0) == 98520
-    assert compute_context_budget("3b_local", 2) == 1720
+    assert compute_context_budget("cloud", None) == 98520
+    assert compute_context_budget("3b_local", None) == 2520
 
 
 # ── 10. Retrieval Insights & Metadata ─────────────────────────────────────────

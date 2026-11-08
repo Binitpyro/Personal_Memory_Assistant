@@ -288,7 +288,9 @@ export function SetupPage() {
         ? !(driveInfo.is_portable_fs && driveInfo.lancedb_mode !== 'split_brain')
         : true
 
-    const canProceed = (isConnected || hasLocalModels) && isDriveConfigSafe && !requiresRestart && !consentRequired
+    const hasModel = !!(isConnected || hasLocalModels)
+    // A model is not required: with none, Ask answers with the matching passages.
+    const canProceed = isDriveConfigSafe && !requiresRestart && !consentRequired
 
     return (
         // The blur blobs that used to sit here (two 24rem `blur-[120px]`
@@ -515,7 +517,13 @@ export function SetupPage() {
                             </>
                         )}
 
-                        <div className="mt-8 flex justify-end">
+                        <div className="mt-8 flex items-center justify-end gap-4">
+                            {!hasModel && (
+                                <p className="text-xs text-text-secondary m-0 max-w-[40ch]">
+                                    No model yet? You can add one later. Until then, answers
+                                    are the matching passages from your files.
+                                </p>
+                            )}
                             {/* The ready state used to add `animate-pulse ring-2 ring-primary
                                 ring-offset-2`, i.e. a pulsing halo on an enabled button. The
                                 button going from disabled to enabled already says it. */}
@@ -524,7 +532,7 @@ export function SetupPage() {
                                 onClick={() => setStep(2)}
                                 disabled={!canProceed}
                             >
-                                Continue <span aria-hidden>›</span>
+                                {hasModel ? 'Continue' : 'Continue without a model'} <span aria-hidden>›</span>
                             </Button>
                         </div>
                     </div>
@@ -535,10 +543,13 @@ export function SetupPage() {
                     <div className="flex flex-col gap-6 animate-fade-in-right items-start">
 
                         <div>
-                            <h3 className="stock text-[28px] leading-none m-0">Model connected</h3>
+                            <h3 className="stock text-[28px] leading-none m-0">
+                                {hasModel ? 'Model connected' : 'No model connected'}
+                            </h3>
                             <p className="text-text-secondary max-w-[52ch] mt-2 mb-0">
-                                PMA can read now, but it has nothing to read yet. Give it a folder,
-                                or start with the demo corpus.
+                                {hasModel
+                                    ? 'PMA can read now, but it has nothing to read yet. Give it a folder, or start with the demo corpus.'
+                                    : 'PMA can still search: each answer will be the closest passages from your files, with their sources. Add a model in Settings for written answers. Give it a folder, or start with the demo corpus.'}
                             </p>
                         </div>
 

@@ -285,9 +285,9 @@ async def _delivery_scores(
             if cls == "cloud":
                 budget = settings.context_max_tokens
             elif cls == _CLOUD_SHIPPED:
-                budget = compute_context_budget("cloud", 0)
+                budget = compute_context_budget("cloud", None)
             else:
-                budget = compute_context_budget(cls, 0)
+                budget = compute_context_budget(cls, None)
             builder_class = "cloud" if cls == _CLOUD_SHIPPED else cls
             context, tokens = build_context(results, max_tokens=budget, model_class=builder_class)
             contexts[cls][q.id] = context

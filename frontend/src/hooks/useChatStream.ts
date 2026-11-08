@@ -30,6 +30,8 @@ export interface Message {
   isEstimatedCost?: boolean;
   /** Why this turn failed. Rendered inside the bubble, below any partial answer. */
   error?: { text: string; code?: string };
+  /** `false` when no model is configured and the answer is the passages themselves. */
+  llm_available?: boolean;
 }
 
 type ChatAction =
@@ -44,6 +46,7 @@ type ChatAction =
   | { type: 'SET_FALLBACK'; payload: { to: string } }
   | { type: 'SET_USAGE'; payload: { prompt_tokens: number; completion_tokens: number; cost: number; isEstimatedCost: boolean } }
   | { type: 'SET_ERROR'; payload: { text: string; code?: string } }
+  | { type: 'SET_NO_LLM' }
   | { type: 'RESET' };
 
 function chatReducer(state: Message[], action: ChatAction): Message[] {
@@ -156,6 +159,13 @@ function chatReducer(state: Message[], action: ChatAction): Message[] {
             }];
         }
         return state;
+    }
+    case 'SET_NO_LLM': {
+      const last = state.at(-1);
+      if (last?.role === 'assistant') {
+        return [...state.slice(0, -1), { ...last, llm_available: false }];
+      }
+      return state;
     }
     default:
       return state;
@@ -450,6 +460,10 @@ export function useChatStream(onHistoryUpdate: () => void) {
         }
 
         if (chunk.type === 'ping') return;
+
+        if (chunk.type === 'content' && chunk.llm_available === false) {
+          dispatch({ type: 'SET_NO_LLM' });
+        }
 
         if (chunk.type === 'content' && chunk.text) {
           streamBufferRef.current += chunk.text;

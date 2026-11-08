@@ -720,6 +720,8 @@ export interface QueryStreamChunk {
    * never reached the UI.
    */
   query_mode?: string;
+  /** `false` on the content frame when no model is configured: the text is the passages. */
+  llm_available?: boolean;
 }
 
 

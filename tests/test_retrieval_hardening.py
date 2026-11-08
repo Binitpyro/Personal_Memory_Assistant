@@ -1212,9 +1212,11 @@ async def test_stream_rag_passes_recency_file_list_to_context(monkeypatch):
 def test_reported_window_only_lowers_the_class_ceiling():
     from app.search.context_builder import compute_context_budget
 
-    assert compute_context_budget("7b_local", 0, 4096) == 4096 - 400 - 1000 - 80
-    assert compute_context_budget("7b_local", 0, 131_072) == compute_context_budget("7b_local", 0)
-    assert compute_context_budget("cloud", 0, 8192) < compute_context_budget("cloud", 0)
+    assert compute_context_budget("7b_local", None, 4096) == 4096 - 400 - 1000 - 80
+    assert compute_context_budget("7b_local", None, 131_072) == compute_context_budget(
+        "7b_local", None
+    )
+    assert compute_context_budget("cloud", None, 8192) < compute_context_budget("cloud", None)
 
 
 def _budget_rag_mocks(monkeypatch, window):

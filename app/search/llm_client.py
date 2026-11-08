@@ -66,6 +66,8 @@ async def _get_effective_fallback_chain_async() -> list[str]:
 # What `generate_answer` returns, as prose, when every provider failed. Callers
 # that must not treat that string as an answer (cache, annotator) test for it.
 LLM_UNAVAILABLE_PREFIX = "LLM unavailable"
+# The no-provider case of the above, which retrieval answers extractively.
+NO_PROVIDERS_ANSWER = f"{LLM_UNAVAILABLE_PREFIX}: No providers configured."
 
 
 def _chain_failure_message(providers_to_try: list, last_error: object) -> str:
@@ -462,9 +464,11 @@ Answer:
     def _build_messages(
         self, prompt: str, history: list[dict[str, str]] | None
     ) -> list[dict[str, str]]:
+        from app.search.context_builder import HISTORY_WINDOW
+
         messages = []
         if history:
-            messages.extend(history[-10:])
+            messages.extend(history[-HISTORY_WINDOW:])
         messages.append({"role": "user", "content": prompt})
         return messages
 
@@ -691,7 +695,7 @@ Answer:
             return (
                 f"{LLM_UNAVAILABLE_PREFIX}: {_chain_failure_message(providers_to_try, last_error)}"
             )
-        return f"{LLM_UNAVAILABLE_PREFIX}: No providers configured."
+        return NO_PROVIDERS_ANSWER
 
     async def generate_raw(
         self,

@@ -162,13 +162,12 @@ class OpenAICompatibleProvider:
                 result["error_code"] = "provider_down"
                 result["error"] = f"Unexpected validation error: {e!s}"
 
-        # Redact keys in logs
-        key_preview = self.api_key[:6] + "..." if self.api_key and len(self.api_key) > 6 else "****"
+        # No key material in logs: for a custom endpoint even a 6-char prefix is secret.
         logger.info(
             "Validation for %s (%s, key: %s): ok=%s, error_code=%s, error=%s",
             self.spec.id,
             url,
-            key_preview,
+            "set" if self.api_key else "unset",
             result["ok"],
             result["error_code"],
             result["error"],

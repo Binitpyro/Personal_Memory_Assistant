@@ -18845,3 +18845,10 @@ routing remains unscheduled.
 "post-Aug 17" against the XPRIZE submission deadline; that framing was dropped
 because the submission was withdrawn (CLAUDE.md section 8.6). The technical
 content is unchanged.
+
+## Status update 2026-11-08 (CodeQL triage, working tree on `updates`)
+
+All 81 open CodeQL alerts on `main` (`962bb97`) triaged, read-only, in `PMA Obsidian/files/CODEQL_TRIAGE_2026-11-08.md`: 5 real but low, 39 accepted, 37 false positive. None is exploitable under the loopback + token threat model; none blocks v0.1.0.
+
+- **Fixed in the working tree (uncommitted):** #40 `py/clear-text-logging-sensitive-data`: `app/providers/openai_compat.py` logs only whether a key is set. #4-7 `actions/unpinned-tag`: every `uses:` in `ci.yml` and the new `release.yml` is pinned to a commit SHA, with the tag in a comment.
+- **Not done:** no alert is dismissed on GitHub; dismissing the 39 accepted and 37 false-positive alerts is the user's call, with reasons from the triage file.

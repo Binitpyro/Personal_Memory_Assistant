@@ -1,7 +1,7 @@
 # Personal Memory Assistant (PMA)
 ### Local-First Semantic Search & Intelligence Engine
 
-[![Version](https://img.shields.io/badge/Version-0.0.72-blue?style=flat-square)](https://github.com/Binitpyro/Personal_Memory_Assistant)
+[![Version](https://img.shields.io/badge/Version-0.1.0-blue?style=flat-square)](https://github.com/Binitpyro/Personal_Memory_Assistant)
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![Rust](https://img.shields.io/badge/Rust-1.97.1-brown?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![React](https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react&logoColor=black)](https://react.dev/)
@@ -45,7 +45,7 @@ What changed in each release: [`PMA Obsidian/05_CHANGELOGS.md`](PMA%20Obsidian/0
 
 Local-first is enforced in the code, not just claimed in the pitch.
 
-- **Your files never leave your machine by default.** No telemetry, no phone-home. At first run PMA downloads its embedding model from Hugging Face, pinned to a revision and checked against the SHA-256 digests in `models.lock.json`. The download is currently about 460 MB, because every ONNX build in that revision is fetched while only the 34 MB INT8 one is used. Set `PMA_EMBEDDING_ALLOW_DOWNLOAD=false` to forbid it (`.env.example` sets it to `true`).
+- **Your files never leave your machine by default.** No telemetry, no phone-home, and no download at first run: the installer bundles the embedding model and the reranker (INT8 ONNX plus tokenizer, about 59 MB), and every load checks them against the SHA-256 digests in `models.lock.json`, refusing a file that does not match. A source checkout reads them from the Hugging Face cache instead (`scripts/pin_models.py` fills it). Downloading a missing embedder is off by default; `PMA_EMBEDDING_ALLOW_DOWNLOAD=true` allows it, and it then fetches only the pinned INT8 model and tokenizer, about 35 MB (`.env.example` sets it to `true`).
 - **Cloud providers are opt-in**, and consent is checked against the *resolved destination* rather than a provider's label — a provider registered as "local" but pointed at a remote host is not exempt. PMA states plainly that free-tier cloud dispatch may use your inputs for model training before it sends anything.
 - **API keys live in the OS keyring.** A key set in `.env` overrides the keyring and is managed outside the UI.
 - **Every `/api/` route requires a local access token**, sent as the `X-Local-Access-Token` header only and compared in constant time. There is no `?token=` query fallback, so tokens never reach access logs, browser history, or `Referer`.
@@ -103,6 +103,10 @@ provider API keys. Enter API keys during onboarding or in **Settings → Provide
 PMA stores those keys in the OS keyring by default. A provider API key set in `.env`
 takes precedence and is managed outside the UI, so it cannot be changed or deleted
 from Settings.
+
+A model is optional. Setup can finish without one, and until you add one in
+**Settings → Providers**, each answer is the closest passages from your files, each
+with its source.
 
 ---
 
@@ -200,13 +204,15 @@ Tauri is the supported desktop distribution path. After the setup in §4.3, buil
 ./scripts/Build-Exe.bat
 ```
 
-It builds the frontend, packs the Python backend with PyInstaller into `dist\PMA-sidecar.zip`, then runs
+It builds the frontend, copies the pinned embedder and reranker out of your Hugging Face cache (honouring
+`HF_HOME` / `HF_HUB_CACHE`; run `scripts/pin_models.py` first if they are not there) and checks each file's
+SHA-256, stopping the build on a missing file or a mismatch. It then packs the Python backend and those models
+with PyInstaller into `dist\PMA-sidecar.zip`, then runs
 `npx tauri build --bundles msi --config src-tauri/tauri.bundle.conf.json`, which puts that zip inside the
 installer. The MSI lands in `dist\`, with an unbundled `dist\app\pma-desktop.exe` beside it. A bare
 `npm run tauri build` skips the bundle config, so its MSI has no backend.
 
-> **Unproven.** No MSI built this way has yet been installed and run on a clean machine. The installer bundles
-> no models: the embedder downloads on first run (see [§3](#3-privacy--security)) and the reranker is absent.
+> **Unproven.** No MSI built this way has yet been installed and run on a clean machine.
 
 ---
 

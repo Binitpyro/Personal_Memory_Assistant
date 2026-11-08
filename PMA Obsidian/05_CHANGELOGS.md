@@ -1,4 +1,16 @@
-# Unreleased (merged to `main` via PR #12, `2f26d85`)
+# 0.1.0 (unreleased, target tag Sat 14 Nov 2026)
+
+*Version is `0.1.0` in all manifests, skipping 0.0.73. Uncommitted in the working tree on `updates` as of 2026-11-08; both local gates, a real `Build-Exe.bat` build and the clean-machine install are still to run.* The first build meant for a stranger: it installs on Windows and answers with no network and no LLM.
+
+* **No network at first run.** The installer bundles the INT8 embedder and reranker with their tokenizers (~59 MB). `Build-Exe.bat` step `[2b/4]` copies them from the HF cache and checks each SHA-256 against `models.lock.json`; every load checks the digests again and fails closed. `embedding_allow_download` now defaults `False`, and an opt-in download fetches only the pinned files. The fp16 GPU model is not bundled.
+* **The CI-built MSI contains the backend.** The release workflow is back (`.github/workflows/release.yml`): it passes `--config src-tauri/tauri.bundle.conf.json`, fetches the pinned models, fails if the MSI is smaller than the sidecar, and marks `-rc` tags as prereleases.
+* **Works without an LLM.** Setup can finish with no model. With no provider, Ask returns the top 3 passages, each cited, plus `llm_available: false`, and the UI shows an "Add a model" link. The demo corpus is now 11 original notes.
+* **Chat history no longer starves the context budget.** A shared `HISTORY_WINDOW = 10`; the budget charges the real tokens of the messages actually sent instead of 400 per message. 3b_local used to hit its 1,000-token floor after 4 messages.
+* **Security:** OpenAI-compatible validation no longer logs the first 6 characters of the API key (CodeQL #40). Every GitHub Action is pinned to a commit SHA (CodeQL #4-7). All 81 open CodeQL alerts are triaged: `PMA Obsidian/files/CODEQL_TRIAGE_2026-11-08.md`.
+* **Dependencies (Dependabot):** Pillow 13.0.0, pypdf 6.21.4 (`<7`), certifi 2026.10.23, filelock 4.2.9, pyasn1 0.6.5, nltk 3.10.4, setuptools 84.2.1; Vitest and `@vitest/coverage-v8` 5.0.5 (removes tinypool); `coverage.all` dropped from `vitest.config.ts`.
+* **Known limitations:** the build is unsigned (SmartScreen: More info → Run anyway); Defender may flag the PyInstaller exe; first-launch extraction time is unmeasured; old extracted sidecars are never cleaned up.
+
+# Earlier unreleased work (merged to `main` via PR #12, `2f26d85`)
 
 *Version still `0.0.72` in the manifests; no bump or tag yet.* **102 commits**, 2026-08-29 through 2026-11-03, on top of `d59d4e3` (merge of PR #11), merged to `main` by PR #12 on 2026-11-02 19:18 UTC as `2f26d85`. GitHub CI on the PR at `34b8352`, the first Linux run of these commits, passed: python, frontend and rust checks, and CodeQL for actions, JS/TS, Python and Rust. Locally, the full gate was green at `87f7e66` (pytest 1382 passed / 1 skipped / 6 deselected), and both gates were green on `2d2526b` with the uncommitted Vitest 5 bump (pytest 1426 passed). Later commits are under "Since `87f7e66`" and "Since `2d2526b`".
 

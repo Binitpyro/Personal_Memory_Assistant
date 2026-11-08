@@ -13,7 +13,6 @@ export default defineConfig({
     pool: 'forks',
     coverage: {
       provider: 'v8',
-      all: false,
       reporter: ['text', 'lcov', 'html'],
       reportsDirectory: './coverage',
       include: ['src/**/*.ts', 'src/**/*.tsx'],

@@ -46,20 +46,23 @@ fn resolve_prod_sidecar_paths(
         )
     })?;
 
-    let output = std::process::Command::new("powershell")
-    .args([
-      "-NoLogo",
-      "-NoProfile",
-      "-NonInteractive",
-      "-ExecutionPolicy",
-      "Bypass",
-      "-Command",
-      "& { param([string]$zipPath, [string]$destinationPath) Expand-Archive -LiteralPath $zipPath -DestinationPath $destinationPath -Force }",
-    ])
-    .arg(&sidecar_zip)
-    .arg(&extract_dir)
-    .output()
-    .map_err(|err| format!("Failed to run PowerShell Expand-Archive: {err}"))?;
+    // tar.exe (bsdtar, in System32 since Windows 10 1803) reads the zip Build-Exe.bat
+    // wrote with it, and takes each path as its own argv entry. The previous
+    // `powershell -Command <script> <zip> <dest>` re-joined the args into script text,
+    // so the MSI's `C:\Program Files\...` path split at the space; Expand-Archive then
+    // extracted nothing and still exited 0.
+    let tar = std::env::var_os("SystemRoot")
+        .map(|root| PathBuf::from(root).join("System32").join("tar.exe"))
+        .filter(|path| path.exists())
+        .unwrap_or_else(|| PathBuf::from("tar"));
+    let output = std::process::Command::new(tar)
+        .arg("-x")
+        .arg("-f")
+        .arg(&sidecar_zip)
+        .arg("-C")
+        .arg(&extract_dir)
+        .output()
+        .map_err(|err| format!("Failed to run tar to extract the sidecar: {err}"))?;
 
     if !output.status.success() {
         return Err(format!(
@@ -764,9 +767,11 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn test_resolve_sidecar_extracts_build_exe_layout() {
-        // Real zip built the way Build-Exe.bat does (tar -C <parent> PMA), real Expand-Archive.
+        // Real zip built the way Build-Exe.bat does (tar -C <parent> PMA), real extraction.
+        // The space mirrors the MSI's C:\Program Files\... install path, which once split
+        // the zip path in two and extracted nothing while reporting success.
         let temp_dir = test_tmp().join(format!("test_real_extract_{}", uuid::Uuid::new_v4()));
-        let resource_dir = temp_dir.join("resources");
+        let resource_dir = temp_dir.join("Program Files");
         let app_local_data_dir = temp_dir.join("local_data");
         let staged = temp_dir.join("sidecar").join("PMA");
         std::fs::create_dir_all(staged.join("_internal")).unwrap();

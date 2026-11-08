@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- PMA app icon (Safelight), "recall spiral": a paper-coloured line curling
+       inward to one small lamp dot — memories gathered toward the one you need.
+       Colours are Safelight tokens: tile = surface + rule, line = paper, dot = accent (the lamp).
+       Single source of truth: regenerate sizes with `npx tauri icon src-tauri/icons/icon.svg`;
+       frontend/public/pma.svg is a copy for the favicon. -->
+  <rect x="32" y="32" width="960" height="960" rx="216" fill="#131211" stroke="#2B2826" stroke-width="8"/>
+  <path d="M622 567 A110 110 0 0 0 402 567 A220 220 0 0 0 842 567 A330 330 0 0 0 182 567"
+        fill="none" stroke="#E6E1DA" stroke-width="80" stroke-linecap="round"/>
+  <circle cx="622" cy="567" r="54" fill="#F04A30"/>
+</svg>
